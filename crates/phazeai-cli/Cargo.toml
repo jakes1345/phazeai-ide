@@ -1,0 +1,25 @@
+[package]
+name = "phazeai-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal UI for PhazeAI - AI-powered coding assistant"
+
+[[bin]]
+name = "phazeai"
+path = "src/main.rs"
+
+[dependencies]
+phazeai-core = { path = "../phazeai-core" }
+phazeai-sidecar = { path = "../phazeai-sidecar" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+syntect = { workspace = true }

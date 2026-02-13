@@ -1,0 +1,27 @@
+[package]
+name = "phazeai-ide"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Desktop GUI for PhazeAI IDE - AI-powered development environment"
+
+[[bin]]
+name = "phazeai-ide"
+path = "src/main.rs"
+
+[dependencies]
+phazeai-core = { path = "../phazeai-core" }
+phazeai-sidecar = { path = "../phazeai-sidecar" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+ropey = { workspace = true }
+rfd = { workspace = true }
+syntect = { workspace = true }
+chrono = { workspace = true }

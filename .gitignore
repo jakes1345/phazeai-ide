@@ -1,0 +1,58 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+*$py.class
+.ruff_cache/
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+*.egg
+
+# Models and data
+models/fine_tuned/
+*.gguf
+*.bin
+*.safetensors
+
+# Environment
+.env
+.env.local
+
+# Archives
+/_archive/
+
+# Logs & cache
+/logs/
+/cache/
+*.log
+
+# Data
+/data/
+
+# Sidecar index
+.phazeai/
+
+# Distribution
+/dist/
+
+# Node (if any tooling pulls it in)
+node_modules/

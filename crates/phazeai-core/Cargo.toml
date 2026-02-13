@@ -1,0 +1,31 @@
+[package]
+name = "phazeai-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core engine for PhazeAI IDE - agent loop, LLM clients, tools, config"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+similar = { workspace = true }
+notify = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dirs = "5.0"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio = { workspace = true, features = ["test-util", "macros"] }
