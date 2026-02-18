@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 description = "Terminal UI for PhazeAI - AI-powered coding assistant"
 
+[lib]
+name = "phazeai_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "phazeai"
 path = "src/main.rs"
@@ -23,3 +27,6 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 clap = { workspace = true }
 syntect = { workspace = true }
+dirs = "5.0"
+tui-textarea = { workspace = true }
+tui-tree-widget = { workspace = true }

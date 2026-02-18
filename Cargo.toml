@@ -5,6 +5,7 @@ members = [
     "crates/phazeai-sidecar",
     "crates/phazeai-cli",
     "crates/phazeai-ide",
+    "crates/ollama-rs",
 ]
 
 [workspace.package]
@@ -44,3 +45,12 @@ egui = "0.28"
 eframe = "0.28"
 ropey = "1.6"
 rfd = "0.15"
+
+# New Arsenal Integrations
+ollama-rs = { package = "ollama-rs-phazeai", path = "crates/ollama-rs", features = ["stream", "chat-history"] }
+comrak = { version = "0.36", default-features = false }
+tui-textarea = { version = "0.7", features = ["ratatui"] }
+tui-tree-widget = "0.22"
+tree-sitter = "0.24"
+lsp-types = "0.97"
+portable-pty = "0.8"

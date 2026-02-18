@@ -45,8 +45,20 @@ impl ConversationHistory {
     }
 
     pub fn add_tool_result(&mut self, tool_call_id: impl Into<String>, result: impl Into<String>) {
+        let mut result_str = result.into();
+        
+        // Truncate huge tool results to save context
+        const MAX_TOOL_RESULT_LEN: usize = 12000;
+        if result_str.len() > MAX_TOOL_RESULT_LEN {
+            result_str = format!(
+                "{}... [Truncated {} bytes]", 
+                &result_str[..MAX_TOOL_RESULT_LEN],
+                result_str.len() - MAX_TOOL_RESULT_LEN
+            );
+        }
+
         self.messages
-            .push_back(Message::tool_result(tool_call_id, result));
+            .push_back(Message::tool_result(tool_call_id, result_str));
         self.trim_if_needed();
     }
 
@@ -87,18 +99,38 @@ impl ConversationHistory {
     }
 
     fn trim_if_needed(&mut self) {
+        // Keep message count within limits
         while self.messages.len() > self.max_messages {
             self.messages.pop_front();
         }
     }
 
+    /// Trim conversation to stay within a token budget while preserving the system prompt and recent context.
+    pub fn trim_to_token_budget(&mut self, max_tokens: usize) {
+        while self.estimate_tokens() > max_tokens && !self.messages.is_empty() {
+            // Remove the oldest message
+            self.messages.pop_front();
+        }
+    }
+
     pub fn estimate_tokens(&self) -> usize {
-        self.messages
+        let mut total = 0;
+        
+        // System prompt tokens
+        if let Some(ref system) = self.system_prompt {
+            total += (system.len() + 3) / 4;
+        }
+
+        // Message tokens
+        total += self.messages
             .iter()
-            .map(|m| m.content.len() / 4)
-            .sum()
+            .map(|m| (m.content.len() + 3) / 4)
+            .sum::<usize>();
+            
+        total
     }
 }
+
 
 impl Default for ConversationHistory {
     fn default() -> Self {

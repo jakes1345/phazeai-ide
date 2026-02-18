@@ -25,6 +25,11 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dirs = "5.0"
 toml = "0.8"
+ollama-rs = { workspace = true }
+comrak = { workspace = true }
+tree-sitter = { workspace = true }
+lsp-types = { workspace = true }
+urlencoding = "2.1"
 
 [dev-dependencies]
 tempfile = "3.10"

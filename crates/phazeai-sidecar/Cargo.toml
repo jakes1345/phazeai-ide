@@ -12,9 +12,12 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+lsp-types = { workspace = true }
+tree-sitter = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.10"

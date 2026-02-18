@@ -25,3 +25,6 @@ ropey = { workspace = true }
 rfd = { workspace = true }
 syntect = { workspace = true }
 chrono = { workspace = true }
+comrak = { workspace = true }
+portable-pty = { workspace = true }
+notify = { workspace = true }

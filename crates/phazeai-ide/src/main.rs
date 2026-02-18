@@ -17,6 +17,23 @@ fn main() -> Result<()> {
 
     let settings = phazeai_core::Settings::load();
 
+    // Auto-provision phaze-beast if needed
+    if settings.llm.provider == phazeai_core::config::LlmProvider::Ollama 
+        && settings.llm.model == "phaze-beast" 
+    {
+        let base_url = settings.llm.base_url.clone()
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        
+        if let Ok(manager) = phazeai_core::llm::OllamaManager::new(&base_url) {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+            rt.block_on(async {
+                if let Err(e) = manager.ensure_phaze_beast().await {
+                    tracing::warn!("Failed to auto-provision phaze-beast: {e}");
+                }
+            });
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 800.0])

@@ -79,19 +79,27 @@ impl GitOps {
         let files: Vec<FileStatus> = porcelain
             .lines()
             .filter(|l| !l.is_empty())
-            .map(|line| {
-                let status_code = &line[..2];
-                let path = line[3..].to_string();
-                let status = match status_code.trim() {
-                    "M" | "MM" => FileState::Modified,
-                    "A" | "AM" => FileState::Added,
-                    "D" => FileState::Deleted,
-                    "R" => FileState::Renamed,
+            .filter_map(|line| {
+                // Git status --porcelain format: XY PATH where X is index status, Y is worktree status
+                // However, the exact format can vary, so we need to find where the filename starts
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                if parts.len() < 2 {
+                    return None;
+                }
+
+                let status_code = parts[0];
+                let path = parts[1].trim().to_string();
+
+                let status = match status_code {
+                    "M" | "MM" | " M" | "M " => FileState::Modified,
+                    "A" | "AM" | " A" | "A " => FileState::Added,
+                    "D" | " D" | "D " => FileState::Deleted,
+                    "R" | " R" | "R " => FileState::Renamed,
                     "??" => FileState::Untracked,
                     "UU" | "AA" | "DD" => FileState::Conflicted,
                     _ => FileState::Modified,
                 };
-                FileStatus { path, status }
+                Some(FileStatus { path, status })
             })
             .collect();
 

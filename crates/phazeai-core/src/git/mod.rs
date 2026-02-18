@@ -1,3 +1,3 @@
 mod ops;
 
-pub use ops::{GitOps, GitStatus, FileStatus};
+pub use ops::{FileState, FileStatus, GitOps, GitStatus};

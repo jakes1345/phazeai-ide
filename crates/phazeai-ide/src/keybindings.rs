@@ -17,6 +17,9 @@ pub enum Action {
     ToggleTerminal,
     FocusChat,
     CommandPalette,
+    Undo,
+    Redo,
+    Find,
 }
 
 pub fn default_keybindings() -> Vec<Keybinding> {
@@ -30,6 +33,9 @@ pub fn default_keybindings() -> Vec<Keybinding> {
         Keybinding { key: Key::Backtick, modifiers: Modifiers::COMMAND, action: Action::ToggleTerminal },
         Keybinding { key: Key::L, modifiers: Modifiers::COMMAND, action: Action::FocusChat },
         Keybinding { key: Key::P, modifiers: Modifiers::COMMAND.plus(Modifiers::SHIFT), action: Action::CommandPalette },
+        Keybinding { key: Key::Z, modifiers: Modifiers::COMMAND, action: Action::Undo },
+        Keybinding { key: Key::Z, modifiers: Modifiers::COMMAND.plus(Modifiers::SHIFT), action: Action::Redo },
+        Keybinding { key: Key::F, modifiers: Modifiers::COMMAND, action: Action::Find },
     ]
 }
 

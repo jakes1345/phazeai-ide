@@ -60,6 +60,7 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         let mut registry = Self::new();
+        // Original tools
         registry.register(Box::new(super::ReadFileTool));
         registry.register(Box::new(super::WriteFileTool));
         registry.register(Box::new(super::BashTool::default()));
@@ -67,6 +68,17 @@ impl Default for ToolRegistry {
         registry.register(Box::new(super::ListFilesTool));
         registry.register(Box::new(super::GlobTool));
         registry.register(Box::new(super::EditTool));
+        // New tools
+        registry.register(Box::new(super::FindPathTool));
+        registry.register(Box::new(super::FetchTool));
+        registry.register(Box::new(super::WebSearchTool));
+        registry.register(Box::new(super::CopyPathTool));
+        registry.register(Box::new(super::MovePathTool));
+        registry.register(Box::new(super::DeletePathTool));
+        registry.register(Box::new(super::CreateDirectoryTool));
+        registry.register(Box::new(super::NowTool));
+        registry.register(Box::new(super::OpenTool));
+        registry.register(Box::new(super::DiagnosticsTool));
         registry
     }
 }

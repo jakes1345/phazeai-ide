@@ -17,6 +17,10 @@ impl SettingsPanel {
             LlmProvider::Claude => 0,
             LlmProvider::OpenAI => 1,
             LlmProvider::Ollama => 2,
+            LlmProvider::Groq => 3,
+            LlmProvider::Together => 4,
+            LlmProvider::OpenRouter => 5,
+            LlmProvider::LmStudio => 6,
         };
         Self {
             visible: false,
@@ -102,7 +106,7 @@ impl SettingsPanel {
 
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "Provider:");
-            let providers = ["Claude", "OpenAI", "Ollama"];
+            let providers = ["Claude", "OpenAI", "Ollama", "Groq", "Together.ai", "OpenRouter", "LM Studio"];
             egui::ComboBox::from_id_source("provider_selector")
                 .selected_text(providers[self.provider_idx])
                 .show_ui(ui, |ui: &mut egui::Ui| {
@@ -111,7 +115,11 @@ impl SettingsPanel {
                             self.settings.llm.provider = match i {
                                 0 => LlmProvider::Claude,
                                 1 => LlmProvider::OpenAI,
-                                _ => LlmProvider::Ollama,
+                                2 => LlmProvider::Ollama,
+                                3 => LlmProvider::Groq,
+                                4 => LlmProvider::Together,
+                                5 => LlmProvider::OpenRouter,
+                                _ => LlmProvider::LmStudio,
                             };
                             self.settings_changed = true;
                         }

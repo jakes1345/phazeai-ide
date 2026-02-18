@@ -3,6 +3,7 @@ pub struct ContextBuilder {
     system_prompt: String,
     context_files: Vec<(String, String)>,
     user_query: String,
+    repo_map: Option<String>,
 }
 
 impl ContextBuilder {
@@ -11,6 +12,7 @@ impl ContextBuilder {
             system_prompt: Self::default_system_prompt(),
             context_files: Vec::new(),
             user_query: String::new(),
+            repo_map: None,
         }
     }
 
@@ -29,11 +31,26 @@ impl ContextBuilder {
         self
     }
 
+    /// Add a repo map (project-wide symbol summary) to the context.
+    /// This gives the agent a bird's-eye view of all functions, classes,
+    /// and modules in the project — like Aider's repo map.
+    pub fn with_repo_map(mut self, repo_map: impl Into<String>) -> Self {
+        self.repo_map = Some(repo_map.into());
+        self
+    }
+
     pub fn build(self) -> String {
         let mut context = String::new();
 
         context.push_str(&self.system_prompt);
         context.push_str("\n\n");
+
+        // Include repo map before files — gives the agent project overview
+        if let Some(ref repo_map) = self.repo_map {
+            context.push_str("## Repository Map (project symbols):\n\n");
+            context.push_str(repo_map);
+            context.push_str("\n\n");
+        }
 
         if !self.context_files.is_empty() {
             context.push_str("## Context Files:\n\n");
@@ -48,6 +65,7 @@ impl ContextBuilder {
 
         context
     }
+
 
     fn default_system_prompt() -> String {
         "You are PhazeAI, an advanced AI-powered development environment. \

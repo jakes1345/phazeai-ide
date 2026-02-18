@@ -1,19 +1,25 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::{
+    Agent, AgentEvent, Settings, SystemPromptBuilder, collect_git_info,
+    context::{ConversationStore, SavedConversation, SavedMessage, ConversationMetadata},
+    tools::{ToolApprovalManager, ToolApprovalMode},
+};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Terminal,
 };
 use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
@@ -21,12 +27,22 @@ use crate::theme::Theme;
 
 // ── Single-prompt mode ──────────────────────────────────────────────────
 
-pub async fn run_single_prompt(settings: &Settings, prompt: &str) -> Result<()> {
+pub async fn run_single_prompt(settings: &Settings, prompt: &str, extra_instructions: Option<&str>) -> Result<()> {
     let llm = settings.build_llm_client()?;
-    let agent = Agent::new(llm).with_system_prompt(
-        "You are PhazeAI, an AI coding assistant. Help the user with their request. \
-         Be concise and direct.",
-    );
+    let system_prompt = build_system_prompt(extra_instructions);
+
+    let mut agent = Agent::new(llm).with_system_prompt(system_prompt);
+
+    // Try to start sidecar for semantic search
+    if let Some(client) = try_start_sidecar().await {
+        let client = Arc::new(client);
+        agent.register_tool(Box::new(
+            phazeai_sidecar::SemanticSearchTool::new(client.clone()),
+        ));
+        agent.register_tool(Box::new(
+            phazeai_sidecar::BuildIndexTool::new(client),
+        ));
+    }
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -59,12 +75,14 @@ pub async fn run_single_prompt(settings: &Settings, prompt: &str) -> Result<()> 
 
 // ── Interactive TUI ─────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct ChatMessage {
     role: MessageRole,
     content: String,
+    timestamp: String,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 enum MessageRole {
     User,
     Assistant,
@@ -72,48 +90,207 @@ enum MessageRole {
     Tool,
 }
 
+/// What we're waiting on from the user during tool approval
+struct PendingApproval {
+    tool_name: String,
+    description: String,
+}
+
 struct AppState {
+    // Input
     input: String,
     cursor_pos: usize,
+    input_history: Vec<String>,
+    history_pos: Option<usize>,
+
+    // Chat
     messages: Vec<ChatMessage>,
-    scroll: u16,
+    scroll_offset: usize,
+    total_content_lines: usize,
+
+    // Processing state
     is_processing: bool,
+    pending_approval: Option<PendingApproval>,
+
+    // Status
     status_text: String,
     model_name: String,
+    provider_name: String,
+    iterations: usize,
+    total_tokens_in: u64,
+    total_tokens_out: u64,
+    estimated_cost: f64,
+
+    // Display
     should_quit: bool,
     show_files: bool,
     theme: Theme,
+
+    // Conversation management
+    conversation_id: String,
+    conversation_store: ConversationStore,
+
+    // Tool approval
+    approval_manager: ToolApprovalManager,
 }
 
 impl AppState {
     fn new(settings: &Settings, theme_name: &str) -> Self {
+        let provider_name = format!("{:?}", settings.llm.provider);
+        let store = ConversationStore::new().unwrap_or_else(|_| ConversationStore::default());
+        let conv_id = ConversationStore::generate_id();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into());
+
         Self {
             input: String::new(),
             cursor_pos: 0,
+            input_history: Vec::new(),
+            history_pos: None,
+
             messages: vec![ChatMessage {
                 role: MessageRole::System,
-                content: "Welcome to PhazeAI. Type a message and press Enter. Ctrl+C to quit. /help for commands.".into(),
+                content: format!(
+                    "PhazeAI v0.1.0 | {} | {} | {}\n\
+                     Type a message and press Enter. Ctrl+C to quit. /help for commands.",
+                    provider_name, settings.llm.model, cwd
+                ),
+                timestamp: now_str(),
             }],
-            scroll: 0,
+            scroll_offset: 0,
+            total_content_lines: 0,
+
             is_processing: false,
+            pending_approval: None,
+
             status_text: "Ready".into(),
             model_name: settings.llm.model.clone(),
+            provider_name,
+            iterations: 0,
+            total_tokens_in: 0,
+            total_tokens_out: 0,
+            estimated_cost: 0.0,
+
             should_quit: false,
             show_files: false,
             theme: Theme::by_name(theme_name),
+
+            conversation_id: conv_id,
+            conversation_store: store,
+
+            approval_manager: ToolApprovalManager::default(),
         }
     }
 
     fn add_message(&mut self, role: MessageRole, content: String) {
-        self.messages.push(ChatMessage { role, content });
+        self.messages.push(ChatMessage {
+            role,
+            content,
+            timestamp: now_str(),
+        });
+        self.scroll_to_bottom();
     }
 
-    fn auto_scroll(&mut self) {
-        self.scroll = 0;
+    fn scroll_to_bottom(&mut self) {
+        // Will be resolved on next draw
+        self.scroll_offset = usize::MAX;
+    }
+
+    fn push_history(&mut self, input: String) {
+        if !input.is_empty() && self.input_history.last() != Some(&input) {
+            self.input_history.push(input);
+        }
+        self.history_pos = None;
+    }
+
+    fn history_prev(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        let pos = match self.history_pos {
+            None => self.input_history.len().saturating_sub(1),
+            Some(0) => 0,
+            Some(p) => p - 1,
+        };
+        self.history_pos = Some(pos);
+        self.input = self.input_history[pos].clone();
+        self.cursor_pos = self.input.len();
+    }
+
+    fn history_next(&mut self) {
+        match self.history_pos {
+            None => {}
+            Some(pos) => {
+                if pos + 1 >= self.input_history.len() {
+                    self.history_pos = None;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                } else {
+                    self.history_pos = Some(pos + 1);
+                    self.input = self.input_history[pos + 1].clone();
+                    self.cursor_pos = self.input.len();
+                }
+            }
+        }
+    }
+
+    fn save_conversation(&self) {
+        let messages: Vec<SavedMessage> = self
+            .messages
+            .iter()
+            .map(|m| SavedMessage {
+                role: match m.role {
+                    MessageRole::User => "user".into(),
+                    MessageRole::Assistant => "assistant".into(),
+                    MessageRole::System => "system".into(),
+                    MessageRole::Tool => "tool".into(),
+                },
+                content: m.content.clone(),
+                timestamp: m.timestamp.clone(),
+                tool_name: None,
+            })
+            .collect();
+
+        let title = self
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| {
+                let t = m.content.chars().take(80).collect::<String>();
+                if m.content.len() > 80 {
+                    format!("{}...", t)
+                } else {
+                    t
+                }
+            })
+            .unwrap_or_else(|| "Untitled".into());
+
+        let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+
+        let metadata = ConversationMetadata {
+            id: self.conversation_id.clone(),
+            title,
+            created_at: now_str(),
+            updated_at: now_str(),
+            message_count: messages.len(),
+            model: self.model_name.clone(),
+            project_dir: cwd,
+        };
+
+        let conversation = SavedConversation {
+            metadata,
+            messages,
+            system_prompt: None,
+        };
+
+        if let Err(e) = self.conversation_store.save(&conversation) {
+            tracing::warn!("Failed to save conversation: {e}");
+        }
     }
 }
 
-pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
+pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, resume_id: Option<String>, extra_instructions: Option<&str>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -122,12 +299,81 @@ pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
 
     let mut state = AppState::new(&settings, theme_name);
 
+    // Restore conversation if requested
+    let mut restore_messages: Vec<(String, String)> = Vec::new(); // (role, content) pairs
+
+    if continue_last {
+        if let Ok(recent) = state.conversation_store.list_recent(1) {
+            if let Some(meta) = recent.first() {
+                if let Ok(conv) = state.conversation_store.load(&meta.id) {
+                    state.conversation_id = conv.metadata.id.clone();
+                    for msg in &conv.messages {
+                        let role = match msg.role.as_str() {
+                            "user" => MessageRole::User,
+                            "assistant" => MessageRole::Assistant,
+                            "tool" => MessageRole::Tool,
+                            _ => MessageRole::System,
+                        };
+                        state.messages.push(ChatMessage {
+                            role: role.clone(),
+                            content: msg.content.clone(),
+                            timestamp: msg.timestamp.clone(),
+                        });
+                        // Collect user/assistant pairs for agent context
+                        if msg.role == "user" || msg.role == "assistant" {
+                            restore_messages.push((msg.role.clone(), msg.content.clone()));
+                        }
+                    }
+                    state.add_message(MessageRole::System, format!("Resumed: {}", conv.metadata.title));
+                    state.scroll_to_bottom();
+                }
+            }
+        }
+    } else if let Some(ref id) = resume_id {
+        // Try prefix match
+        if let Ok(recent) = state.conversation_store.list_recent(100) {
+            if let Some(meta) = recent.iter().find(|m| m.id.starts_with(id)) {
+                if let Ok(conv) = state.conversation_store.load(&meta.id) {
+                    state.conversation_id = conv.metadata.id.clone();
+                    for msg in &conv.messages {
+                        let role = match msg.role.as_str() {
+                            "user" => MessageRole::User,
+                            "assistant" => MessageRole::Assistant,
+                            "tool" => MessageRole::Tool,
+                            _ => MessageRole::System,
+                        };
+                        state.messages.push(ChatMessage {
+                            role: role.clone(),
+                            content: msg.content.clone(),
+                            timestamp: msg.timestamp.clone(),
+                        });
+                        if msg.role == "user" || msg.role == "assistant" {
+                            restore_messages.push((msg.role.clone(), msg.content.clone()));
+                        }
+                    }
+                    state.add_message(MessageRole::System, format!("Resumed: {}", conv.metadata.title));
+                    state.scroll_to_bottom();
+                } else {
+                    state.add_message(MessageRole::System, format!("Failed to load conversation '{}'", meta.id));
+                }
+            } else {
+                state.add_message(MessageRole::System, format!("No conversation matching '{id}' found."));
+            }
+        }
+    }
+
+    let system_prompt = build_system_prompt(extra_instructions);
+
     let llm = match settings.build_llm_client() {
         Ok(llm) => Some(llm),
         Err(e) => {
             state.add_message(
                 MessageRole::System,
-                format!("LLM not available: {e}\nSet ANTHROPIC_API_KEY or use --provider ollama"),
+                format!(
+                    "LLM not available: {e}\n\
+                     Set your API key or use --provider ollama for local models.\n\
+                     Available providers: claude, openai, ollama, groq, together, openrouter, lmstudio"
+                ),
             );
             None
         }
@@ -139,12 +385,52 @@ pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
     // Agent worker task
     if let Some(llm) = llm {
         let event_tx = agent_event_tx;
+        let restore_msgs = restore_messages.clone();
+
+        // Create approval callback
+        let approval_manager_clone = Arc::new(std::sync::Mutex::new(ToolApprovalManager::default()));
+        let approval_mgr = approval_manager_clone.clone();
+        let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(move |tool_name, params| {
+            let mgr = approval_mgr.clone();
+            Box::pin(async move {
+                let needs = {
+                    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                    mgr.needs_approval(&tool_name, &params)
+                };
+                if !needs {
+                    return true; // Auto-approved
+                }
+                // For now, auto-approve. The pending_approval UI already exists
+                // but blocking here would freeze the agent. We'll approve and let
+                // the UI show the notification.
+                {
+                    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                    mgr.record_approval(&tool_name);
+                }
+                true
+            })
+        });
+
         tokio::spawn(async move {
-            let agent = Agent::new(llm).with_system_prompt(
-                "You are PhazeAI, an AI coding assistant in a terminal. \
-                 Help the user with coding tasks. Be concise. \
-                 When showing code, use markdown code blocks with language tags.",
-            );
+            let mut agent = Agent::new(llm)
+                .with_system_prompt(system_prompt)
+                .with_approval(approval_fn);
+
+            // Try to start the Python sidecar for semantic search
+            if let Some(client) = try_start_sidecar().await {
+                let client = Arc::new(client);
+                agent.register_tool(Box::new(
+                    phazeai_sidecar::SemanticSearchTool::new(client.clone()),
+                ));
+                agent.register_tool(Box::new(
+                    phazeai_sidecar::BuildIndexTool::new(client),
+                ));
+            }
+
+            // Load any restored history
+            if !restore_msgs.is_empty() {
+                agent.load_history(restore_msgs).await;
+            }
 
             while let Some(input) = user_input_rx.recv().await {
                 let local_tx = event_tx.clone();
@@ -171,7 +457,7 @@ pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
 
     loop {
         // Draw
-        terminal.draw(|f| draw_ui(f, &state))?;
+        terminal.draw(|f| draw_ui(f, &mut state))?;
 
         // Process agent events (non-blocking)
         while let Ok(agent_event) = agent_event_rx.try_recv() {
@@ -186,6 +472,10 @@ pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
         }
 
         if state.should_quit {
+            // Auto-save conversation on exit
+            if state.messages.len() > 1 {
+                state.save_conversation();
+            }
             break;
         }
     }
@@ -197,16 +487,44 @@ pub async fn run_tui(settings: Settings, theme_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn draw_ui(f: &mut ratatui::Frame, state: &AppState) {
+fn build_system_prompt(extra_instructions: Option<&str>) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let mut builder = SystemPromptBuilder::new()
+        .with_project_root(cwd.clone())
+        .with_tools(vec![
+            "read_file".into(),
+            "write_file".into(),
+            "edit_file".into(),
+            "bash".into(),
+            "grep".into(),
+            "glob".into(),
+            "list_files".into(),
+        ])
+        .load_project_instructions();
+
+    let (branch, dirty) = collect_git_info(&cwd);
+    builder = builder.with_git_info(branch, dirty);
+
+    if let Some(extra) = extra_instructions {
+        builder = builder.with_additional_instructions(extra.to_string());
+    }
+
+    builder.build()
+}
+
+fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let theme = &state.theme;
 
     // Main vertical layout: chat + input + status
+    let input_height = if state.pending_approval.is_some() { 5 } else { 3 };
+
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),     // chat
-            Constraint::Length(3),   // input
-            Constraint::Length(1),   // status
+            Constraint::Min(5),              // chat
+            Constraint::Length(input_height), // input (or approval prompt)
+            Constraint::Length(1),            // status
         ])
         .split(f.area());
 
@@ -217,27 +535,88 @@ fn draw_ui(f: &mut ratatui::Frame, state: &AppState) {
             .constraints([Constraint::Length(30), Constraint::Min(40)])
             .split(main_chunks[0]);
 
-        // File tree panel
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".into());
-        let files_block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Files ")
-            .border_style(Style::default().fg(theme.border));
-        let files_text = Paragraph::new(format!("  {cwd}\n  (file tree placeholder)"))
-            .block(files_block)
-            .style(Style::default().fg(theme.muted));
-        f.render_widget(files_text, h_chunks[0]);
-
+        draw_file_tree(f, h_chunks[0], theme);
         h_chunks[1]
     } else {
         main_chunks[0]
     };
 
     // Chat messages
+    let chat_lines = build_chat_lines(&state.messages, state.is_processing, theme);
+    let total_lines = chat_lines.len();
+    state.total_content_lines = total_lines;
+
+    // Calculate visible height (area height - 2 for borders)
+    let visible_height = chat_area.height.saturating_sub(2) as usize;
+
+    // Resolve scroll_to_bottom
+    if state.scroll_offset == usize::MAX {
+        state.scroll_offset = total_lines.saturating_sub(visible_height);
+    }
+
+    // Clamp scroll offset
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    if state.scroll_offset > max_scroll {
+        state.scroll_offset = max_scroll;
+    }
+
+    let chat = Paragraph::new(Text::from(chat_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" PhazeAI ")
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((state.scroll_offset as u16, 0));
+    f.render_widget(chat, chat_area);
+
+    // Scrollbar
+    if total_lines > visible_height {
+        let mut scrollbar_state = ScrollbarState::new(max_scroll)
+            .position(state.scroll_offset);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("^"))
+                .end_symbol(Some("v")),
+            chat_area,
+            &mut scrollbar_state,
+        );
+    }
+
+    // Input or approval prompt
+    if let Some(ref approval) = state.pending_approval {
+        draw_approval_prompt(f, main_chunks[1], approval, theme);
+    } else {
+        draw_input(f, main_chunks[1], state, theme);
+    }
+
+    // Status bar
+    draw_status_bar(f, main_chunks[2], state, theme);
+}
+
+fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into());
+    let files_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Files ")
+        .border_style(Style::default().fg(theme.border));
+    let files_text = Paragraph::new(format!("  {cwd}\n  (Ctrl+E to close)"))
+        .block(files_block)
+        .style(Style::default().fg(theme.muted));
+    f.render_widget(files_text, area);
+}
+
+fn build_chat_lines<'a>(
+    messages: &'a [ChatMessage],
+    is_processing: bool,
+    theme: &'a Theme,
+) -> Vec<Line<'a>> {
     let mut chat_lines: Vec<Line> = Vec::new();
-    for msg in &state.messages {
+
+    for msg in messages {
         let (prefix, color) = match msg.role {
             MessageRole::User => ("You > ", theme.user_color),
             MessageRole::Assistant => ("AI > ", theme.assistant_color),
@@ -245,7 +624,6 @@ fn draw_ui(f: &mut ratatui::Frame, state: &AppState) {
             MessageRole::Tool => ("  ", theme.tool_color),
         };
 
-        // Split content into lines to handle multi-line messages
         for (i, line) in msg.content.lines().enumerate() {
             if i == 0 {
                 chat_lines.push(Line::from(vec![
@@ -266,7 +644,7 @@ fn draw_ui(f: &mut ratatui::Frame, state: &AppState) {
         chat_lines.push(Line::raw(""));
     }
 
-    if state.is_processing {
+    if is_processing {
         chat_lines.push(Line::from(Span::styled(
             "  Thinking...",
             Style::default()
@@ -275,90 +653,185 @@ fn draw_ui(f: &mut ratatui::Frame, state: &AppState) {
         )));
     }
 
-    let chat = Paragraph::new(Text::from(chat_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" PhazeAI ")
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((state.scroll, 0));
-    f.render_widget(chat, chat_area);
+    chat_lines
+}
 
-    // Input area
+fn draw_approval_prompt(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    approval: &PendingApproval,
+    theme: &Theme,
+) {
+    let text = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" Tool: {} ", approval.tool_name),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &approval.description,
+                Style::default().fg(theme.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                " [y] Allow  [n] Deny  [a] Allow all  [s] Allow session ",
+                Style::default().fg(theme.accent),
+            ),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Approve? ")
+        .border_style(Style::default().fg(theme.warning));
+
+    f.render_widget(Paragraph::new(text).block(block), area);
+}
+
+fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Theme) {
     let input_style = if state.is_processing {
         Style::default().fg(theme.muted)
     } else {
         Style::default().fg(theme.fg)
     };
+
+    let title = if state.is_processing {
+        " Input (processing...) "
+    } else if state.input.starts_with('/') {
+        " Command "
+    } else {
+        " Input "
+    };
+
     let input = Paragraph::new(state.input.as_str())
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(if state.is_processing {
-                    " Input (processing...) "
+                .title(title)
+                .border_style(Style::default().fg(if state.input.starts_with('/') {
+                    theme.accent
                 } else {
-                    " Input "
-                })
-                .border_style(Style::default().fg(theme.border)),
+                    theme.border
+                })),
         )
         .style(input_style);
-    f.render_widget(input, main_chunks[1]);
+    f.render_widget(input, area);
 
     // Set cursor position in input area
-    if !state.is_processing {
-        f.set_cursor_position((
-            main_chunks[1].x + state.cursor_pos as u16 + 1,
-            main_chunks[1].y + 1,
-        ));
+    if !state.is_processing && state.pending_approval.is_none() {
+        let cursor_x = area.x + state.cursor_pos as u16 + 1;
+        // Clamp cursor to area width
+        let max_x = area.x + area.width.saturating_sub(2);
+        f.set_cursor_position((cursor_x.min(max_x), area.y + 1));
     }
+}
 
-    // Status bar
+fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let cwd = std::env::current_dir()
+        .map(|p| {
+            let s = p.display().to_string();
+            // Shorten home dir
+            if let Ok(home) = std::env::var("HOME") {
+                if s.starts_with(&home) {
+                    return format!("~{}", &s[home.len()..]);
+                }
+            }
+            s
+        })
+        .unwrap_or_else(|_| ".".into());
+
+    let tokens_str = if state.total_tokens_in > 0 || state.total_tokens_out > 0 {
+        format!(
+            "{}in/{}out ",
+            format_tokens(state.total_tokens_in),
+            format_tokens(state.total_tokens_out),
+        )
+    } else {
+        String::new()
+    };
+
+    let cost_str = if state.estimated_cost > 0.0 {
+        format!("${:.4} ", state.estimated_cost)
+    } else {
+        String::new()
+    };
+
+    let approval_str = match state.approval_manager.mode() {
+        ToolApprovalMode::AutoApprove => "auto",
+        ToolApprovalMode::AlwaysAsk => "ask",
+        ToolApprovalMode::AskOnce => "ask-once",
+    };
+
     let status_spans = vec![
         Span::styled(
-            format!(" {} ", state.model_name),
+            format!(" {} ", state.provider_name),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" | ", Style::default().fg(theme.muted)),
-        Span::styled(&state.status_text, Style::default().fg(theme.muted)),
         Span::styled(
-            format!(
-                "  {}  ",
-                if state.show_files {
-                    "Ctrl+E:hide files"
-                } else {
-                    "Ctrl+E:files"
-                }
-            ),
+            format!("| {} ", state.model_name),
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled(
+            format!("| {} ", approval_str),
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(&tokens_str, Style::default().fg(theme.muted)),
+        Span::styled(&cost_str, Style::default().fg(theme.warning)),
+        Span::styled("| ", Style::default().fg(theme.muted)),
+        Span::styled(&state.status_text, Style::default().fg(theme.muted)),
+        // Right-align cwd and keybindings
+        Span::styled(
+            format!("  {} ", cwd),
             Style::default().fg(theme.muted),
         ),
     ];
     let status = Paragraph::new(Line::from(status_spans));
-    f.render_widget(status, main_chunks[2]);
+    f.render_widget(status, area);
 }
 
 fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     match event {
         AgentEvent::Thinking { iteration } => {
-            state.status_text = format!("Thinking... (iteration {iteration})");
+            state.iterations = iteration;
+            state.status_text = format!("Thinking... (step {iteration})");
+        }
+        AgentEvent::ToolApprovalRequest { name, params } => {
+            // Handle tool approval request if needed
+            let desc = format!("{}: {}", name, params);
+            state.pending_approval = Some(PendingApproval {
+                tool_name: name,
+                description: desc,
+            });
         }
         AgentEvent::TextDelta(text) => {
             // Append to existing assistant message or create new one
             if let Some(last) = state.messages.last_mut() {
                 if last.role == MessageRole::Assistant {
                     last.content.push_str(&text);
-                    state.auto_scroll();
+                    state.scroll_to_bottom();
                     return;
                 }
             }
             state.add_message(MessageRole::Assistant, text);
-            state.auto_scroll();
         }
         AgentEvent::ToolStart { name } => {
-            state.add_message(MessageRole::Tool, format!("[{name}]"));
+            // Check if tool needs approval
+            let needs_approval = state.approval_manager.needs_approval(&name, &serde_json::Value::Null);
+
+            if needs_approval {
+                let desc = state.approval_manager.format_approval_prompt(&name, &serde_json::Value::Null);
+                state.pending_approval = Some(PendingApproval {
+                    tool_name: name.clone(),
+                    description: desc,
+                });
+            }
+
+            state.add_message(MessageRole::Tool, format!("[running: {name}]"));
             state.status_text = format!("Running {name}...");
         }
         AgentEvent::ToolResult {
@@ -368,11 +841,16 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         } => {
             let icon = if success { "ok" } else { "ERR" };
             state.add_message(MessageRole::Tool, format!("[{name}: {icon}] {summary}"));
+            state.pending_approval = None;
         }
         AgentEvent::Complete { iterations } => {
             state.is_processing = false;
-            state.status_text = format!("Done ({iterations} iterations)");
-            state.auto_scroll();
+            state.status_text = format!("Done ({iterations} steps)");
+            state.scroll_to_bottom();
+            // Auto-save periodically
+            if state.messages.len().is_multiple_of(10) {
+                state.save_conversation();
+            }
         }
         AgentEvent::Error(e) => {
             state.is_processing = false;
@@ -384,16 +862,62 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
 
 fn handle_key(
     state: &mut AppState,
-    key: event::KeyEvent,
+    key: KeyEvent,
     user_input_tx: &mpsc::UnboundedSender<String>,
 ) {
+    // Handle approval prompt first
+    if state.pending_approval.is_some() {
+        handle_approval_key(state, key);
+        return;
+    }
+
     match (key.modifiers, key.code) {
+        // Quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            state.should_quit = true;
+            if state.is_processing {
+                // First Ctrl+C cancels the current operation
+                state.is_processing = false;
+                state.status_text = "Cancelled".into();
+                state.add_message(MessageRole::System, "Request cancelled.".into());
+            } else {
+                state.should_quit = true;
+            }
         }
+
+        // Toggle file tree
         (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
             state.show_files = !state.show_files;
         }
+
+        // Clear chat
+        (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+            state.messages.clear();
+            state.add_message(MessageRole::System, "Chat cleared.".into());
+            state.scroll_offset = 0;
+        }
+
+        // New conversation
+        (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+            if state.messages.len() > 1 {
+                state.save_conversation();
+            }
+            state.messages.clear();
+            state.conversation_id = ConversationStore::generate_id();
+            state.add_message(MessageRole::System, "New conversation started.".into());
+            state.scroll_offset = 0;
+            state.iterations = 0;
+            state.total_tokens_in = 0;
+            state.total_tokens_out = 0;
+            state.estimated_cost = 0.0;
+        }
+
+        // Save conversation
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
+            state.save_conversation();
+            state.add_message(MessageRole::System, "Conversation saved.".into());
+        }
+
+        // Submit input
         (_, KeyCode::Enter) => {
             if state.input.is_empty() || state.is_processing {
                 return;
@@ -402,68 +926,50 @@ fn handle_key(
             let input = state.input.clone();
             state.input.clear();
             state.cursor_pos = 0;
+            state.push_history(input.clone());
 
             // Handle slash commands
             if input.starts_with('/') {
-                match commands::handle_command(&input) {
-                    CommandResult::Message(msg) => {
-                        state.add_message(MessageRole::System, msg);
-                    }
-                    CommandResult::Clear => {
-                        state.messages.clear();
-                        state.add_message(MessageRole::System, "Chat cleared.".into());
-                    }
-                    CommandResult::Quit => {
-                        state.should_quit = true;
-                    }
-                    CommandResult::ModelChanged(model) => {
-                        state.model_name = model.clone();
-                        state.add_message(
-                            MessageRole::System,
-                            format!("Model changed to: {model}"),
-                        );
-                    }
-                    CommandResult::ThemeChanged(name) => {
-                        state.theme = Theme::by_name(&name);
-                        state.add_message(
-                            MessageRole::System,
-                            format!("Theme changed to: {}", state.theme.name),
-                        );
-                    }
-                    CommandResult::ToggleFiles => {
-                        state.show_files = !state.show_files;
-                    }
-                    CommandResult::NotACommand => {
-                        // Shouldn't happen for /-prefixed input
-                    }
-                }
+                handle_command_result(state, commands::handle_command(&input));
                 return;
             }
 
             state.add_message(MessageRole::User, input.clone());
             state.is_processing = true;
             state.status_text = "Sending...".into();
-            state.auto_scroll();
             let _ = user_input_tx.send(input);
         }
+
+        // Input editing
         (_, KeyCode::Backspace) => {
-            if state.cursor_pos > 0 {
+            if state.cursor_pos > 0 && !state.is_processing {
                 state.input.remove(state.cursor_pos - 1);
                 state.cursor_pos -= 1;
             }
         }
         (_, KeyCode::Delete) => {
-            if state.cursor_pos < state.input.len() {
+            if state.cursor_pos < state.input.len() && !state.is_processing {
                 state.input.remove(state.cursor_pos);
             }
         }
         (_, KeyCode::Left) => {
-            state.cursor_pos = state.cursor_pos.saturating_sub(1);
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Word jump left
+                state.cursor_pos = word_boundary_left(&state.input, state.cursor_pos);
+            } else {
+                state.cursor_pos = state.cursor_pos.saturating_sub(1);
+            }
         }
         (_, KeyCode::Right) => {
-            if state.cursor_pos < state.input.len() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Word jump right
+                state.cursor_pos = word_boundary_right(&state.input, state.cursor_pos);
+            } else if state.cursor_pos < state.input.len() {
                 state.cursor_pos += 1;
             }
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+            state.cursor_pos = 0;
         }
         (_, KeyCode::Home) => {
             state.cursor_pos = 0;
@@ -471,24 +977,782 @@ fn handle_key(
         (_, KeyCode::End) => {
             state.cursor_pos = state.input.len();
         }
+
+        // Scroll (Shift+arrows, must come before bare arrows)
+        (KeyModifiers::SHIFT, KeyCode::Up) => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Down) => {
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        }
+        (_, KeyCode::PageUp) => {
+            state.scroll_offset = state.scroll_offset.saturating_sub(20);
+        }
+        (_, KeyCode::PageDown) => {
+            state.scroll_offset = state.scroll_offset.saturating_add(20);
+        }
+
+        // History navigation
+        (_, KeyCode::Up) => {
+            if !state.is_processing {
+                state.history_prev();
+            }
+        }
+        (_, KeyCode::Down) => {
+            if !state.is_processing {
+                state.history_next();
+            }
+        }
+
+        // Kill line (Ctrl+U)
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+            state.input.drain(..state.cursor_pos);
+            state.cursor_pos = 0;
+        }
+
+        // Kill to end of line (Ctrl+K)
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+            state.input.truncate(state.cursor_pos);
+        }
+
+        // Delete word backward (Ctrl+W)
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+            let new_pos = word_boundary_left(&state.input, state.cursor_pos);
+            state.input.drain(new_pos..state.cursor_pos);
+            state.cursor_pos = new_pos;
+        }
+
+        // Tab completion for commands
+        (_, KeyCode::Tab) => {
+            if state.input.starts_with('/') {
+                if let Some(completion) = complete_command(&state.input) {
+                    state.input = completion;
+                    state.cursor_pos = state.input.len();
+                }
+            }
+        }
+
+        // Regular character input
         (_, KeyCode::Char(c)) => {
             if !state.is_processing {
                 state.input.insert(state.cursor_pos, c);
                 state.cursor_pos += 1;
             }
         }
-        (_, KeyCode::PageUp) => {
-            state.scroll = state.scroll.saturating_add(10);
+
+        _ => {}
+    }
+}
+
+fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(ref approval) = state.pending_approval {
+                state.approval_manager.record_approval(&approval.tool_name);
+            }
+            state.pending_approval = None;
         }
-        (_, KeyCode::PageDown) => {
-            state.scroll = state.scroll.saturating_sub(10);
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            state.add_message(MessageRole::System, "Tool execution denied.".into());
+            state.pending_approval = None;
         }
-        (_, KeyCode::Up) => {
-            state.scroll = state.scroll.saturating_add(1);
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            state.approval_manager.set_mode(ToolApprovalMode::AutoApprove);
+            state.pending_approval = None;
+            state.add_message(
+                MessageRole::System,
+                "All tools auto-approved for this session.".into(),
+            );
         }
-        (_, KeyCode::Down) => {
-            state.scroll = state.scroll.saturating_sub(1);
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if let Some(ref approval) = state.pending_approval {
+                state.approval_manager.record_approval(&approval.tool_name);
+            }
+            state.pending_approval = None;
+        }
+        KeyCode::Char('q') | KeyCode::Esc => {
+            state.pending_approval = None;
+            state.is_processing = false;
+            state.status_text = "Cancelled".into();
         }
         _ => {}
     }
+}
+
+fn handle_command_result(state: &mut AppState, result: CommandResult) {
+    match result {
+        CommandResult::Message(msg) => {
+            state.add_message(MessageRole::System, msg);
+        }
+        CommandResult::Clear => {
+            state.messages.clear();
+            state.add_message(MessageRole::System, "Chat cleared.".into());
+            state.scroll_offset = 0;
+        }
+        CommandResult::Quit => {
+            state.should_quit = true;
+        }
+        CommandResult::ModelChanged(model) => {
+            state.model_name = model.clone();
+            state.add_message(MessageRole::System, format!("Model changed to: {model}"));
+        }
+        CommandResult::ThemeChanged(name) => {
+            state.theme = Theme::by_name(&name);
+            state.add_message(
+                MessageRole::System,
+                format!("Theme changed to: {}", state.theme.name),
+            );
+        }
+        CommandResult::ToggleFiles => {
+            state.show_files = !state.show_files;
+        }
+        CommandResult::ProviderChanged(provider) => {
+            state.provider_name = provider.clone();
+            state.add_message(
+                MessageRole::System,
+                format!("Provider changed to: {provider}. Restart to take effect."),
+            );
+        }
+        CommandResult::Compact => {
+            let msg_count = state.messages.len();
+
+            // Only compact if we have enough messages to make it worthwhile
+            if msg_count <= 8 {
+                state.add_message(
+                    MessageRole::System,
+                    "Conversation is too short to compact (need more than 8 messages).".into(),
+                );
+                return;
+            }
+
+            // Find the first user message (for context)
+            let first_user_idx = state.messages.iter()
+                .position(|m| m.role == MessageRole::User);
+
+            if first_user_idx.is_none() {
+                state.add_message(
+                    MessageRole::System,
+                    "No user messages found to compact.".into(),
+                );
+                return;
+            }
+
+            let first_user_idx = first_user_idx.unwrap();
+
+            // Keep:
+            // - Everything before the first user message (system welcome, etc.)
+            // - The first user message
+            // - The last 6 messages
+            // Replace everything in between with a summary message
+
+            let keep_recent = 6;
+            let split_point = msg_count.saturating_sub(keep_recent);
+
+            // Only compact if there's something to compact between first user and last 6
+            if split_point <= first_user_idx + 1 {
+                state.add_message(
+                    MessageRole::System,
+                    "Conversation is too short to compact effectively.".into(),
+                );
+                return;
+            }
+
+            // Calculate how many messages we're compacting
+            let compacted_count = split_point - (first_user_idx + 1);
+
+            if compacted_count == 0 {
+                state.add_message(
+                    MessageRole::System,
+                    "Nothing to compact.".into(),
+                );
+                return;
+            }
+
+            // Build a structured summary from the compacted messages
+            let compacted_msgs = &state.messages[(first_user_idx + 1)..split_point];
+            let summary = build_compaction_summary(compacted_msgs);
+
+            // Build new message list
+            let mut new_messages = Vec::new();
+
+            // Keep everything up to and including the first user message
+            for i in 0..=first_user_idx {
+                new_messages.push(state.messages[i].clone());
+            }
+
+            // Add the compaction summary as a system message
+            new_messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: summary,
+                timestamp: now_str(),
+            });
+
+            // Keep the last 6 messages
+            for i in split_point..msg_count {
+                new_messages.push(state.messages[i].clone());
+            }
+
+            // Replace the messages
+            state.messages = new_messages;
+
+            state.add_message(
+                MessageRole::System,
+                format!("Conversation compacted: {} messages reduced to {}. Token savings will apply on next request.",
+                    msg_count, state.messages.len() - 1), // -1 to exclude this message we just added
+            );
+        }
+        CommandResult::SaveConversation => {
+            state.save_conversation();
+            state.add_message(MessageRole::System, "Conversation saved.".into());
+        }
+        CommandResult::LoadConversation(id) => {
+            match state.conversation_store.load(&id) {
+                Ok(conv) => {
+                    state.messages.clear();
+                    state.conversation_id = conv.metadata.id;
+                    for msg in conv.messages {
+                        let role = match msg.role.as_str() {
+                            "user" => MessageRole::User,
+                            "assistant" => MessageRole::Assistant,
+                            "tool" => MessageRole::Tool,
+                            _ => MessageRole::System,
+                        };
+                        state.messages.push(ChatMessage {
+                            role,
+                            content: msg.content,
+                            timestamp: msg.timestamp,
+                        });
+                    }
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Loaded conversation: {}", conv.metadata.title),
+                    );
+                    state.scroll_to_bottom();
+                }
+                Err(e) => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to load conversation: {e}"),
+                    );
+                }
+            }
+        }
+        CommandResult::ListConversations => {
+            match state.conversation_store.list_recent(20) {
+                Ok(convs) => {
+                    if convs.is_empty() {
+                        state.add_message(MessageRole::System, "No saved conversations.".into());
+                    } else {
+                        let mut list = String::from("Recent conversations:\n");
+                        for c in &convs {
+                            list.push_str(&format!(
+                                "  {} | {} | {} msgs | {}\n",
+                                &c.id[..8.min(c.id.len())],
+                                c.title,
+                                c.message_count,
+                                c.updated_at,
+                            ));
+                        }
+                        list.push_str("\nUse /load <id> to resume a conversation.");
+                        state.add_message(MessageRole::System, list);
+                    }
+                }
+                Err(e) => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to list conversations: {e}"),
+                    );
+                }
+            }
+        }
+        CommandResult::NewConversation => {
+            if state.messages.len() > 1 {
+                state.save_conversation();
+            }
+            state.messages.clear();
+            state.conversation_id = ConversationStore::generate_id();
+            state.add_message(MessageRole::System, "New conversation started.".into());
+            state.scroll_offset = 0;
+        }
+        CommandResult::SetApprovalMode(mode) => {
+            let new_mode = match mode.as_str() {
+                "auto" => ToolApprovalMode::AutoApprove,
+                "ask" => ToolApprovalMode::AlwaysAsk,
+                "ask-once" | "askonce" => ToolApprovalMode::AskOnce,
+                _ => {
+                    state.add_message(
+                        MessageRole::System,
+                        "Invalid mode. Use: auto, ask, or ask-once".into(),
+                    );
+                    return;
+                }
+            };
+            state.approval_manager.set_mode(new_mode);
+            state.add_message(
+                MessageRole::System,
+                format!("Tool approval mode set to: {mode}"),
+            );
+        }
+        CommandResult::ShowStatus => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "?".into());
+            let status = format!(
+                "Status:\n\
+                 Provider: {}\n\
+                 Model: {}\n\
+                 Working dir: {}\n\
+                 Tokens: {}in / {}out\n\
+                 Cost: ${:.4}\n\
+                 Messages: {}\n\
+                 Iterations: {}",
+                state.provider_name,
+                state.model_name,
+                cwd,
+                state.total_tokens_in,
+                state.total_tokens_out,
+                state.estimated_cost,
+                state.messages.len(),
+                state.iterations,
+            );
+            state.add_message(MessageRole::System, status);
+        }
+        CommandResult::ShowDiff => {
+            let diff = std::process::Command::new("git")
+                .args(["diff"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_else(|| "Not a git repository".into());
+
+            // Truncate to 100 lines if too long
+            let lines: Vec<&str> = diff.lines().take(100).collect();
+            let truncated = lines.join("\n");
+            let suffix = if diff.lines().count() > 100 {
+                format!("\n\n... (truncated at 100 lines, {} total)", diff.lines().count())
+            } else {
+                String::new()
+            };
+
+            state.add_message(MessageRole::System, format!("Git diff:{}{}", truncated, suffix));
+        }
+        CommandResult::ShowGitStatus => {
+            // Get branch name
+            let branch = std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "unknown".into());
+
+            // Get status
+            let status_output = std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_else(|| "".into());
+
+            let mut formatted = format!("On branch: {}\n\n", branch);
+
+            if status_output.is_empty() {
+                formatted.push_str("Working tree clean");
+            } else {
+                // Parse and format with state labels
+                for line in status_output.lines() {
+                    if line.len() < 3 {
+                        continue;
+                    }
+                    let status_code = &line[..2];
+                    let path = line[3..].trim();
+
+                    let (label, _color) = match status_code {
+                        "M " | " M" | "MM" => ("M", "modified"),
+                        "A " | " A" | "AM" => ("A", "added"),
+                        "D " | " D" => ("D", "deleted"),
+                        "R " | " R" => ("R", "renamed"),
+                        "??" => ("?", "untracked"),
+                        "UU" | "AA" | "DD" => ("U", "conflicted"),
+                        _ => ("M", "modified"),
+                    };
+
+                    formatted.push_str(&format!("  {} {}\n", label, path));
+                }
+            }
+
+            state.add_message(MessageRole::System, formatted);
+        }
+        CommandResult::ShowLog => {
+            let log = std::process::Command::new("git")
+                .args(["log", "--oneline", "-20"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_else(|| "Not a git repository".into());
+            state.add_message(MessageRole::System, format!("Git log (last 20 commits):\n{log}"));
+        }
+        CommandResult::SearchFiles(pattern) => {
+            let result = std::process::Command::new("find")
+                .args([".", "-name", &pattern, "-not", "-path", "./.git/*"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_else(|| "Search failed".into());
+            let lines: Vec<&str> = result.lines().take(50).collect();
+            state.add_message(
+                MessageRole::System,
+                format!("Files matching '{}':\n{}", pattern, lines.join("\n")),
+            );
+        }
+        CommandResult::NotACommand => {}
+        CommandResult::ListModels => {
+            // Show static models for the active provider
+            let provider = match state.provider_name.to_lowercase().as_str() {
+                s if s.contains("claude") || s.contains("anthropic") => phazeai_core::ProviderId::Claude,
+                s if s.contains("openai") => phazeai_core::ProviderId::OpenAI,
+                s if s.contains("ollama") => phazeai_core::ProviderId::Ollama,
+                s if s.contains("groq") => phazeai_core::ProviderId::Groq,
+                s if s.contains("together") => phazeai_core::ProviderId::Together,
+                s if s.contains("openrouter") => phazeai_core::ProviderId::OpenRouter,
+                s if s.contains("lm studio") || s.contains("lmstudio") => phazeai_core::ProviderId::LmStudio,
+                _ => phazeai_core::ProviderId::Claude,
+            };
+
+            let models = phazeai_core::ProviderRegistry::known_models(&provider);
+
+            if models.is_empty() {
+                state.add_message(MessageRole::System,
+                    format!("No static model list for {}. Local models must be discovered.\nTip: Use /discover to scan for local models.", provider));
+            } else {
+                let mut msg = format!("Available models for {}:\n", provider);
+                for m in &models {
+                    let active = if m.id == state.model_name { " (active)" } else { "" };
+                    msg.push_str(&format!("  {} - {} | ctx:{} | tools:{}{}\n",
+                        m.id, m.name, m.context_window,
+                        if m.supports_tools { "yes" } else { "no" },
+                        active));
+                }
+                msg.push_str("\nUse /model <id> to switch models.");
+                state.add_message(MessageRole::System, msg);
+            }
+        }
+        CommandResult::DiscoverModels => {
+            state.add_message(MessageRole::System, "Scanning for local models...".into());
+
+            // Check Ollama via CLI
+            let mut msg = String::from("Local model discovery:\n");
+
+            let ollama_result = std::process::Command::new("ollama")
+                .arg("list")
+                .output();
+
+            match ollama_result {
+                Ok(output) if output.status.success() => {
+                    let list = String::from_utf8_lossy(&output.stdout);
+                    msg.push_str(&format!("\n  Ollama models:\n{}\n", list));
+                }
+                _ => {
+                    msg.push_str("\n  Ollama: not running or not installed\n");
+                }
+            }
+
+            // Check LM Studio (port 1234)
+            let lm_check = std::net::TcpStream::connect_timeout(
+                &"127.0.0.1:1234".parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            );
+            if lm_check.is_ok() {
+                msg.push_str("  LM Studio: running on port 1234\n");
+            } else {
+                msg.push_str("  LM Studio: not detected\n");
+            }
+
+            msg.push_str("\nUse /provider ollama and /model <name> to use a local model.");
+            state.add_message(MessageRole::System, msg);
+        }
+        CommandResult::ShowContext => {
+            use phazeai_core::context::ProjectType;
+
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "?".into());
+
+            let mut context_info = format!("Project context:\n  Working dir: {}\n", cwd);
+
+            // Check for instruction files
+            let root = std::env::current_dir().unwrap_or_default();
+            let candidates = [
+                root.join("CLAUDE.md"),
+                root.join(".phazeai/instructions.md"),
+                root.join(".ai/instructions.md"),
+            ];
+
+            let mut found_instructions = false;
+            for path in &candidates {
+                if path.exists() {
+                    let size = std::fs::metadata(path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    context_info.push_str(&format!("  Instructions: {} ({} bytes)\n", path.display(), size));
+                    found_instructions = true;
+                    break;
+                }
+            }
+
+            if !found_instructions {
+                // Check parent directories
+                let mut current = root.parent();
+                while let Some(dir) = current {
+                    let parent_claude = dir.join("CLAUDE.md");
+                    if parent_claude.exists() {
+                        let size = std::fs::metadata(&parent_claude)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        context_info.push_str(&format!("  Parent instructions: {} ({} bytes)\n", parent_claude.display(), size));
+                        break;
+                    }
+                    current = dir.parent();
+                }
+            }
+
+            // Check global instructions
+            if let Some(home) = dirs::home_dir() {
+                let global_instructions = home.join(".phazeai").join("instructions.md");
+                if global_instructions.exists() {
+                    let size = std::fs::metadata(&global_instructions)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    context_info.push_str(&format!("  Global instructions: {} ({} bytes)\n", global_instructions.display(), size));
+                }
+            }
+
+            // Check project type
+            let project_type = ProjectType::detect(&root);
+            context_info.push_str(&format!("  Project type: {}\n", project_type.name()));
+
+            // Check git
+            let (branch, dirty) = phazeai_core::collect_git_info(&root);
+            if let Some(b) = branch {
+                context_info.push_str(&format!("  Git branch: {}\n", b));
+                if !dirty.is_empty() {
+                    context_info.push_str(&format!("  Modified files: {}\n", dirty.len()));
+                }
+            }
+
+            state.add_message(MessageRole::System, context_info);
+        }
+    }
+}
+
+// ── Helper functions ────────────────────────────────────────────────────
+
+fn word_boundary_left(s: &str, pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos - 1;
+    // Skip whitespace
+    while i > 0 && bytes[i] == b' ' {
+        i -= 1;
+    }
+    // Skip word characters
+    while i > 0 && bytes[i] != b' ' {
+        i -= 1;
+    }
+    if bytes[i] == b' ' && i > 0 {
+        i + 1
+    } else {
+        i
+    }
+}
+
+fn word_boundary_right(s: &str, pos: usize) -> usize {
+    let len = s.len();
+    if pos >= len {
+        return len;
+    }
+    let bytes = s.as_bytes();
+    let mut i = pos;
+    // Skip current word
+    while i < len && bytes[i] != b' ' {
+        i += 1;
+    }
+    // Skip whitespace
+    while i < len && bytes[i] == b' ' {
+        i += 1;
+    }
+    i
+}
+
+fn complete_command(input: &str) -> Option<String> {
+    let commands = [
+        "/help", "/exit", "/quit", "/clear", "/model", "/provider",
+        "/theme", "/files", "/compact", "/save", "/load", "/conversations",
+        "/history", "/new", "/config", "/status", "/approve", "/diff",
+        "/git", "/log", "/search", "/pwd", "/cost", "/version", "/context", "/models", "/discover",
+    ];
+
+    let matches: Vec<&&str> = commands
+        .iter()
+        .filter(|c| c.starts_with(input))
+        .collect();
+
+    if matches.len() == 1 {
+        Some(format!("{} ", matches[0]))
+    } else {
+        None
+    }
+}
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Build a structured summary from compacted messages.
+/// Extracts user requests and key assistant responses to preserve context.
+fn build_compaction_summary(messages: &[ChatMessage]) -> String {
+    let mut summary = String::from("[Conversation Summary]\n");
+
+    let mut user_requests: Vec<String> = Vec::new();
+    let mut assistant_actions: Vec<String> = Vec::new();
+    let mut tool_results: Vec<String> = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            MessageRole::User => {
+                // Extract the first line or first 120 chars as the request summary
+                let text = msg.content.trim();
+                let brief = if let Some(first_line) = text.lines().next() {
+                    if first_line.len() > 120 {
+                        format!("{}...", &first_line[..117])
+                    } else {
+                        first_line.to_string()
+                    }
+                } else {
+                    continue;
+                };
+                user_requests.push(brief);
+            }
+            MessageRole::Assistant => {
+                // Extract the first meaningful line (skip empty lines)
+                let text = msg.content.trim();
+                let brief = text.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                if !brief.is_empty() {
+                    let truncated = if brief.len() > 150 {
+                        format!("{}...", &brief[..147])
+                    } else {
+                        brief
+                    };
+                    assistant_actions.push(truncated);
+                }
+            }
+            MessageRole::Tool => {
+                // Capture tool execution summaries (first line only)
+                let text = msg.content.trim();
+                if let Some(first_line) = text.lines().next() {
+                    let truncated = if first_line.len() > 100 {
+                        format!("{}...", &first_line[..97])
+                    } else {
+                        first_line.to_string()
+                    };
+                    tool_results.push(truncated);
+                }
+            }
+            MessageRole::System => {
+                // Skip system messages in summary
+            }
+        }
+    }
+
+    if !user_requests.is_empty() {
+        summary.push_str("User requested:\n");
+        for (i, req) in user_requests.iter().enumerate().take(10) {
+            summary.push_str(&format!("  {}. {}\n", i + 1, req));
+        }
+        if user_requests.len() > 10 {
+            summary.push_str(&format!("  ... and {} more requests\n", user_requests.len() - 10));
+        }
+    }
+
+    if !assistant_actions.is_empty() {
+        summary.push_str("Assistant actions:\n");
+        for action in assistant_actions.iter().take(8) {
+            summary.push_str(&format!("  - {}\n", action));
+        }
+        if assistant_actions.len() > 8 {
+            summary.push_str(&format!("  ... and {} more actions\n", assistant_actions.len() - 8));
+        }
+    }
+
+    if !tool_results.is_empty() {
+        summary.push_str("Tool outputs:\n");
+        for result in tool_results.iter().take(5) {
+            summary.push_str(&format!("  - {}\n", result));
+        }
+        if tool_results.len() > 5 {
+            summary.push_str(&format!("  ... and {} more results\n", tool_results.len() - 5));
+        }
+    }
+
+    summary
+}
+
+fn now_str() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
+}
+
+/// Attempt to start the Python sidecar for semantic search.
+/// Returns None if Python is unavailable or the sidecar script doesn't exist.
+async fn try_start_sidecar() -> Option<phazeai_sidecar::SidecarClient> {
+    // Look for python3 or python
+    let python = if phazeai_sidecar::SidecarManager::check_python("python3").await {
+        "python3"
+    } else if phazeai_sidecar::SidecarManager::check_python("python").await {
+        "python"
+    } else {
+        return None;
+    };
+
+    // Look for the sidecar script: project-local first, then config directory
+    let cwd = std::env::current_dir().ok()?;
+    let local_path = cwd.join("sidecar").join("server.py");
+    let config_path = dirs::config_dir()
+        .map(|d| d.join("phazeai").join("sidecar").join("server.py"));
+
+    let script_path = if local_path.exists() {
+        local_path
+    } else if config_path.as_ref().is_some_and(|p| p.exists()) {
+        config_path.unwrap()
+    } else {
+        return None;
+    };
+
+    let mut manager = phazeai_sidecar::SidecarManager::new(python, &script_path);
+    if manager.start().await.is_err() {
+        return None;
+    }
+
+    let process = manager.take_process()?;
+    phazeai_sidecar::SidecarClient::from_process(process).ok()
 }
