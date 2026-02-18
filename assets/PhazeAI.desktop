@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=PhazeAI IDE
+Comment=Local AI-Powered Coding Environment
+Exec=/home/jack/phazeai_ide/target/release/phazeai-ide
+Icon=/home/jack/phazeai_ide/assets/branding/icon.png
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupNotify=true
