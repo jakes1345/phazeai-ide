@@ -120,9 +120,10 @@ See [training/README.md](training/README.md) for full details.
 
 ### Prerequisites
 
-- Rust 1.70+ (install from [https://rustup.rs/](https://rustup.rs/))
-- Python 3.8+ (for semantic search sidecar)
-- An LLM API key (Claude, OpenAI, etc.) or local model (Ollama, LM Studio)
+- **NVIDIA GPU (8GB+ VRAM Recommended)**: See [HARDWARE.md](HARDWARE.md) for a tested reference setup.
+- **Ollama**: Install from [ollama.com](https://ollama.com).
+- **Rust 1.70+**: Install from [rustup.rs](https://rustup.rs/).
+- **Python 3.8+**: For semantic search and training pipeline.
 
 ### Installation
 
