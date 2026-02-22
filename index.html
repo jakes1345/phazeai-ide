@@ -1,0 +1,1730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="PhazeAI IDE — An open-source, AI-native code editor built entirely in Rust with egui. Local-first. No cloud. No subscriptions." />
+  <title>PhazeAI IDE — The AI IDE That Runs on Your Machine</title>
+  <style>
+    /* =========================================================
+       RESET & BASE
+    ========================================================= */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg-0:        #0d0f14;
+      --bg-1:        #13161d;
+      --bg-2:        #1a1d27;
+      --bg-3:        #21253a;
+      --surface:     #252a3d;
+      --border:      #2e3350;
+      --border-hi:   #3d4470;
+
+      --accent-lo:   #7c3aed;
+      --accent-hi:   #2563eb;
+      --accent-mid:  #5b3fd4;
+      --glow:        rgba(124, 58, 237, 0.18);
+      --glow-blue:   rgba(37, 99, 235, 0.14);
+
+      --text-0:      #f0f2ff;
+      --text-1:      #b8bfe8;
+      --text-2:      #6b7399;
+      --text-3:      #454a6b;
+
+      --green:       #4ec994;
+      --yellow:      #e5c07b;
+      --red:         #e06c75;
+      --blue:        #61afef;
+      --purple:      #c678dd;
+      --cyan:        #56b6c2;
+      --orange:      #d19a66;
+
+      --mono: "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", "Menlo", monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+
+      --radius-sm:   6px;
+      --radius-md:   10px;
+      --radius-lg:   16px;
+      --radius-xl:   24px;
+
+      --transition: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    html {
+      scroll-behavior: smooth;
+      font-size: 16px;
+    }
+
+    body {
+      background-color: var(--bg-0);
+      color: var(--text-1);
+      font-family: var(--sans);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    /* =========================================================
+       UTILITY
+    ========================================================= */
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #a78bfa 0%, var(--accent-hi) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+    }
+
+    /* =========================================================
+       NAV
+    ========================================================= */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13, 15, 20, 0.82);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+      gap: 24px;
+    }
+
+    .nav-logo {
+      font-size: 1.2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-0);
+      flex-shrink: 0;
+    }
+
+    .nav-logo .ai {
+      background: linear-gradient(135deg, #a78bfa 0%, var(--accent-hi) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      padding: 6px 14px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text-2);
+      border-radius: var(--radius-sm);
+      transition: color var(--transition), background var(--transition);
+    }
+
+    .nav-links a:hover {
+      color: var(--text-0);
+      background: var(--bg-2);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 20px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all var(--transition);
+      white-space: nowrap;
+      border: none;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-lo) 0%, var(--accent-hi) 100%);
+      color: #fff;
+      box-shadow: 0 0 0 0 rgba(124,58,237,0);
+    }
+
+    .btn-primary:hover {
+      box-shadow: 0 4px 20px rgba(124,58,237,0.45);
+      transform: translateY(-1px);
+      filter: brightness(1.08);
+    }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text-1);
+      border: 1px solid var(--border-hi);
+    }
+
+    .btn-outline:hover {
+      border-color: var(--accent-lo);
+      color: var(--text-0);
+      background: rgba(124,58,237,0.08);
+    }
+
+    .btn-lg {
+      padding: 13px 28px;
+      font-size: 1rem;
+      border-radius: var(--radius-md);
+    }
+
+    /* =========================================================
+       HERO
+    ========================================================= */
+    .hero {
+      padding: 100px 0 80px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* subtle grid overlay */
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(37,99,235,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(37,99,235,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+    }
+
+    /* large diffused glow behind hero text */
+    .hero::after {
+      content: '';
+      position: absolute;
+      top: -120px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 500px;
+      background: radial-gradient(ellipse at center,
+        rgba(124,58,237,0.14) 0%,
+        rgba(37,99,235,0.08) 40%,
+        transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 14px;
+      background: rgba(124,58,237,0.12);
+      border: 1px solid rgba(124,58,237,0.3);
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #a78bfa;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 28px;
+    }
+
+    .hero-badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #a78bfa;
+      box-shadow: 0 0 8px #a78bfa;
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    .hero h1 {
+      font-size: clamp(2.4rem, 6vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1.08;
+      color: var(--text-0);
+      margin-bottom: 24px;
+    }
+
+    .hero-sub {
+      font-size: clamp(1rem, 2.5vw, 1.2rem);
+      color: var(--text-2);
+      max-width: 540px;
+      margin: 0 auto 40px;
+      line-height: 1.7;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 72px;
+    }
+
+    /* =========================================================
+       EDITOR MOCKUP
+    ========================================================= */
+    .mockup-wrap {
+      position: relative;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    /* outer glow ring */
+    .mockup-wrap::before {
+      content: '';
+      position: absolute;
+      inset: -2px;
+      border-radius: calc(var(--radius-xl) + 2px);
+      background: linear-gradient(135deg, rgba(124,58,237,0.6) 0%, rgba(37,99,235,0.4) 100%);
+      filter: blur(1px);
+      z-index: 0;
+    }
+
+    .mockup {
+      position: relative;
+      z-index: 1;
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      box-shadow:
+        0 40px 80px rgba(0,0,0,0.6),
+        0 0 0 1px rgba(255,255,255,0.04) inset;
+    }
+
+    /* Title bar */
+    .mockup-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .traffic-lights {
+      display: flex;
+      gap: 7px;
+    }
+
+    .traffic-lights span {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .tl-red   { background: #ff5f57; }
+    .tl-yellow { background: #febc2e; }
+    .tl-green  { background: #27c840; }
+
+    .mockup-tabs {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 1;
+      margin-left: 16px;
+    }
+
+    .mockup-tab {
+      padding: 4px 14px;
+      font-size: 0.75rem;
+      font-family: var(--mono);
+      border-radius: 4px 4px 0 0;
+      color: var(--text-3);
+    }
+
+    .mockup-tab.active {
+      background: var(--bg-1);
+      color: var(--text-1);
+      border: 1px solid var(--border);
+      border-bottom: 1px solid var(--bg-1);
+      margin-bottom: -1px;
+    }
+
+    /* Editor body: sidebar + code area */
+    .mockup-body {
+      display: flex;
+      min-height: 360px;
+    }
+
+    /* File sidebar */
+    .mockup-sidebar {
+      width: 180px;
+      flex-shrink: 0;
+      background: var(--bg-2);
+      border-right: 1px solid var(--border);
+      padding: 12px 0;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+    }
+
+    .sidebar-section {
+      padding: 0 12px;
+      margin-bottom: 6px;
+      color: var(--text-3);
+      font-size: 0.65rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-family: var(--sans);
+    }
+
+    .sidebar-item {
+      padding: 3px 12px 3px 22px;
+      color: var(--text-2);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sidebar-item.active {
+      background: rgba(124,58,237,0.15);
+      color: var(--text-0);
+      border-left: 2px solid var(--accent-lo);
+      padding-left: 20px;
+    }
+
+    .sidebar-item.modified {
+      color: var(--yellow);
+    }
+
+    .sidebar-icon {
+      font-size: 0.65rem;
+      width: 14px;
+      text-align: center;
+    }
+
+    /* Code pane */
+    .mockup-code {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .breadcrumb {
+      padding: 6px 16px;
+      font-size: 0.7rem;
+      font-family: var(--mono);
+      color: var(--text-3);
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.01);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .breadcrumb-sep {
+      opacity: 0.3;
+    }
+
+    .code-area {
+      display: flex;
+      flex: 1;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      line-height: 1.65;
+      overflow: hidden;
+    }
+
+    .line-numbers {
+      padding: 12px 0;
+      width: 44px;
+      text-align: right;
+      color: var(--text-3);
+      user-select: none;
+      background: rgba(0,0,0,0.15);
+      border-right: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .line-numbers span {
+      display: block;
+      padding: 0 10px 0 0;
+      font-size: 0.7rem;
+    }
+
+    .line-numbers span.current {
+      color: var(--text-1);
+    }
+
+    .code-lines {
+      flex: 1;
+      padding: 12px 0;
+      overflow: hidden;
+    }
+
+    .code-line {
+      padding: 0 18px;
+      white-space: pre;
+      height: 1.65em;
+      display: flex;
+      align-items: center;
+    }
+
+    .code-line.selected {
+      background: rgba(124,58,237,0.15);
+    }
+
+    .code-line.cursor-line {
+      background: rgba(255,255,255,0.03);
+    }
+
+    /* Syntax colors */
+    .kw    { color: var(--purple); }
+    .fn    { color: var(--blue); }
+    .ty    { color: var(--cyan); }
+    .str   { color: var(--green); }
+    .num   { color: var(--orange); }
+    .cmt   { color: var(--text-3); font-style: italic; }
+    .mac   { color: var(--red); }
+    .attr  { color: var(--yellow); }
+    .op    { color: var(--text-2); }
+    .pun   { color: var(--text-2); }
+    .lf    { color: var(--text-1); }
+
+    /* Cursor */
+    .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background: var(--text-0);
+      margin-left: 1px;
+      vertical-align: middle;
+      animation: blink 1.2s step-end infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0; }
+    }
+
+    /* Git gutter */
+    .gutter-bar {
+      display: inline-block;
+      width: 3px;
+      align-self: stretch;
+      margin-right: 6px;
+      border-radius: 2px;
+    }
+
+    .g-add  { background: var(--green); }
+    .g-mod  { background: var(--yellow); }
+
+    /* AI chat overlay in mockup */
+    .mockup-chat {
+      width: 220px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--border);
+      background: var(--bg-0);
+      display: flex;
+      flex-direction: column;
+      font-size: 0.72rem;
+    }
+
+    .chat-header {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      color: var(--text-2);
+      font-family: var(--sans);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.7rem;
+    }
+
+    .chat-mode-badge {
+      font-size: 0.6rem;
+      padding: 1px 6px;
+      background: rgba(124,58,237,0.2);
+      border: 1px solid rgba(124,58,237,0.35);
+      border-radius: 99px;
+      color: #a78bfa;
+    }
+
+    .chat-msgs {
+      flex: 1;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: hidden;
+    }
+
+    .chat-bubble {
+      padding: 7px 10px;
+      border-radius: 8px;
+      line-height: 1.5;
+      font-family: var(--sans);
+    }
+
+    .chat-bubble.user {
+      background: rgba(124,58,237,0.15);
+      border: 1px solid rgba(124,58,237,0.25);
+      color: var(--text-1);
+      align-self: flex-end;
+      max-width: 85%;
+    }
+
+    .chat-bubble.ai {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      color: var(--text-1);
+      align-self: flex-start;
+      max-width: 100%;
+    }
+
+    .chat-typing {
+      display: flex;
+      gap: 4px;
+      padding: 2px 4px;
+    }
+
+    .chat-typing span {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent-lo);
+      animation: typing-dot 1.2s ease-in-out infinite;
+    }
+
+    .chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+    .chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes typing-dot {
+      0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+      40%           { opacity: 1;   transform: scale(1); }
+    }
+
+    .chat-input-row {
+      padding: 8px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .chat-input-fake {
+      flex: 1;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-size: 0.68rem;
+      color: var(--text-3);
+      font-family: var(--sans);
+    }
+
+    /* Status bar */
+    .mockup-statusbar {
+      padding: 3px 14px;
+      background: linear-gradient(90deg, var(--accent-lo) 0%, var(--accent-hi) 100%);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 0.65rem;
+      font-family: var(--mono);
+      color: rgba(255,255,255,0.9);
+    }
+
+    .statusbar-item {
+      opacity: 0.85;
+    }
+
+    .statusbar-item.spinner::before {
+      content: '';
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border: 1.5px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 5px;
+      vertical-align: middle;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* =========================================================
+       FEATURES
+    ========================================================= */
+    .features {
+      padding: 100px 0;
+      position: relative;
+    }
+
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #a78bfa;
+      margin-bottom: 14px;
+      display: block;
+    }
+
+    .section-title {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      color: var(--text-0);
+      margin-bottom: 14px;
+    }
+
+    .section-sub {
+      font-size: 1rem;
+      color: var(--text-2);
+      max-width: 480px;
+    }
+
+    .section-head {
+      margin-bottom: 56px;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+
+    .feature-card {
+      background: var(--bg-1);
+      padding: 32px 28px;
+      position: relative;
+      transition: background var(--transition);
+    }
+
+    .feature-card:hover {
+      background: var(--bg-2);
+    }
+
+    .feature-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(124,58,237,0.05) 0%, transparent 60%);
+      opacity: 0;
+      transition: opacity var(--transition);
+      pointer-events: none;
+    }
+
+    .feature-card:hover::after {
+      opacity: 1;
+    }
+
+    .feature-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: var(--radius-md);
+      background: rgba(124,58,237,0.12);
+      border: 1px solid rgba(124,58,237,0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 18px;
+    }
+
+    .feature-icon svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .feature-card h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-0);
+      margin-bottom: 10px;
+      letter-spacing: -0.01em;
+    }
+
+    .feature-card p {
+      font-size: 0.875rem;
+      color: var(--text-2);
+      line-height: 1.7;
+    }
+
+    /* =========================================================
+       INSTALL
+    ========================================================= */
+    .install {
+      padding: 100px 0;
+      background: linear-gradient(180deg, transparent 0%, rgba(37,99,235,0.04) 40%, transparent 100%);
+      position: relative;
+    }
+
+    /* Pure CSS tabs via radio inputs */
+    .tab-system {
+      margin-top: 48px;
+    }
+
+    .tab-radios {
+      display: none;
+    }
+
+    .tab-labels {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0;
+    }
+
+    .tab-label {
+      padding: 10px 26px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-3);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color var(--transition), border-color var(--transition);
+      user-select: none;
+    }
+
+    .tab-label:hover {
+      color: var(--text-1);
+    }
+
+    .tab-panels {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    }
+
+    .tab-panel {
+      display: none;
+      padding: 32px;
+    }
+
+    /* Radio-driven tab activation */
+    #tab-linux:checked ~ .tab-labels .tab-label[for="tab-linux"],
+    #tab-macos:checked ~ .tab-labels .tab-label[for="tab-macos"],
+    #tab-windows:checked ~ .tab-labels .tab-label[for="tab-windows"] {
+      color: var(--text-0);
+      border-bottom-color: var(--accent-lo);
+    }
+
+    #tab-linux:checked ~ .tab-panels #panel-linux,
+    #tab-macos:checked ~ .tab-panels #panel-macos,
+    #tab-windows:checked ~ .tab-panels #panel-windows {
+      display: block;
+    }
+
+    /* Code block */
+    .code-block {
+      position: relative;
+      background: var(--bg-0);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+
+    .code-block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-2);
+    }
+
+    .code-block-lang {
+      font-size: 0.7rem;
+      font-family: var(--mono);
+      color: var(--text-3);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .copy-btn {
+      font-size: 0.7rem;
+      font-family: var(--sans);
+      font-weight: 600;
+      color: var(--text-3);
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 10px;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .copy-btn:hover {
+      color: var(--text-1);
+      border-color: var(--border-hi);
+      background: var(--bg-3);
+    }
+
+    .copy-btn.copied {
+      color: var(--green);
+      border-color: rgba(78,201,148,0.4);
+    }
+
+    code {
+      display: block;
+      padding: 18px 20px;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      line-height: 1.75;
+      color: var(--text-1);
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    code .c { color: var(--text-3); font-style: italic; }
+    code .s { color: var(--green); }
+    code .k { color: var(--purple); }
+
+    .install-divider {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin: 28px 0;
+      color: var(--text-3);
+      font-size: 0.8rem;
+    }
+
+    .install-divider::before,
+    .install-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* =========================================================
+       REQUIREMENTS
+    ========================================================= */
+    .requirements {
+      padding: 80px 0;
+    }
+
+    .req-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 40px;
+    }
+
+    .req-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 22px 22px;
+      transition: border-color var(--transition), background var(--transition);
+    }
+
+    .req-card:hover {
+      border-color: var(--border-hi);
+      background: var(--bg-2);
+    }
+
+    .req-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 8px;
+    }
+
+    .req-value {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-0);
+    }
+
+    .req-note {
+      font-size: 0.75rem;
+      color: var(--text-3);
+      margin-top: 4px;
+    }
+
+    /* =========================================================
+       FOOTER
+    ========================================================= */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-left {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .footer-logo {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-0);
+      letter-spacing: -0.02em;
+    }
+
+    .footer-logo .ai {
+      background: linear-gradient(135deg, #a78bfa 0%, var(--accent-hi) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .footer-meta {
+      font-size: 0.8rem;
+      color: var(--text-3);
+    }
+
+    .footer-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .footer-link {
+      font-size: 0.8rem;
+      color: var(--text-3);
+      transition: color var(--transition);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .footer-link:hover {
+      color: var(--text-1);
+    }
+
+    .footer-tech {
+      font-size: 0.75rem;
+      color: var(--text-3);
+      font-family: var(--mono);
+      padding: 4px 12px;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+    }
+
+    /* =========================================================
+       RESPONSIVE
+    ========================================================= */
+    @media (max-width: 900px) {
+      .features-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .req-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .mockup-chat {
+        display: none;
+      }
+    }
+
+    @media (max-width: 700px) {
+      .nav-links {
+        display: none;
+      }
+
+      .hero {
+        padding: 64px 0 48px;
+      }
+
+      .features-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .req-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .footer-inner {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .mockup-sidebar {
+        display: none;
+      }
+
+      .mockup-titlebar .mockup-tabs .mockup-tab:not(.active) {
+        display: none;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .req-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .tab-label {
+        padding: 10px 16px;
+        font-size: 0.8rem;
+      }
+    }
+
+    /* =========================================================
+       SCROLL FADE-IN (progressive enhancement)
+    ========================================================= */
+    .fade-in {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+    }
+
+    .fade-in.visible {
+      opacity: 1;
+      transform: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ===================== NAV ===================== -->
+  <nav>
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo" aria-label="PhazeAI IDE Home">Phaze<span class="ai">AI</span></a>
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#install">Install</a></li>
+        <li>
+          <a href="https://github.com/jakes1345/phazeai-ide" target="_blank" rel="noopener">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;margin-right:4px;" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>GitHub
+          </a>
+        </li>
+      </ul>
+      <div class="nav-actions">
+        <a href="#install" class="btn btn-primary">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ===================== HERO ===================== -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-content">
+        <div class="hero-badge">
+          <span class="hero-badge-dot" aria-hidden="true"></span>
+          Open Source &middot; MIT License
+        </div>
+
+        <h1>
+          The AI IDE That Runs<br>
+          <span class="gradient-text">on Your Machine</span>
+        </h1>
+
+        <p class="hero-sub">
+          Full egui desktop editor. Local-first. Open source.
+          No cloud. No subscriptions. No data leaving your box.
+        </p>
+
+        <div class="hero-actions">
+          <a href="#install" class="btn btn-primary btn-lg">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download for Linux
+          </a>
+          <a href="https://github.com/jakes1345/phazeai-ide" target="_blank" rel="noopener" class="btn btn-outline btn-lg">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+            View on GitHub
+          </a>
+        </div>
+      </div>
+
+      <!-- EDITOR MOCKUP -->
+      <div class="mockup-wrap" aria-hidden="true">
+        <div class="mockup">
+
+          <!-- Title bar -->
+          <div class="mockup-titlebar">
+            <div class="traffic-lights">
+              <span class="tl-red"></span>
+              <span class="tl-yellow"></span>
+              <span class="tl-green"></span>
+            </div>
+            <div class="mockup-tabs">
+              <div class="mockup-tab active">agent.rs</div>
+              <div class="mockup-tab">provider.rs</div>
+              <div class="mockup-tab">main.rs</div>
+            </div>
+          </div>
+
+          <!-- Body -->
+          <div class="mockup-body">
+
+            <!-- File sidebar -->
+            <div class="mockup-sidebar">
+              <div class="sidebar-section">phazeai-core</div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon">▾</span>src
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon">▾</span>agent
+              </div>
+              <div class="sidebar-item active">
+                <span class="sidebar-icon"></span>core.rs
+              </div>
+              <div class="sidebar-item modified">
+                <span class="sidebar-icon"></span>multi_agent.rs
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon">▾</span>llm
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon"></span>claude.rs
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon"></span>provider.rs
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon">▾</span>lsp
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon"></span>client.rs
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon">▾</span>tools
+              </div>
+              <div class="sidebar-item">
+                <span class="sidebar-icon"></span>traits.rs
+              </div>
+            </div>
+
+            <!-- Code area -->
+            <div class="mockup-code">
+              <div class="breadcrumb">
+                <span>phazeai-core</span>
+                <span class="breadcrumb-sep">/</span>
+                <span>agent</span>
+                <span class="breadcrumb-sep">/</span>
+                <span style="color:var(--text-1)">core.rs</span>
+                <span class="breadcrumb-sep">&rarr;</span>
+                <span style="color:var(--blue)">run_with_events</span>
+              </div>
+
+              <div class="code-area">
+                <div class="line-numbers">
+                  <span>48</span>
+                  <span>49</span>
+                  <span>50</span>
+                  <span>51</span>
+                  <span>52</span>
+                  <span>53</span>
+                  <span>54</span>
+                  <span class="current">55</span>
+                  <span>56</span>
+                  <span>57</span>
+                  <span>58</span>
+                  <span>59</span>
+                  <span>60</span>
+                  <span>61</span>
+                  <span>62</span>
+                  <span>63</span>
+                  <span>64</span>
+                  <span>65</span>
+                </div>
+
+                <div class="code-lines">
+                  <div class="code-line"><span class="cmt">/// Streaming agentic loop. Emits events over mpsc.</span></div>
+                  <div class="code-line"><span class="attr">#[instrument(skip(self, tx))]</span></div>
+                  <div class="code-line"><span class="kw">pub async fn </span><span class="fn">run_with_events</span><span class="pun">(</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="op">&amp;</span><span class="kw">mut </span><span class="lf">self</span><span class="pun">,</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="lf">tx</span><span class="pun">: </span><span class="ty">Sender</span><span class="pun">&lt;</span><span class="ty">AgentEvent</span><span class="pun">&gt;,</span></div>
+                  <div class="code-line"><span class="pun">) -&gt; </span><span class="ty">Result</span><span class="pun">&lt;()&gt; {</span></div>
+                  <div class="code-line"><span class="gutter-bar g-add"></span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">loop </span><span class="pun">{</span></div>
+                  <div class="code-line cursor-line"><span class="gutter-bar g-add"></span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">let </span><span class="lf">response</span><span class="pun"> = </span><span class="lf">self</span><span class="pun">.</span><span class="fn">client</span><span class="pun">.</span><span class="fn">stream_chat</span><span class="pun">(</span><span class="op">&amp;</span><span class="lf">self</span><span class="pun">.</span><span class="lf">messages</span><span class="pun">).</span><span class="fn">await</span><span class="pun">?;</span><span class="cursor"></span></div>
+                  <div class="code-line"><span class="gutter-bar g-mod"></span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">let </span><span class="lf">tool_calls</span><span class="pun"> = </span><span class="lf">response</span><span class="pun">.</span><span class="fn">tool_calls</span><span class="pun">();</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if </span><span class="lf">tool_calls</span><span class="pun">.</span><span class="fn">is_empty</span><span class="pun">() {</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">break</span><span class="pun">;</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="pun">}</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">for </span><span class="lf">call</span><span class="kw"> in </span><span class="lf">tool_calls</span><span class="pun"> {</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">let </span><span class="lf">approved</span><span class="pun"> = (</span><span class="lf">self</span><span class="pun">.</span><span class="lf">approval_fn</span><span class="pun">)(</span><span class="op">&amp;</span><span class="lf">call</span><span class="pun">).</span><span class="fn">await</span><span class="pun">;</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if </span><span class="lf">approved</span><span class="pun"> {</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">let </span><span class="lf">result</span><span class="pun"> = </span><span class="lf">call</span><span class="pun">.</span><span class="fn">execute</span><span class="pun">().</span><span class="fn">await</span><span class="pun">?;</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="lf">tx</span><span class="pun">.</span><span class="fn">send</span><span class="pun">(</span><span class="ty">AgentEvent</span><span class="pun">::</span><span class="ty">ToolResult</span><span class="pun">(</span><span class="lf">result</span><span class="pun">)).</span><span class="fn">await</span><span class="pun">?;</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="pun">}</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- AI Chat panel -->
+            <div class="mockup-chat">
+              <div class="chat-header">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                AI Chat
+                <span class="chat-mode-badge">Edit</span>
+              </div>
+              <div class="chat-msgs">
+                <div class="chat-bubble user">Refactor the agent loop to use select! for cancellation</div>
+                <div class="chat-bubble ai">I'll add a cancellation channel using <code style="background:rgba(255,255,255,0.07);padding:1px 5px;border-radius:3px;font-size:0.9em">tokio::select!</code> so the loop can be interrupted cleanly.</div>
+                <div class="chat-bubble ai">
+                  <div class="chat-typing">
+                    <span></span><span></span><span></span>
+                  </div>
+                </div>
+              </div>
+              <div class="chat-input-row">
+                <div class="chat-input-fake">Ask or instruct...</div>
+              </div>
+            </div>
+
+          </div><!-- /.mockup-body -->
+
+          <!-- Status bar -->
+          <div class="mockup-statusbar">
+            <span class="statusbar-item">main</span>
+            <span class="statusbar-item">Rust</span>
+            <span class="statusbar-item">rust-analyzer</span>
+            <span class="statusbar-item spinner">Agent running</span>
+            <span class="statusbar-item" style="margin-left:auto">Ln 55, Col 58</span>
+            <span class="statusbar-item">UTF-8</span>
+          </div>
+
+        </div><!-- /.mockup -->
+      </div><!-- /.mockup-wrap -->
+
+    </div><!-- /.container -->
+  </section>
+
+  <!-- ===================== FEATURES ===================== -->
+  <section class="features" id="features">
+    <div class="container">
+      <div class="section-head fade-in">
+        <span class="section-label">Features</span>
+        <h2 class="section-title">Everything you expect.<br>Nothing you don't need.</h2>
+        <p class="section-sub">Built from scratch in Rust. No Electron, no web views — just native egui rendering at 60fps.</p>
+      </div>
+
+      <div class="features-grid fade-in">
+
+        <!-- 1 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad1)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad1" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+          </div>
+          <h3>Tree-sitter Highlighting</h3>
+          <p>Semantic syntax coloring powered by real AST parsing, not regex. 24 token types mapped to theme colors. Works correctly inside strings, macros, and nested structures.</p>
+        </div>
+
+        <!-- 2 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad2)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad2" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+          </div>
+          <h3>Multi-Tab Terminal</h3>
+          <p>Full VTE terminal emulator with PTY support, 256-color rendering, and 10,000-line scrollback. Multiple sessions in tabs. Agent bash output streams directly into the terminal.</p>
+        </div>
+
+        <!-- 3 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad3)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad3" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </div>
+          <h3>LSP Integration</h3>
+          <p>rust-analyzer, pyright, typescript-language-server — auto-detected and spawned per workspace. Hover types, go-to-definition (F12), find references, autocomplete, and gutter diagnostics.</p>
+        </div>
+
+        <!-- 4 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad4)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad4" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+          </div>
+          <h3>AI Modes</h3>
+          <p>Five purpose-built modes: Chat, Ask, Debug, Plan, Edit. Each mode automatically collects the right context — file, selection, terminal output, or full project tree — before sending to the model.</p>
+        </div>
+
+        <!-- 5 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad5)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad5" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
+            </svg>
+          </div>
+          <h3>Inline Diff Approval</h3>
+          <p>When the agent edits a file, you see a full unified diff with color-coded hunks. Accept or reject each change individually before anything touches disk. Real control, not blind trust.</p>
+        </div>
+
+        <!-- 6 -->
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#grad6)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <defs>
+                <linearGradient id="grad6" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#a78bfa"/>
+                  <stop offset="100%" stop-color="#2563eb"/>
+                </linearGradient>
+              </defs>
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+            </svg>
+          </div>
+          <h3>Works Offline</h3>
+          <p>Ollama and LM Studio supported out of the box. Run any local GGUF model with no API key, no internet, no telemetry. Cloud providers (Claude, OpenAI, Groq) remain optional.</p>
+        </div>
+
+      </div><!-- /.features-grid -->
+    </div>
+  </section>
+
+  <!-- ===================== INSTALL ===================== -->
+  <section class="install" id="install">
+    <div class="container">
+      <div class="section-head fade-in">
+        <span class="section-label">Install</span>
+        <h2 class="section-title">Get running in seconds.</h2>
+        <p class="section-sub">Pre-built binaries for all major platforms. Or compile from source — it is a standard Cargo workspace.</p>
+      </div>
+
+      <div class="tab-system fade-in">
+        <!-- Hidden radio controls — no JS required for tab switching -->
+        <input type="radio" class="tab-radios" name="os-tab" id="tab-linux" checked>
+        <input type="radio" class="tab-radios" name="os-tab" id="tab-macos">
+        <input type="radio" class="tab-radios" name="os-tab" id="tab-windows">
+
+        <div class="tab-labels">
+          <label class="tab-label" for="tab-linux">Linux</label>
+          <label class="tab-label" for="tab-macos">macOS</label>
+          <label class="tab-label" for="tab-windows">Windows</label>
+        </div>
+
+        <div class="tab-panels">
+
+          <!-- Linux -->
+          <div class="tab-panel" id="panel-linux">
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="# Download latest release
+curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
+./phazeai-ide">Copy</button>
+              </div>
+              <code><span class="c"># Download latest release</span>
+curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
+./phazeai-ide</code>
+            </div>
+
+            <div class="install-divider">or install via AppImage</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/PhazeAI-IDE.AppImage -o PhazeAI-IDE.AppImage
+chmod +x PhazeAI-IDE.AppImage
+./PhazeAI-IDE.AppImage">Copy</button>
+              </div>
+              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/PhazeAI-IDE.AppImage -o PhazeAI-IDE.AppImage
+chmod +x PhazeAI-IDE.AppImage
+./PhazeAI-IDE.AppImage</code>
+            </div>
+
+            <div class="install-divider">or build from source</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+./target/release/phazeai-ide">Copy</button>
+              </div>
+              <code>git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+./target/release/phazeai-ide</code>
+            </div>
+          </div><!-- /#panel-linux -->
+
+          <!-- macOS -->
+          <div class="tab-panel" id="panel-macos">
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
+./phazeai-ide">Copy</button>
+              </div>
+              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
+./phazeai-ide</code>
+            </div>
+
+            <div class="install-divider">Intel Mac (x86_64)</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
+./phazeai-ide">Copy</button>
+              </div>
+              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
+./phazeai-ide</code>
+            </div>
+
+            <div class="install-divider">or build from source</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">bash</span>
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+open target/release/phazeai-ide">Copy</button>
+              </div>
+              <code>git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+open target/release/phazeai-ide</code>
+            </div>
+          </div><!-- /#panel-macos -->
+
+          <!-- Windows -->
+          <div class="tab-panel" id="panel-windows">
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">text</span>
+                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-windows-x86_64.zip">Copy URL</button>
+              </div>
+              <code><span class="c"># Download the zip from GitHub Releases:</span>
+https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-windows-x86_64.zip
+
+<span class="c"># Extract the archive, then run:</span>
+phazeai-ide.exe</code>
+            </div>
+
+            <div class="install-divider">or install via MSI installer</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">text</span>
+                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi">Copy URL</button>
+              </div>
+              <code>https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi</code>
+            </div>
+
+            <div class="install-divider">or build from source (PowerShell)</div>
+
+            <div class="code-block">
+              <div class="code-block-header">
+                <span class="code-block-lang">powershell</span>
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+.\target\release\phazeai-ide.exe">Copy</button>
+              </div>
+              <code>git clone https://github.com/jakes1345/phazeai-ide
+cd phazeai-ide
+cargo build --release -p phazeai-ide
+.\target\release\phazeai-ide.exe</code>
+            </div>
+          </div><!-- /#panel-windows -->
+
+        </div><!-- /.tab-panels -->
+      </div><!-- /.tab-system -->
+
+    </div>
+  </section>
+
+  <!-- ===================== REQUIREMENTS ===================== -->
+  <section class="requirements">
+    <div class="container">
+      <div class="section-head fade-in">
+        <span class="section-label">Requirements</span>
+        <h2 class="section-title">Lightweight by design.</h2>
+        <p class="section-sub">PhazeAI IDE compiles to a single binary with no system dependencies beyond a GPU driver for rendering.</p>
+      </div>
+
+      <div class="req-grid fade-in">
+        <div class="req-card">
+          <div class="req-title">Rust toolchain</div>
+          <div class="req-value">1.70+</div>
+          <div class="req-note">Required to build from source. Pre-built binaries need nothing.</div>
+        </div>
+
+        <div class="req-card">
+          <div class="req-title">RAM</div>
+          <div class="req-value">4 GB min</div>
+          <div class="req-note">8 GB recommended when running local models via Ollama.</div>
+        </div>
+
+        <div class="req-card">
+          <div class="req-title">Local AI</div>
+          <div class="req-value">Ollama (optional)</div>
+          <div class="req-note">LM Studio also supported. Cloud providers need only an API key.</div>
+        </div>
+
+        <div class="req-card">
+          <div class="req-title">Platform</div>
+          <div class="req-value">Linux / macOS / Win</div>
+          <div class="req-note">x86_64 and aarch64 targets. Wayland and X11 on Linux.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer>
+    <div class="container footer-inner">
+      <div class="footer-left">
+        <span class="footer-logo">Phaze<span class="ai">AI</span> IDE</span>
+        <span class="footer-meta">MIT License &mdash; Free and open source</span>
+      </div>
+      <div class="footer-right">
+        <a href="https://github.com/jakes1345/phazeai-ide" target="_blank" rel="noopener" class="footer-link">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <span class="footer-tech">Built with Rust + egui</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Minimal JS: copy button + scroll fade -->
+  <script>
+    // Copy buttons
+    document.querySelectorAll('.copy-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var text = btn.getAttribute('data-copy');
+        navigator.clipboard.writeText(text).then(function() {
+          btn.textContent = 'Copied';
+          btn.classList.add('copied');
+          setTimeout(function() {
+            btn.textContent = btn.getAttribute('data-copy').startsWith('http') ? 'Copy URL' : 'Copy';
+            btn.classList.remove('copied');
+          }, 2000);
+        }).catch(function() {
+          // Fallback for older browsers
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); } catch(e) {}
+          document.body.removeChild(ta);
+          btn.textContent = 'Copied';
+          btn.classList.add('copied');
+          setTimeout(function() {
+            btn.textContent = btn.getAttribute('data-copy').startsWith('http') ? 'Copy URL' : 'Copy';
+            btn.classList.remove('copied');
+          }, 2000);
+        });
+      });
+    });
+
+    // Scroll fade-in
+    var fadeEls = document.querySelectorAll('.fade-in');
+    if (typeof IntersectionObserver !== 'undefined') {
+      var observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12 });
+      fadeEls.forEach(function(el) { observer.observe(el); });
+    } else {
+      fadeEls.forEach(function(el) { el.classList.add('visible'); });
+    }
+  </script>
+
+</body>
+</html>

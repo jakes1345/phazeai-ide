@@ -1,426 +1,233 @@
 # PhazeAI IDE
 
-**The AI-powered IDE that runs 100% on your machine. No cloud. No subscriptions. Your code stays yours.**
+**A full-featured, AI-native code editor built entirely in Rust. Local-first. No cloud required.**
 
-![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-Local%20AI-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://rustup.rs)
+[![Build](https://github.com/jakes1345/phazeai-ide/actions/workflows/ci.yml/badge.svg)](https://github.com/jakes1345/phazeai-ide/actions)
 
 ---
 
-## Overview
+## What It Is
 
-PhazeAI is a multi-interface AI coding assistant with a **local-first multi-agent system** and a **custom model training pipeline**. It brings agentic capabilities to your development workflow — all running locally through [Ollama](https://ollama.ai).
+PhazeAI IDE is a desktop code editor built with [egui](https://github.com/emilk/egui) and backed by a full agentic AI engine. It runs entirely on your machine — plug in Ollama for local models, or wire up Claude/OpenAI/Groq for cloud. Everything else (editor, terminal, LSP, diff, search) is pure Rust.
 
-The project consists of four integrated crates:
+**Not a VS Code extension. Not an Electron app. A real native binary.**
 
-- **phazeai-core**: Core agent engine, LLM providers, tool system, multi-agent orchestrator, LSP client, code analysis
-- **phazeai-cli**: Terminal UI with ratatui — slash commands, conversation persistence, file tree
-- **phazeai-ide**: GUI application built with eframe/egui — editor, chat, terminal, file explorer
-- **phazeai-sidecar**: Python process manager for semantic code search using TF-IDF and optional embeddings
+---
 
-### Key Capabilities
+## Download
 
-- **🤖 Local Multi-Agent System**: Planner → Coder → Reviewer pipeline running entirely through Ollama
-- **🧠 Custom AI Models**: Pre-built Ollama Modelfiles + QLoRA fine-tuning pipeline to train on YOUR codebase
-- **🔧 Agentic Tool Execution**: Read, write, edit files; execute bash; search with grep/glob
-- **🔌 Multi-Provider LLM Support**: Ollama, Claude, OpenAI, Groq, Together, OpenRouter, LM Studio
-- **📊 Code Intelligence**: LSP client (20+ languages), code outline extractor, Aider-style repo map
-- **🔀 Git Integration**: View status, diffs, logs; stage and commit from the assistant
-- **💬 Conversation Persistence**: Save, load, resume conversations with history management
-- **🛡️ Tool Approval System**: Per-tool approval (auto, ask, ask-once) for safe execution
-- **📁 Project Instructions**: `.phazerules`, `.cursorrules`, `CLAUDE.md` support
-- **🎨 Customizable Themes**: Dark, Tokyo Night, and Dracula themes
+Pre-built binaries for Linux, macOS, and Windows are on the [Releases page](https://github.com/jakes1345/phazeai-ide/releases).
 
-## Architecture
+| Platform | Download |
+|---|---|
+| Linux x86_64 | `phazeai-linux-x86_64.tar.gz` |
+| macOS Apple Silicon | `phazeai-macos-aarch64.tar.gz` |
+| macOS Intel | `phazeai-macos-x86_64.tar.gz` |
+| Windows x86_64 | `phazeai-windows-x86_64.zip` |
 
-```
-phazeai_ide/
-├── crates/
-│   ├── phazeai-core/          # Core engine
-│   │   ├── agent/             # Agent loop + multi-agent orchestrator
-│   │   ├── llm/               # LLM clients, Ollama manager, model router
-│   │   ├── tools/             # Tool definitions and registry
-│   │   ├── context/           # Conversation history, system prompts, context builder
-│   │   ├── config/            # Settings and configuration
-│   │   ├── lsp/               # LSP client + manager (20+ languages)
-│   │   ├── analysis/          # Code outline extractor + repo map generator
-│   │   └── git/               # Git operations
-│   │
-│   ├── phazeai-cli/           # Terminal UI (ratatui)
-│   ├── phazeai-ide/           # GUI application (egui)
-│   └── phazeai-sidecar/       # Python semantic search
-│
-├── modelfiles/                # Ollama Modelfiles for custom AI models
-│   ├── Modelfile.coder        # Code generation (Qwen 2.5 Coder 14B)
-│   ├── Modelfile.planner      # Planning (Llama 3.2 3B)
-│   ├── Modelfile.reviewer     # Code review (DeepSeek Coder V2 16B)
-│   └── install.sh             # One-click model installer
-│
-├── training/                  # QLoRA fine-tuning pipeline
-│   ├── prepare_data.py        # Collect + format training data
-│   ├── fine_tune.py           # Unsloth QLoRA training
-│   ├── export_gguf.py         # Export to GGUF for Ollama
-│   └── README.md              # Training guide
-│
-└── Cargo.toml                 # Workspace configuration
-```
+Or build from source (see below).
 
-### Multi-Agent Pipeline
+---
 
-```
-User Request → Planner (3B, fast) → Coder (14B, precise) → Reviewer (16B, thorough) → Output
-                  ↓                      ↓                       ↓
-           Step-by-step plan      Production code         Bug/security check
-```
+## Features
 
-Each agent role can use a different model, optimized for its task. All running locally through Ollama.
+### Editor
+- **Tree-sitter syntax highlighting** — Semantic coloring for Rust (24 token types). Syntect fallback for all other languages.
+- **Rope-based text buffer** — O(log n) edits, efficient undo/redo
+- **Multi-cursor editing** — Alt+Click, Ctrl+D select-next-occurrence, column selection
+- **LSP integration** — Hover, go-to-definition (F12), find references (Shift+F12), autocomplete (Ctrl+Space), formatting (Shift+Alt+F), inline diagnostics
+- **Code folding** — Gutter triangles, click to fold/unfold functions and blocks
+- **Symbol outline** — Sidebar panel listing functions/classes/structs in the current file
+- **Bracket matching** — Cursor-scan highlight of matching `()`, `[]`, `{}`
+- **Find & Replace** — Ctrl+H panel, regex support, replace-in-files
+- **Split editor** — Horizontal split with draggable separator
+- **Minimap** — Downscaled file overview, click to scroll
+- **Breadcrumb navigation** — File → Module → Function context bar
+- **Git gutter** — Added/modified/deleted line decorations, inline blame on hover
+- **Tab management** — Drag-to-reorder, middle-click to close, file watching
 
-## Custom AI Models
+### Terminal
+- **Full VTE emulator** — Real PTY, VT100/ANSI parsing, 256-color, truecolor
+- **Multiple terminal tabs** — Each tab is an independent PTY session with its own shell
+- **PTY resize** — Terminal dimensions follow the panel size in real time
+- **Input history** — Up/Down arrow history, Ctrl+C / Ctrl+D / Ctrl+L / Tab passthrough
+- **Scrollback** — 10,000-line buffer
 
-### Quick Setup (Instant — No Training Required)
+### AI
+- **Five AI modes** — Chat (general), Ask (current file), Debug (file + terminal output), Plan (project tree), Edit (inline with diff)
+- **Inline chat** — Ctrl+K popup in the editor, streams AI response with diff highlighting
+- **Per-hunk diff approval** — Agent file edits show a colored diff; Accept / Reject each hunk individually
+- **Agent history** — View the last 20 agent runs
+- **Cancel running agent** — Stop button in the chat panel
+- **Bash → terminal** — Agent shell commands stream output directly into the terminal panel
+- **Token usage meter** — Live token count in the status bar
 
-```bash
-# Install pre-configured PhazeAI models
-cd modelfiles && bash install.sh
-```
+### Workspace
+- **Workspace search** — ripgrep-powered, regex, case-sensitive toggle, file glob filter, replace-in-files
+- **Git diff viewer** — Unified and side-by-side diff panel
+- **Git commit panel** — Stage files, write message, commit
+- **Docs viewer** — In-app browser panel for documentation
 
-This creates three specialized models in Ollama:
+### Other
+- **Persistent state** — Panel sizes, open folder, AI mode, terminal height saved across sessions
+- **Settings editor** — Searchable settings panel with keybindings reference (26 bindings)
+- **Welcome screen** — Onboarding for new users
+- **Command palette** — Quick access to all actions
+- **Multiple themes** — Dark, Tokyo Night, Dracula (more coming)
 
-| Model | Base | Purpose | Speed |
-|---|---|---|---|
-| `phaze-coder` | Qwen 2.5 Coder 14B | Code generation | Medium |
-| `phaze-planner` | Llama 3.2 3B | Planning & analysis | Fast |
-| `phaze-reviewer` | DeepSeek Coder V2 16B | Code review | Thorough |
+---
 
-### Train Your Own Model (Advanced)
+## LLM Providers
 
-Fine-tune on YOUR codebase using QLoRA. Requires NVIDIA GPU (8GB+ VRAM).
+| Provider | Type | Notes |
+|---|---|---|
+| [Ollama](https://ollama.ai) | Local | Qwen, Llama, Mistral, DeepSeek, etc. |
+| [LM Studio](https://lmstudio.ai) | Local | Any GGUF model |
+| [Anthropic Claude](https://anthropic.com) | Cloud | claude-sonnet-4-6, opus, etc. |
+| [OpenAI](https://openai.com) | Cloud | gpt-4o, o3, etc. |
+| [Groq](https://groq.com) | Cloud | Ultra-fast inference |
+| [Together AI](https://together.ai) | Cloud | Open models |
+| [OpenRouter](https://openrouter.ai) | Cloud | Any model via unified API |
 
-```bash
-# 1. Install dependencies
-pip install unsloth transformers datasets trl peft bitsandbytes
+---
 
-# 2. Prepare training data from your projects
-python training/prepare_data.py ~/my-project1 ~/my-project2
-
-# 3. Fine-tune (2-6 hours depending on GPU)
-python training/fine_tune.py
-
-# 4. Export to Ollama
-python training/export_gguf.py
-
-# 5. Test
-ollama run phaze-coder-custom "Write a function to merge sorted arrays"
-```
-
-See [training/README.md](training/README.md) for full details.
-
-## Getting Started
+## Build from Source
 
 ### Prerequisites
 
-- **NVIDIA GPU (8GB+ VRAM Recommended)**: See [HARDWARE.md](HARDWARE.md) for a tested reference setup.
-- **Ollama**: Install from [ollama.com](https://ollama.com).
-- **Rust 1.70+**: Install from [rustup.rs](https://rustup.rs/).
-- **Python 3.8+**: For semantic search and training pipeline.
+- **Rust 1.70+** — [rustup.rs](https://rustup.rs)
+- **Linux**: `libxcb`, `libxkbcommon`, `libwayland`, `libgtk-3` dev packages
+- **macOS / Windows**: no extra deps
 
-### Installation
-
-1. Clone the repository:
 ```bash
-git clone https://github.com/phazeai/ide.git
-cd phazeai_ide
+# Linux dep install
+sudo apt-get install -y \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libssl-dev libgtk-3-dev libwayland-dev libxdo-dev
 ```
 
-2. Build the project:
+### Build
+
 ```bash
-cargo build --release
-```
+git clone https://github.com/jakes1345/phazeai-ide.git
+cd phazeai-ide
 
-The compiled binaries will be in `target/release/`:
-- `phazeai` - Terminal UI
-- `phazeai-ide` - GUI application
+# GUI (desktop IDE)
+cargo build --release -p phazeai-ide
+./target/release/phazeai-ide
 
-### Quick Start
-
-#### Terminal UI
-```bash
+# Terminal UI
+cargo build --release -p phazeai-cli
 ./target/release/phazeai
 ```
 
-Run a single prompt without interactive mode:
+### Tests
+
 ```bash
-./target/release/phazeai --prompt "Explain this file" --model claude-3-5-sonnet-20241022
+cargo test --workspace       # all tests
+cargo test -p phazeai-ide    # IDE tests only (12 integration tests)
 ```
 
-Continue the most recent conversation:
-```bash
-./target/release/phazeai --continue
-```
-
-Resume a specific conversation:
-```bash
-./target/release/phazeai --resume abc123
-```
-
-#### GUI Application
-```bash
-./target/release/phazeai-ide
-```
-
-Opens with default window size (1400x800) and loads your saved configuration.
+---
 
 ## Configuration
 
-Configuration is stored at `~/.config/phazeai/settings.toml` and is automatically created on first run with sensible defaults.
-
-### Example Configuration
+Config is auto-created at `~/.config/phazeai/settings.toml` on first run.
 
 ```toml
 [llm]
-provider = "claude"              # claude, openai, ollama, groq, together, openrouter, lmstudio
-model = "claude-3-5-sonnet-20241022"
-api_key_env = "ANTHROPIC_API_KEY"
-base_url = null                 # Optional: override provider URL
+provider = "ollama"           # ollama, claude, openai, groq, together, openrouter, lmstudio
+model = "qwen2.5-coder:14b"
+api_key_env = "ANTHROPIC_API_KEY"   # only needed for cloud providers
 max_tokens = 8192
 
 [editor]
-theme = "Dark"                  # Dark, TokyoNight, Dracula
+theme = "Dark"                # Dark, TokyoNight, Dracula
 font_size = 14.0
 tab_size = 4
 show_line_numbers = true
-auto_save = true
-
-[sidecar]
-enabled = true
-python_path = "python3"
-auto_start = true
-
-# Optional: Configure additional providers
-[[providers]]
-name = "local_ollama"
-enabled = true
-api_key_env = "OLLAMA_API_KEY"
-base_url = "http://localhost:11434"
-default_model = "llama2"
 ```
 
-### Environment Variables
-
-Most LLM providers require an API key:
+**Cloud provider API keys** (set as env vars):
 
 ```bash
-export ANTHROPIC_API_KEY="your-key-here"        # Claude
-export OPENAI_API_KEY="your-key-here"           # OpenAI
-export GROQ_API_KEY="your-key-here"             # Groq
-export TOGETHER_API_KEY="your-key-here"         # Together
-export OPENROUTER_API_KEY="your-key-here"       # OpenRouter
-export LM_STUDIO_API_KEY="your-key-here"        # LM Studio
+export ANTHROPIC_API_KEY="sk-ant-..."   # Claude
+export OPENAI_API_KEY="sk-..."          # OpenAI
+export GROQ_API_KEY="gsk_..."           # Groq
+export TOGETHER_API_KEY="..."           # Together AI
+export OPENROUTER_API_KEY="sk-or-..."   # OpenRouter
 ```
 
-For Ollama and LM Studio (local models), no API key is required. They run on your machine.
+---
 
-## CLI Commands
+## Workspace Structure
 
-The terminal UI supports the following slash commands:
-
-### General
-- `/help` - Show command help
-- `/exit`, `/quit` - Exit the application
-- `/version` - Show application version
-- `/status` - Show current model, token usage, and settings
-- `/pwd` - Print working directory
-- `/cd <directory>` - Change working directory
-
-### Model & Provider
-- `/model <name>` - Change the LLM model
-- `/provider <name>` - Change the LLM provider (claude, openai, ollama, groq, together, openrouter, lmstudio)
-- `/models` - List available models for the current provider
-- `/discover` - Discover local LLM models (Ollama, LM Studio)
-
-### Display & Theme
-- `/theme <name>` - Change theme (dark, tokyo-night, dracula)
-- `/files` or `/tree` - Toggle file tree panel visibility
-
-### Conversations
-- `/new` - Start a fresh conversation
-- `/clear` - Clear the chat history
-- `/save` - Save the current conversation
-- `/load <id>` - Load a saved conversation (by ID prefix)
-- `/conversations` or `/history` - List all saved conversations
-- `/compact` - Summarize conversation to reduce token usage
-
-### Tools & Git
-- `/approve <mode>` - Set tool approval mode: `auto`, `ask`, `ask-once`
-- `/diff` - Show git diff
-- `/git` - Show git status
-- `/log` - Show git log
-- `/search <pattern>` - Search files with glob pattern (e.g., `/search **/*.rs`)
-- `/context` - Show project context information
-
-### Examples
-
-```bash
-# Change model
-/model gpt-4o
-
-# Use a local Ollama model
-/provider ollama
-/model mistral
-
-# Set approval mode
-/approve auto
-
-# Search for Python files
-/search **/*.py
-
-# View git status and diffs
-/git
-/diff
-
-# Save and load conversations
-/save
-/load abc123
+```
+phazeai-ide/
+├── crates/
+│   ├── phazeai-core/       # Agent loop, LLM clients, tools, LSP, context
+│   ├── phazeai-ide/        # Desktop GUI (egui 0.28 / eframe 0.28)
+│   ├── phazeai-cli/        # Terminal UI (ratatui 0.28)
+│   ├── phazeai-sidecar/    # Python semantic search subprocess
+│   └── ollama-rs/          # Custom fork of ollama-rs with streaming + chat history
+└── Cargo.toml
 ```
 
-## IDE Features
+### Key Dependencies
 
-The GUI application (phazeai-ide) provides a comprehensive development environment:
+| Crate | Purpose |
+|---|---|
+| `egui 0.28` / `eframe 0.28` | Immediate-mode GUI |
+| `ropey` | Efficient rope text buffer |
+| `tree-sitter 0.24` + `tree-sitter-rust` | Syntax parsing + semantic highlighting |
+| `syntect` | Highlighting fallback for non-Rust languages |
+| `vte` | VT100/ANSI terminal emulator |
+| `portable-pty` | Cross-platform PTY |
+| `lsp-types` | Language Server Protocol types |
+| `similar` | Diff algorithm for inline edit approval |
+| `notify` | Filesystem watching |
+| `arboard` | Cross-platform clipboard |
+| `reqwest` | HTTP client for LLM API calls |
 
-### Editor Panel
-- Syntax highlighting with language detection
-- Line numbering and line wrapping
-- Keyboard navigation (Ctrl+G to go to line)
-- File content editing with auto-save support
+---
 
-### Chat Panel
-- Conversation history with user and assistant messages
-- Slash command support (same as CLI)
-- Tool execution display and results
-- Token usage and cost tracking
+## Keyboard Shortcuts
 
-### Terminal Panel
-- Integrated terminal for running bash commands
-- Scrollback history
-- Command execution feedback
+| Shortcut | Action |
+|---|---|
+| Ctrl+P | Open file / command palette |
+| Ctrl+K | Inline AI chat |
+| Ctrl+H | Find & Replace |
+| Ctrl+Space | LSP autocomplete |
+| F12 | Go to definition |
+| Shift+F12 | Find references |
+| Shift+Alt+F | Format document |
+| Ctrl+D | Select next occurrence |
+| Alt+Click | Add cursor |
+| Ctrl+Z / Ctrl+Y | Undo / Redo |
+| Ctrl+` | Toggle terminal |
+| Ctrl+W | Close tab |
 
-### File Explorer
-- Browse project files and directories
-- Quick file opening
-- Integrated with chat context
+---
 
-### Settings Panel
-- Change LLM provider and model
-- Configure editor preferences
-- Manage theme selection
-- Adjust sidecar settings
+## Releases
 
-### Command Palette
-- Quick access to all features via keyboard shortcut
-- Search and execute commands
-- Model and file switching
+Releases are built automatically via GitHub Actions on every version tag (`v*`), producing binaries for:
+- Linux x86_64 (`.tar.gz`)
+- macOS Apple Silicon (`aarch64`, `.tar.gz`)
+- macOS Intel (`x86_64`, `.tar.gz`)
+- Windows x86_64 (`.zip`)
 
-## Tools
+To trigger a release: push a tag like `git tag v0.2.0 && git push origin v0.2.0`.
 
-PhazeAI provides the following tools that the AI can autonomously execute:
-
-### File Operations
-- **read_file** - Read file contents
-- **write_file** - Create or overwrite files
-- **edit_file** - Edit specific regions within files
-
-### System Commands
-- **bash** - Execute shell commands and scripts
-- **grep** - Search file contents with regex patterns
-- **glob** - Find files matching patterns
-
-### Project Context
-- **git_status** - View git repository status
-- **git_diff** - Show changes between commits
-- **git_log** - View commit history
-
-### Code Search
-- **semantic_search** - Search code semantically using the Python sidecar
-
-Tools are subject to an approval system. By default, tools are approved automatically, but you can configure per-tool or per-type approval policies.
-
-## Development
-
-### Project Structure
-
-The workspace uses Cargo's workspace feature for easy development:
-
-```bash
-# Build all crates
-cargo build --release
-
-# Build specific crate
-cargo build -p phazeai-cli --release
-cargo build -p phazeai-ide --release
-
-# Run tests
-cargo test
-
-# Run with logging
-RUST_LOG=debug cargo run -p phazeai-cli
-
-# Format code
-cargo fmt
-
-# Lint
-cargo clippy
-```
-
-### Adding New Tools
-
-1. Define the tool in `phazeai-core/src/tools/mod.rs`
-2. Implement the tool handler in the agent loop
-3. Add approval rules if needed
-4. Update CLI commands if user-facing
-
-### Adding New LLM Providers
-
-1. Implement `LlmClient` trait in `phazeai-core/src/llm/`
-2. Register the provider in `ProviderRegistry`
-3. Update configuration to support new provider
-
-### Adding New Themes
-
-1. Add theme definition to `phazeai-cli/src/theme.rs` or `phazeai-ide/src/themes.rs`
-2. Update theme selector commands
-3. Test in both TUI and GUI
-
-## Dependencies
-
-Key dependencies:
-
-- **Runtime**: tokio (async runtime), serde (serialization)
-- **TUI**: ratatui (terminal UI), crossterm (terminal control), syntect (syntax highlighting)
-- **GUI**: egui/eframe (immediate mode GUI), ropey (text editing), rfd (file dialogs)
-- **LLM**: reqwest (HTTP client), async-trait (async trait support)
-- **Tools**: regex, ignore (gitignore support), globset (glob patterns), similar (diff algorithm)
-- **Git**: git2 integration for repository operations
-- **Utilities**: uuid (ID generation), chrono (timestamps), tracing (logging)
+---
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Contributions are welcome! Please ensure:
-
-- Code is formatted with `cargo fmt`
-- All tests pass with `cargo test`
-- No warnings with `cargo clippy`
-- Meaningful commit messages
-- Documentation for new features
-
-## Support
-
-For issues, questions, or suggestions:
-
-- Open an issue on GitHub
-- Check existing documentation
-- Review examples in the codebase
+PRs welcome. Please run `cargo fmt`, `cargo clippy`, and `cargo test` before submitting.
