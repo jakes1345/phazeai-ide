@@ -14,6 +14,7 @@ use tokio_stream::StreamExt;
 const PROMPT: &str = "Why is the sky blue?";
 
 #[tokio::test]
+#[ignore]
 async fn test_generation_stream() {
     let ollama = Ollama::default();
 
@@ -41,6 +42,7 @@ async fn test_generation_stream() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_generation() {
     let ollama = Ollama::default();
 
@@ -57,6 +59,7 @@ async fn test_generation() {
 const IMAGE_URL: &str = "https://images.pexels.com/photos/1054655/pexels-photo-1054655.jpeg";
 
 #[tokio::test]
+#[ignore]
 async fn test_generation_with_images() {
     let ollama = Ollama::default();
 

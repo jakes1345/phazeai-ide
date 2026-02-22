@@ -1,4 +1,4 @@
-use egui::{self, Color32, FontId, Sense, Vec2, TextFormat, text::LayoutJob};
+use egui::{self, text::LayoutJob, Color32, FontId, Sense, TextFormat, Vec2};
 use lsp_types::Diagnostic;
 use ropey::Rope;
 use std::collections::{HashMap, HashSet};
@@ -8,8 +8,7 @@ use std::time::Instant;
 use syntect::highlighting::{HighlightState, Highlighter, RangedHighlightIterator, ThemeSet};
 use syntect::parsing::{ParseState, SyntaxSet};
 use tree_sitter_highlight::{
-    Highlight, HighlightConfiguration, HighlightEvent,
-    Highlighter as TsHighlighter,
+    Highlight, HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter,
 };
 
 use crate::themes::ThemeColors;
@@ -19,29 +18,29 @@ use crate::themes::ThemeColors;
 /// Highlight capture names in priority order.
 /// Index matches the `Highlight` value returned by tree-sitter-highlight.
 const TS_NAMES: &[&str] = &[
-    "attribute",          // 0
-    "comment",            // 1
-    "constant",           // 2
-    "constant.builtin",   // 3
-    "constructor",        // 4
-    "function",           // 5
-    "function.builtin",   // 6
-    "function.macro",     // 7
-    "keyword",            // 8
-    "module",             // 9
-    "number",             // 10
-    "operator",           // 11
-    "property",           // 12
-    "string",             // 13
-    "string.escape",      // 14
-    "type",               // 15
-    "type.builtin",       // 16
-    "variable",           // 17
-    "variable.builtin",   // 18
-    "variable.parameter", // 19
-    "label",              // 20
-    "punctuation",        // 21
-    "punctuation.bracket",// 22
+    "attribute",             // 0
+    "comment",               // 1
+    "constant",              // 2
+    "constant.builtin",      // 3
+    "constructor",           // 4
+    "function",              // 5
+    "function.builtin",      // 6
+    "function.macro",        // 7
+    "keyword",               // 8
+    "module",                // 9
+    "number",                // 10
+    "operator",              // 11
+    "property",              // 12
+    "string",                // 13
+    "string.escape",         // 14
+    "type",                  // 15
+    "type.builtin",          // 16
+    "variable",              // 17
+    "variable.builtin",      // 18
+    "variable.parameter",    // 19
+    "label",                 // 20
+    "punctuation",           // 21
+    "punctuation.bracket",   // 22
     "punctuation.delimiter", // 23
 ];
 
@@ -74,12 +73,10 @@ impl TsHighlightEngine {
     /// Compute highlight spans for a Rust source buffer.
     /// Returns spans sorted by start_byte (tree-sitter guarantees this).
     fn compute_rust(&mut self, source: &[u8]) -> Vec<TsSpan> {
-        let events = match self.highlighter.highlight(
-            &self.rust_config,
-            source,
-            None,
-            |_| None,
-        ) {
+        let events = match self
+            .highlighter
+            .highlight(&self.rust_config, source, None, |_| None)
+        {
             Ok(e) => e,
             Err(_) => return Vec::new(),
         };
@@ -112,31 +109,31 @@ impl TsHighlightEngine {
 /// Map a tree-sitter highlight index to a theme Color32.
 fn ts_color(idx: usize, theme: &ThemeColors) -> Color32 {
     match idx {
-        0  => Color32::from_rgb(210, 150, 250), // attribute → light purple
-        1  => theme.comment,                     // comment
-        2  => theme.number,                      // constant
-        3  => theme.number,                      // constant.builtin
-        4  => theme.function,                    // constructor
-        5  => theme.function,                    // function
-        6  => theme.function,                    // function.builtin
-        7  => Color32::from_rgb(255, 160, 90),   // function.macro → orange
-        8  => theme.keyword,                     // keyword
-        9  => theme.type_name,                   // module
-        10 => theme.number,                      // number
-        11 => theme.text_secondary,              // operator
-        12 => Color32::from_rgb(180, 220, 255),  // property → light blue
-        13 => theme.string,                      // string
-        14 => Color32::from_rgb(255, 200, 130),  // string.escape → yellow-orange
-        15 => theme.type_name,                   // type
-        16 => theme.type_name,                   // type.builtin
-        17 => theme.text,                        // variable
-        18 => theme.keyword,                     // variable.builtin
-        19 => Color32::from_rgb(200, 230, 255),  // variable.parameter → pale blue
-        20 => Color32::from_rgb(255, 200, 100),  // label → yellow
-        21 => theme.text_muted,                  // punctuation
-        22 => theme.text_muted,                  // punctuation.bracket
-        23 => theme.text_muted,                  // punctuation.delimiter
-        _  => theme.text,
+        0 => Color32::from_rgb(210, 150, 250), // attribute → light purple
+        1 => theme.comment,                    // comment
+        2 => theme.number,                     // constant
+        3 => theme.number,                     // constant.builtin
+        4 => theme.function,                   // constructor
+        5 => theme.function,                   // function
+        6 => theme.function,                   // function.builtin
+        7 => Color32::from_rgb(255, 160, 90),  // function.macro → orange
+        8 => theme.keyword,                    // keyword
+        9 => theme.type_name,                  // module
+        10 => theme.number,                    // number
+        11 => theme.text_secondary,            // operator
+        12 => Color32::from_rgb(180, 220, 255), // property → light blue
+        13 => theme.string,                    // string
+        14 => Color32::from_rgb(255, 200, 130), // string.escape → yellow-orange
+        15 => theme.type_name,                 // type
+        16 => theme.type_name,                 // type.builtin
+        17 => theme.text,                      // variable
+        18 => theme.keyword,                   // variable.builtin
+        19 => Color32::from_rgb(200, 230, 255), // variable.parameter → pale blue
+        20 => Color32::from_rgb(255, 200, 100), // label → yellow
+        21 => theme.text_muted,                // punctuation
+        22 => theme.text_muted,                // punctuation.bracket
+        23 => theme.text_muted,                // punctuation.delimiter
+        _ => theme.text,
     }
 }
 
@@ -151,11 +148,15 @@ fn highlight_line_ts(
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     if line_text.is_empty() {
-        job.append(" ", 0.0, TextFormat {
-            font_id: FontId::monospace(font_size),
-            color: theme.text,
-            ..Default::default()
-        });
+        job.append(
+            " ",
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(font_size),
+                color: theme.text,
+                ..Default::default()
+            },
+        );
         return job;
     }
 
@@ -167,11 +168,15 @@ fn highlight_line_ts(
 
     if first >= last {
         // No highlights for this line
-        job.append(line_text, 0.0, TextFormat {
-            font_id: FontId::monospace(font_size),
-            color: theme.text,
-            ..Default::default()
-        });
+        job.append(
+            line_text,
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(font_size),
+                color: theme.text,
+                ..Default::default()
+            },
+        );
         return job;
     }
 
@@ -179,45 +184,65 @@ fn highlight_line_ts(
 
     for &(span_start, span_end, hl_idx) in &ts_spans[first..last] {
         // Clamp span to this line
-        let rel_start = span_start.saturating_sub(line_byte_start).min(line_text.len());
-        let rel_end = span_end.saturating_sub(line_byte_start).min(line_text.len());
+        let rel_start = span_start
+            .saturating_sub(line_byte_start)
+            .min(line_text.len());
+        let rel_end = span_end
+            .saturating_sub(line_byte_start)
+            .min(line_text.len());
 
         // Unhighlighted gap before this span
         if rel_start > cursor {
             let gap = &line_text[cursor..rel_start];
-            job.append(gap, 0.0, TextFormat {
-                font_id: FontId::monospace(font_size),
-                color: theme.text,
-                ..Default::default()
-            });
+            job.append(
+                gap,
+                0.0,
+                TextFormat {
+                    font_id: FontId::monospace(font_size),
+                    color: theme.text,
+                    ..Default::default()
+                },
+            );
         }
 
         if rel_end > rel_start {
             let span_text = &line_text[rel_start..rel_end];
-            job.append(span_text, 0.0, TextFormat {
-                font_id: FontId::monospace(font_size),
-                color: ts_color(hl_idx, theme),
-                ..Default::default()
-            });
+            job.append(
+                span_text,
+                0.0,
+                TextFormat {
+                    font_id: FontId::monospace(font_size),
+                    color: ts_color(hl_idx, theme),
+                    ..Default::default()
+                },
+            );
             cursor = rel_end;
         }
     }
 
     // Trailing unhighlighted text
     if cursor < line_text.len() {
-        job.append(&line_text[cursor..], 0.0, TextFormat {
-            font_id: FontId::monospace(font_size),
-            color: theme.text,
-            ..Default::default()
-        });
+        job.append(
+            &line_text[cursor..],
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(font_size),
+                color: theme.text,
+                ..Default::default()
+            },
+        );
     }
 
     if job.sections.is_empty() {
-        job.append(line_text, 0.0, TextFormat {
-            font_id: FontId::monospace(font_size),
-            color: theme.text,
-            ..Default::default()
-        });
+        job.append(
+            line_text,
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(font_size),
+                color: theme.text,
+                ..Default::default()
+            },
+        );
     }
 
     job
@@ -282,7 +307,10 @@ pub struct Selection {
 
 impl Selection {
     pub fn new(pos: TextPosition) -> Self {
-        Self { anchor: pos, cursor: pos }
+        Self {
+            anchor: pos,
+            cursor: pos,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -336,7 +364,11 @@ impl UndoStack {
 
     fn push(&mut self, rope: &Rope, cursor: TextPosition, selection: Option<Selection>) {
         self.entries.truncate(self.position + 1);
-        self.entries.push(UndoEntry { rope: rope.clone(), cursor, selection });
+        self.entries.push(UndoEntry {
+            rope: rope.clone(),
+            cursor,
+            selection,
+        });
         self.position = self.entries.len() - 1;
         if self.entries.len() > MAX_UNDO_HISTORY {
             self.entries.remove(0);
@@ -369,21 +401,32 @@ fn char_idx_to_pos(rope: &Rope, char_idx: usize) -> TextPosition {
     let safe_idx = char_idx.min(rope.len_chars().saturating_sub(1));
     let line = rope.char_to_line(safe_idx);
     let line_start = rope.line_to_char(line);
-    TextPosition { line, col: safe_idx - line_start }
+    TextPosition {
+        line,
+        col: safe_idx - line_start,
+    }
 }
 
 /// Scan the rope from the cursor position to find the matching bracket pair.
 /// Returns (open_pos, close_pos) or None.
 fn find_bracket_match(rope: &Rope, cursor: TextPosition) -> Option<(TextPosition, TextPosition)> {
     let total_chars = rope.len_chars();
-    if total_chars == 0 { return None; }
+    if total_chars == 0 {
+        return None;
+    }
 
     let cursor_idx = {
-        if cursor.line >= rope.len_lines() { return None; }
+        if cursor.line >= rope.len_lines() {
+            return None;
+        }
         let line_start = rope.line_to_char(cursor.line);
         let line = rope.line(cursor.line);
         let line_len = line.len_chars();
-        let max_col = if line_len > 0 && line.char(line_len - 1) == '\n' { line_len - 1 } else { line_len };
+        let max_col = if line_len > 0 && line.char(line_len - 1) == '\n' {
+            line_len - 1
+        } else {
+            line_len
+        };
         line_start + cursor.col.min(max_col)
     };
 
@@ -394,7 +437,9 @@ fn find_bracket_match(rope: &Rope, cursor: TextPosition) -> Option<(TextPosition
     };
 
     for &check_idx in check_indices {
-        if check_idx >= total_chars { continue; }
+        if check_idx >= total_chars {
+            continue;
+        }
         let ch = rope.char(check_idx);
         let (open, close, forward) = match ch {
             '(' => ('(', ')', true),
@@ -412,10 +457,13 @@ fn find_bracket_match(rope: &Rope, cursor: TextPosition) -> Option<(TextPosition
             let end = (check_idx + 50_000).min(total_chars);
             for idx in check_idx..end {
                 let c = rope.char(idx);
-                if c == open { depth += 1; }
-                else if c == close {
+                if c == open {
+                    depth += 1;
+                } else if c == close {
                     depth -= 1;
-                    if depth == 0 { return Some((start_pos, char_idx_to_pos(rope, idx))); }
+                    if depth == 0 {
+                        return Some((start_pos, char_idx_to_pos(rope, idx)));
+                    }
                 }
             }
         } else {
@@ -423,10 +471,13 @@ fn find_bracket_match(rope: &Rope, cursor: TextPosition) -> Option<(TextPosition
             let start = check_idx.saturating_sub(50_000);
             for idx in (start..=check_idx).rev() {
                 let c = rope.char(idx);
-                if c == close { depth += 1; }
-                else if c == open {
+                if c == close {
+                    depth += 1;
+                } else if c == open {
                     depth -= 1;
-                    if depth == 0 { return Some((char_idx_to_pos(rope, idx), start_pos)); }
+                    if depth == 0 {
+                        return Some((char_idx_to_pos(rope, idx), start_pos));
+                    }
                 }
             }
         }
@@ -438,22 +489,34 @@ fn find_bracket_match(rope: &Rope, cursor: TextPosition) -> Option<(TextPosition
 /// Scan forward from start_line to find the line containing the matching closing brace.
 fn find_fold_end(rope: &Rope, start_line: usize) -> Option<usize> {
     let total_lines = rope.len_lines();
-    if start_line >= total_lines { return None; }
+    if start_line >= total_lines {
+        return None;
+    }
     let start_text = rope.line(start_line).to_string();
     let trimmed = start_text.trim_end();
-    let (open, close) = if trimmed.ends_with('{') { ('{', '}') }
-        else if trimmed.ends_with('(') { ('(', ')') }
-        else if trimmed.ends_with('[') { ('[', ']') }
-        else { return None; };
+    let (open, close) = if trimmed.ends_with('{') {
+        ('{', '}')
+    } else if trimmed.ends_with('(') {
+        ('(', ')')
+    } else if trimmed.ends_with('[') {
+        ('[', ']')
+    } else {
+        return None;
+    };
 
     let mut depth: i32 = 0;
     for line_idx in start_line..total_lines.min(start_line + 5000) {
         for ch in rope.line(line_idx).chars() {
-            if ch == open { depth += 1; }
-            else if ch == close {
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
                 depth -= 1;
                 if depth == 0 {
-                    return if line_idx > start_line { Some(line_idx) } else { None };
+                    return if line_idx > start_line {
+                        Some(line_idx)
+                    } else {
+                        None
+                    };
                 }
             }
         }
@@ -724,7 +787,9 @@ impl EditorTab {
             let start_col = edit.range.start.character as usize;
             let end_line = edit.range.end.line as usize;
             let end_col = edit.range.end.character as usize;
-            if start_line >= self.rope.len_lines() { continue; }
+            if start_line >= self.rope.len_lines() {
+                continue;
+            }
             let start_idx = self.rope.line_to_char(start_line) + start_col;
             let end_idx = if end_line >= self.rope.len_lines() {
                 self.rope.len_chars()
@@ -770,7 +835,10 @@ impl EditorTab {
 
     /// Clamp cursor column to valid range for its line
     fn clamp_cursor_col(&mut self) {
-        let line = self.cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let line = self
+            .cursor
+            .line
+            .min(self.rope.len_lines().saturating_sub(1));
         self.cursor.line = line;
         if line < self.rope.len_lines() {
             let line_slice = self.rope.line(line);
@@ -967,13 +1035,17 @@ impl EditorTab {
         // Skip whitespace
         while i > 0 {
             let ch = self.rope.char(i - 1);
-            if !ch.is_whitespace() { break; }
+            if !ch.is_whitespace() {
+                break;
+            }
             i -= 1;
         }
         // Skip word chars
         while i > 0 {
             let ch = self.rope.char(i - 1);
-            if ch.is_whitespace() { break; }
+            if ch.is_whitespace() {
+                break;
+            }
             i -= 1;
         }
         self.char_idx_to_pos(i)
@@ -990,13 +1062,17 @@ impl EditorTab {
         // Skip whitespace
         while i < len {
             let ch = self.rope.char(i);
-            if !ch.is_whitespace() { break; }
+            if !ch.is_whitespace() {
+                break;
+            }
             i += 1;
         }
         // Skip word chars
         while i < len {
             let ch = self.rope.char(i);
-            if ch.is_whitespace() { break; }
+            if ch.is_whitespace() {
+                break;
+            }
             i += 1;
         }
         self.char_idx_to_pos(i)
@@ -1107,7 +1183,11 @@ impl EditorTab {
         // Smart home: go to first non-whitespace, then column 0
         let line = self.rope.line(self.cursor.line);
         let first_non_ws = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-        let target_col = if self.cursor.col != first_non_ws { first_non_ws } else { 0 };
+        let target_col = if self.cursor.col != first_non_ws {
+            first_non_ws
+        } else {
+            0
+        };
         let new_pos = TextPosition::new(self.cursor.line, target_col);
         self.move_cursor_to(new_pos, extend);
     }
@@ -1160,7 +1240,10 @@ impl EditorTab {
             let abs_pos = search_start + pos;
             let anchor = self.char_idx_to_pos(abs_pos);
             let end_pos = self.char_idx_to_pos(abs_pos + search_term.len());
-            self.selection = Some(Selection { anchor, cursor: end_pos });
+            self.selection = Some(Selection {
+                anchor,
+                cursor: end_pos,
+            });
             self.cursor = end_pos;
             self.cursor_changed = true;
             self.sync_legacy_cursor();
@@ -1168,7 +1251,10 @@ impl EditorTab {
             // Wrap around
             let anchor = self.char_idx_to_pos(pos);
             let end_pos = self.char_idx_to_pos(pos + search_term.len());
-            self.selection = Some(Selection { anchor, cursor: end_pos });
+            self.selection = Some(Selection {
+                anchor,
+                cursor: end_pos,
+            });
             self.cursor = end_pos;
             self.cursor_changed = true;
             self.sync_legacy_cursor();
@@ -1180,20 +1266,29 @@ impl EditorTab {
         let text = self.rope.to_string();
         let chars: Vec<char> = text.chars().collect();
 
-        if cursor_char >= chars.len() { return; }
+        if cursor_char >= chars.len() {
+            return;
+        }
 
         // Find word boundaries
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
         let mut start = cursor_char;
         let mut end = cursor_char;
 
-        while start > 0 && is_word(chars[start - 1]) { start -= 1; }
-        while end < chars.len() && is_word(chars[end]) { end += 1; }
+        while start > 0 && is_word(chars[start - 1]) {
+            start -= 1;
+        }
+        while end < chars.len() && is_word(chars[end]) {
+            end += 1;
+        }
 
         if start < end {
             let anchor = self.char_idx_to_pos(start);
             let end_pos = self.char_idx_to_pos(end);
-            self.selection = Some(Selection { anchor, cursor: end_pos });
+            self.selection = Some(Selection {
+                anchor,
+                cursor: end_pos,
+            });
             self.cursor = end_pos;
             self.cursor_changed = true;
             self.sync_legacy_cursor();
@@ -1260,7 +1355,13 @@ impl EditorTab {
         // Also check against HEAD for new untracked content (git diff HEAD)
         if self.git_hunks.is_empty() {
             let output2 = std::process::Command::new("git")
-                .args(["diff", "HEAD", "--unified=0", "--", path.to_str().unwrap_or("")])
+                .args([
+                    "diff",
+                    "HEAD",
+                    "--unified=0",
+                    "--",
+                    path.to_str().unwrap_or(""),
+                ])
                 .current_dir(work_dir)
                 .output();
             if let Ok(o) = output2 {
@@ -1275,7 +1376,9 @@ impl EditorTab {
     /// Load blame info for all lines via `git blame --porcelain`.
     /// Results are cached; subsequent calls are no-ops.
     pub fn load_blame(&mut self) {
-        if self.blame_loaded { return; }
+        if self.blame_loaded {
+            return;
+        }
         self.blame_loaded = true;
 
         let path = match &self.path {
@@ -1301,9 +1404,9 @@ impl EditorTab {
     /// Returns a hover label for the given line (loads blame if needed).
     pub fn blame_for_line(&mut self, line_idx: usize) -> Option<String> {
         self.load_blame();
-        self.blame_cache.get(&line_idx).map(|b| {
-            format!("{} {} • {}", b.short_hash, b.author, b.date)
-        })
+        self.blame_cache
+            .get(&line_idx)
+            .map(|b| format!("{} {} • {}", b.short_hash, b.author, b.date))
     }
 
     // ── Multi-Cursor ──────────────────────────────────────────────────────
@@ -1311,7 +1414,9 @@ impl EditorTab {
     /// Add an extra cursor at the given position (Alt+Click).
     pub fn add_cursor(&mut self, pos: TextPosition) {
         // Don't duplicate the primary cursor
-        if pos == self.cursor { return; }
+        if pos == self.cursor {
+            return;
+        }
         // Remove if already exists (toggle off)
         if let Some(idx) = self.extra_cursors.iter().position(|&p| p == pos) {
             self.extra_cursors.remove(idx);
@@ -1362,24 +1467,22 @@ impl EditorTab {
         // count of insertion sites Y where Y <= X (including X itself)
         let orig_positions: Vec<usize> = positions.iter().map(|p| p.0).collect();
 
-        let shift_for = |x: usize| -> usize {
-            orig_positions.iter().filter(|&&y| y <= x).count()
-        };
+        let shift_for = |x: usize| -> usize { orig_positions.iter().filter(|&&y| y <= x).count() };
 
         // Update primary cursor
         let new_primary_idx = primary_idx + shift_for(primary_idx);
-        if ch == '\n' {
-            self.cursor = self.char_idx_to_pos(new_primary_idx);
-        } else {
-            self.cursor = self.char_idx_to_pos(new_primary_idx);
-        }
+        self.cursor = self.char_idx_to_pos(new_primary_idx);
 
         // Update extra cursors
-        let new_extra: Vec<TextPosition> = self.extra_cursors.iter().map(|&ec| {
-            let ec_idx = self.pos_to_char_idx(ec);
-            let new_idx = ec_idx + shift_for(ec_idx);
-            self.char_idx_to_pos(new_idx)
-        }).collect();
+        let new_extra: Vec<TextPosition> = self
+            .extra_cursors
+            .iter()
+            .map(|&ec| {
+                let ec_idx = self.pos_to_char_idx(ec);
+                let new_idx = ec_idx + shift_for(ec_idx);
+                self.char_idx_to_pos(new_idx)
+            })
+            .collect();
         self.extra_cursors = new_extra;
 
         self.sync_legacy_cursor();
@@ -1397,7 +1500,9 @@ impl EditorTab {
         let mut indices: Vec<usize> = vec![primary_idx];
         for &ec in &self.extra_cursors {
             let idx = self.pos_to_char_idx(ec);
-            if idx > 0 { indices.push(idx); }
+            if idx > 0 {
+                indices.push(idx);
+            }
         }
         // Sort descending
         indices.sort_unstable_by(|a, b| b.cmp(a));
@@ -1415,21 +1520,26 @@ impl EditorTab {
 
         // Update positions: each cursor at original X shifts by
         // -count of deletions at positions Y where Y-1 < X (i.e., Y <= X)
-        let shift_for = |x: usize| -> usize {
-            indices.iter().filter(|&&y| y > 0 && y <= x).count()
-        };
+        let shift_for =
+            |x: usize| -> usize { indices.iter().filter(|&&y| y > 0 && y <= x).count() };
 
         if primary_idx > 0 {
             let new_primary_idx = primary_idx - shift_for(primary_idx);
             self.cursor = self.char_idx_to_pos(new_primary_idx);
         }
 
-        let new_extra: Vec<TextPosition> = self.extra_cursors.iter().map(|&ec| {
-            let ec_idx = self.pos_to_char_idx(ec);
-            if ec_idx == 0 { return ec; }
-            let new_idx = ec_idx.saturating_sub(shift_for(ec_idx));
-            self.char_idx_to_pos(new_idx)
-        }).collect();
+        let new_extra: Vec<TextPosition> = self
+            .extra_cursors
+            .iter()
+            .map(|&ec| {
+                let ec_idx = self.pos_to_char_idx(ec);
+                if ec_idx == 0 {
+                    return ec;
+                }
+                let new_idx = ec_idx.saturating_sub(shift_for(ec_idx));
+                self.char_idx_to_pos(new_idx)
+            })
+            .collect();
         self.extra_cursors = new_extra;
         self.sync_legacy_cursor();
     }
@@ -1537,6 +1647,12 @@ pub struct FindReplaceState {
     pub case_sensitive: bool,
 }
 
+impl Default for FindReplaceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FindReplaceState {
     pub fn new() -> Self {
         Self {
@@ -1577,7 +1693,9 @@ impl FindReplaceState {
             while let Some(pos) = search_str[start..].find(&query) {
                 self.matches.push((line_idx, start + pos));
                 start += pos + query.len().max(1);
-                if start >= search_str.len() { break; }
+                if start >= search_str.len() {
+                    break;
+                }
             }
         }
         if !self.matches.is_empty() && self.current_match >= self.matches.len() {
@@ -1602,7 +1720,9 @@ impl FindReplaceState {
     }
 
     pub fn replace_current(&mut self, tab: &mut EditorTab) {
-        if self.matches.is_empty() || self.query.is_empty() { return; }
+        if self.matches.is_empty() || self.query.is_empty() {
+            return;
+        }
         let (line_idx, col) = self.matches[self.current_match];
         let line_start = tab.rope.line_to_char(line_idx);
         let start_char = line_start + col;
@@ -1616,7 +1736,9 @@ impl FindReplaceState {
     }
 
     pub fn replace_all(&mut self, tab: &mut EditorTab) {
-        if self.matches.is_empty() || self.query.is_empty() { return; }
+        if self.matches.is_empty() || self.query.is_empty() {
+            return;
+        }
         tab.force_snapshot();
         let matches: Vec<_> = self.matches.iter().rev().cloned().collect();
         let first_line = matches.last().map(|(l, _)| *l).unwrap_or(0);
@@ -1705,11 +1827,15 @@ impl EditorPanel {
                 Ok(content) => {
                     // Check if a tab for this path was already added (e.g. by a
                     // racing sync open_file call) while the thread was running.
-                    let already_open = self.tabs.iter().position(|t| t.path.as_ref() == Some(&result.path));
+                    let already_open = self
+                        .tabs
+                        .iter()
+                        .position(|t| t.path.as_ref() == Some(&result.path));
                     let tab_idx = if let Some(idx) = already_open {
                         idx
                     } else {
-                        let title = result.path
+                        let title = result
+                            .path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "Untitled".to_string());
@@ -1792,9 +1918,12 @@ impl EditorPanel {
         self.loading_paths.insert(path.clone());
         let tx = self.file_load_tx.clone();
         std::thread::spawn(move || {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string());
-            let _ = tx.send(FileLoadResult { path, content, jump_to_line: None });
+            let content = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            let _ = tx.send(FileLoadResult {
+                path,
+                content,
+                jump_to_line: None,
+            });
         });
     }
 
@@ -1819,9 +1948,12 @@ impl EditorPanel {
         self.loading_paths.insert(path.clone());
         let tx = self.file_load_tx.clone();
         std::thread::spawn(move || {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string());
-            let _ = tx.send(FileLoadResult { path, content, jump_to_line: Some(line) });
+            let content = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            let _ = tx.send(FileLoadResult {
+                path,
+                content,
+                jump_to_line: Some(line),
+            });
         });
     }
 
@@ -1869,10 +2001,14 @@ impl EditorPanel {
     /// that has been stable for > 500ms and no request is already in-flight.
     pub fn lsp_hover_request(&mut self) -> Option<(std::path::PathBuf, u32, u32)> {
         let tab = self.tabs.get_mut(self.active_tab)?;
-        if tab.hover_pending { return None; }
+        if tab.hover_pending {
+            return None;
+        }
         let (line, col) = tab.hover_pos?;
         let elapsed = tab.hover_start?.elapsed();
-        if elapsed.as_millis() < 500 { return None; }
+        if elapsed.as_millis() < 500 {
+            return None;
+        }
         let path = tab.path.clone()?;
         tab.hover_pending = true;
         Some((path, line, col))
@@ -1926,8 +2062,8 @@ impl EditorPanel {
                     tab.title.clone()
                 };
                 let is_active = i == self.active_tab;
-                let is_drop_target = self.drag_target == Some(i)
-                    && self.dragging_tab.map_or(false, |d| d != i);
+                let is_drop_target =
+                    self.drag_target == Some(i) && self.dragging_tab.is_some_and(|d| d != i);
 
                 let bg = if is_drop_target {
                     theme.accent.gamma_multiply(0.4)
@@ -1936,14 +2072,18 @@ impl EditorPanel {
                 } else {
                     theme.background_secondary
                 };
-                let fg = if is_active { theme.text } else { theme.text_muted };
+                let fg = if is_active {
+                    theme.text
+                } else {
+                    theme.text_muted
+                };
 
                 let tab_response = ui.add(
                     egui::Button::new(egui::RichText::new(&label).color(fg))
                         .fill(bg)
                         .frame(true)
                         .min_size(Vec2::new(0.0, 28.0))
-                        .sense(egui::Sense::click_and_drag())
+                        .sense(egui::Sense::click_and_drag()),
                 );
 
                 if tab_response.clicked() {
@@ -1969,10 +2109,8 @@ impl EditorPanel {
                     self.drag_target = None;
                 }
 
-                if self.tabs.len() > 1 {
-                    if ui.small_button("×").clicked() {
-                        close_idx = Some(i);
-                    }
+                if self.tabs.len() > 1 && ui.small_button("×").clicked() {
+                    close_idx = Some(i);
                 }
                 ui.add_space(4.0);
             }
@@ -2023,18 +2161,28 @@ impl EditorPanel {
                 let find_resp = ui.add(
                     egui::TextEdit::singleline(&mut self.find_replace.query)
                         .desired_width(200.0)
-                        .hint_text("Search...")
+                        .hint_text("Search..."),
                 );
-                if find_resp.changed() { do_search = true; }
+                if find_resp.changed() {
+                    do_search = true;
+                }
                 if find_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     do_next = true;
                 }
-                if ui.small_button("▲").clicked() { do_prev = true; }
-                if ui.small_button("▼").clicked() { do_next = true; }
+                if ui.small_button("▲").clicked() {
+                    do_prev = true;
+                }
+                if ui.small_button("▼").clicked() {
+                    do_next = true;
+                }
 
                 let match_count = self.find_replace.matches.len();
                 if match_count > 0 {
-                    ui.label(format!("{}/{}", self.find_replace.current_match + 1, match_count));
+                    ui.label(format!(
+                        "{}/{}",
+                        self.find_replace.current_match + 1,
+                        match_count
+                    ));
                 } else if !self.find_replace.query.is_empty() {
                     ui.colored_label(Color32::from_rgb(255, 100, 100), "No results");
                 }
@@ -2044,10 +2192,14 @@ impl EditorPanel {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.find_replace.replacement)
                         .desired_width(150.0)
-                        .hint_text("Replace...")
+                        .hint_text("Replace..."),
                 );
-                if ui.small_button("Replace").clicked() { do_replace = true; }
-                if ui.small_button("All").clicked() { do_replace_all = true; }
+                if ui.small_button("Replace").clicked() {
+                    do_replace = true;
+                }
+                if ui.small_button("All").clicked() {
+                    do_replace_all = true;
+                }
                 if ui.small_button("✕").clicked() {
                     self.find_replace.visible = false;
                     self.find_replace.matches.clear();
@@ -2062,7 +2214,11 @@ impl EditorPanel {
             }
             if do_next {
                 self.find_replace.next_match();
-                if let Some(&(line, col)) = self.find_replace.matches.get(self.find_replace.current_match) {
+                if let Some(&(line, col)) = self
+                    .find_replace
+                    .matches
+                    .get(self.find_replace.current_match)
+                {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.cursor = TextPosition::new(line, col);
                         tab.cursor_changed = true;
@@ -2072,7 +2228,11 @@ impl EditorPanel {
             }
             if do_prev {
                 self.find_replace.prev_match();
-                if let Some(&(line, col)) = self.find_replace.matches.get(self.find_replace.current_match) {
+                if let Some(&(line, col)) = self
+                    .find_replace
+                    .matches
+                    .get(self.find_replace.current_match)
+                {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.cursor = TextPosition::new(line, col);
                         tab.cursor_changed = true;
@@ -2104,12 +2264,28 @@ impl EditorPanel {
             let syntax_set = &self.syntax_set;
             let theme_set = &self.theme_set;
             let find_matches = if self.find_replace.visible {
-                Some((&self.find_replace.matches, self.find_replace.current_match, self.find_replace.query.len()))
+                Some((
+                    &self.find_replace.matches,
+                    self.find_replace.current_match,
+                    self.find_replace.query.len(),
+                ))
             } else {
                 None
             };
             let tab = &mut self.tabs[active_tab];
-            render_editor_content(ui, tab, theme, font_size, show_line_numbers, char_width, syntax_set, theme_set, &mut self.ts_engine, find_matches, self.has_focus);
+            render_editor_content(
+                ui,
+                tab,
+                theme,
+                font_size,
+                show_line_numbers,
+                char_width,
+                syntax_set,
+                theme_set,
+                &mut self.ts_engine,
+                find_matches,
+                self.has_focus,
+            );
 
             // ── LSP hover popup ──────────────────────────────────────────────
             if let Some(ref hover_text) = tab.hover_text.clone() {
@@ -2129,9 +2305,8 @@ impl EditorPanel {
 
             // ── Completion popup ─────────────────────────────────────────────
             if tab.completion_visible && !tab.completions.is_empty() {
-                let completions_clone: Vec<_> = tab.completions.iter()
-                    .map(|c| c.label.clone())
-                    .collect();
+                let completions_clone: Vec<_> =
+                    tab.completions.iter().map(|c| c.label.clone()).collect();
                 let selected = tab.completion_selected;
                 let popup_id = ui.id().with("lsp_completion_popup");
                 let mut chosen: Option<usize> = None;
@@ -2151,9 +2326,14 @@ impl EditorPanel {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 for (i, label) in completions_clone.iter().enumerate() {
                                     let is_sel = i == selected;
-                                    let bg = if is_sel { theme.accent } else { theme.background_secondary };
+                                    let bg = if is_sel {
+                                        theme.accent
+                                    } else {
+                                        theme.background_secondary
+                                    };
                                     let rt = egui::RichText::new(label).monospace().size(12.0);
-                                    if ui.add(egui::Button::new(rt).fill(bg).frame(true)).clicked() {
+                                    if ui.add(egui::Button::new(rt).fill(bg).frame(true)).clicked()
+                                    {
                                         chosen = Some(i);
                                     }
                                 }
@@ -2230,20 +2410,29 @@ impl EditorPanel {
                     egui::Vec2::new(minimap_width, clip.height()),
                 );
                 let painter = ui.painter_at(minimap_rect);
-                painter.rect_filled(minimap_rect, 0.0, Color32::from_rgba_premultiplied(15, 15, 20, 220));
+                painter.rect_filled(
+                    minimap_rect,
+                    0.0,
+                    Color32::from_rgba_premultiplied(15, 15, 20, 220),
+                );
 
                 let total_lines = tab.rope.len_lines().max(1);
-                let line_h = (minimap_rect.height() / total_lines as f32).max(0.5_f32).min(3.0_f32);
+                let line_h = (minimap_rect.height() / total_lines as f32).clamp(0.5_f32, 3.0_f32);
 
                 // Current viewport: estimate from cursor position
                 let scroll_frac = tab.cursor.line as f32 / total_lines as f32;
                 let viewport_h = (minimap_rect.height() * 0.25).max(8.0);
-                let vp_y = (minimap_rect.top() + scroll_frac * minimap_rect.height() - viewport_h * 0.5)
+                let vp_y = (minimap_rect.top() + scroll_frac * minimap_rect.height()
+                    - viewport_h * 0.5)
                     .max(minimap_rect.top())
                     .min(minimap_rect.bottom() - viewport_h);
                 painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(minimap_rect.left(), vp_y), egui::Vec2::new(minimap_width, viewport_h)),
-                    0.0, Color32::from_rgba_premultiplied(80, 80, 120, 60),
+                    egui::Rect::from_min_size(
+                        egui::pos2(minimap_rect.left(), vp_y),
+                        egui::Vec2::new(minimap_width, viewport_h),
+                    ),
+                    0.0,
+                    Color32::from_rgba_premultiplied(80, 80, 120, 60),
                 );
 
                 for line_idx in 0..total_lines {
@@ -2254,7 +2443,8 @@ impl EditorPanel {
                     let content_len = trimmed.trim().len();
                     if content_len > 0 {
                         let x_start = minimap_rect.left() + (indent as f32 * 0.4).min(16.0);
-                        let x_end = (x_start + content_len as f32 * 0.45).min(minimap_rect.right() - 2.0);
+                        let x_end =
+                            (x_start + content_len as f32 * 0.45).min(minimap_rect.right() - 2.0);
                         if x_end > x_start {
                             let color = if tab.diagnostics.contains_key(&line_idx) {
                                 Color32::from_rgb(200, 80, 80)
@@ -2270,12 +2460,18 @@ impl EditorPanel {
                 }
 
                 // Click minimap to scroll to line
-                let mm_resp = ui.interact(minimap_rect, ui.id().with("minimap_interact"), Sense::click());
+                let mm_resp = ui.interact(
+                    minimap_rect,
+                    ui.id().with("minimap_interact"),
+                    Sense::click(),
+                );
                 if mm_resp.clicked() {
                     if let Some(pos) = mm_resp.interact_pointer_pos() {
-                        let rel = ((pos.y - minimap_rect.top()) / minimap_rect.height()).clamp(0.0, 1.0);
+                        let rel =
+                            ((pos.y - minimap_rect.top()) / minimap_rect.height()).clamp(0.0, 1.0);
                         let target = (rel * total_lines as f32) as usize;
-                        tab.cursor = TextPosition::new(target.min(total_lines.saturating_sub(1)), 0);
+                        tab.cursor =
+                            TextPosition::new(target.min(total_lines.saturating_sub(1)), 0);
                         tab.cursor_changed = true;
                         tab.sync_legacy_cursor();
                     }
@@ -2287,6 +2483,9 @@ impl EditorPanel {
 
 // ── Editor Rendering ──────────────────────────────────────────────────────
 
+type FindMatchesArg<'a> = Option<(&'a Vec<(usize, usize)>, usize, usize)>;
+
+#[allow(clippy::too_many_arguments)]
 fn render_editor_content(
     ui: &mut egui::Ui,
     tab: &mut EditorTab,
@@ -2297,7 +2496,7 @@ fn render_editor_content(
     syntax_set: &SyntaxSet,
     theme_set: &ThemeSet,
     ts_engine: &mut Option<TsHighlightEngine>,
-    find_matches: Option<(&Vec<(usize, usize)>, usize, usize)>,
+    find_matches: FindMatchesArg<'_>,
     has_focus: bool,
 ) {
     // ── Tree-sitter: recompute spans when file changes ─────────────────────
@@ -2318,7 +2517,7 @@ fn render_editor_content(
     let total_lines = tab.rope.len_lines().max(1);
     let gutter_width = if show_line_numbers {
         let digits = format!("{}", total_lines).len();
-        (digits as f32) * char_width + 24.0  // extra 4px for git bar
+        (digits as f32) * char_width + 24.0 // extra 4px for git bar
     } else {
         0.0
     };
@@ -2359,7 +2558,12 @@ fn render_editor_content(
                         needs_search_update = true;
                     }
 
-                    egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => {
                         let shift = modifiers.shift;
                         let ctrl = modifiers.command || modifiers.ctrl;
                         let _alt = modifiers.alt;
@@ -2403,12 +2607,18 @@ fn render_editor_content(
                             egui::Key::ArrowUp => tab.move_up(shift),
                             egui::Key::ArrowDown => tab.move_down(shift),
                             egui::Key::ArrowLeft => {
-                                if ctrl { tab.move_word_left(shift); }
-                                else { tab.move_left(shift); }
+                                if ctrl {
+                                    tab.move_word_left(shift);
+                                } else {
+                                    tab.move_left(shift);
+                                }
                             }
                             egui::Key::ArrowRight => {
-                                if ctrl { tab.move_word_right(shift); }
-                                else { tab.move_right(shift); }
+                                if ctrl {
+                                    tab.move_word_right(shift);
+                                } else {
+                                    tab.move_right(shift);
+                                }
                             }
                             egui::Key::Home => tab.move_home(shift),
                             egui::Key::End => tab.move_end(shift),
@@ -2418,7 +2628,8 @@ fn render_editor_content(
                                 tab.move_cursor_to(new, shift);
                             }
                             egui::Key::PageDown => {
-                                let new_line = (tab.cursor.line + 25).min(tab.rope.len_lines().saturating_sub(1));
+                                let new_line = (tab.cursor.line + 25)
+                                    .min(tab.rope.len_lines().saturating_sub(1));
                                 let new = TextPosition::new(new_line, tab.cursor.col);
                                 tab.move_cursor_to(new, shift);
                             }
@@ -2495,7 +2706,8 @@ fn render_editor_content(
             let viewport = ui.clip_rect();
             let origin_y = ui.min_rect().min.y;
             let min_visible = ((viewport.min.y - origin_y) / line_height).floor().max(0.0) as usize;
-            let max_visible = (((viewport.max.y - origin_y) / line_height).ceil() as usize + 1).min(total_lines);
+            let max_visible =
+                (((viewport.max.y - origin_y) / line_height).ceil() as usize + 1).min(total_lines);
 
             // Space before visible region
             if min_visible > 0 {
@@ -2517,7 +2729,9 @@ fn render_editor_content(
 
             for line_idx in min_visible..max_visible {
                 // Skip lines hidden inside a fold region
-                if tab.fold_hidden_cache.contains(&line_idx) { continue; }
+                if tab.fold_hidden_cache.contains(&line_idx) {
+                    continue;
+                }
 
                 // Expand tabs to 4 spaces for display
                 // Fetch raw line text once; derive display text from it (avoids two rope scans)
@@ -2527,7 +2741,8 @@ fn render_editor_content(
                 ui.horizontal(|ui| {
                     // Line number gutter
                     if show_line_numbers {
-                        let (gutter_id, gutter_rect) = ui.allocate_space(Vec2::new(gutter_width, line_height));
+                        let (gutter_id, gutter_rect) =
+                            ui.allocate_space(Vec2::new(gutter_width, line_height));
                         let gutter_response = ui.interact(gutter_rect, gutter_id, Sense::hover());
                         let gutter_color = if line_idx == tab.cursor.line {
                             theme.text_secondary
@@ -2545,9 +2760,9 @@ fn render_editor_content(
                         // Git gutter bar (3px on left edge of gutter)
                         if let Some(status) = tab.git_hunks.get(&line_idx) {
                             let bar_color = match status {
-                                GitLineStatus::Added    => Color32::from_rgb(80, 200, 80),
+                                GitLineStatus::Added => Color32::from_rgb(80, 200, 80),
                                 GitLineStatus::Modified => Color32::from_rgb(220, 160, 0),
-                                GitLineStatus::Deleted  => Color32::from_rgb(210, 60, 60),
+                                GitLineStatus::Deleted => Color32::from_rgb(210, 60, 60),
                             };
                             ui.painter().rect_filled(
                                 egui::Rect::from_min_max(
@@ -2580,7 +2795,11 @@ fn render_editor_content(
                             );
                             let tri_id = ui.id().with(("fold_tri", line_idx));
                             let tri_resp = ui.interact(tri_rect, tri_id, Sense::click());
-                            let tri_color = if tri_resp.hovered() { theme.accent } else { theme.text_muted };
+                            let tri_color = if tri_resp.hovered() {
+                                theme.accent
+                            } else {
+                                theme.text_muted
+                            };
                             ui.painter().text(
                                 tri_rect.center(),
                                 egui::Align2::CENTER_CENTER,
@@ -2628,7 +2847,8 @@ fn render_editor_content(
 
                     let galley = ui.fonts(|f| f.layout_job(layout_job));
 
-                    let content_width = (available_width - gutter_width).max(galley.size().x + 40.0);
+                    let content_width =
+                        (available_width - gutter_width).max(galley.size().x + 40.0);
                     let (rect, response) = ui.allocate_exact_size(
                         Vec2::new(content_width, line_height),
                         Sense::click_and_drag(),
@@ -2650,7 +2870,11 @@ fn render_editor_content(
                             let (start, end) = sel.ordered();
                             let sel_start_col = if line_idx > start.line { 0 } else { start.col };
                             let line_len = raw_line_text.len(); // reuse already-fetched text
-                            let sel_end_col = if line_idx < end.line { line_len + 1 } else { end.col };
+                            let sel_end_col = if line_idx < end.line {
+                                line_len + 1
+                            } else {
+                                end.col
+                            };
 
                             let x_start = rect.left() + sel_start_col as f32 * char_width;
                             let x_end = rect.left() + sel_end_col as f32 * char_width;
@@ -2698,7 +2922,8 @@ fn render_editor_content(
                         let max_col = anchor.col.max(cursor.col);
                         if line_idx >= min_line && line_idx <= max_line {
                             let x_start = rect.left() + min_col as f32 * char_width;
-                            let x_end = rect.left() + (max_col as f32 * char_width).max(x_start + 2.0);
+                            let x_end =
+                                rect.left() + (max_col as f32 * char_width).max(x_start + 2.0);
                             ui.painter().rect_filled(
                                 egui::Rect::from_min_max(
                                     egui::pos2(x_start, rect.top()),
@@ -2731,7 +2956,10 @@ fn render_editor_content(
 
                     // Draw text
                     ui.painter().galley(
-                        egui::pos2(rect.left(), rect.top() + (line_height - galley.size().y) / 2.0),
+                        egui::pos2(
+                            rect.left(),
+                            rect.top() + (line_height - galley.size().y) / 2.0,
+                        ),
                         galley,
                         theme.text,
                     );
@@ -2741,9 +2969,9 @@ fn render_editor_content(
                         for diag in diags {
                             use lsp_types::DiagnosticSeverity;
                             let color = match diag.severity {
-                                Some(DiagnosticSeverity::ERROR)   => theme.error,
+                                Some(DiagnosticSeverity::ERROR) => theme.error,
                                 Some(DiagnosticSeverity::WARNING) => theme.warning,
-                                _                                 => theme.text_muted,
+                                _ => theme.text_muted,
                             };
                             let col_start = diag.range.start.character as f32;
                             let col_end = (diag.range.end.character as f32).max(col_start + 1.0);
@@ -2772,7 +3000,11 @@ fn render_editor_content(
                                 egui::pos2(x0, rect.top()),
                                 egui::pos2(x1.max(x0 + 8.0), rect.bottom()),
                             );
-                            let diag_resp = ui.interact(diag_rect, ui.id().with(("diag", line_idx, diag.range.start.character)), Sense::hover());
+                            let diag_resp = ui.interact(
+                                diag_rect,
+                                ui.id().with(("diag", line_idx, diag.range.start.character)),
+                                Sense::hover(),
+                            );
                             if diag_resp.hovered() {
                                 diag_resp.on_hover_text(diag_msg);
                             }
@@ -2941,7 +3173,9 @@ fn ensure_highlight_state_up_to(
     };
 
     // Get or create the initial state
-    let mut cur_state = if start_from == 0 && cache.states.first().and_then(|s| s.as_ref()).is_none() {
+    let mut cur_state = if start_from == 0
+        && cache.states.first().and_then(|s| s.as_ref()).is_none()
+    {
         LineHighlightState {
             parse_state: ParseState::new(syntax),
             highlight_state: HighlightState::new(highlighter, syntect::parsing::ScopeStack::new()),
@@ -2952,7 +3186,10 @@ fn ensure_highlight_state_up_to(
         } else {
             LineHighlightState {
                 parse_state: ParseState::new(syntax),
-                highlight_state: HighlightState::new(highlighter, syntect::parsing::ScopeStack::new()),
+                highlight_state: HighlightState::new(
+                    highlighter,
+                    syntect::parsing::ScopeStack::new(),
+                ),
             }
         }
     } else {
@@ -2991,6 +3228,7 @@ fn ensure_highlight_state_up_to(
 }
 
 /// Highlight a single line using cached parse state (stateful, correct multi-line)
+#[allow(clippy::too_many_arguments)]
 fn highlight_line_stateful(
     line_text: &str,
     cache: &mut HighlightCache,
@@ -3004,11 +3242,15 @@ fn highlight_line_stateful(
     let mut job = LayoutJob::default();
 
     if line_text.is_empty() {
-        job.append(" ", 0.0, TextFormat {
-            font_id: FontId::monospace(font_size),
-            color: theme.text,
-            ..Default::default()
-        });
+        job.append(
+            " ",
+            0.0,
+            TextFormat {
+                font_id: FontId::monospace(font_size),
+                color: theme.text,
+                ..Default::default()
+            },
+        );
         return job;
     }
 
@@ -3045,7 +3287,8 @@ fn highlight_line_stateful(
             &ops,
             &line_with_nl,
             highlighter,
-        ).collect();
+        )
+        .collect();
 
         // Cache updated state for next line
         cache.ensure_size(line_idx + 2);
@@ -3053,26 +3296,36 @@ fn highlight_line_stateful(
 
         for (style, text, _range) in ranges {
             let text = text.trim_end_matches('\n');
-            if text.is_empty() { continue; }
+            if text.is_empty() {
+                continue;
+            }
             let color = Color32::from_rgba_premultiplied(
                 style.foreground.r,
                 style.foreground.g,
                 style.foreground.b,
                 style.foreground.a,
             );
-            job.append(text, 0.0, TextFormat {
-                font_id: FontId::monospace(font_size),
-                color,
-                ..Default::default()
-            });
+            job.append(
+                text,
+                0.0,
+                TextFormat {
+                    font_id: FontId::monospace(font_size),
+                    color,
+                    ..Default::default()
+                },
+            );
         }
 
         if job.sections.is_empty() {
-            job.append(line_text, 0.0, TextFormat {
-                font_id: FontId::monospace(font_size),
-                color: theme.text,
-                ..Default::default()
-            });
+            job.append(
+                line_text,
+                0.0,
+                TextFormat {
+                    font_id: FontId::monospace(font_size),
+                    color: theme.text,
+                    ..Default::default()
+                },
+            );
         }
     } else {
         return plain_layout(line_text, font_size, theme);
@@ -3089,11 +3342,15 @@ fn highlight_line_stateful(
 fn plain_layout(line: &str, font_size: f32, theme: &ThemeColors) -> LayoutJob {
     let mut job = LayoutJob::default();
     let text = if line.is_empty() { " " } else { line };
-    job.append(text, 0.0, TextFormat {
-        font_id: FontId::monospace(font_size),
-        color: theme.text,
-        ..Default::default()
-    });
+    job.append(
+        text,
+        0.0,
+        TextFormat {
+            font_id: FontId::monospace(font_size),
+            color: theme.text,
+            ..Default::default()
+        },
+    );
     job
 }
 
@@ -3123,14 +3380,27 @@ fn build_breadcrumbs(tab: &EditorTab) -> Vec<String> {
     let total_lines = tab.rope.len_lines();
     let scan_limit = cursor_line.min(total_lines);
 
-    let keywords = ["impl ", "fn ", "struct ", "enum ", "trait ", "mod ", "class ", "def ", "function ", "async fn "];
+    let keywords = [
+        "impl ",
+        "fn ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "mod ",
+        "class ",
+        "def ",
+        "function ",
+        "async fn ",
+    ];
 
     let mut scopes: Vec<String> = Vec::new();
     let mut brace_depth: i32 = 0;
     let mut last_depth_at: Vec<(i32, String)> = Vec::new(); // (brace_depth, label)
 
     for line_idx in 0..=scan_limit {
-        if line_idx >= total_lines { break; }
+        if line_idx >= total_lines {
+            break;
+        }
         let line_text = tab.rope.line(line_idx).to_string();
         let trimmed = line_text.trim();
 
@@ -3139,19 +3409,27 @@ fn build_breadcrumbs(tab: &EditorTab) -> Vec<String> {
         let close_count = trimmed.chars().filter(|&c| c == '}').count() as i32;
 
         // Check if this line declares a scope
-        let is_scope_line = keywords.iter().any(|kw| trimmed.starts_with(kw) || trimmed.contains(kw));
+        let is_scope_line = keywords
+            .iter()
+            .any(|kw| trimmed.starts_with(kw) || trimmed.contains(kw));
 
         if is_scope_line && open_count > 0 {
             // Extract the label: first keyword match
-            let label = keywords.iter()
+            let label = keywords
+                .iter()
                 .filter_map(|kw| {
                     let pos = trimmed.find(kw)?;
                     let after = &trimmed[pos + kw.len()..];
                     // Take up to first `(`, `{`, `<`, or whitespace after an ident
-                    let ident: String = after.chars()
+                    let ident: String = after
+                        .chars()
                         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '<' || *c == '>')
                         .collect();
-                    if ident.is_empty() { None } else { Some(format!("{}{}", kw.trim_end(), ident)) }
+                    if ident.is_empty() {
+                        None
+                    } else {
+                        Some(format!("{}{}", kw.trim_end(), ident))
+                    }
                 })
                 .next()
                 .unwrap_or_else(|| trimmed.chars().take(30).collect());
@@ -3177,11 +3455,19 @@ fn build_breadcrumbs(tab: &EditorTab) -> Vec<String> {
 /// Line indices are 0-based (subtract 1 from the diff's 1-based line numbers).
 fn parse_git_diff_hunks(diff: &str, hunks: &mut HashMap<usize, GitLineStatus>) {
     for line in diff.lines() {
-        if !line.starts_with("@@") { continue; }
+        if !line.starts_with("@@") {
+            continue;
+        }
         // Format: @@ -orig_start[,orig_count] +new_start[,new_count] @@
-        let inner = line.trim_start_matches('@').trim_start().trim_end_matches('@').trim();
+        let inner = line
+            .trim_start_matches('@')
+            .trim_start()
+            .trim_end_matches('@')
+            .trim();
         let parts: Vec<&str> = inner.split_whitespace().collect();
-        if parts.len() < 2 { continue; }
+        if parts.len() < 2 {
+            continue;
+        }
 
         let old_part = parts[0].trim_start_matches('-');
         let new_part = parts[1].trim_start_matches('+');
@@ -3228,19 +3514,19 @@ fn parse_hunk_range(s: &str) -> (usize, usize) {
 /// Porcelain format: each hunk starts with "<40-char hash> <orig-line> <final-line> [<lines>]"
 /// followed by key-value pairs (author, author-time, summary, etc.), ending with a tab-prefixed line.
 fn parse_blame_porcelain(text: &str, cache: &mut HashMap<usize, BlameInfo>) {
-    let mut lines = text.lines().peekable();
     let mut current_hash = String::new();
     let mut current_author = String::new();
     let mut current_date = String::new();
     let mut current_summary = String::new();
     let mut current_final_line: usize = 0;
 
-    while let Some(line) = lines.next() {
+    for line in text.lines() {
         // Hunk header: 40-char hex hash followed by orig-line final-line [count]
         if line.len() >= 40 && line.chars().take(40).all(|c| c.is_ascii_hexdigit()) {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             current_hash = parts[0][..8].to_string(); // short hash (8 chars)
-            current_final_line = parts.get(2)
+            current_final_line = parts
+                .get(2)
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(1)
                 .saturating_sub(1); // convert to 0-based
@@ -3249,27 +3535,30 @@ fn parse_blame_porcelain(text: &str, cache: &mut HashMap<usize, BlameInfo>) {
             current_author.clear();
             current_date.clear();
             current_summary.clear();
-        } else if line.starts_with("author ") {
-            current_author = line[7..].trim().to_string();
-        } else if line.starts_with("author-time ") {
+        } else if let Some(rest) = line.strip_prefix("author ") {
+            current_author = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("author-time ") {
             // Unix timestamp → "YYYY-MM-DD"
-            if let Ok(ts) = line[12..].trim().parse::<i64>() {
+            if let Ok(ts) = rest.trim().parse::<i64>() {
                 let days = ts / 86400;
                 // Simple approximation: epoch 1970-01-01 + days
                 let year = 1970 + days / 365;
                 current_date = format!("{year}");
             }
-        } else if line.starts_with("summary ") {
-            current_summary = line[8..].trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("summary ") {
+            current_summary = rest.trim().to_string();
         } else if line.starts_with('\t') {
             // This is the actual line content — end of this hunk's metadata
             if !current_hash.is_empty() {
-                cache.insert(current_final_line, BlameInfo {
-                    short_hash: current_hash.clone(),
-                    author: current_author.clone(),
-                    date: current_date.clone(),
-                    summary: current_summary.clone(),
-                });
+                cache.insert(
+                    current_final_line,
+                    BlameInfo {
+                        short_hash: current_hash.clone(),
+                        author: current_author.clone(),
+                        date: current_date.clone(),
+                        summary: current_summary.clone(),
+                    },
+                );
             }
         }
     }

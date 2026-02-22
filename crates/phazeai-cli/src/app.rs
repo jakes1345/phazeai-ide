@@ -5,30 +5,34 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use phazeai_core::{
-    Agent, AgentEvent, Settings, SystemPromptBuilder, collect_git_info,
-    context::{ConversationStore, SavedConversation, SavedMessage, ConversationMetadata},
+    collect_git_info,
+    context::{ConversationMetadata, ConversationStore, SavedConversation, SavedMessage},
     tools::{ToolApprovalManager, ToolApprovalMode},
+    Agent, AgentEvent, Settings, SystemPromptBuilder,
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Terminal,
 };
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use arboard;
 
 use crate::commands::{self, CommandResult};
 use crate::theme::Theme;
 
 // ── Single-prompt mode ──────────────────────────────────────────────────
 
-pub async fn run_single_prompt(settings: &Settings, prompt: &str, extra_instructions: Option<&str>) -> Result<()> {
+pub async fn run_single_prompt(
+    settings: &Settings,
+    prompt: &str,
+    extra_instructions: Option<&str>,
+) -> Result<()> {
     let llm = settings.build_llm_client()?;
     let system_prompt = build_system_prompt(extra_instructions);
 
@@ -37,12 +41,10 @@ pub async fn run_single_prompt(settings: &Settings, prompt: &str, extra_instruct
     // Try to start sidecar for semantic search
     if let Some(client) = try_start_sidecar().await {
         let client = Arc::new(client);
-        agent.register_tool(Box::new(
-            phazeai_sidecar::SemanticSearchTool::new(client.clone()),
-        ));
-        agent.register_tool(Box::new(
-            phazeai_sidecar::BuildIndexTool::new(client),
-        ));
+        agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
+            client.clone(),
+        )));
+        agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));
     }
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -271,7 +273,9 @@ impl AppState {
             })
             .unwrap_or_else(|| "Untitled".into());
 
-        let cwd = std::env::current_dir().ok().map(|p| p.display().to_string());
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string());
 
         let metadata = ConversationMetadata {
             id: self.conversation_id.clone(),
@@ -295,7 +299,13 @@ impl AppState {
     }
 }
 
-pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, resume_id: Option<String>, extra_instructions: Option<&str>) -> Result<()> {
+pub async fn run_tui(
+    settings: Settings,
+    theme_name: &str,
+    continue_last: bool,
+    resume_id: Option<String>,
+    extra_instructions: Option<&str>,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -329,7 +339,10 @@ pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, 
                             restore_messages.push((msg.role.clone(), msg.content.clone()));
                         }
                     }
-                    state.add_message(MessageRole::System, format!("Resumed: {}", conv.metadata.title));
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Resumed: {}", conv.metadata.title),
+                    );
                     state.scroll_to_bottom();
                 }
             }
@@ -356,13 +369,22 @@ pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, 
                             restore_messages.push((msg.role.clone(), msg.content.clone()));
                         }
                     }
-                    state.add_message(MessageRole::System, format!("Resumed: {}", conv.metadata.title));
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Resumed: {}", conv.metadata.title),
+                    );
                     state.scroll_to_bottom();
                 } else {
-                    state.add_message(MessageRole::System, format!("Failed to load conversation '{}'", meta.id));
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to load conversation '{}'", meta.id),
+                    );
                 }
             } else {
-                state.add_message(MessageRole::System, format!("No conversation matching '{id}' found."));
+                state.add_message(
+                    MessageRole::System,
+                    format!("No conversation matching '{id}' found."),
+                );
             }
         }
     }
@@ -393,7 +415,8 @@ pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, 
         let restore_msgs = restore_messages.clone();
 
         // Create approval callback
-        let approval_manager_clone = Arc::new(std::sync::Mutex::new(ToolApprovalManager::default()));
+        let approval_manager_clone =
+            Arc::new(std::sync::Mutex::new(ToolApprovalManager::default()));
         let approval_mgr = approval_manager_clone.clone();
         let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(move |tool_name, params| {
             let mgr = approval_mgr.clone();
@@ -424,12 +447,10 @@ pub async fn run_tui(settings: Settings, theme_name: &str, continue_last: bool, 
             // Try to start the Python sidecar for semantic search
             if let Some(client) = try_start_sidecar().await {
                 let client = Arc::new(client);
-                agent.register_tool(Box::new(
-                    phazeai_sidecar::SemanticSearchTool::new(client.clone()),
-                ));
-                agent.register_tool(Box::new(
-                    phazeai_sidecar::BuildIndexTool::new(client),
-                ));
+                agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
+                    client.clone(),
+                )));
+                agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));
             }
 
             // Load any restored history
@@ -522,12 +543,16 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let theme = &state.theme;
 
     // Main vertical layout: chat + input + status
-    let input_height = if state.pending_approval.is_some() { 5 } else { 3 };
+    let input_height = if state.pending_approval.is_some() {
+        5
+    } else {
+        3
+    };
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),              // chat
+            Constraint::Min(5),               // chat
             Constraint::Length(input_height), // input (or approval prompt)
             Constraint::Length(1),            // status
         ])
@@ -578,8 +603,7 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
 
     // Scrollbar
     if total_lines > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(max_scroll)
-            .position(state.scroll_offset);
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(state.scroll_offset);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("^"))
@@ -675,17 +699,12 @@ fn draw_approval_prompt(
                     .fg(theme.warning)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                &approval.description,
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(&approval.description, Style::default().fg(theme.fg)),
         ]),
-        Line::from(vec![
-            Span::styled(
-                " [y] Allow  [n] Deny  [a] Allow all  [s] Allow session ",
-                Style::default().fg(theme.accent),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            " [y] Allow  [n] Deny  [a] Allow all  [s] Allow session ",
+            Style::default().fg(theme.accent),
+        )]),
     ];
 
     let block = Block::default()
@@ -794,10 +813,7 @@ fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: 
         Span::styled("| ", Style::default().fg(theme.muted)),
         Span::styled(&state.status_text, Style::default().fg(theme.muted)),
         // Right-align cwd and keybindings
-        Span::styled(
-            format!("  {} ", cwd),
-            Style::default().fg(theme.muted),
-        ),
+        Span::styled(format!("  {} ", cwd), Style::default().fg(theme.muted)),
     ];
     let status = Paragraph::new(Line::from(status_spans));
     f.render_widget(status, area);
@@ -830,10 +846,14 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         }
         AgentEvent::ToolStart { name } => {
             // Check if tool needs approval
-            let needs_approval = state.approval_manager.needs_approval(&name, &serde_json::Value::Null);
+            let needs_approval = state
+                .approval_manager
+                .needs_approval(&name, &serde_json::Value::Null);
 
             if needs_approval {
-                let desc = state.approval_manager.format_approval_prompt(&name, &serde_json::Value::Null);
+                let desc = state
+                    .approval_manager
+                    .format_approval_prompt(&name, &serde_json::Value::Null);
                 state.pending_approval = Some(PendingApproval {
                     tool_name: name.clone(),
                     description: desc,
@@ -872,11 +892,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     }
 }
 
-fn handle_key(
-    state: &mut AppState,
-    key: KeyEvent,
-    user_input_tx: &mpsc::UnboundedSender<String>,
-) {
+fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::UnboundedSender<String>) {
     // Handle approval prompt first
     if state.pending_approval.is_some() {
         handle_approval_key(state, key);
@@ -1082,7 +1098,9 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
             state.pending_approval = None;
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
-            state.approval_manager.set_mode(ToolApprovalMode::AutoApprove);
+            state
+                .approval_manager
+                .set_mode(ToolApprovalMode::AutoApprove);
             state.pending_approval = None;
             state.add_message(
                 MessageRole::System,
@@ -1151,7 +1169,9 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             }
 
             // Find the first user message (for context)
-            let first_user_idx = state.messages.iter()
+            let first_user_idx = state
+                .messages
+                .iter()
                 .position(|m| m.role == MessageRole::User);
 
             if first_user_idx.is_none() {
@@ -1186,10 +1206,7 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             let compacted_count = split_point - (first_user_idx + 1);
 
             if compacted_count == 0 {
-                state.add_message(
-                    MessageRole::System,
-                    "Nothing to compact.".into(),
-                );
+                state.add_message(MessageRole::System, "Nothing to compact.".into());
                 return;
             }
 
@@ -1230,66 +1247,62 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             state.save_conversation();
             state.add_message(MessageRole::System, "Conversation saved.".into());
         }
-        CommandResult::LoadConversation(id) => {
-            match state.conversation_store.load(&id) {
-                Ok(conv) => {
-                    state.messages.clear();
-                    state.conversation_id = conv.metadata.id;
-                    for msg in conv.messages {
-                        let role = match msg.role.as_str() {
-                            "user" => MessageRole::User,
-                            "assistant" => MessageRole::Assistant,
-                            "tool" => MessageRole::Tool,
-                            _ => MessageRole::System,
-                        };
-                        state.messages.push(ChatMessage {
-                            role,
-                            content: msg.content,
-                            timestamp: msg.timestamp,
-                        });
-                    }
-                    state.add_message(
-                        MessageRole::System,
-                        format!("Loaded conversation: {}", conv.metadata.title),
-                    );
-                    state.scroll_to_bottom();
+        CommandResult::LoadConversation(id) => match state.conversation_store.load(&id) {
+            Ok(conv) => {
+                state.messages.clear();
+                state.conversation_id = conv.metadata.id;
+                for msg in conv.messages {
+                    let role = match msg.role.as_str() {
+                        "user" => MessageRole::User,
+                        "assistant" => MessageRole::Assistant,
+                        "tool" => MessageRole::Tool,
+                        _ => MessageRole::System,
+                    };
+                    state.messages.push(ChatMessage {
+                        role,
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                    });
                 }
-                Err(e) => {
-                    state.add_message(
-                        MessageRole::System,
-                        format!("Failed to load conversation: {e}"),
-                    );
+                state.add_message(
+                    MessageRole::System,
+                    format!("Loaded conversation: {}", conv.metadata.title),
+                );
+                state.scroll_to_bottom();
+            }
+            Err(e) => {
+                state.add_message(
+                    MessageRole::System,
+                    format!("Failed to load conversation: {e}"),
+                );
+            }
+        },
+        CommandResult::ListConversations => match state.conversation_store.list_recent(20) {
+            Ok(convs) => {
+                if convs.is_empty() {
+                    state.add_message(MessageRole::System, "No saved conversations.".into());
+                } else {
+                    let mut list = String::from("Recent conversations:\n");
+                    for c in &convs {
+                        list.push_str(&format!(
+                            "  {} | {} | {} msgs | {}\n",
+                            &c.id[..8.min(c.id.len())],
+                            c.title,
+                            c.message_count,
+                            c.updated_at,
+                        ));
+                    }
+                    list.push_str("\nUse /load <id> to resume a conversation.");
+                    state.add_message(MessageRole::System, list);
                 }
             }
-        }
-        CommandResult::ListConversations => {
-            match state.conversation_store.list_recent(20) {
-                Ok(convs) => {
-                    if convs.is_empty() {
-                        state.add_message(MessageRole::System, "No saved conversations.".into());
-                    } else {
-                        let mut list = String::from("Recent conversations:\n");
-                        for c in &convs {
-                            list.push_str(&format!(
-                                "  {} | {} | {} msgs | {}\n",
-                                &c.id[..8.min(c.id.len())],
-                                c.title,
-                                c.message_count,
-                                c.updated_at,
-                            ));
-                        }
-                        list.push_str("\nUse /load <id> to resume a conversation.");
-                        state.add_message(MessageRole::System, list);
-                    }
-                }
-                Err(e) => {
-                    state.add_message(
-                        MessageRole::System,
-                        format!("Failed to list conversations: {e}"),
-                    );
-                }
+            Err(e) => {
+                state.add_message(
+                    MessageRole::System,
+                    format!("Failed to list conversations: {e}"),
+                );
             }
-        }
+        },
         CommandResult::NewConversation => {
             if state.messages.len() > 1 {
                 state.save_conversation();
@@ -1354,12 +1367,18 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             let lines: Vec<&str> = diff.lines().take(100).collect();
             let truncated = lines.join("\n");
             let suffix = if diff.lines().count() > 100 {
-                format!("\n\n... (truncated at 100 lines, {} total)", diff.lines().count())
+                format!(
+                    "\n\n... (truncated at 100 lines, {} total)",
+                    diff.lines().count()
+                )
             } else {
                 String::new()
             };
 
-            state.add_message(MessageRole::System, format!("Git diff:{}{}", truncated, suffix));
+            state.add_message(
+                MessageRole::System,
+                format!("Git diff:{}{}", truncated, suffix),
+            );
         }
         CommandResult::ShowGitStatus => {
             // Get branch name
@@ -1420,7 +1439,10 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_else(|| "Not a git repository".into());
-            state.add_message(MessageRole::System, format!("Git log (last 20 commits):\n{log}"));
+            state.add_message(
+                MessageRole::System,
+                format!("Git log (last 20 commits):\n{log}"),
+            );
         }
         CommandResult::SearchFiles(pattern) => {
             let result = std::process::Command::new("find")
@@ -1439,13 +1461,17 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
         CommandResult::ListModels => {
             // Show static models for the active provider
             let provider = match state.provider_name.to_lowercase().as_str() {
-                s if s.contains("claude") || s.contains("anthropic") => phazeai_core::ProviderId::Claude,
+                s if s.contains("claude") || s.contains("anthropic") => {
+                    phazeai_core::ProviderId::Claude
+                }
                 s if s.contains("openai") => phazeai_core::ProviderId::OpenAI,
                 s if s.contains("ollama") => phazeai_core::ProviderId::Ollama,
                 s if s.contains("groq") => phazeai_core::ProviderId::Groq,
                 s if s.contains("together") => phazeai_core::ProviderId::Together,
                 s if s.contains("openrouter") => phazeai_core::ProviderId::OpenRouter,
-                s if s.contains("lm studio") || s.contains("lmstudio") => phazeai_core::ProviderId::LmStudio,
+                s if s.contains("lm studio") || s.contains("lmstudio") => {
+                    phazeai_core::ProviderId::LmStudio
+                }
                 _ => phazeai_core::ProviderId::Claude,
             };
 
@@ -1457,11 +1483,19 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             } else {
                 let mut msg = format!("Available models for {}:\n", provider);
                 for m in &models {
-                    let active = if m.id == state.model_name { " (active)" } else { "" };
-                    msg.push_str(&format!("  {} - {} | ctx:{} | tools:{}{}\n",
-                        m.id, m.name, m.context_window,
+                    let active = if m.id == state.model_name {
+                        " (active)"
+                    } else {
+                        ""
+                    };
+                    msg.push_str(&format!(
+                        "  {} - {} | ctx:{} | tools:{}{}\n",
+                        m.id,
+                        m.name,
+                        m.context_window,
                         if m.supports_tools { "yes" } else { "no" },
-                        active));
+                        active
+                    ));
                 }
                 msg.push_str("\nUse /model <id> to switch models.");
                 state.add_message(MessageRole::System, msg);
@@ -1473,9 +1507,7 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             // Check Ollama via CLI
             let mut msg = String::from("Local model discovery:\n");
 
-            let ollama_result = std::process::Command::new("ollama")
-                .arg("list")
-                .output();
+            let ollama_result = std::process::Command::new("ollama").arg("list").output();
 
             match ollama_result {
                 Ok(output) if output.status.success() => {
@@ -1521,10 +1553,12 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             let mut found_instructions = false;
             for path in &candidates {
                 if path.exists() {
-                    let size = std::fs::metadata(path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    context_info.push_str(&format!("  Instructions: {} ({} bytes)\n", path.display(), size));
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    context_info.push_str(&format!(
+                        "  Instructions: {} ({} bytes)\n",
+                        path.display(),
+                        size
+                    ));
                     found_instructions = true;
                     break;
                 }
@@ -1539,7 +1573,11 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
                         let size = std::fs::metadata(&parent_claude)
                             .map(|m| m.len())
                             .unwrap_or(0);
-                        context_info.push_str(&format!("  Parent instructions: {} ({} bytes)\n", parent_claude.display(), size));
+                        context_info.push_str(&format!(
+                            "  Parent instructions: {} ({} bytes)\n",
+                            parent_claude.display(),
+                            size
+                        ));
                         break;
                     }
                     current = dir.parent();
@@ -1553,7 +1591,11 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
                     let size = std::fs::metadata(&global_instructions)
                         .map(|m| m.len())
                         .unwrap_or(0);
-                    context_info.push_str(&format!("  Global instructions: {} ({} bytes)\n", global_instructions.display(), size));
+                    context_info.push_str(&format!(
+                        "  Global instructions: {} ({} bytes)\n",
+                        global_instructions.display(),
+                        size
+                    ));
                 }
             }
 
@@ -1575,12 +1617,12 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
         CommandResult::SetMode(mode) => {
             state.ai_mode = mode.clone();
             let description = match mode.as_str() {
-                "plan"  => "Planning mode: creates structured plans and checklists",
+                "plan" => "Planning mode: creates structured plans and checklists",
                 "debug" => "Debug mode: focuses on diagnosing and fixing issues",
-                "ask"   => "Ask mode: read-only, answers questions about your code",
-                "edit"  => "Edit mode: makes targeted code changes",
-                "chat"  => "Chat mode: general conversation and assistance",
-                _       => "Mode changed",
+                "ask" => "Ask mode: read-only, answers questions about your code",
+                "edit" => "Edit mode: makes targeted code changes",
+                "chat" => "Chat mode: general conversation and assistance",
+                _ => "Mode changed",
             };
             state.add_message(MessageRole::System, format!("Mode: {mode} — {description}"));
         }
@@ -1630,16 +1672,36 @@ fn word_boundary_right(s: &str, pos: usize) -> usize {
 
 fn complete_command(input: &str) -> Option<String> {
     let commands = [
-        "/help", "/exit", "/quit", "/clear", "/model", "/provider",
-        "/theme", "/files", "/compact", "/save", "/load", "/conversations",
-        "/history", "/new", "/config", "/status", "/approve", "/diff",
-        "/git", "/log", "/search", "/pwd", "/cost", "/version", "/context", "/models", "/discover",
+        "/help",
+        "/exit",
+        "/quit",
+        "/clear",
+        "/model",
+        "/provider",
+        "/theme",
+        "/files",
+        "/compact",
+        "/save",
+        "/load",
+        "/conversations",
+        "/history",
+        "/new",
+        "/config",
+        "/status",
+        "/approve",
+        "/diff",
+        "/git",
+        "/log",
+        "/search",
+        "/pwd",
+        "/cost",
+        "/version",
+        "/context",
+        "/models",
+        "/discover",
     ];
 
-    let matches: Vec<&&str> = commands
-        .iter()
-        .filter(|c| c.starts_with(input))
-        .collect();
+    let matches: Vec<&&str> = commands.iter().filter(|c| c.starts_with(input)).collect();
 
     if matches.len() == 1 {
         Some(format!("{} ", matches[0]))
@@ -1686,7 +1748,8 @@ fn build_compaction_summary(messages: &[ChatMessage]) -> String {
             MessageRole::Assistant => {
                 // Extract the first meaningful line (skip empty lines)
                 let text = msg.content.trim();
-                let brief = text.lines()
+                let brief = text
+                    .lines()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("")
                     .to_string();
@@ -1723,7 +1786,10 @@ fn build_compaction_summary(messages: &[ChatMessage]) -> String {
             summary.push_str(&format!("  {}. {}\n", i + 1, req));
         }
         if user_requests.len() > 10 {
-            summary.push_str(&format!("  ... and {} more requests\n", user_requests.len() - 10));
+            summary.push_str(&format!(
+                "  ... and {} more requests\n",
+                user_requests.len() - 10
+            ));
         }
     }
 
@@ -1733,7 +1799,10 @@ fn build_compaction_summary(messages: &[ChatMessage]) -> String {
             summary.push_str(&format!("  - {}\n", action));
         }
         if assistant_actions.len() > 8 {
-            summary.push_str(&format!("  ... and {} more actions\n", assistant_actions.len() - 8));
+            summary.push_str(&format!(
+                "  ... and {} more actions\n",
+                assistant_actions.len() - 8
+            ));
         }
     }
 
@@ -1743,7 +1812,10 @@ fn build_compaction_summary(messages: &[ChatMessage]) -> String {
             summary.push_str(&format!("  - {}\n", result));
         }
         if tool_results.len() > 5 {
-            summary.push_str(&format!("  ... and {} more results\n", tool_results.len() - 5));
+            summary.push_str(&format!(
+                "  ... and {} more results\n",
+                tool_results.len() - 5
+            ));
         }
     }
 
@@ -1774,8 +1846,8 @@ async fn try_start_sidecar() -> Option<phazeai_sidecar::SidecarClient> {
     // Look for the sidecar script: project-local first, then config directory
     let cwd = std::env::current_dir().ok()?;
     let local_path = cwd.join("sidecar").join("server.py");
-    let config_path = dirs::config_dir()
-        .map(|d| d.join("phazeai").join("sidecar").join("server.py"));
+    let config_path =
+        dirs::config_dir().map(|d| d.join("phazeai").join("sidecar").join("server.py"));
 
     let script_path = if local_path.exists() {
         local_path

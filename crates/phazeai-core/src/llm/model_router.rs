@@ -49,7 +49,7 @@ impl TaskType {
         let lower = input.to_lowercase();
 
         // Reasoning keywords - should take priority because complex things can be short
-        if lower.contains("explain") 
+        if lower.contains("explain")
             || lower.contains("why")
             || lower.contains("design")
             || lower.contains("architect")
@@ -104,7 +104,6 @@ impl TaskType {
         TaskType::Reasoning
     }
 }
-
 
 /// A route mapping a task type to a specific provider/model pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]

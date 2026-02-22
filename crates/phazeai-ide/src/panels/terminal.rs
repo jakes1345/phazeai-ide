@@ -1,4 +1,4 @@
-use egui::{self, Color32, FontId, RichText, text::LayoutJob, TextFormat};
+use egui::{self, text::LayoutJob, Color32, FontId, RichText, TextFormat};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -18,11 +18,11 @@ pub enum TermColor {
 }
 
 impl TermColor {
-    fn to_egui(&self, default_color: Color32, is_fg: bool) -> Color32 {
+    fn to_egui(self, default_color: Color32, is_fg: bool) -> Color32 {
         match self {
             TermColor::Default => default_color,
-            TermColor::Rgb(r, g, b) => Color32::from_rgb(*r, *g, *b),
-            TermColor::Indexed(idx) => indexed_color(*idx, is_fg),
+            TermColor::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
+            TermColor::Indexed(idx) => indexed_color(idx, is_fg),
         }
     }
 }
@@ -32,22 +32,22 @@ fn indexed_color(idx: u8, is_fg: bool) -> Color32 {
     let basic = [
         // Normal (0-7)
         Color32::from_rgb(0, 0, 0),       // 0 black
-        Color32::from_rgb(194, 54, 33),    // 1 red
-        Color32::from_rgb(37, 188, 36),    // 2 green
-        Color32::from_rgb(173, 173, 39),   // 3 yellow
-        Color32::from_rgb(73, 46, 225),    // 4 blue
-        Color32::from_rgb(211, 56, 211),   // 5 magenta
-        Color32::from_rgb(51, 187, 200),   // 6 cyan
-        Color32::from_rgb(203, 204, 205),  // 7 white
+        Color32::from_rgb(194, 54, 33),   // 1 red
+        Color32::from_rgb(37, 188, 36),   // 2 green
+        Color32::from_rgb(173, 173, 39),  // 3 yellow
+        Color32::from_rgb(73, 46, 225),   // 4 blue
+        Color32::from_rgb(211, 56, 211),  // 5 magenta
+        Color32::from_rgb(51, 187, 200),  // 6 cyan
+        Color32::from_rgb(203, 204, 205), // 7 white
         // Bright (8-15)
-        Color32::from_rgb(129, 131, 131),  // 8 bright black (gray)
-        Color32::from_rgb(252, 57, 31),    // 9 bright red
-        Color32::from_rgb(49, 231, 34),    // 10 bright green
-        Color32::from_rgb(234, 236, 35),   // 11 bright yellow
-        Color32::from_rgb(88, 51, 255),    // 12 bright blue
-        Color32::from_rgb(249, 53, 248),   // 13 bright magenta
-        Color32::from_rgb(20, 240, 240),   // 14 bright cyan
-        Color32::from_rgb(233, 235, 235),  // 15 bright white
+        Color32::from_rgb(129, 131, 131), // 8 bright black (gray)
+        Color32::from_rgb(252, 57, 31),   // 9 bright red
+        Color32::from_rgb(49, 231, 34),   // 10 bright green
+        Color32::from_rgb(234, 236, 35),  // 11 bright yellow
+        Color32::from_rgb(88, 51, 255),   // 12 bright blue
+        Color32::from_rgb(249, 53, 248),  // 13 bright magenta
+        Color32::from_rgb(20, 240, 240),  // 14 bright cyan
+        Color32::from_rgb(233, 235, 235), // 15 bright white
     ];
 
     if (idx as usize) < basic.len() {
@@ -55,7 +55,7 @@ fn indexed_color(idx: u8, is_fg: bool) -> Color32 {
     }
 
     // 216-color cube (16-231)
-    if idx >= 16 && idx <= 231 {
+    if (16..=231).contains(&idx) {
         let i = idx - 16;
         let b = i % 6;
         let g = (i / 6) % 6;
@@ -70,7 +70,11 @@ fn indexed_color(idx: u8, is_fg: bool) -> Color32 {
         return Color32::from_rgb(v, v, v);
     }
 
-    if is_fg { Color32::WHITE } else { Color32::BLACK }
+    if is_fg {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 // ── Terminal Segment (colored text span) ─────────────────────────────────
@@ -87,8 +91,23 @@ pub struct TermSegment {
 }
 
 impl TermSegment {
-    fn new(fg: TermColor, bg: TermColor, bold: bool, italic: bool, underline: bool, dim: bool) -> Self {
-        Self { text: String::new(), fg, bg, bold, italic, underline, dim }
+    fn new(
+        fg: TermColor,
+        bg: TermColor,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        dim: bool,
+    ) -> Self {
+        Self {
+            text: String::new(),
+            fg,
+            bg,
+            bold,
+            italic,
+            underline,
+            dim,
+        }
     }
 }
 
@@ -101,9 +120,12 @@ pub struct TermLine {
 
 impl TermLine {
     fn new() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_char(
         &mut self,
         ch: char,
@@ -115,8 +137,12 @@ impl TermLine {
         dim: bool,
     ) {
         if let Some(last) = self.segments.last_mut() {
-            if last.fg == fg && last.bg == bg && last.bold == bold
-                && last.italic == italic && last.underline == underline && last.dim == dim
+            if last.fg == fg
+                && last.bg == bg
+                && last.bold == bold
+                && last.italic == italic
+                && last.underline == underline
+                && last.dim == dim
             {
                 last.text.push(ch);
                 return;
@@ -174,7 +200,8 @@ impl TermState {
         let italic = self.cur_italic;
         let underline = self.cur_underline;
         let dim = self.cur_dim;
-        self.current_line.push_char(ch, fg, bg, bold, italic, underline, dim);
+        self.current_line
+            .push_char(ch, fg, bg, bold, italic, underline, dim);
     }
 
     fn reset_attrs(&mut self) {
@@ -188,11 +215,7 @@ impl TermState {
 
     fn handle_sgr(&mut self, params: &vte::Params) {
         let mut iter = params.iter();
-        loop {
-            let param = match iter.next() {
-                Some(p) => p,
-                None => break,
-            };
+        while let Some(param) = iter.next() {
             let code = param.first().copied().unwrap_or(0);
             match code {
                 0 => self.reset_attrs(),
@@ -200,7 +223,10 @@ impl TermState {
                 2 => self.cur_dim = true,
                 3 => self.cur_italic = true,
                 4 => self.cur_underline = true,
-                22 => { self.cur_bold = false; self.cur_dim = false; }
+                22 => {
+                    self.cur_bold = false;
+                    self.cur_dim = false;
+                }
                 23 => self.cur_italic = false,
                 24 => self.cur_underline = false,
                 30..=37 => self.cur_fg = TermColor::Indexed(code as u8 - 30),
@@ -209,7 +235,8 @@ impl TermState {
                         match mode.first().copied().unwrap_or(0) {
                             5 => {
                                 if let Some(idx) = iter.next() {
-                                    self.cur_fg = TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
+                                    self.cur_fg =
+                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
                                 }
                             }
                             2 => {
@@ -229,7 +256,8 @@ impl TermState {
                         match mode.first().copied().unwrap_or(0) {
                             5 => {
                                 if let Some(idx) = iter.next() {
-                                    self.cur_bg = TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
+                                    self.cur_bg =
+                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
                                 }
                             }
                             2 => {
@@ -289,19 +317,32 @@ impl Perform for VtePerformer {
             match action {
                 'm' => state.handle_sgr(params),
                 'J' => {
-                    let param = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                    let param = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
                     if param == 2 || param == 3 {
                         state.commit_line();
                     }
                 }
                 'K' => {
-                    let param = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                    let param = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
                     if param == 0 {
                         state.current_line = TermLine::new();
                     }
                 }
                 'A' => {
-                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1).max(1);
+                    let n = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1)
+                        .max(1);
                     if !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
                         state.lines.push(line);
@@ -311,7 +352,11 @@ impl Perform for VtePerformer {
                     state.lines.truncate(len - trim);
                 }
                 'H' | 'f' => {
-                    let row = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1);
+                    let row = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1);
                     if row == 1 && !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
                         state.lines.push(line);
@@ -330,7 +375,8 @@ impl Perform for VtePerformer {
         }
     }
 
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
+    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    }
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
@@ -382,13 +428,29 @@ impl TerminalSession {
         let mut state = self.term_state.lock().unwrap_or_else(|e| e.into_inner());
         let mut header = TermLine::new();
         for ch in "\u{2500}\u{2500}\u{2500} agent ".chars() {
-            header.push_char(ch, TermColor::Indexed(8), TermColor::Default, false, false, false, true);
+            header.push_char(
+                ch,
+                TermColor::Indexed(8),
+                TermColor::Default,
+                false,
+                false,
+                false,
+                true,
+            );
         }
         state.lines.push(header);
         for output_line in text.lines() {
             let mut line = TermLine::new();
             for ch in output_line.chars() {
-                line.push_char(ch, TermColor::Default, TermColor::Default, false, false, false, false);
+                line.push_char(
+                    ch,
+                    TermColor::Default,
+                    TermColor::Default,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
             }
             state.lines.push(line);
         }
@@ -405,7 +467,10 @@ impl TerminalSession {
         state.lines[start..]
             .iter()
             .map(|line| {
-                line.segments.iter().map(|s| s.text.as_str()).collect::<String>()
+                line.segments
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<String>()
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -448,7 +513,9 @@ impl TerminalSession {
     }
 
     fn history_prev(&mut self) {
-        if self.input_history.is_empty() { return; }
+        if self.input_history.is_empty() {
+            return;
+        }
         let pos = match self.history_pos {
             None => self.input_history.len() - 1,
             Some(0) => 0,
@@ -486,7 +553,15 @@ impl TerminalSession {
                 if let Ok(mut state) = self.term_state.lock() {
                     let mut line = TermLine::new();
                     for ch in format!("! PTY error: {e}").chars() {
-                        line.push_char(ch, TermColor::Indexed(1), TermColor::Default, false, false, false, false);
+                        line.push_char(
+                            ch,
+                            TermColor::Indexed(1),
+                            TermColor::Default,
+                            false,
+                            false,
+                            false,
+                            false,
+                        );
                     }
                     state.lines.push(line);
                 }
@@ -506,7 +581,15 @@ impl TerminalSession {
                 if let Ok(mut state) = self.term_state.lock() {
                     let mut line = TermLine::new();
                     for ch in format!("Shell spawn error: {e}").chars() {
-                        line.push_char(ch, TermColor::Indexed(1), TermColor::Default, false, false, false, false);
+                        line.push_char(
+                            ch,
+                            TermColor::Indexed(1),
+                            TermColor::Default,
+                            false,
+                            false,
+                            false,
+                            false,
+                        );
                     }
                     state.lines.push(line);
                 }
@@ -628,7 +711,13 @@ impl TerminalSession {
                         render_term_line(ui, term_line, font_size, default_fg, default_bg);
                     }
                     if !state.current_line.is_empty() {
-                        render_term_line(ui, &state.current_line, font_size, default_fg, default_bg);
+                        render_term_line(
+                            ui,
+                            &state.current_line,
+                            font_size,
+                            default_fg,
+                            default_bg,
+                        );
                     }
                 }
             });
@@ -702,6 +791,12 @@ pub struct TerminalPanel {
     active: usize,
     /// Public flag — set from outside to trigger scroll-to-bottom on the active session.
     pub scroll_to_bottom: bool,
+}
+
+impl Default for TerminalPanel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalPanel {
@@ -792,7 +887,11 @@ impl TerminalPanel {
                         } else {
                             theme.background_secondary
                         };
-                        let text_color = if is_active { theme.text } else { theme.text_secondary };
+                        let text_color = if is_active {
+                            theme.text
+                        } else {
+                            theme.text_secondary
+                        };
 
                         egui::Frame::none()
                             .fill(tab_bg)
@@ -809,18 +908,19 @@ impl TerminalPanel {
                                         self.active = i;
                                     }
                                     // Close button (only show if more than one tab)
-                                    if n > 1 {
-                                        if ui
+                                    if n > 1
+                                        && ui
                                             .add(
                                                 egui::Button::new(
-                                                    RichText::new("×").color(theme.text_secondary).size(11.0),
+                                                    RichText::new("×")
+                                                        .color(theme.text_secondary)
+                                                        .size(11.0),
                                                 )
                                                 .frame(false),
                                             )
                                             .clicked()
-                                        {
-                                            close_idx = Some(i);
-                                        }
+                                    {
+                                        close_idx = Some(i);
                                     }
                                 });
                             });
@@ -829,8 +929,10 @@ impl TerminalPanel {
                     // "+" button — new terminal tab
                     if ui
                         .add(
-                            egui::Button::new(RichText::new("+").color(theme.text_secondary).size(14.0))
-                                .frame(false),
+                            egui::Button::new(
+                                RichText::new("+").color(theme.text_secondary).size(14.0),
+                            )
+                            .frame(false),
                         )
                         .on_hover_text("New terminal")
                         .clicked()
@@ -877,7 +979,9 @@ fn render_term_line(
 
     let mut job = LayoutJob::default();
     for seg in &line.segments {
-        if seg.text.is_empty() { continue; }
+        if seg.text.is_empty() {
+            continue;
+        }
         let fg = seg.fg.to_egui(default_fg, true);
         let mut format = TextFormat {
             font_id: FontId::monospace(font_size),

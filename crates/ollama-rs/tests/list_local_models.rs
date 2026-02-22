@@ -1,4 +1,5 @@
 #[tokio::test]
+#[ignore]
 async fn test_list_local_models() {
     let ollama = ollama_rs::Ollama::default();
 

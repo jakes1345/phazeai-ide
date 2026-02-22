@@ -1,6 +1,6 @@
-use eframe::egui;
-use egui::{RichText, Margin, Rounding, Stroke};
 use crate::themes::ThemeColors;
+use eframe::egui;
+use egui::{Margin, RichText, Rounding, Stroke};
 
 const QUICK_LINKS: &[(&str, &str)] = &[
     ("std", "https://doc.rust-lang.org/std/"),
@@ -20,6 +20,12 @@ pub struct BrowserPanel {
     pub history_index: usize,
     pub loading: bool,
     pub show_history: bool,
+}
+
+impl Default for BrowserPanel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BrowserPanel {
@@ -73,11 +79,9 @@ impl BrowserPanel {
             ui.colored_label(theme.text_muted, RichText::new("Quick:").size(11.0));
             ui.add_space(4.0);
             for (label, url) in QUICK_LINKS {
-                let btn = egui::Button::new(
-                    RichText::new(*label).size(11.0).color(theme.accent)
-                )
-                .fill(theme.background_secondary)
-                .frame(true);
+                let btn = egui::Button::new(RichText::new(*label).size(11.0).color(theme.accent))
+                    .fill(theme.background_secondary)
+                    .frame(true);
                 if ui.add(btn).clicked() {
                     self.navigate_to(url.to_string());
                 }
@@ -88,17 +92,21 @@ impl BrowserPanel {
     fn render_navbar(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         ui.horizontal(|ui| {
             let back_enabled = self.history_index > 0;
-            if ui.add_enabled(back_enabled, egui::Button::new("⬅").frame(false)).clicked() {
+            if ui
+                .add_enabled(back_enabled, egui::Button::new("⬅").frame(false))
+                .clicked()
+            {
                 self.go_back();
             }
             let forward_enabled = self.history_index + 1 < self.history.len();
-            if ui.add_enabled(forward_enabled, egui::Button::new("➡").frame(false)).clicked() {
+            if ui
+                .add_enabled(forward_enabled, egui::Button::new("➡").frame(false))
+                .clicked()
+            {
                 self.go_forward();
             }
-            if ui.button("🔄").clicked() {
-                if !self.url.is_empty() {
-                    self.loading = true;
-                }
+            if ui.button("🔄").clicked() && !self.url.is_empty() {
+                self.loading = true;
             }
             ui.add_space(8.0);
 
@@ -121,9 +129,7 @@ impl BrowserPanel {
                             .text_color(theme.text)
                             .desired_width(ui.available_width() - 40.0);
                         let response = ui.add(text_edit);
-                        if response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             self.navigate_to(self.url.clone());
                         }
                         if self.loading {
@@ -145,10 +151,8 @@ impl BrowserPanel {
             );
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
-                    "Use the quick links above or enter a URL to browse docs.",
-                )
-                .color(theme.text_muted),
+                RichText::new("Use the quick links above or enter a URL to browse docs.")
+                    .color(theme.text_muted),
             );
             ui.add_space(24.0);
 
@@ -160,10 +164,7 @@ impl BrowserPanel {
                         ui.colored_label(theme.accent, "→");
                         ui.vertical(|ui| {
                             ui.colored_label(theme.text, RichText::new(*label).strong());
-                            ui.colored_label(
-                                theme.text_muted,
-                                RichText::new(*url).size(10.0),
-                            );
+                            ui.colored_label(theme.text_muted, RichText::new(*url).size(10.0));
                         });
                         ui.end_row();
                     }
@@ -202,13 +203,9 @@ impl BrowserPanel {
                             );
                         });
                 } else if let Some(rest) = line.strip_prefix("### ") {
-                    ui.label(
-                        RichText::new(rest).size(15.0).color(theme.text).strong(),
-                    );
+                    ui.label(RichText::new(rest).size(15.0).color(theme.text).strong());
                 } else if let Some(rest) = line.strip_prefix("## ") {
-                    ui.label(
-                        RichText::new(rest).size(18.0).color(theme.text).strong(),
-                    );
+                    ui.label(RichText::new(rest).size(18.0).color(theme.text).strong());
                 } else if let Some(rest) = line.strip_prefix("# ") {
                     ui.label(RichText::new(rest).heading().color(theme.text).strong());
                 } else if line.is_empty() {

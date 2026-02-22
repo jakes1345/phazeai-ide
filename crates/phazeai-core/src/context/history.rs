@@ -46,12 +46,12 @@ impl ConversationHistory {
 
     pub fn add_tool_result(&mut self, tool_call_id: impl Into<String>, result: impl Into<String>) {
         let mut result_str = result.into();
-        
+
         // Truncate huge tool results to save context
         const MAX_TOOL_RESULT_LEN: usize = 12000;
         if result_str.len() > MAX_TOOL_RESULT_LEN {
             result_str = format!(
-                "{}... [Truncated {} bytes]", 
+                "{}... [Truncated {} bytes]",
                 &result_str[..MAX_TOOL_RESULT_LEN],
                 result_str.len() - MAX_TOOL_RESULT_LEN
             );
@@ -115,22 +115,22 @@ impl ConversationHistory {
 
     pub fn estimate_tokens(&self) -> usize {
         let mut total = 0;
-        
+
         // System prompt tokens
         if let Some(ref system) = self.system_prompt {
-            total += (system.len() + 3) / 4;
+            total += system.len().div_ceil(4);
         }
 
         // Message tokens
-        total += self.messages
+        total += self
+            .messages
             .iter()
-            .map(|m| (m.content.len() + 3) / 4)
+            .map(|m| m.content.len().div_ceil(4))
             .sum::<usize>();
-            
+
         total
     }
 }
-
 
 impl Default for ConversationHistory {
     fn default() -> Self {

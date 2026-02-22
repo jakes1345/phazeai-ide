@@ -1,9 +1,9 @@
+use crate::error::PhazeError;
+use crate::llm::{LlmClient, Message, Role};
 /// Multi-agent orchestrator for PhazeAI.
 /// Runs planner, coder, and reviewer agents ALL locally through Ollama.
 /// Inspired by goose's subagent system but fully local — zero cloud dependency.
 use std::sync::Arc;
-use crate::llm::{LlmClient, Message, Role};
-use crate::error::PhazeError;
 
 /// Roles in the multi-agent system
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -158,7 +158,10 @@ impl MultiAgentOrchestrator {
         );
 
         // Step 3: Reviewer checks the code
-        Self::emit(&event_tx, MultiAgentEvent::AgentStarted(AgentRole::Reviewer));
+        Self::emit(
+            &event_tx,
+            MultiAgentEvent::AgentStarted(AgentRole::Reviewer),
+        );
 
         let review_context = format!(
             "## Plan\n{}\n\n## Implementation\n{}",

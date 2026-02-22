@@ -5,5 +5,5 @@ pub mod editor;
 pub mod explorer;
 pub mod outline;
 pub mod search;
-pub mod terminal;
 pub mod settings;
+pub mod terminal;

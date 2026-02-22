@@ -39,10 +39,7 @@ impl Tool for GlobTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("glob", "Missing required parameter: pattern"))?;
 
-        let base_path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let base_path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let glob = GlobPattern::new(pattern)
             .map_err(|e| PhazeError::tool("glob", format!("Invalid glob pattern: {e}")))?;
@@ -67,9 +64,7 @@ impl Tool for GlobTool {
             }
 
             let entry_path = entry.path();
-            let relative = entry_path
-                .strip_prefix(base_path)
-                .unwrap_or(entry_path);
+            let relative = entry_path.strip_prefix(base_path).unwrap_or(entry_path);
 
             if glob_set.is_match(relative) {
                 matches.push(entry_path.to_string_lossy().to_string());

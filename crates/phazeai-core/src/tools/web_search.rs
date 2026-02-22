@@ -49,13 +49,15 @@ impl Tool for WebSearchTool {
             .map_err(|e| PhazeError::tool("web_search", format!("HTTP client error: {e}")))?;
 
         // Use DuckDuckGo HTML lite (no API key required)
-        let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding::encode(query));
+        let url = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            urlencoding::encode(query)
+        );
 
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| PhazeError::tool("web_search", format!("Search request failed: {e}")))?;
+        let response =
+            client.get(&url).send().await.map_err(|e| {
+                PhazeError::tool("web_search", format!("Search request failed: {e}"))
+            })?;
 
         let html = response
             .text()
@@ -102,7 +104,12 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<Value> {
         // Clean up the URL (DDG wraps them in a redirect)
         let clean_url = if url.contains("uddg=") {
             urlencoding::decode(
-                url.split("uddg=").nth(1).unwrap_or(&url).split('&').next().unwrap_or(&url)
+                url.split("uddg=")
+                    .nth(1)
+                    .unwrap_or(&url)
+                    .split('&')
+                    .next()
+                    .unwrap_or(&url),
             )
             .unwrap_or_else(|_| url.clone().into())
             .to_string()
@@ -124,7 +131,7 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<Value> {
     results
 }
 
-fn extract_between<'a>(text: &'a str, start: &str, end: &str) -> Option<String> {
+fn extract_between(text: &str, start: &str, end: &str) -> Option<String> {
     let start_idx = text.find(start)? + start.len();
     let remaining = &text[start_idx..];
     let end_idx = remaining.find(end)?;

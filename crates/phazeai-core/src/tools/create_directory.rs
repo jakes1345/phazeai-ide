@@ -29,17 +29,19 @@ impl Tool for CreateDirectoryTool {
     }
 
     async fn execute(&self, params: Value) -> ToolResult {
-        let path_str = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| PhazeError::tool("create_directory", "Missing required parameter: path"))?;
+        let path_str = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+            PhazeError::tool("create_directory", "Missing required parameter: path")
+        })?;
 
         let path = Path::new(path_str);
         let already_existed = path.exists();
 
-        tokio::fs::create_dir_all(path)
-            .await
-            .map_err(|e| PhazeError::tool("create_directory", format!("Failed to create directory: {e}")))?;
+        tokio::fs::create_dir_all(path).await.map_err(|e| {
+            PhazeError::tool(
+                "create_directory",
+                format!("Failed to create directory: {e}"),
+            )
+        })?;
 
         Ok(serde_json::json!({
             "success": true,

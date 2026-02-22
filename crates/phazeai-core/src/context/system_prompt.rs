@@ -169,7 +169,9 @@ impl SystemPromptBuilder {
             let mut current = root.parent();
             let mut depth = 0;
             while let Some(dir) = current {
-                if depth > 5 { break; } // Don't walk up too far
+                if depth > 5 {
+                    break;
+                } // Don't walk up too far
 
                 let parent_claude = dir.join("CLAUDE.md");
                 if parent_claude.exists() {
@@ -229,10 +231,7 @@ impl SystemPromptBuilder {
         // Project context
         if let Some(ref root) = self.project_root {
             prompt.push_str("\n\n## Project Context\n");
-            prompt.push_str(&format!(
-                "- Working directory: {}\n",
-                root.display()
-            ));
+            prompt.push_str(&format!("- Working directory: {}\n", root.display()));
             if let Some(ref pt) = self.project_type {
                 prompt.push_str(&format!("- Project type: {}\n", pt.name()));
             }

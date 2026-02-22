@@ -66,7 +66,6 @@ impl ContextBuilder {
         context
     }
 
-
     fn default_system_prompt() -> String {
         "You are PhazeAI, an advanced AI-powered development environment. \
         You help users write, analyze, and refactor code using available tools.\n\

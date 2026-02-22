@@ -5,7 +5,9 @@ use ollama_rs::{
 
 const CODE_MODEL: &str = "granite-code:3b";
 
+/// Requires a live Ollama instance with granite-code:3b — skip in CI
 #[tokio::test]
+#[ignore]
 async fn typical_c_code_main() {
     const C_PREFIX: &str = "int m";
     const C_SUFFIX: &str = "(int argc, char **argv)";

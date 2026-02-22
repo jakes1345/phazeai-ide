@@ -24,10 +24,7 @@ pub struct LspManager {
 }
 
 impl LspManager {
-    pub fn new(
-        workspace_root: PathBuf,
-        event_tx: mpsc::UnboundedSender<LspEvent>,
-    ) -> Self {
+    pub fn new(workspace_root: PathBuf, event_tx: mpsc::UnboundedSender<LspEvent>) -> Self {
         Self {
             clients: HashMap::new(),
             workspace_root,
@@ -51,7 +48,12 @@ impl LspManager {
             LspServerConfig {
                 command: "typescript-language-server".into(),
                 args: vec!["--stdio".into()],
-                language_ids: vec!["typescript".into(), "javascript".into(), "typescriptreact".into(), "javascriptreact".into()],
+                language_ids: vec![
+                    "typescript".into(),
+                    "javascript".into(),
+                    "typescriptreact".into(),
+                    "javascriptreact".into(),
+                ],
             },
             LspServerConfig {
                 command: "gopls".into(),
@@ -83,7 +85,7 @@ impl LspManager {
     /// Start the appropriate LSP server for a file based on its extension
     pub async fn ensure_server_for_file(&mut self, path: &Path) -> Result<(), String> {
         let language_id = Self::language_id_from_path(path);
-        
+
         if self.clients.contains_key(&language_id) {
             return Ok(());
         }
@@ -109,7 +111,8 @@ impl LspManager {
 
         client.initialize(&self.workspace_root).await?;
 
-        self.clients.insert(language_id, std::sync::Arc::new(client));
+        self.clients
+            .insert(language_id, std::sync::Arc::new(client));
         Ok(())
     }
 
@@ -155,10 +158,15 @@ impl LspManager {
             tracing::info!("Shutting down LSP server for {}", lang);
             // Try to unwrap the Arc to get exclusive access for shutdown
             match std::sync::Arc::try_unwrap(arc_client) {
-                Ok(mut client) => { let _ = client.shutdown().await; }
+                Ok(mut client) => {
+                    let _ = client.shutdown().await;
+                }
                 Err(_) => {
                     // Other references exist; best-effort: send exit notification
-                    tracing::warn!("Could not shutdown LSP client for '{}': Arc still shared", lang);
+                    tracing::warn!(
+                        "Could not shutdown LSP client for '{}': Arc still shared",
+                        lang
+                    );
                 }
             }
         }

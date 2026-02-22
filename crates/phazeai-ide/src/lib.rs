@@ -1,9 +1,9 @@
 pub mod app;
-pub mod themes;
 pub mod keybindings;
 pub mod panels;
 pub mod state;
+pub mod themes;
 
 pub use app::PhazeApp;
-pub use themes::ThemeColors;
 pub use state::IdeState;
+pub use themes::ThemeColors;

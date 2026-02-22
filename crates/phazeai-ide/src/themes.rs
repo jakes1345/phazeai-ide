@@ -56,13 +56,28 @@ impl ThemePreset {
 
     pub fn all() -> Vec<Self> {
         vec![
-            Self::Dark, Self::TokyoNight, Self::TokyoNightStorm, Self::Dracula,
-            Self::Nord, Self::OneDark, Self::Monokai, Self::SolarizedDark,
-            Self::GruvboxDark, Self::CatppuccinMocha, Self::SpectralPurple,
-            Self::MidnightBlue, Self::Cyberpunk, Self::Matrix,
-            Self::Light, Self::TokyoNightDay, Self::SolarizedLight,
-            Self::GruvboxLight, Self::CatppuccinLatte, Self::GitHubLight,
-            Self::HighContrastDark, Self::HighContrastLight,
+            Self::Dark,
+            Self::TokyoNight,
+            Self::TokyoNightStorm,
+            Self::Dracula,
+            Self::Nord,
+            Self::OneDark,
+            Self::Monokai,
+            Self::SolarizedDark,
+            Self::GruvboxDark,
+            Self::CatppuccinMocha,
+            Self::SpectralPurple,
+            Self::MidnightBlue,
+            Self::Cyberpunk,
+            Self::Matrix,
+            Self::Light,
+            Self::TokyoNightDay,
+            Self::SolarizedLight,
+            Self::GruvboxLight,
+            Self::CatppuccinLatte,
+            Self::GitHubLight,
+            Self::HighContrastDark,
+            Self::HighContrastLight,
         ]
     }
 }
@@ -563,7 +578,7 @@ impl ThemeColors {
 
     pub fn apply(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
-        
+
         // --- Premium Global Style ---
         style.visuals.extreme_bg_color = self.background;
         style.visuals.window_fill = self.surface;
@@ -575,20 +590,20 @@ impl ThemeColors {
         style.visuals.window_stroke.color = self.border;
         style.visuals.window_stroke.width = 1.0;
         style.visuals.window_rounding = egui::Rounding::same(12.0);
-        
+
         // Widget states
         style.visuals.widgets.noninteractive.bg_fill = self.surface;
         style.visuals.widgets.noninteractive.fg_stroke.color = self.text;
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
-        
+
         style.visuals.widgets.inactive.bg_fill = self.background_secondary;
         style.visuals.widgets.inactive.fg_stroke.color = self.text_secondary;
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
-        
+
         style.visuals.widgets.hovered.bg_fill = self.surface;
         style.visuals.widgets.hovered.fg_stroke.color = self.text;
         style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
-        
+
         style.visuals.widgets.active.bg_fill = self.accent;
         style.visuals.widgets.active.fg_stroke.color = Color32::WHITE;
         style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);

@@ -49,7 +49,9 @@ impl Tool for SemanticSearchTool {
         let query = params
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PhazeError::tool("semantic_search", "Missing required parameter: query"))?;
+            .ok_or_else(|| {
+                PhazeError::tool("semantic_search", "Missing required parameter: query")
+            })?;
 
         let top_k = params
             .get("top_k")
@@ -114,11 +116,10 @@ impl Tool for BuildIndexTool {
             })
             .unwrap_or_else(|| vec![".".to_string()]);
 
-        let result = self
-            .client
-            .build_index(&paths)
-            .await
-            .map_err(|e| PhazeError::tool("build_search_index", format!("Sidecar error: {e}")))?;
+        let result =
+            self.client.build_index(&paths).await.map_err(|e| {
+                PhazeError::tool("build_search_index", format!("Sidecar error: {e}"))
+            })?;
 
         Ok(result)
     }

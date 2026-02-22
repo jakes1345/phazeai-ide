@@ -139,7 +139,7 @@ impl ToolApprovalManager {
             "kill -9",
             "killall",
             "pkill",
-            ":(){:|:&};:",  // fork bomb
+            ":(){:|:&};:", // fork bomb
             "chmod -r",
             "chown -r",
         ];
@@ -164,7 +164,7 @@ impl ToolApprovalManager {
             "touch",
             "mv ",
             "cp ",
-            ">>",  // append
+            ">>", // append
             "git add",
             "git rm",
         ];
@@ -182,10 +182,26 @@ impl ToolApprovalManager {
 
         // Read-only commands
         let readonly_patterns = [
-            "ls ", "cat ", "head ", "tail ", "grep ", "find ", "echo ",
-            "pwd", "which", "whereis", "whoami", "date", "uname",
-            "git status", "git diff", "git log", "git show",
-            "npm list", "cargo --version", "python --version",
+            "ls ",
+            "cat ",
+            "head ",
+            "tail ",
+            "grep ",
+            "find ",
+            "echo ",
+            "pwd",
+            "which",
+            "whereis",
+            "whoami",
+            "date",
+            "uname",
+            "git status",
+            "git diff",
+            "git log",
+            "git show",
+            "npm list",
+            "cargo --version",
+            "python --version",
         ];
 
         for pattern in &readonly_patterns {
@@ -431,10 +447,8 @@ mod tests {
     fn test_format_approval_prompt() {
         let manager = ToolApprovalManager::default();
 
-        let prompt = manager.format_approval_prompt(
-            "bash",
-            &json!({"command": "rm -rf /tmp/test"}),
-        );
+        let prompt =
+            manager.format_approval_prompt("bash", &json!({"command": "rm -rf /tmp/test"}));
 
         assert!(prompt.contains("bash"));
         assert!(prompt.contains("CRITICAL"));

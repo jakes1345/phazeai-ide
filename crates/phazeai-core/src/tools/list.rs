@@ -32,10 +32,7 @@ impl Tool for ListFilesTool {
     }
 
     async fn execute(&self, params: Value) -> ToolResult {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let recursive = params
             .get("recursive")
@@ -61,9 +58,7 @@ impl Tool for ListFilesTool {
 
             let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
             let entry_path = entry.path();
-            let relative = entry_path
-                .strip_prefix(path)
-                .unwrap_or(entry_path);
+            let relative = entry_path.strip_prefix(path).unwrap_or(entry_path);
 
             files.push(serde_json::json!({
                 "name": relative.to_string_lossy(),

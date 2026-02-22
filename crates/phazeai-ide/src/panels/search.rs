@@ -45,6 +45,12 @@ pub struct SearchPanel {
     replace_status: Option<String>,
 }
 
+impl Default for SearchPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SearchPanel {
     pub fn new() -> Self {
         Self {
@@ -72,7 +78,9 @@ impl SearchPanel {
     pub fn run_search(&mut self) {
         let query = self.query.trim().to_string();
         if query.is_empty() {
-            if let Ok(mut r) = self.results.lock() { r.clear(); }
+            if let Ok(mut r) = self.results.lock() {
+                r.clear();
+            }
             self.result_count = 0;
             return;
         }
@@ -89,7 +97,9 @@ impl SearchPanel {
         let include_glob = self.include_glob.clone();
 
         // Clear old results
-        if let Ok(mut r) = results.lock() { r.clear(); }
+        if let Ok(mut r) = results.lock() {
+            r.clear();
+        }
         *searching.lock().unwrap() = true;
         self.scroll_to_top = true;
 
@@ -120,7 +130,8 @@ impl SearchPanel {
         // Collect unique files
         let files: Vec<PathBuf> = {
             let mut seen = HashSet::new();
-            results.iter()
+            results
+                .iter()
                 .filter(|r| seen.insert(r.file.clone()))
                 .map(|r| r.file.clone())
                 .collect()
@@ -138,22 +149,29 @@ impl SearchPanel {
             let (new_content, n) = if use_regex {
                 // Regex replace using simple line-by-line approach
                 let mut changed = 0;
-                let lines: Vec<String> = content.lines().map(|l| {
-                    if case_sensitive {
-                        if l.contains(&query) {
-                            changed += l.matches(&query).count();
-                            l.replace(&query, &replacement)
-                        } else { l.to_string() }
-                    } else {
-                        let lower = l.to_lowercase();
-                        let ql = query.to_lowercase();
-                        if lower.contains(&ql) {
-                            changed += lower.matches(&ql).count();
-                            // Case-insensitive replace (simple)
-                            replace_case_insensitive(l, &query, &replacement)
-                        } else { l.to_string() }
-                    }
-                }).collect();
+                let lines: Vec<String> = content
+                    .lines()
+                    .map(|l| {
+                        if case_sensitive {
+                            if l.contains(&query) {
+                                changed += l.matches(&query).count();
+                                l.replace(&query, &replacement)
+                            } else {
+                                l.to_string()
+                            }
+                        } else {
+                            let lower = l.to_lowercase();
+                            let ql = query.to_lowercase();
+                            if lower.contains(&ql) {
+                                changed += lower.matches(&ql).count();
+                                // Case-insensitive replace (simple)
+                                replace_case_insensitive(l, &query, &replacement)
+                            } else {
+                                l.to_string()
+                            }
+                        }
+                    })
+                    .collect();
                 let nc = if content.ends_with('\n') {
                     format!("{}\n", lines.join("\n"))
                 } else {
@@ -166,22 +184,25 @@ impl SearchPanel {
                     changed += content.matches(&query).count();
                     content.replace(&query, &replacement)
                 } else {
-                    changed += content.to_lowercase().matches(&query.to_lowercase()).count();
+                    changed += content
+                        .to_lowercase()
+                        .matches(&query.to_lowercase())
+                        .count();
                     replace_case_insensitive(&content, &query, &replacement)
                 };
                 (new, changed)
             };
 
-            if n > 0 {
-                if std::fs::write(file, new_content).is_ok() {
-                    files_changed += 1;
-                    total_replacements += n;
-                }
+            if n > 0 && std::fs::write(file, new_content).is_ok() {
+                files_changed += 1;
+                total_replacements += n;
             }
         }
 
         // Clear results after replacing
-        if let Ok(mut r) = self.results.lock() { r.clear(); }
+        if let Ok(mut r) = self.results.lock() {
+            r.clear();
+        }
         self.result_count = 0;
 
         (files_changed, total_replacements)
@@ -189,9 +210,7 @@ impl SearchPanel {
 
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         let is_searching = *self.is_searching.lock().unwrap_or_else(|e| e.into_inner());
-        let result_count = self.results.lock()
-            .map(|r| r.len())
-            .unwrap_or(0);
+        let result_count = self.results.lock().map(|r| r.len()).unwrap_or(0);
         self.result_count = result_count;
 
         // Header
@@ -203,7 +222,11 @@ impl SearchPanel {
                 } else {
                     egui::RichText::new("↔").color(theme.text_muted)
                 };
-                if ui.button(replace_label).on_hover_text("Toggle replace").clicked() {
+                if ui
+                    .button(replace_label)
+                    .on_hover_text("Toggle replace")
+                    .clicked()
+                {
                     self.show_replace = !self.show_replace;
                 }
             });
@@ -216,13 +239,15 @@ impl SearchPanel {
                 egui::TextEdit::singleline(&mut self.query)
                     .hint_text("Search in workspace...")
                     .desired_width(ui.available_width() - 60.0)
-                    .font(FontId::monospace(13.0))
+                    .font(FontId::monospace(13.0)),
             );
 
-            let enter_pressed = search_resp.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter_pressed =
+                search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-            if ui.add_enabled(!is_searching, egui::Button::new("🔍")).clicked()
+            if ui
+                .add_enabled(!is_searching, egui::Button::new("🔍"))
+                .clicked()
                 || (enter_pressed && !is_searching)
             {
                 self.last_query = self.query.clone();
@@ -238,11 +263,14 @@ impl SearchPanel {
                     egui::TextEdit::singleline(&mut self.replacement)
                         .hint_text("Replace with...")
                         .desired_width(ui.available_width() - 120.0)
-                        .font(FontId::monospace(13.0))
+                        .font(FontId::monospace(13.0)),
                 );
                 let result_count = self.result_count;
                 let enabled = result_count > 0 && !self.query.is_empty();
-                if ui.add_enabled(enabled, egui::Button::new("Replace All")).clicked() {
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Replace All"))
+                    .clicked()
+                {
                     do_replace_all = true;
                 }
             });
@@ -304,7 +332,7 @@ impl SearchPanel {
                 egui::TextEdit::singleline(&mut self.include_glob)
                     .hint_text("*.rs, src/**")
                     .desired_width(ui.available_width() - 8.0)
-                    .font(FontId::monospace(11.0))
+                    .font(FontId::monospace(11.0)),
             );
         });
 
@@ -317,14 +345,20 @@ impl SearchPanel {
                 ui.colored_label(theme.text_muted, "Searching...");
             });
         } else if !self.last_query.is_empty() {
-            let count_color = if result_count == 0 { theme.error } else { theme.success };
+            let count_color = if result_count == 0 {
+                theme.error
+            } else {
+                theme.success
+            };
             ui.colored_label(
                 count_color,
-                RichText::new(format!("{} result{} for \"{}\"",
+                RichText::new(format!(
+                    "{} result{} for \"{}\"",
                     result_count,
                     if result_count == 1 { "" } else { "s" },
                     self.last_query
-                )).size(11.0)
+                ))
+                .size(11.0),
             );
         }
 
@@ -346,13 +380,17 @@ impl SearchPanel {
                         current_file = Some(result.file.clone());
                         ui.add_space(4.0);
 
-                        let rel_path = result.file
+                        let rel_path = result
+                            .file
                             .strip_prefix(self.search_root.as_deref().unwrap_or(&result.file))
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|_| result.file.display().to_string());
 
                         ui.horizontal(|ui| {
-                            ui.colored_label(theme.accent, RichText::new(&rel_path).size(12.0).strong());
+                            ui.colored_label(
+                                theme.accent,
+                                RichText::new(&rel_path).size(12.0).strong(),
+                            );
                         });
                     }
 
@@ -363,28 +401,28 @@ impl SearchPanel {
                         // Line number
                         ui.colored_label(
                             theme.text_muted,
-                            RichText::new(format!("{:4}:", result.line_number)).monospace().size(11.0)
+                            RichText::new(format!("{:4}:", result.line_number))
+                                .monospace()
+                                .size(11.0),
                         );
 
                         // Line text with match highlighted
                         let text = result.line_text.trim();
-                        let text = if text.len() > 120 {
-                            &text[..120]
-                        } else {
-                            text
-                        };
+                        let text = if text.len() > 120 { &text[..120] } else { text };
 
                         let resp = ui.add(
                             egui::Label::new(
                                 RichText::new(text)
                                     .monospace()
                                     .size(11.0)
-                                    .color(theme.text_secondary)
-                            ).sense(egui::Sense::click())
+                                    .color(theme.text_secondary),
+                            )
+                            .sense(egui::Sense::click()),
                         );
 
                         if resp.clicked() {
-                            file_to_open = Some((result.file.clone(), result.line_number.saturating_sub(1)));
+                            file_to_open =
+                                Some((result.file.clone(), result.line_number.saturating_sub(1)));
                         }
 
                         if resp.hovered() {
@@ -442,10 +480,7 @@ fn run_ripgrep(
     args.push(query.to_string());
     args.push(root.to_string_lossy().to_string());
 
-    let output = match std::process::Command::new("rg")
-        .args(&args)
-        .output()
-    {
+    let output = match std::process::Command::new("rg").args(&args).output() {
         Ok(o) => o,
         Err(_) => {
             // Fall back to grep if rg not available
@@ -468,7 +503,9 @@ fn parse_rg_output(output: &str, _root: &PathBuf) -> Vec<SearchResult> {
         let col: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
         let text = parts.next().unwrap_or("").to_string();
 
-        if file_str.is_empty() || line_num == 0 { continue; }
+        if file_str.is_empty() || line_num == 0 {
+            continue;
+        }
 
         let file = PathBuf::from(file_str);
         results.push(SearchResult {
@@ -479,7 +516,9 @@ fn parse_rg_output(output: &str, _root: &PathBuf) -> Vec<SearchResult> {
             match_len: 1, // will be refined if needed
         });
 
-        if results.len() >= 2000 { break; }
+        if results.len() >= 2000 {
+            break;
+        }
     }
 
     results
@@ -487,7 +526,9 @@ fn parse_rg_output(output: &str, _root: &PathBuf) -> Vec<SearchResult> {
 
 /// Case-insensitive string replacement preserving original case where possible.
 fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() { return haystack.to_string(); }
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
     let lower_haystack = haystack.to_lowercase();
     let lower_needle = needle.to_lowercase();
     let mut result = String::with_capacity(haystack.len());
@@ -527,7 +568,9 @@ fn run_grep_fallback(query: &str, root: &PathBuf, case_sensitive: bool) -> Vec<S
         let line_num: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let text = parts.next().unwrap_or("").to_string();
 
-        if file_str.is_empty() { continue; }
+        if file_str.is_empty() {
+            continue;
+        }
 
         results.push(SearchResult {
             file: PathBuf::from(file_str),

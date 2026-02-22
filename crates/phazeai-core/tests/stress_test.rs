@@ -1,58 +1,32 @@
-use phazeai_core::agent::multi_agent::{MultiAgentOrchestrator, AgentTask};
-use phazeai_core::Settings;
-use phazeai_core::error::PhazeError;
+use phazeai_core::agent::multi_agent::{AgentTask, MultiAgentOrchestrator};
+use phazeai_core::llm::OllamaClient;
+use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> Result<(), PhazeError> {
-    println!("🚀 Starting PhazeAI Multi-Agent Stress Test...");
-    
-    let settings = Settings::load();
-    let orchestrator = MultiAgentOrchestrator::new(settings, true); // true = full pipeline (Planner -> Coder -> Reviewer)
-    
-    let task = AgentTask {
-        prompt: "Create a new module `analysis/benchmark.rs` that can run a sample prompt against all `phaze-*` local models and measure tokens per second (TPS) and total latency. Wire it into the CLI as a `/benchmark` command.".to_string(),
-        context_files: vec![
-            "crates/phazeai-core/src/llm/ollama_manager.rs".into(),
-            "crates/phazeai-cli/src/commands.rs".into(),
-        ],
-        project_root: std::env::current_dir().unwrap(),
+/// Smoke test: verify the orchestrator can be constructed and the task struct works.
+/// Does not actually call Ollama (no server required in CI).
+#[test]
+fn test_orchestrator_construction() {
+    let client = Arc::new(OllamaClient::new("qwen2.5-coder:14b"));
+    let orchestrator = MultiAgentOrchestrator::new(client).with_full_pipeline(false);
+    let _task = AgentTask {
+        user_request: "test request".to_string(),
         repo_map: None,
+        relevant_files: vec![],
+        conversation_context: vec![],
     };
+    drop(orchestrator);
+}
 
-    println!("🤖 Executing full pipeline (Planner -> Coder -> Reviewer)...");
-    
-    // We'll use a channel to see real-time events from the agents
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    
-    let handle = tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                phazeai_core::agent::multi_agent::MultiAgentEvent::AgentStarted { role, model } => {
-                    println!("\n▶️  Agent Started: {:?} (Model: {})", role, model);
-                }
-                phazeai_core::agent::multi_agent::MultiAgentEvent::AgentFinished { role, result } => {
-                    println!("\n✅ Agent Finished: {:?}", role);
-                    println!("--- Output Snippet ---\n{}\n---", result.output.chars().take(200).collect::<String>());
-                }
-                phazeai_core::agent::multi_agent::MultiAgentEvent::StepProgress { step, total, description } => {
-                    println!("  [{}/{}] {}", step, total, description);
-                }
-                _ => {}
-            }
-        }
-    });
-
-    match orchestrator.execute(task, Some(tx)).await {
-        Ok(result) => {
-            println!("\n🏁 STRESS TEST COMPLETE!");
-            println!("Status: {:?}", result.status);
-            println!("Final Coder Output: {} chars", result.coder_output.len());
-        }
-        Err(e) => {
-            println!("\n❌ STRESS TEST FAILED: {}", e);
-        }
-    }
-
-    handle.await.unwrap();
-    Ok(())
+#[test]
+fn test_agent_task_fields() {
+    let task = AgentTask {
+        user_request: "Create a benchmark module".to_string(),
+        repo_map: Some("phazeai-ide/\n  src/\n    main.rs".to_string()),
+        relevant_files: vec![("src/main.rs".to_string(), "fn main() {}".to_string())],
+        conversation_context: vec!["previous message".to_string()],
+    };
+    assert_eq!(task.user_request, "Create a benchmark module");
+    assert!(task.repo_map.is_some());
+    assert_eq!(task.relevant_files.len(), 1);
+    assert_eq!(task.conversation_context.len(), 1);
 }

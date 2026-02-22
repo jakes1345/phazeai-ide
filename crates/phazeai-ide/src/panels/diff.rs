@@ -33,7 +33,7 @@ pub struct DiffPanel {
     /// Git root
     pub git_root: Option<PathBuf>,
     /// All changed files (from `git status`)
-    pub changed_files: Vec<(PathBuf, String)>,  // (path, status_code)
+    pub changed_files: Vec<(PathBuf, String)>, // (path, status_code)
     last_refresh: Option<std::time::Instant>,
     /// Staged files ready for commit
     pub staged_files: Vec<PathBuf>,
@@ -42,6 +42,12 @@ pub struct DiffPanel {
     /// Result of last commit
     pub commit_status: Option<String>,
     pub visible: bool,
+}
+
+impl Default for DiffPanel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DiffPanel {
@@ -94,7 +100,9 @@ impl DiffPanel {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
-            if line.len() < 3 { continue; }
+            if line.len() < 3 {
+                continue;
+            }
             let xy = &line[..2];
             let path_str = line[3..].trim();
             let path = if path_str.contains(" -> ") {
@@ -102,7 +110,8 @@ impl DiffPanel {
             } else {
                 path_str
             };
-            self.changed_files.push((git_root.join(path), xy.to_string()));
+            self.changed_files
+                .push((git_root.join(path), xy.to_string()));
         }
     }
 
@@ -128,7 +137,13 @@ impl DiffPanel {
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .or_else(|| {
                 Command::new("git")
-                    .args(["diff", "HEAD", "--unified=3", "--", path.to_str().unwrap_or("")])
+                    .args([
+                        "diff",
+                        "HEAD",
+                        "--unified=3",
+                        "--",
+                        path.to_str().unwrap_or(""),
+                    ])
                     .current_dir(&git_root)
                     .output()
                     .ok()
@@ -147,15 +162,26 @@ impl DiffPanel {
                     let (tag, content) = match change.tag() {
                         ChangeTag::Delete => (LineTag::Removed, change.value().to_string()),
                         ChangeTag::Insert => (LineTag::Added, change.value().to_string()),
-                        ChangeTag::Equal  => (LineTag::Context, change.value().to_string()),
+                        ChangeTag::Equal => (LineTag::Context, change.value().to_string()),
                     };
                     let old = if tag == LineTag::Removed || tag == LineTag::Context {
-                        old_num += 1; Some(old_num)
-                    } else { None };
+                        old_num += 1;
+                        Some(old_num)
+                    } else {
+                        None
+                    };
                     let new = if tag == LineTag::Added || tag == LineTag::Context {
-                        new_num += 1; Some(new_num)
-                    } else { None };
-                    self.lines.push(DiffLine { tag, old_num: old, new_num: new, content });
+                        new_num += 1;
+                        Some(new_num)
+                    } else {
+                        None
+                    };
+                    self.lines.push(DiffLine {
+                        tag,
+                        old_num: old,
+                        new_num: new,
+                        content,
+                    });
                 }
             }
         }
@@ -203,7 +229,9 @@ impl DiffPanel {
 
     /// Commit staged changes.
     pub fn commit(&mut self) {
-        if self.commit_message.trim().is_empty() { return; }
+        if self.commit_message.trim().is_empty() {
+            return;
+        }
         let git_root = match &self.git_root {
             Some(r) => r.clone(),
             None => return,
@@ -235,14 +263,20 @@ impl DiffPanel {
     /// Call this from within the left side panel.
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         // Refresh every 5 seconds
-        if self.last_refresh.map(|t| t.elapsed().as_secs() >= 5).unwrap_or(true) {
+        if self
+            .last_refresh
+            .map(|t| t.elapsed().as_secs() >= 5)
+            .unwrap_or(true)
+        {
             self.refresh();
         }
 
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "GIT");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⟳").clicked() { self.refresh(); }
+                if ui.small_button("⟳").clicked() {
+                    self.refresh();
+                }
             });
         });
         ui.separator();
@@ -269,47 +303,54 @@ impl DiffPanel {
 
     fn show_file_list(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         ui.colored_label(theme.text_muted, RichText::new("CHANGES").size(11.0));
-        ScrollArea::vertical().id_source("diff_file_list").show(ui, |ui| {
-            let files = self.changed_files.clone();
-            let selected = self.selected_file.clone();
+        ScrollArea::vertical()
+            .id_source("diff_file_list")
+            .show(ui, |ui| {
+                let files = self.changed_files.clone();
+                let selected = self.selected_file.clone();
 
-            for (path, status) in &files {
-                let is_selected = selected.as_ref() == Some(path);
-                let is_staged = self.staged_files.contains(path);
+                for (path, status) in &files {
+                    let is_selected = selected.as_ref() == Some(path);
+                    let is_staged = self.staged_files.contains(path);
 
-                let name = path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
 
-                let status_color = match status.trim() {
-                    "M " | " M" | "MM" => theme.warning,
-                    "A " | " A"        => theme.success,
-                    "D " | " D"        => theme.error,
-                    "??"               => theme.text_muted,
-                    _                  => theme.text_secondary,
-                };
+                    let status_color = match status.trim() {
+                        "M " | " M" | "MM" => theme.warning,
+                        "A " | " A" => theme.success,
+                        "D " | " D" => theme.error,
+                        "??" => theme.text_muted,
+                        _ => theme.text_secondary,
+                    };
 
-                ui.horizontal(|ui| {
-                    // Stage/unstage checkbox
-                    let mut staged = is_staged;
-                    if ui.checkbox(&mut staged, "").changed() {
-                        if staged {
-                            self.stage_file(path);
-                        } else {
-                            self.unstage_file(path);
+                    ui.horizontal(|ui| {
+                        // Stage/unstage checkbox
+                        let mut staged = is_staged;
+                        if ui.checkbox(&mut staged, "").changed() {
+                            if staged {
+                                self.stage_file(path);
+                            } else {
+                                self.unstage_file(path);
+                            }
                         }
-                    }
 
-                    let label = RichText::new(format!("{} {}", status.trim(), &name))
-                        .size(12.0)
-                        .color(if is_selected { theme.accent } else { status_color });
-                    if ui.selectable_label(is_selected, label).clicked() {
-                        let p = path.clone();
-                        self.load_diff_for(&p);
-                    }
-                });
-            }
-        });
+                        let label = RichText::new(format!("{} {}", status.trim(), &name))
+                            .size(12.0)
+                            .color(if is_selected {
+                                theme.accent
+                            } else {
+                                status_color
+                            });
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            let p = path.clone();
+                            self.load_diff_for(&p);
+                        }
+                    });
+                }
+            });
     }
 
     fn show_commit_panel(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
@@ -319,11 +360,19 @@ impl DiffPanel {
 
         let staged_count = self.staged_files.len();
         if staged_count > 0 {
-            ui.colored_label(theme.success,
-                RichText::new(format!("{staged_count} file{} staged", if staged_count == 1 { "" } else { "s" })).size(11.0)
+            ui.colored_label(
+                theme.success,
+                RichText::new(format!(
+                    "{staged_count} file{} staged",
+                    if staged_count == 1 { "" } else { "s" }
+                ))
+                .size(11.0),
             );
         } else {
-            ui.colored_label(theme.text_muted, RichText::new("No files staged").size(11.0));
+            ui.colored_label(
+                theme.text_muted,
+                RichText::new("No files staged").size(11.0),
+            );
         }
 
         ui.add_space(4.0);
@@ -332,30 +381,40 @@ impl DiffPanel {
                 .hint_text("Commit message...")
                 .desired_width(ui.available_width())
                 .desired_rows(3)
-                .font(FontId::monospace(11.0))
+                .font(FontId::monospace(11.0)),
         );
         ui.add_space(4.0);
 
         let can_commit = staged_count > 0 && !self.commit_message.trim().is_empty();
-        if ui.add_enabled(can_commit, egui::Button::new(
-            RichText::new("Commit").size(12.0)
-        )).clicked() {
+        if ui
+            .add_enabled(
+                can_commit,
+                egui::Button::new(RichText::new("Commit").size(12.0)),
+            )
+            .clicked()
+        {
             self.commit();
         }
 
         if let Some(ref status) = self.commit_status.clone() {
-            let color = if status.starts_with('✓') { theme.success } else { theme.error };
+            let color = if status.starts_with('✓') {
+                theme.success
+            } else {
+                theme.error
+            };
             ui.colored_label(color, RichText::new(status).size(11.0));
         }
     }
 
     fn show_diff_view(&self, ui: &mut egui::Ui, theme: &ThemeColors) {
         if let Some(ref path) = self.selected_file {
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            ui.colored_label(theme.text_secondary,
-                RichText::new(format!("diff: {name}")).size(12.0)
+            ui.colored_label(
+                theme.text_secondary,
+                RichText::new(format!("diff: {name}")).size(12.0),
             );
             ui.separator();
         }
@@ -370,21 +429,36 @@ impl DiffPanel {
         ScrollArea::both().show(ui, |ui| {
             for line in &self.lines {
                 let (bg, fg, prefix) = match line.tag {
-                    LineTag::Added   => (Color32::from_rgba_premultiplied(0, 80, 0, 40),
-                                        Color32::from_rgb(80, 200, 80), "+"),
-                    LineTag::Removed => (Color32::from_rgba_premultiplied(80, 0, 0, 40),
-                                        Color32::from_rgb(200, 80, 80), "-"),
+                    LineTag::Added => (
+                        Color32::from_rgba_premultiplied(0, 80, 0, 40),
+                        Color32::from_rgb(80, 200, 80),
+                        "+",
+                    ),
+                    LineTag::Removed => (
+                        Color32::from_rgba_premultiplied(80, 0, 0, 40),
+                        Color32::from_rgb(200, 80, 80),
+                        "-",
+                    ),
                     LineTag::Context => (Color32::TRANSPARENT, theme.text_secondary, " "),
-                    LineTag::Hunk    => (Color32::from_rgba_premultiplied(0, 40, 80, 60),
-                                        theme.accent, ""),
+                    LineTag::Hunk => (
+                        Color32::from_rgba_premultiplied(0, 40, 80, 60),
+                        theme.accent,
+                        "",
+                    ),
                 };
 
                 let content = line.content.trim_end_matches('\n');
                 let text = if line.tag == LineTag::Hunk {
                     format!("  {content}")
                 } else {
-                    let old = line.old_num.map(|n| format!("{:4}", n)).unwrap_or_else(|| "    ".to_string());
-                    let new = line.new_num.map(|n| format!("{:4}", n)).unwrap_or_else(|| "    ".to_string());
+                    let old = line
+                        .old_num
+                        .map(|n| format!("{:4}", n))
+                        .unwrap_or_else(|| "    ".to_string());
+                    let new = line
+                        .new_num
+                        .map(|n| format!("{:4}", n))
+                        .unwrap_or_else(|| "    ".to_string());
                     format!("{old} {new} {prefix} {content}")
                 };
 
@@ -394,8 +468,9 @@ impl DiffPanel {
                             .monospace()
                             .size(11.5)
                             .color(fg)
-                            .background_color(bg)
-                    ).wrap()
+                            .background_color(bg),
+                    )
+                    .wrap(),
                 );
                 let _ = resp;
             }
@@ -415,12 +490,16 @@ fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
             // Parse hunk header: @@ -O,o +N,n @@
             if let Some(plus) = line.find('+') {
                 let after = &line[plus + 1..];
-                let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                let end = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
                 new_num = after[..end].parse::<usize>().unwrap_or(1).saturating_sub(1);
             }
             if let Some(minus) = line.find('-') {
                 let after = &line[minus + 1..];
-                let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                let end = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
                 old_num = after[..end].parse::<usize>().unwrap_or(1).saturating_sub(1);
             }
             lines.push(DiffLine {
@@ -435,7 +514,7 @@ fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
                 tag: LineTag::Added,
                 old_num: None,
                 new_num: Some(new_num),
-                content: line[1..].to_string(),
+                content: line.strip_prefix('+').unwrap_or("").to_string(),
             });
         } else if line.starts_with('-') && !line.starts_with("---") {
             old_num += 1;
@@ -443,7 +522,7 @@ fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
                 tag: LineTag::Removed,
                 old_num: Some(old_num),
                 new_num: None,
-                content: line[1..].to_string(),
+                content: line.strip_prefix('-').unwrap_or("").to_string(),
             });
         } else if line.starts_with(' ') {
             old_num += 1;
@@ -452,7 +531,7 @@ fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
                 tag: LineTag::Context,
                 old_num: Some(old_num),
                 new_num: Some(new_num),
-                content: line[1..].to_string(),
+                content: line.strip_prefix(' ').unwrap_or("").to_string(),
             });
         }
         // Skip diff headers (---, +++, diff --, index ...)

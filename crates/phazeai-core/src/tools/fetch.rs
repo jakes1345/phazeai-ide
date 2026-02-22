@@ -77,7 +77,12 @@ impl Tool for FetchTool {
             "DELETE" => client.delete(url),
             "PATCH" => client.patch(url),
             "HEAD" => client.head(url),
-            _ => return Err(PhazeError::tool("fetch", format!("Unsupported method: {method}"))),
+            _ => {
+                return Err(PhazeError::tool(
+                    "fetch",
+                    format!("Unsupported method: {method}"),
+                ))
+            }
         };
 
         // Add custom headers

@@ -2,6 +2,7 @@ use ollama_rs::{models::create::CreateModelRequest, Ollama};
 use tokio_stream::StreamExt;
 
 #[tokio::test]
+#[ignore]
 /// This test needs a Modelfile at /tmp to work
 async fn test_create_model_stream() {
     let ollama = Ollama::default();
@@ -31,6 +32,7 @@ async fn test_create_model_stream() {
 }
 
 #[tokio::test]
+#[ignore]
 /// This test needs a Modelfile at /tmp to work
 async fn test_create_model() {
     let ollama = Ollama::default();

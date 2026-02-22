@@ -143,8 +143,11 @@ fn estimate_context_window(name: &str) -> usize {
     if lower.contains("128k") {
         128_000
     } else if lower.contains("32k")
-        || lower.contains("qwen") || lower.contains("deepseek")
-        || lower.contains("codestral") || lower.contains("coder") {
+        || lower.contains("qwen")
+        || lower.contains("deepseek")
+        || lower.contains("codestral")
+        || lower.contains("coder")
+    {
         32_768
     } else if lower.contains("llama") || lower.contains("mistral") {
         8_192

@@ -11,6 +11,7 @@ use ollama_rs::{
 use std::sync::Arc;
 
 #[tokio::test]
+#[ignore]
 async fn test_send_function_call() {
     /// Model to be used, make sure it is tailored towards "function calling", such as:
     /// - OpenAIFunctionCall: not model specific, degraded performance
@@ -42,6 +43,7 @@ async fn test_send_function_call() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_function_call_with_history() {
     /// Model to be used, make sure it is tailored towards "function calling", such as:
     /// - OpenAIFunctionCall: not model specific, degraded performance
@@ -74,6 +76,7 @@ async fn test_send_function_call_with_history() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_function_call_finance() {
     /// Model to be used, make sure it is tailored towards "function calling", such as:
     /// - OpenAIFunctionCall: not model specific, degraded performance
@@ -100,6 +103,7 @@ async fn test_send_function_call_finance() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_function_call_llama() {
     /// Model to be used, make sure it is tailored towards "function calling", such as:
     /// - OpenAIFunctionCall: not model specific, degraded performance
@@ -126,6 +130,7 @@ async fn test_send_function_call_llama() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_function_call_llama_raw() {
     /// Model to be used, make sure it is tailored towards "function calling", such as:
     /// - OpenAIFunctionCall: not model specific, degraded performance

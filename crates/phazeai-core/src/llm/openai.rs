@@ -263,7 +263,8 @@ impl LlmClient for OpenAIClient {
             use futures::StreamExt;
             let mut buffer = String::new();
             // Maps tool_call index → id, since OpenAI only sends id on the first delta chunk
-            let mut tool_call_ids: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+            let mut tool_call_ids: std::collections::HashMap<u64, String> =
+                std::collections::HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -296,11 +297,8 @@ impl LlmClient for OpenAIClient {
 
                     if let Ok(event) = serde_json::from_str::<Value>(data) {
                         if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
-                            if let Some(delta) =
-                                choices.first().and_then(|c| c.get("delta"))
-                            {
-                                if let Some(content) =
-                                    delta.get("content").and_then(|c| c.as_str())
+                            if let Some(delta) = choices.first().and_then(|c| c.get("delta")) {
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                                 {
                                     let _ = tx.unbounded_send(StreamEvent::TextDelta(
                                         content.to_string(),
@@ -311,22 +309,16 @@ impl LlmClient for OpenAIClient {
                                     delta.get("tool_calls").and_then(|t| t.as_array())
                                 {
                                     for tc in tool_calls {
-                                        let index = tc
-                                            .get("index")
-                                            .and_then(|i| i.as_u64())
-                                            .unwrap_or(0);
+                                        let index =
+                                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                                         // Store id by index on first chunk (id absent on subsequent chunks)
-                                        if let Some(id) =
-                                            tc.get("id").and_then(|i| i.as_str())
-                                        {
+                                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                             if !id.is_empty() {
                                                 tool_call_ids.insert(index, id.to_string());
                                             }
                                         }
-                                        let id = tool_call_ids
-                                            .get(&index)
-                                            .cloned()
-                                            .unwrap_or_default();
+                                        let id =
+                                            tool_call_ids.get(&index).cloned().unwrap_or_default();
                                         if let Some(func) = tc.get("function") {
                                             if let Some(name) =
                                                 func.get("name").and_then(|n| n.as_str())

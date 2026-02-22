@@ -50,25 +50,21 @@ impl Tool for EditTool {
         let old_text = params
             .get("old_text")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PhazeError::tool("edit_file", "Missing required parameter: old_text")
-            })?;
+            .ok_or_else(|| PhazeError::tool("edit_file", "Missing required parameter: old_text"))?;
 
         let new_text = params
             .get("new_text")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PhazeError::tool("edit_file", "Missing required parameter: new_text")
-            })?;
+            .ok_or_else(|| PhazeError::tool("edit_file", "Missing required parameter: new_text"))?;
 
         let replace_all = params
             .get("replace_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| PhazeError::tool("edit_file", format!("Failed to read '{}': {}", path, e)))?;
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            PhazeError::tool("edit_file", format!("Failed to read '{}': {}", path, e))
+        })?;
 
         let match_count = content.matches(old_text).count();
 
@@ -95,9 +91,9 @@ impl Tool for EditTool {
             content.replacen(old_text, new_text, 1)
         };
 
-        tokio::fs::write(path, &new_content)
-            .await
-            .map_err(|e| PhazeError::tool("edit_file", format!("Failed to write '{}': {}", path, e)))?;
+        tokio::fs::write(path, &new_content).await.map_err(|e| {
+            PhazeError::tool("edit_file", format!("Failed to write '{}': {}", path, e))
+        })?;
 
         Ok(serde_json::json!({
             "path": path,

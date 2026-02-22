@@ -54,7 +54,11 @@ struct FileEntry {
     git_state: Option<GitFileState>,
 }
 
-fn load_entries_for(dir: &Path, depth: usize, git_status: &HashMap<PathBuf, GitFileState>) -> Vec<FileEntry> {
+fn load_entries_for(
+    dir: &Path,
+    depth: usize,
+    git_status: &HashMap<PathBuf, GitFileState>,
+) -> Vec<FileEntry> {
     let mut entries: Vec<FileEntry> = Vec::new();
 
     if let Ok(read_dir) = std::fs::read_dir(dir) {
@@ -62,8 +66,13 @@ fn load_entries_for(dir: &Path, depth: usize, git_status: &HashMap<PathBuf, GitF
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            if name.starts_with('.') || name == "node_modules" || name == "target"
-                || name == "__pycache__" || name == "_archive" || name == "dist" || name == "build"
+            if name.starts_with('.')
+                || name == "node_modules"
+                || name == "target"
+                || name == "__pycache__"
+                || name == "_archive"
+                || name == "dist"
+                || name == "build"
             {
                 continue;
             }
@@ -71,16 +80,22 @@ fn load_entries_for(dir: &Path, depth: usize, git_status: &HashMap<PathBuf, GitF
             let is_dir = path.is_dir();
             let git_state = git_status.get(&path).cloned();
 
-            entries.push(FileEntry { name, path, is_dir, depth, expanded: false, children_loaded: false, git_state });
+            entries.push(FileEntry {
+                name,
+                path,
+                is_dir,
+                depth,
+                expanded: false,
+                children_loaded: false,
+                git_state,
+            });
         }
     }
 
-    entries.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     entries
@@ -99,6 +114,12 @@ pub struct ExplorerPanel {
     last_git_refresh: Option<Instant>,
     /// Git root (may differ from explorer root)
     git_root: Option<PathBuf>,
+}
+
+impl Default for ExplorerPanel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ExplorerPanel {
@@ -149,7 +170,9 @@ impl ExplorerPanel {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
-            if line.len() < 3 { continue; }
+            if line.len() < 3 {
+                continue;
+            }
             let xy = &line[..2];
             let path_str = line[3..].trim();
             // Handle renames: "old -> new" format
@@ -169,8 +192,12 @@ impl ExplorerPanel {
         for path in paths {
             let mut parent = path.parent();
             while let Some(p) = parent {
-                if p == git_root { break; }
-                self.git_status.entry(p.to_path_buf()).or_insert(GitFileState::Modified);
+                if p == git_root {
+                    break;
+                }
+                self.git_status
+                    .entry(p.to_path_buf())
+                    .or_insert(GitFileState::Modified);
                 parent = p.parent();
             }
         }
@@ -244,7 +271,11 @@ impl ExplorerPanel {
                     let is_selected = self.selected.as_ref() == Some(&entry.path);
 
                     let icon = if entry.is_dir {
-                        if entry.expanded { "▾ " } else { "▸ " }
+                        if entry.expanded {
+                            "▾ "
+                        } else {
+                            "▸ "
+                        }
                     } else {
                         file_icon(&entry.name)
                     };
@@ -253,7 +284,11 @@ impl ExplorerPanel {
                         theme.accent
                     } else if entry.is_dir {
                         // Directory with changes shows a muted warning color
-                        if entry.git_state.is_some() { theme.warning } else { theme.text }
+                        if entry.git_state.is_some() {
+                            theme.warning
+                        } else {
+                            theme.text
+                        }
                     } else {
                         match &entry.git_state {
                             Some(GitFileState::Added) => theme.success,

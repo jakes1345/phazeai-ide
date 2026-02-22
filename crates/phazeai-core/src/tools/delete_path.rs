@@ -5,8 +5,8 @@ use std::path::Path;
 
 /// Critical paths that must never be deleted
 const PROTECTED_PATHS: &[&str] = &[
-    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp",
-    "/boot", "/dev", "/proc", "/sys", "/lib", "/lib64", "/opt",
+    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp", "/boot", "/dev", "/proc",
+    "/sys", "/lib", "/lib64", "/opt",
 ];
 
 pub struct DeletePathTool;
@@ -43,11 +43,15 @@ impl Tool for DeletePathTool {
         let path = Path::new(path_str);
 
         if !path.exists() {
-            return Err(PhazeError::tool("delete_path", format!("Path does not exist: {path_str}")));
+            return Err(PhazeError::tool(
+                "delete_path",
+                format!("Path does not exist: {path_str}"),
+            ));
         }
 
         // Safety: refuse to delete critical paths
-        let canonical = path.canonicalize()
+        let canonical = path
+            .canonicalize()
             .map_err(|e| PhazeError::tool("delete_path", format!("Cannot resolve path: {e}")))?;
         let canonical_str = canonical.to_string_lossy();
 
@@ -71,9 +75,9 @@ impl Tool for DeletePathTool {
         }
 
         if path.is_file() || path.is_symlink() {
-            tokio::fs::remove_file(path)
-                .await
-                .map_err(|e| PhazeError::tool("delete_path", format!("Failed to delete file: {e}")))?;
+            tokio::fs::remove_file(path).await.map_err(|e| {
+                PhazeError::tool("delete_path", format!("Failed to delete file: {e}"))
+            })?;
 
             Ok(serde_json::json!({
                 "success": true,
@@ -81,9 +85,9 @@ impl Tool for DeletePathTool {
                 "deleted": path_str,
             }))
         } else if path.is_dir() {
-            tokio::fs::remove_dir_all(path)
-                .await
-                .map_err(|e| PhazeError::tool("delete_path", format!("Failed to delete directory: {e}")))?;
+            tokio::fs::remove_dir_all(path).await.map_err(|e| {
+                PhazeError::tool("delete_path", format!("Failed to delete directory: {e}"))
+            })?;
 
             Ok(serde_json::json!({
                 "success": true,
@@ -91,7 +95,10 @@ impl Tool for DeletePathTool {
                 "deleted": path_str,
             }))
         } else {
-            Err(PhazeError::tool("delete_path", format!("Unsupported file type: {path_str}")))
+            Err(PhazeError::tool(
+                "delete_path",
+                format!("Unsupported file type: {path_str}"),
+            ))
         }
     }
 }

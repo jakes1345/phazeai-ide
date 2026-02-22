@@ -40,7 +40,10 @@ impl Tool for OpenTool {
         if !is_url {
             let path = Path::new(path_str);
             if !path.exists() {
-                return Err(PhazeError::tool("open", format!("Path does not exist: {path_str}")));
+                return Err(PhazeError::tool(
+                    "open",
+                    format!("Path does not exist: {path_str}"),
+                ));
             }
         }
 
@@ -59,7 +62,10 @@ impl Tool for OpenTool {
             }))
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(PhazeError::tool("open", format!("Failed to open {path_str}: {stderr}")))
+            Err(PhazeError::tool(
+                "open",
+                format!("Failed to open {path_str}: {stderr}"),
+            ))
         }
     }
 }

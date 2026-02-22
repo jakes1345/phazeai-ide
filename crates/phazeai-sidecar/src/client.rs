@@ -45,7 +45,10 @@ impl SidecarClient {
                 .write_all(request_line.as_bytes())
                 .await
                 .map_err(|e| format!("Write error: {e}"))?;
-            stdin.flush().await.map_err(|e| format!("Flush error: {e}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| format!("Flush error: {e}"))?;
         }
 
         // Read response

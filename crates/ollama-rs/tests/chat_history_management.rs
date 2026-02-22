@@ -115,7 +115,9 @@ fn test_chat_history_freed_if_limit_exceeded() {
     assert_eq!(last.unwrap().content, "Hi again".to_string());
 }
 
+/// Requires a live Ollama instance — skip in CI
 #[tokio::test]
+#[ignore]
 async fn test_chat_history_accumulated() {
     let mut ollama = Ollama::new_default_with_history(30);
     let chat_id = "default";

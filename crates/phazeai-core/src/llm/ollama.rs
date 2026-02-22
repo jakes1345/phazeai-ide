@@ -111,9 +111,9 @@ impl LlmClient for OllamaClient {
             .await
             .map_err(|e| PhazeError::Llm(format!("Ollama chat error: {e}")))?;
 
-        let chat_msg = response.message.unwrap_or_else(|| {
-            OllamaChatMessage::assistant(String::new())
-        });
+        let chat_msg = response
+            .message
+            .unwrap_or_else(|| OllamaChatMessage::assistant(String::new()));
 
         let content = chat_msg.content.clone();
 
@@ -128,8 +128,7 @@ impl LlmClient for OllamaClient {
                 call_type: "function".to_string(),
                 function: FunctionCall {
                     name: tc.function.name.clone(),
-                    arguments: serde_json::to_string(&tc.function.arguments)
-                        .unwrap_or_default(),
+                    arguments: serde_json::to_string(&tc.function.arguments).unwrap_or_default(),
                 },
             })
             .collect();
@@ -174,9 +173,7 @@ impl LlmClient for OllamaClient {
                         id: tc.id.clone(),
                         arguments_delta: tc.function.arguments.clone(),
                     });
-                    let _ = tx.unbounded_send(StreamEvent::ToolCallEnd {
-                        id: tc.id.clone(),
-                    });
+                    let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id: tc.id.clone() });
                 }
             }
 
@@ -204,9 +201,8 @@ impl LlmClient for OllamaClient {
                     Ok(response) => {
                         if let Some(msg) = &response.message {
                             if !msg.content.is_empty() {
-                                let _ = tx.unbounded_send(StreamEvent::TextDelta(
-                                    msg.content.clone(),
-                                ));
+                                let _ =
+                                    tx.unbounded_send(StreamEvent::TextDelta(msg.content.clone()));
                             }
                         }
                         if response.done {

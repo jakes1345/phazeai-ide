@@ -69,11 +69,20 @@ impl SettingsPanel {
                         self.show_appearance(ui, theme);
                         ui.add_space(16.0);
                     }
-                    if self.section_matches(&q, &["llm", "provider", "model", "api", "key", "base", "url", "tokens", "claude", "openai", "ollama", "groq"]) {
+                    if self.section_matches(
+                        &q,
+                        &[
+                            "llm", "provider", "model", "api", "key", "base", "url", "tokens",
+                            "claude", "openai", "ollama", "groq",
+                        ],
+                    ) {
                         self.show_llm(ui, theme);
                         ui.add_space(16.0);
                     }
-                    if self.section_matches(&q, &["editor", "tab", "line", "numbers", "auto", "save", "indent"]) {
+                    if self.section_matches(
+                        &q,
+                        &["editor", "tab", "line", "numbers", "auto", "save", "indent"],
+                    ) {
                         self.show_editor(ui, theme);
                         ui.add_space(16.0);
                     }
@@ -81,7 +90,9 @@ impl SettingsPanel {
                         self.show_sidecar(ui, theme);
                         ui.add_space(16.0);
                     }
-                    if self.section_matches(&q, &["keybind", "shortcut", "hotkey", "key", "binding"]) {
+                    if self
+                        .section_matches(&q, &["keybind", "shortcut", "hotkey", "key", "binding"])
+                    {
                         self.show_keybindings(ui, theme);
                         ui.add_space(16.0);
                     }
@@ -118,7 +129,10 @@ impl SettingsPanel {
                 .show_ui(ui, |ui: &mut egui::Ui| {
                     for preset in ThemePreset::all() {
                         let name = preset.name().to_string();
-                        if ui.selectable_value(&mut self.theme_preset, preset, &name).changed() {
+                        if ui
+                            .selectable_value(&mut self.theme_preset, preset, &name)
+                            .changed()
+                        {
                             self.settings.editor.theme = name;
                             self.settings_changed = true;
                         }
@@ -129,7 +143,10 @@ impl SettingsPanel {
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "Font size:");
             if ui
-                .add(egui::Slider::new(&mut self.settings.editor.font_size, 10.0..=24.0))
+                .add(egui::Slider::new(
+                    &mut self.settings.editor.font_size,
+                    10.0..=24.0,
+                ))
                 .changed()
             {
                 self.settings_changed = true;
@@ -138,17 +155,31 @@ impl SettingsPanel {
     }
 
     fn show_llm(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
-        ui.colored_label(theme.text, RichText::new("LLM Provider").strong().size(16.0));
+        ui.colored_label(
+            theme.text,
+            RichText::new("LLM Provider").strong().size(16.0),
+        );
         ui.separator();
 
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "Provider:");
-            let providers = ["Claude", "OpenAI", "Ollama", "Groq", "Together.ai", "OpenRouter", "LM Studio"];
+            let providers = [
+                "Claude",
+                "OpenAI",
+                "Ollama",
+                "Groq",
+                "Together.ai",
+                "OpenRouter",
+                "LM Studio",
+            ];
             egui::ComboBox::from_id_source("provider_selector")
                 .selected_text(providers[self.provider_idx])
                 .show_ui(ui, |ui: &mut egui::Ui| {
                     for (i, name) in providers.iter().enumerate() {
-                        if ui.selectable_value(&mut self.provider_idx, i, *name).changed() {
+                        if ui
+                            .selectable_value(&mut self.provider_idx, i, *name)
+                            .changed()
+                        {
                             self.settings.llm.provider = match i {
                                 0 => LlmProvider::Claude,
                                 1 => LlmProvider::OpenAI,
@@ -166,7 +197,10 @@ impl SettingsPanel {
 
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "Model:");
-            if ui.text_edit_singleline(&mut self.settings.llm.model).changed() {
+            if ui
+                .text_edit_singleline(&mut self.settings.llm.model)
+                .changed()
+            {
                 self.settings_changed = true;
             }
         });
@@ -224,7 +258,10 @@ impl SettingsPanel {
         });
 
         if ui
-            .checkbox(&mut self.settings.editor.show_line_numbers, "Show line numbers")
+            .checkbox(
+                &mut self.settings.editor.show_line_numbers,
+                "Show line numbers",
+            )
             .changed()
         {
             self.settings_changed = true;
@@ -239,7 +276,10 @@ impl SettingsPanel {
     }
 
     fn show_sidecar(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
-        ui.colored_label(theme.text, RichText::new("Python Sidecar").strong().size(16.0));
+        ui.colored_label(
+            theme.text,
+            RichText::new("Python Sidecar").strong().size(16.0),
+        );
         ui.separator();
 
         if ui
@@ -268,7 +308,10 @@ impl SettingsPanel {
     }
 
     fn show_keybindings(&self, ui: &mut egui::Ui, theme: &ThemeColors) {
-        ui.colored_label(theme.text, RichText::new("Keyboard Shortcuts").strong().size(16.0));
+        ui.colored_label(
+            theme.text,
+            RichText::new("Keyboard Shortcuts").strong().size(16.0),
+        );
         ui.separator();
         ui.add_space(4.0);
 
@@ -298,7 +341,9 @@ impl SettingsPanel {
         ui.add_space(4.0);
         ui.colored_label(
             theme.text_muted,
-            RichText::new("Custom keybinding editor coming soon.").size(11.0).italics(),
+            RichText::new("Custom keybinding editor coming soon.")
+                .size(11.0)
+                .italics(),
         );
     }
 }

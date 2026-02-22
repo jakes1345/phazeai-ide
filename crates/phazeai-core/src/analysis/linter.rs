@@ -156,10 +156,7 @@ impl Linter {
             if todo_re.is_match(line) {
                 issues.push(Issue {
                     line: line_num + 1,
-                    column: todo_re
-                        .find(line)
-                        .map(|m| m.start())
-                        .unwrap_or(0),
+                    column: todo_re.find(line).map(|m| m.start()).unwrap_or(0),
                     severity: Severity::Info,
                     message: "TODO/FIXME comment found".into(),
                     suggestion: None,
@@ -214,7 +211,10 @@ mod tests {
     fn test_python_bare_except() {
         let code = "try:\n    pass\nexcept:\n    pass";
         let analysis = Linter::analyze(code, Language::Python);
-        assert!(analysis.issues.iter().any(|i| i.message.contains("Bare except")));
+        assert!(analysis
+            .issues
+            .iter()
+            .any(|i| i.message.contains("Bare except")));
     }
 
     #[test]

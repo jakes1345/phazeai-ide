@@ -222,7 +222,8 @@ async fn test_add_multiple_files() {
     let git_ops = GitOps::new(repo_path);
 
     // Add multiple files at once
-    git_ops.add(&["file1.txt", "file2.txt", "file3.txt"])
+    git_ops
+        .add(&["file1.txt", "file2.txt", "file3.txt"])
         .await
         .unwrap();
 

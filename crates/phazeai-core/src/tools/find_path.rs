@@ -48,29 +48,20 @@ impl Tool for FindPathTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("find_path", "Missing required parameter: pattern"))?;
 
-        let base_path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let base_path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let max_depth = params
             .get("max_depth")
             .and_then(|v| v.as_u64())
             .map(|d| d as usize);
 
-        let type_filter = params
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("any");
+        let type_filter = params.get("type").and_then(|v| v.as_str()).unwrap_or("any");
 
         let regex = Regex::new(pattern)
             .map_err(|e| PhazeError::tool("find_path", format!("Invalid regex: {e}")))?;
 
         let mut builder = WalkBuilder::new(base_path);
-        builder
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true);
+        builder.hidden(false).git_ignore(true).git_global(true);
 
         if let Some(depth) = max_depth {
             builder.max_depth(Some(depth));

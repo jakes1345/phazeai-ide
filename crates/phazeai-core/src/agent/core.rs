@@ -1,29 +1,51 @@
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
-use crate::llm::{LlmClient, Message, StreamEvent, ToolCall, FunctionCall};
+use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
 use crate::tools::{ToolDefinition, ToolRegistry};
 use futures::StreamExt;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::pin::Pin;
-use std::future::Future;
 
 /// Events emitted during agent execution - the shared CLI/IDE interface.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    Thinking { iteration: usize },
+    Thinking {
+        iteration: usize,
+    },
     TextDelta(String),
-    ToolApprovalRequest { name: String, params: Value },
-    ToolStart { name: String },
-    ToolResult { name: String, success: bool, summary: String },
-    Complete { iterations: usize },
+    ToolApprovalRequest {
+        name: String,
+        params: Value,
+    },
+    ToolStart {
+        name: String,
+    },
+    ToolResult {
+        name: String,
+        success: bool,
+        summary: String,
+    },
+    Complete {
+        iterations: usize,
+    },
     Error(String),
     // Browser Integration
-    BrowserFetchStart { url: String },
-    BrowserFetchComplete { url: String, title: String, content: String },
-    BrowserFetchError { url: String, error: String },
+    BrowserFetchStart {
+        url: String,
+    },
+    BrowserFetchComplete {
+        url: String,
+        title: String,
+        content: String,
+    },
+    BrowserFetchError {
+        url: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +56,9 @@ pub struct AgentResponse {
 }
 
 /// Callback invoked before tool execution. Returns true to approve, false to deny.
-pub type ApprovalFn = Box<dyn Fn(String, serde_json::Value) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+pub type ApprovalFn = Box<
+    dyn Fn(String, serde_json::Value) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+>;
 
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
@@ -98,7 +122,9 @@ impl Agent {
         let conversation = self.conversation.clone();
         let prompt = prompt.into();
         // Use blocking lock since this is called during construction
-        let mut conv = conversation.try_lock().expect("Agent not yet shared during construction");
+        let mut conv = conversation
+            .try_lock()
+            .expect("Agent not yet shared during construction");
         conv.set_system_prompt(prompt);
         drop(conv);
         self
@@ -139,7 +165,9 @@ impl Agent {
             }
 
             iterations += 1;
-            let _ = event_tx.send(AgentEvent::Thinking { iteration: iterations });
+            let _ = event_tx.send(AgentEvent::Thinking {
+                iteration: iterations,
+            });
 
             let messages = {
                 let conversation = self.conversation.lock().await;
@@ -171,7 +199,10 @@ impl Agent {
                     StreamEvent::ToolCallStart { id, name } => {
                         current_tool_calls.insert(id.clone(), (name, String::new()));
                     }
-                    StreamEvent::ToolCallDelta { id, arguments_delta } => {
+                    StreamEvent::ToolCallDelta {
+                        id,
+                        arguments_delta,
+                    } => {
                         if let Some((_, args)) = current_tool_calls.get_mut(&id) {
                             args.push_str(&arguments_delta);
                         }
@@ -181,10 +212,7 @@ impl Agent {
                             tool_calls.push(ToolCall {
                                 id: id.clone(),
                                 call_type: "function".to_string(),
-                                function: FunctionCall {
-                                    name,
-                                    arguments,
-                                },
+                                function: FunctionCall { name, arguments },
                             });
                         }
                     }
@@ -233,7 +261,10 @@ impl Agent {
                             // Add denial to conversation so LLM knows
                             {
                                 let mut conversation = self.conversation.lock().await;
-                                conversation.add_tool_result(&tool_call.id, "Error: Tool execution denied by user");
+                                conversation.add_tool_result(
+                                    &tool_call.id,
+                                    "Error: Tool execution denied by user",
+                                );
                             }
                             tool_executions.push(ToolExecution {
                                 tool_name: tool_name.clone(),
@@ -309,8 +340,8 @@ impl Agent {
         if let Some(tool) = self.tools.get(tool_name) {
             match tool.execute(params).await {
                 Ok(value) => {
-                    let result_str = serde_json::to_string_pretty(&value)
-                        .unwrap_or_else(|_| value.to_string());
+                    let result_str =
+                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                     (true, result_str)
                 }
                 Err(e) => (false, format!("Error: {e}")),

@@ -1,5 +1,5 @@
-use egui::{self, RichText};
 use crate::themes::ThemeColors;
+use egui::{self, RichText};
 
 #[derive(Clone)]
 pub struct OutlineSymbol {
@@ -26,28 +26,28 @@ impl SymbolKind {
     pub fn icon(&self) -> &'static str {
         match self {
             SymbolKind::Function => "ƒ",
-            SymbolKind::Struct   => "◻",
-            SymbolKind::Enum     => "≡",
-            SymbolKind::Trait    => "τ",
-            SymbolKind::Impl     => "⊕",
-            SymbolKind::Module   => "◈",
-            SymbolKind::Class    => "⬡",
+            SymbolKind::Struct => "◻",
+            SymbolKind::Enum => "≡",
+            SymbolKind::Trait => "τ",
+            SymbolKind::Impl => "⊕",
+            SymbolKind::Module => "◈",
+            SymbolKind::Class => "⬡",
             SymbolKind::Constant => "π",
-            SymbolKind::Type     => "Τ",
+            SymbolKind::Type => "Τ",
         }
     }
 
     pub fn color(&self, theme: &ThemeColors) -> egui::Color32 {
         match self {
             SymbolKind::Function => egui::Color32::from_rgb(100, 180, 255),
-            SymbolKind::Struct   => egui::Color32::from_rgb(100, 220, 140),
-            SymbolKind::Enum     => egui::Color32::from_rgb(220, 160, 80),
-            SymbolKind::Trait    => egui::Color32::from_rgb(180, 120, 220),
-            SymbolKind::Impl     => egui::Color32::from_rgb(120, 200, 200),
-            SymbolKind::Module   => theme.text_secondary,
-            SymbolKind::Class    => egui::Color32::from_rgb(100, 220, 140),
+            SymbolKind::Struct => egui::Color32::from_rgb(100, 220, 140),
+            SymbolKind::Enum => egui::Color32::from_rgb(220, 160, 80),
+            SymbolKind::Trait => egui::Color32::from_rgb(180, 120, 220),
+            SymbolKind::Impl => egui::Color32::from_rgb(120, 200, 200),
+            SymbolKind::Module => theme.text_secondary,
+            SymbolKind::Class => egui::Color32::from_rgb(100, 220, 140),
             SymbolKind::Constant => egui::Color32::from_rgb(220, 100, 100),
-            SymbolKind::Type     => egui::Color32::from_rgb(180, 180, 80),
+            SymbolKind::Type => egui::Color32::from_rgb(180, 180, 80),
         }
     }
 }
@@ -57,6 +57,12 @@ pub struct OutlinePanel {
     pub filter: String,
     /// Set by show() when user clicks a symbol; caller reads and clears it.
     pub jump_to_line: Option<usize>,
+}
+
+impl Default for OutlinePanel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OutlinePanel {
@@ -96,7 +102,10 @@ impl OutlinePanel {
                     ui.add_space(20.0);
                     ui.colored_label(theme.text_muted, "No symbols found.");
                     ui.add_space(4.0);
-                    ui.colored_label(theme.text_muted, RichText::new("Open a file to see its outline.").small());
+                    ui.colored_label(
+                        theme.text_muted,
+                        RichText::new("Open a file to see its outline.").small(),
+                    );
                 });
                 return;
             }
@@ -118,9 +127,7 @@ impl OutlinePanel {
                             ui.colored_label(icon_color, sym.kind.icon());
                             ui.add_space(4.0);
                             let label = egui::Label::new(
-                                RichText::new(&sym.name)
-                                    .color(theme.text)
-                                    .size(13.0)
+                                RichText::new(&sym.name).color(theme.text).size(13.0),
                             )
                             .sense(egui::Sense::click());
                             let resp = ui.add(label);
@@ -168,39 +175,92 @@ fn extract_rust(content: &str) -> Vec<OutlineSymbol> {
 
         if let Some(rest) = stripped.strip_prefix("fn ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Function, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Function,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("struct ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Struct, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Struct,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("enum ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Enum, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Enum,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("trait ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Trait, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Trait,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("impl ") {
             // impl Foo or impl Bar for Foo
             let name = if let Some(for_pos) = rest.find(" for ") {
-                format!("impl {} for {}", rest[for_pos + 5..].split('{').next().unwrap_or("").trim(), rest[..for_pos].trim())
+                format!(
+                    "impl {} for {}",
+                    rest[for_pos + 5..].split('{').next().unwrap_or("").trim(),
+                    rest[..for_pos].trim()
+                )
             } else {
-                format!("impl {}", rest.split('{').next().unwrap_or("").split('<').next().unwrap_or("").trim())
+                format!(
+                    "impl {}",
+                    rest.split('{')
+                        .next()
+                        .unwrap_or("")
+                        .split('<')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                )
             };
-            symbols.push(OutlineSymbol { name, kind: SymbolKind::Impl, line: line_idx, indent });
+            symbols.push(OutlineSymbol {
+                name,
+                kind: SymbolKind::Impl,
+                line: line_idx,
+                indent,
+            });
         } else if let Some(rest) = stripped.strip_prefix("mod ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Module, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Module,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("type ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Type, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Type,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("const ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Constant, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Constant,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
     }
@@ -215,16 +275,30 @@ fn extract_python(content: &str) -> Vec<OutlineSymbol> {
 
         if let Some(rest) = trimmed.strip_prefix("def ") {
             if let Some(name) = extract_identifier(rest) {
-                let kind = if indent > 0 { SymbolKind::Function } else { SymbolKind::Function };
-                symbols.push(OutlineSymbol { name, kind, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Function,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("async def ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Function, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Function,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = trimmed.strip_prefix("class ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Class, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Class,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
     }
@@ -238,32 +312,64 @@ fn extract_js_ts(content: &str) -> Vec<OutlineSymbol> {
         let indent = (line.len() - trimmed.len()) / 2;
 
         // function foo() / async function foo()
-        let stripped = trimmed.trim_start_matches("export default ").trim_start_matches("export ");
+        let stripped = trimmed
+            .trim_start_matches("export default ")
+            .trim_start_matches("export ");
         let stripped = stripped.trim_start_matches("async ");
         if let Some(rest) = stripped.strip_prefix("function ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Function, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Function,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("class ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Class, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Class,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("interface ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Trait, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Trait,
+                    line: line_idx,
+                    indent,
+                });
             }
         } else if let Some(rest) = stripped.strip_prefix("type ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Type, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Type,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
         // const foo = () => / const foo = function
         else if let Some(rest) = stripped.strip_prefix("const ") {
             if let Some(name) = extract_identifier(rest) {
                 if rest.contains("=>") || rest.contains("function") {
-                    symbols.push(OutlineSymbol { name, kind: SymbolKind::Function, line: line_idx, indent });
+                    symbols.push(OutlineSymbol {
+                        name,
+                        kind: SymbolKind::Function,
+                        line: line_idx,
+                        indent,
+                    });
                 } else {
-                    symbols.push(OutlineSymbol { name, kind: SymbolKind::Constant, line: line_idx, indent });
+                    symbols.push(OutlineSymbol {
+                        name,
+                        kind: SymbolKind::Constant,
+                        line: line_idx,
+                        indent,
+                    });
                 }
             }
         }
@@ -282,17 +388,33 @@ fn extract_go(content: &str) -> Vec<OutlineSymbol> {
             let name = if rest.starts_with('(') {
                 // method with receiver — extract method name
                 let after_paren = rest.find(')').and_then(|i| rest.get(i + 2..));
-                after_paren.and_then(|s| extract_identifier(s)).unwrap_or_else(|| "func".to_string())
+                after_paren
+                    .and_then(extract_identifier)
+                    .unwrap_or_else(|| "func".to_string())
             } else {
                 extract_identifier(rest).unwrap_or_else(|| "func".to_string())
             };
-            symbols.push(OutlineSymbol { name, kind: SymbolKind::Function, line: line_idx, indent });
+            symbols.push(OutlineSymbol {
+                name,
+                kind: SymbolKind::Function,
+                line: line_idx,
+                indent,
+            });
         } else if let Some(rest) = trimmed.strip_prefix("type ") {
             if let Some(name) = extract_identifier(rest) {
-                let kind = if rest.contains("struct") { SymbolKind::Struct }
-                    else if rest.contains("interface") { SymbolKind::Trait }
-                    else { SymbolKind::Type };
-                symbols.push(OutlineSymbol { name, kind, line: line_idx, indent });
+                let kind = if rest.contains("struct") {
+                    SymbolKind::Struct
+                } else if rest.contains("interface") {
+                    SymbolKind::Trait
+                } else {
+                    SymbolKind::Type
+                };
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
     }
@@ -308,7 +430,12 @@ fn extract_c(content: &str) -> Vec<OutlineSymbol> {
         // struct Foo {
         if let Some(rest) = trimmed.strip_prefix("struct ") {
             if let Some(name) = extract_identifier(rest) {
-                symbols.push(OutlineSymbol { name, kind: SymbolKind::Struct, line: line_idx, indent });
+                symbols.push(OutlineSymbol {
+                    name,
+                    kind: SymbolKind::Struct,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
         // typedef struct Foo / typedef enum Foo
@@ -316,17 +443,34 @@ fn extract_c(content: &str) -> Vec<OutlineSymbol> {
             if trimmed.contains("struct") {
                 if let Some(rest) = trimmed.split("struct").nth(1) {
                     if let Some(name) = extract_identifier(rest.trim()) {
-                        symbols.push(OutlineSymbol { name, kind: SymbolKind::Struct, line: line_idx, indent });
+                        symbols.push(OutlineSymbol {
+                            name,
+                            kind: SymbolKind::Struct,
+                            line: line_idx,
+                            indent,
+                        });
                     }
                 }
             }
         }
         // Simple function-like: return_type name(
-        else if !trimmed.starts_with("//") && !trimmed.starts_with("*") && trimmed.contains('(') && !trimmed.contains(';') {
+        else if !trimmed.starts_with("//")
+            && !trimmed.starts_with("*")
+            && trimmed.contains('(')
+            && !trimmed.contains(';')
+        {
             let before_paren = trimmed.split('(').next().unwrap_or("");
             let last_word = before_paren.split_whitespace().last().unwrap_or("");
-            if !last_word.is_empty() && last_word.chars().all(|c| c.is_alphanumeric() || c == '_') && !is_c_keyword(last_word) {
-                symbols.push(OutlineSymbol { name: last_word.to_string(), kind: SymbolKind::Function, line: line_idx, indent });
+            if !last_word.is_empty()
+                && last_word.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !is_c_keyword(last_word)
+            {
+                symbols.push(OutlineSymbol {
+                    name: last_word.to_string(),
+                    kind: SymbolKind::Function,
+                    line: line_idx,
+                    indent,
+                });
             }
         }
     }
@@ -334,13 +478,33 @@ fn extract_c(content: &str) -> Vec<OutlineSymbol> {
 }
 
 fn is_c_keyword(s: &str) -> bool {
-    matches!(s, "if" | "else" | "for" | "while" | "switch" | "return" | "void" | "int" | "char" | "long" | "unsigned" | "static" | "extern" | "inline")
+    matches!(
+        s,
+        "if" | "else"
+            | "for"
+            | "while"
+            | "switch"
+            | "return"
+            | "void"
+            | "int"
+            | "char"
+            | "long"
+            | "unsigned"
+            | "static"
+            | "extern"
+            | "inline"
+    )
 }
 
 /// Extract the first identifier from a string (stops at whitespace, `<`, `(`, `{`).
 fn extract_identifier(s: &str) -> Option<String> {
-    let ident: String = s.chars()
+    let ident: String = s
+        .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect();
-    if ident.is_empty() { None } else { Some(ident) }
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident)
+    }
 }

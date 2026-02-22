@@ -10,17 +10,26 @@ async fn create_test_files(temp_dir: &TempDir) -> PathBuf {
     let test_dir = temp_dir.path().to_path_buf();
 
     // Create some test files
-    tokio::fs::write(test_dir.join("test.txt"), "line 1\nline 2\nline 3\nline 4\nline 5")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        test_dir.join("test.txt"),
+        "line 1\nline 2\nline 3\nline 4\nline 5",
+    )
+    .await
+    .unwrap();
 
-    tokio::fs::write(test_dir.join("hello.txt"), "Hello World\nFoo Bar\nHello Again")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        test_dir.join("hello.txt"),
+        "Hello World\nFoo Bar\nHello Again",
+    )
+    .await
+    .unwrap();
 
-    tokio::fs::write(test_dir.join("test.rs"), "fn main() {\n    println!(\"Hello\");\n}")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        test_dir.join("test.rs"),
+        "fn main() {\n    println!(\"Hello\");\n}",
+    )
+    .await
+    .unwrap();
 
     // Create subdirectory
     tokio::fs::create_dir(test_dir.join("subdir"))
@@ -54,7 +63,10 @@ async fn test_read_file_full() {
         .await
         .unwrap();
 
-    assert_eq!(result["path"], test_dir.join("test.txt").to_string_lossy().to_string());
+    assert_eq!(
+        result["path"],
+        test_dir.join("test.txt").to_string_lossy().to_string()
+    );
     assert_eq!(result["total_lines"], 5);
     assert_eq!(result["lines_shown"], 5);
     assert!(result["content"].as_str().unwrap().contains("line 1"));
@@ -375,7 +387,9 @@ async fn test_bash_persistent_cwd() {
     let tool = BashTool::new(test_dir.to_path_buf());
 
     // Create a test directory
-    tokio::fs::create_dir(test_dir.join("testdir")).await.unwrap();
+    tokio::fs::create_dir(test_dir.join("testdir"))
+        .await
+        .unwrap();
 
     // Change directory in one command and check we're still there
     let result = tool
@@ -464,7 +478,9 @@ async fn test_grep_regex_search() {
     assert_eq!(result["pattern"], "line [0-9]");
     let matches = result["matches"].as_array().unwrap();
     assert!(matches.len() > 0);
-    assert!(matches.iter().any(|m| m["content"].as_str().unwrap().contains("line 1")));
+    assert!(matches
+        .iter()
+        .any(|m| m["content"].as_str().unwrap().contains("line 1")));
 }
 
 #[tokio::test]

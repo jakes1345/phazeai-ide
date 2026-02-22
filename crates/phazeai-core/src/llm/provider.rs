@@ -261,8 +261,7 @@ impl ProviderRegistry {
                 Ok(Box::new(client))
             }
             ProviderId::Ollama => {
-                let client =
-                    super::OllamaClient::new(model).with_base_url(&config.base_url);
+                let client = super::OllamaClient::new(model).with_base_url(&config.base_url);
                 Ok(Box::new(client))
             }
             // All other providers use OpenAI-compatible API
@@ -457,10 +456,8 @@ impl UsageTracker {
     }
 
     pub fn estimated_cost(&self, model: &ModelInfo) -> f64 {
-        let input_cost =
-            (self.total_input_tokens as f64 / 1_000_000.0) * model.input_cost_per_m;
-        let output_cost =
-            (self.total_output_tokens as f64 / 1_000_000.0) * model.output_cost_per_m;
+        let input_cost = (self.total_input_tokens as f64 / 1_000_000.0) * model.input_cost_per_m;
+        let output_cost = (self.total_output_tokens as f64 / 1_000_000.0) * model.output_cost_per_m;
         input_cost + output_cost
     }
 

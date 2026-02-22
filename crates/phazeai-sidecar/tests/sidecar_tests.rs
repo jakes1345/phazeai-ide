@@ -197,7 +197,10 @@ fn test_jsonrpc_error_serialization_roundtrip() {
     let serialized = serde_json::to_value(&response).unwrap();
     assert_eq!(serialized["error"]["code"], -32603);
     assert_eq!(serialized["error"]["message"], "Internal error");
-    assert_eq!(serialized["error"]["data"]["details"], "Something went wrong");
+    assert_eq!(
+        serialized["error"]["data"]["details"],
+        "Something went wrong"
+    );
 }
 
 // ============================================================================
@@ -273,7 +276,11 @@ async fn test_sidecar_manager_start_with_valid_script() {
     let script_path = temp_file.path();
 
     // Write a simple Python script that exits immediately
-    std::fs::write(script_path, "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n").unwrap();
+    std::fs::write(
+        script_path,
+        "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n",
+    )
+    .unwrap();
 
     // Check if Python is available first
     if !SidecarManager::check_python("python3").await {
@@ -300,8 +307,9 @@ async fn test_sidecar_manager_take_process_returns_some_after_start() {
 
     std::fs::write(
         script_path,
-        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n"
-    ).unwrap();
+        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n",
+    )
+    .unwrap();
 
     // Check if Python is available first
     if !SidecarManager::check_python("python3").await {
@@ -330,8 +338,9 @@ async fn test_sidecar_manager_stop_cleans_up_process() {
 
     std::fs::write(
         script_path,
-        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n"
-    ).unwrap();
+        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n",
+    )
+    .unwrap();
 
     if !SidecarManager::check_python("python3").await {
         eprintln!("Python3 not available, skipping test");
@@ -355,8 +364,9 @@ async fn test_sidecar_manager_start_when_already_running() {
 
     std::fs::write(
         script_path,
-        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n"
-    ).unwrap();
+        "#!/usr/bin/env python3\nimport time\nwhile True: time.sleep(1)\n",
+    )
+    .unwrap();
 
     if !SidecarManager::check_python("python3").await {
         eprintln!("Python3 not available, skipping test");

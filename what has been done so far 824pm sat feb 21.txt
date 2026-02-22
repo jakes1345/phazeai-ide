@@ -1,0 +1,37 @@
+
+    ✻
+    |
+   ▟█▙     Claude Code v2.1.50
+ ▐▛███▜▌   Sonnet 4.6 · Claude Pro
+▝▜█████▛▘  ~/phazeai_ide
+  ▘▘ ▝▝  
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Read TODO.md (221 lines)
+  ⎿  Read packaging/windows/build-msi.ps1 (65 lines)
+  ⎿  Read packaging/windows/phazeai-ide.wxs (145 lines)
+  ⎿  Read packaging/macos/entitlements.plist (21 lines)
+  ⎿  Read packaging/macos/build-dmg.sh (126 lines)
+  ⎿  Skills restored (sisyphus)
+  ⎿  You're out of extra usage · resets 10pm (America/Chicago)
+     /upgrade or /extra-usage to finish what you’re working on.
+
+● Ran 1 stop hook (ctrl+o to expand)
+  ⎿  Stop hook prevented continuation
+
+✻ Brewed for 2m 16s
+
+● Agent "Research charmbracelet/crush repo" completed
+  ⎿  You're out of extra usage · resets 10pm (America/Chicago)
+     /upgrade or /extra-usage to finish what you’re working on.
+
+● Ran 1 stop hook (ctrl+o to expand)
+  ⎿  Stop hook prevented continuation
+
+● Agent "Research openai/codex and charmbracelet/crush repos" completed
+  ⎿  You're out of extra usage · resets 10pm (America/Chicago)
+     /upgrade or /extra-usage to finish what you’re working on.
+
+● Ran 1 stop hook (ctrl+o to expand)
+  ⎿  Stop hook prevented continuation

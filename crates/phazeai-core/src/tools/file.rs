@@ -42,9 +42,9 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("read_file", "Missing required parameter: path"))?;
 
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| PhazeError::tool("read_file", format!("Failed to read '{}': {}", path, e)))?;
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            PhazeError::tool("read_file", format!("Failed to read '{}': {}", path, e))
+        })?;
 
         let offset = params
             .get("offset")
@@ -115,9 +115,7 @@ impl Tool for WriteFileTool {
         let content = params
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PhazeError::tool("write_file", "Missing required parameter: content")
-            })?;
+            .ok_or_else(|| PhazeError::tool("write_file", "Missing required parameter: content"))?;
 
         if let Some(parent) = Path::new(path).parent() {
             if !parent.exists() {

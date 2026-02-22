@@ -2,6 +2,7 @@ use ollama_rs::Ollama;
 use tokio_stream::StreamExt;
 
 #[tokio::test]
+#[ignore]
 async fn test_pull_model() {
     let ollama = Ollama::default();
 

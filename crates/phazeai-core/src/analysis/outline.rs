@@ -3,7 +3,6 @@
 /// Inspired by Zed's outline view and Aider's repo map.
 use std::path::Path;
 
-
 /// A symbol extracted from source code
 #[derive(Debug, Clone)]
 pub struct CodeSymbol {
@@ -113,30 +112,25 @@ pub fn generate_repo_map(root: &Path) -> String {
     let mut map = String::new();
     let walker = ignore::Walk::new(root);
 
-    for entry in walker {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
 
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-            // Only process source code files
-            if !is_source_file(ext) {
-                continue;
-            }
+        // Only process source code files
+        if !is_source_file(ext) {
+            continue;
+        }
 
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let symbols = extract_symbols_generic(&content, ext);
-                if !symbols.is_empty() {
-                    let relative = path.strip_prefix(root).unwrap_or(path);
-                    map.push_str(&symbols_to_repo_map(relative, &symbols));
-                    map.push('\n');
-                }
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let symbols = extract_symbols_generic(&content, ext);
+            if !symbols.is_empty() {
+                let relative = path.strip_prefix(root).unwrap_or(path);
+                map.push_str(&symbols_to_repo_map(relative, &symbols));
+                map.push('\n');
             }
         }
     }
@@ -147,9 +141,25 @@ pub fn generate_repo_map(root: &Path) -> String {
 fn is_source_file(ext: &str) -> bool {
     matches!(
         ext,
-        "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "c" | "cpp"
-            | "cc" | "cxx" | "h" | "hpp" | "java" | "rb" | "lua"
-            | "sh" | "bash" | "mjs" | "mts"
+        "rs" | "py"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "go"
+            | "c"
+            | "cpp"
+            | "cc"
+            | "cxx"
+            | "h"
+            | "hpp"
+            | "java"
+            | "rb"
+            | "lua"
+            | "sh"
+            | "bash"
+            | "mjs"
+            | "mts"
     )
 }
 
@@ -250,7 +260,9 @@ fn extract_rust_symbols(source: &str, symbols: &mut Vec<CodeSymbol>) {
             && !trimmed.contains("//")
         {
             symbols.push(CodeSymbol {
-                name: extract_word_after(trimmed, "mod").trim_end_matches(';').to_string(),
+                name: extract_word_after(trimmed, "mod")
+                    .trim_end_matches(';')
+                    .to_string(),
                 kind: SymbolKind::Module,
                 start_line: line_num + 1,
                 end_line: line_num + 1,
@@ -309,11 +321,7 @@ fn extract_python_symbols(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
         // Functions/methods
         if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
-            let name = if trimmed.starts_with("async ") {
-                extract_word_after(trimmed, "def")
-            } else {
-                extract_word_after(trimmed, "def")
-            };
+            let name = extract_word_after(trimmed, "def");
             let name = name.trim_end_matches('(').trim_end_matches(':').to_string();
 
             let sig = trimmed.trim_end_matches(':').to_string();
@@ -711,7 +719,9 @@ class MyClass:
         return x
 "#;
         let symbols = extract_symbols_generic(src, "py");
-        assert!(symbols.iter().any(|s| s.name == "MyClass" && s.kind == SymbolKind::Class));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "MyClass" && s.kind == SymbolKind::Class));
     }
 
     #[test]

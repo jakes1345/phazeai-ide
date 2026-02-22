@@ -258,7 +258,8 @@ impl LlmClient for ClaudeClient {
             use futures::StreamExt;
             let mut buffer = String::new();
             // Maps content_block index → tool_use id, so delta events can find their tool call
-            let mut tool_block_ids: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+            let mut tool_block_ids: std::collections::HashMap<u64, String> =
+                std::collections::HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -291,22 +292,20 @@ impl LlmClient for ClaudeClient {
                         match event_type {
                             Some("content_block_delta") => {
                                 if let Some(delta) = event.get("delta") {
-                                    let delta_type =
-                                        delta.get("type").and_then(|t| t.as_str());
+                                    let delta_type = delta.get("type").and_then(|t| t.as_str());
                                     match delta_type {
                                         Some("text_delta") => {
                                             if let Some(text) =
                                                 delta.get("text").and_then(|t| t.as_str())
                                             {
-                                                let _ = tx.unbounded_send(
-                                                    StreamEvent::TextDelta(text.to_string()),
-                                                );
+                                                let _ = tx.unbounded_send(StreamEvent::TextDelta(
+                                                    text.to_string(),
+                                                ));
                                             }
                                         }
                                         Some("input_json_delta") => {
-                                            if let Some(partial) = delta
-                                                .get("partial_json")
-                                                .and_then(|t| t.as_str())
+                                            if let Some(partial) =
+                                                delta.get("partial_json").and_then(|t| t.as_str())
                                             {
                                                 let index = event
                                                     .get("index")
@@ -328,9 +327,7 @@ impl LlmClient for ClaudeClient {
                             }
                             Some("content_block_start") => {
                                 if let Some(cb) = event.get("content_block") {
-                                    if cb.get("type").and_then(|t| t.as_str())
-                                        == Some("tool_use")
-                                    {
+                                    if cb.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                                         let index = event
                                             .get("index")
                                             .and_then(|i| i.as_u64())
@@ -346,17 +343,16 @@ impl LlmClient for ClaudeClient {
                                             .unwrap_or("")
                                             .to_string();
                                         tool_block_ids.insert(index, id.clone());
-                                        let _ = tx.unbounded_send(
-                                            StreamEvent::ToolCallStart { id, name },
-                                        );
+                                        let _ = tx.unbounded_send(StreamEvent::ToolCallStart {
+                                            id,
+                                            name,
+                                        });
                                     }
                                 }
                             }
                             Some("content_block_stop") => {
-                                let index = event
-                                    .get("index")
-                                    .and_then(|i| i.as_u64())
-                                    .unwrap_or(0);
+                                let index =
+                                    event.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                                 if let Some(id) = tool_block_ids.remove(&index) {
                                     let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
                                 }

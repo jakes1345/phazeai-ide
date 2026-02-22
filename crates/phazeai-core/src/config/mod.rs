@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::llm::provider::{ProviderId, ProviderConfig, ProviderRegistry};
-use crate::llm::model_router::{TaskType, ModelRoute, ModelRouter};
+use crate::llm::model_router::{ModelRoute, ModelRouter, TaskType};
+use crate::llm::provider::{ProviderConfig, ProviderId, ProviderRegistry};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -175,7 +175,9 @@ impl Settings {
     }
 
     /// Build an LLM client from the current settings.
-    pub fn build_llm_client(&self) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
+    pub fn build_llm_client(
+        &self,
+    ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
         let registry = self.build_provider_registry();
         let default_client = registry.build_active_client()?;
 

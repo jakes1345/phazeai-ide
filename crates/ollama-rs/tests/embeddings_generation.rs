@@ -1,6 +1,7 @@
 use ollama_rs::{generation::embeddings::request::GenerateEmbeddingsRequest, Ollama};
 
 #[tokio::test]
+#[ignore]
 async fn test_embeddings_generation() {
     let ollama = Ollama::default();
 
@@ -16,6 +17,7 @@ async fn test_embeddings_generation() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_batch_embeddings_generation() {
     let ollama = Ollama::default();
 

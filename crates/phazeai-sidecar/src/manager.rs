@@ -35,7 +35,11 @@ impl SidecarManager {
             ));
         }
 
-        info!("Starting Python sidecar: {} {}", self.python_path, self.script_path.display());
+        info!(
+            "Starting Python sidecar: {} {}",
+            self.python_path,
+            self.script_path.display()
+        );
 
         let child = Command::new(&self.python_path)
             .arg(&self.script_path)

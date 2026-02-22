@@ -1,8 +1,8 @@
-use phazeai_core::{
-    Agent, AgentEvent, LlmClient, LlmResponse, Message, Role, StreamEvent,
-    Tool, ToolDefinition, ToolRegistry, ToolResult, PhazeError,
-};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
+use phazeai_core::{
+    Agent, AgentEvent, LlmClient, LlmResponse, Message, PhazeError, Role, StreamEvent, Tool,
+    ToolDefinition, ToolRegistry, ToolResult,
+};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::unbounded_channel;
@@ -105,12 +105,10 @@ impl Tool for ErrorTool {
 
 #[tokio::test]
 async fn test_simple_text_response() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Hello".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Hello".to_string()),
+        StreamEvent::Done,
+    ]]);
 
     let agent = Agent::new(Box::new(mock));
     let response = agent.run("Test").await.unwrap();
@@ -122,15 +120,13 @@ async fn test_simple_text_response() {
 
 #[tokio::test]
 async fn test_multi_token_streaming() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Hello".to_string()),
-            StreamEvent::TextDelta(" ".to_string()),
-            StreamEvent::TextDelta("world".to_string()),
-            StreamEvent::TextDelta("!".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Hello".to_string()),
+        StreamEvent::TextDelta(" ".to_string()),
+        StreamEvent::TextDelta("world".to_string()),
+        StreamEvent::TextDelta("!".to_string()),
+        StreamEvent::Done,
+    ]]);
 
     let agent = Agent::new(Box::new(mock));
     let response = agent.run("Test").await.unwrap();
@@ -232,15 +228,12 @@ async fn test_max_iterations_reached() {
 
 #[tokio::test]
 async fn test_system_prompt_is_set() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("OK".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("OK".to_string()),
+        StreamEvent::Done,
+    ]]);
 
-    let agent = Agent::new(Box::new(mock))
-        .with_system_prompt("You are a helpful assistant.");
+    let agent = Agent::new(Box::new(mock)).with_system_prompt("You are a helpful assistant.");
 
     let _ = agent.run("Test").await.unwrap();
 
@@ -254,15 +247,12 @@ async fn test_system_prompt_is_set() {
 
 #[tokio::test]
 async fn test_clear_conversation() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Response".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Response".to_string()),
+        StreamEvent::Done,
+    ]]);
 
-    let agent = Agent::new(Box::new(mock))
-        .with_system_prompt("System prompt");
+    let agent = Agent::new(Box::new(mock)).with_system_prompt("System prompt");
 
     let _ = agent.run("Test message").await.unwrap();
 
@@ -280,13 +270,11 @@ async fn test_clear_conversation() {
 
 #[tokio::test]
 async fn test_event_channel_receives_all_events() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Hello".to_string()),
-            StreamEvent::TextDelta(" world".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Hello".to_string()),
+        StreamEvent::TextDelta(" world".to_string()),
+        StreamEvent::Done,
+    ]]);
 
     let agent = Agent::new(Box::new(mock));
     let (tx, mut rx) = unbounded_channel();
@@ -314,11 +302,9 @@ async fn test_event_channel_receives_all_events() {
 
 #[tokio::test]
 async fn test_llm_error_propagation() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::Error("LLM connection failed".to_string()),
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![StreamEvent::Error(
+        "LLM connection failed".to_string(),
+    )]]);
 
     let agent = Agent::new(Box::new(mock));
     let result = agent.run("Test").await;
@@ -464,7 +450,9 @@ async fn test_tool_execution_error() {
     assert_eq!(response.content, "Handled error");
     assert_eq!(response.tool_calls.len(), 1);
     assert!(!response.tool_calls[0].success);
-    assert!(response.tool_calls[0].result_summary.contains("Intentional error"));
+    assert!(response.tool_calls[0]
+        .result_summary
+        .contains("Intentional error"));
 }
 
 #[tokio::test]
@@ -501,7 +489,9 @@ async fn test_invalid_tool_arguments() {
     assert_eq!(response.content, "Invalid args handled");
     assert_eq!(response.tool_calls.len(), 1);
     assert!(!response.tool_calls[0].success);
-    assert!(response.tool_calls[0].result_summary.contains("Failed to parse"));
+    assert!(response.tool_calls[0]
+        .result_summary
+        .contains("Failed to parse"));
 }
 
 #[tokio::test]
@@ -548,8 +538,12 @@ async fn test_tool_event_emissions() {
     handle.await.unwrap();
 
     // Find the tool events
-    let has_tool_start = events.iter().any(|e| matches!(e, AgentEvent::ToolStart { name } if name == "echo"));
-    let has_tool_result = events.iter().any(|e| matches!(e, AgentEvent::ToolResult { name, success, .. } if name == "echo" && *success));
+    let has_tool_start = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolStart { name } if name == "echo"));
+    let has_tool_result = events.iter().any(
+        |e| matches!(e, AgentEvent::ToolResult { name, success, .. } if name == "echo" && *success),
+    );
 
     assert!(has_tool_start, "Should have ToolStart event");
     assert!(has_tool_result, "Should have ToolResult event");
@@ -557,15 +551,12 @@ async fn test_tool_event_emissions() {
 
 #[tokio::test]
 async fn test_estimated_tokens() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Response".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Response".to_string()),
+        StreamEvent::Done,
+    ]]);
 
-    let agent = Agent::new(Box::new(mock))
-        .with_system_prompt("System prompt");
+    let agent = Agent::new(Box::new(mock)).with_system_prompt("System prompt");
 
     let _ = agent.run("User message").await.unwrap();
 
@@ -577,15 +568,12 @@ async fn test_estimated_tokens() {
 
 #[tokio::test]
 async fn test_conversation_history_structure() {
-    let mock = MockLlm::new(vec![
-        vec![
-            StreamEvent::TextDelta("Assistant response".to_string()),
-            StreamEvent::Done,
-        ],
-    ]);
+    let mock = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Assistant response".to_string()),
+        StreamEvent::Done,
+    ]]);
 
-    let agent = Agent::new(Box::new(mock))
-        .with_system_prompt("You are helpful");
+    let agent = Agent::new(Box::new(mock)).with_system_prompt("You are helpful");
 
     let _ = agent.run("User question").await.unwrap();
 
@@ -667,18 +655,15 @@ async fn test_approval_callback_denies_tool() {
     ]);
 
     // Create approval callback that denies all tools
-    let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(|_tool_name, _params| {
-        Box::pin(async move { false })
-    });
+    let approval_fn: phazeai_core::agent::ApprovalFn =
+        Box::new(|_tool_name, _params| Box::pin(async move { false }));
 
     let agent = Agent::new(Box::new(mock))
         .with_tools(registry)
         .with_approval(approval_fn);
 
     let (tx, mut rx) = unbounded_channel();
-    let handle = tokio::spawn(async move {
-        agent.run_with_events("Test", tx).await
-    });
+    let handle = tokio::spawn(async move { agent.run_with_events("Test", tx).await });
 
     let mut events = Vec::new();
     while let Some(event) = rx.recv().await {
@@ -691,15 +676,20 @@ async fn test_approval_callback_denies_tool() {
     let response = handle.await.unwrap().unwrap();
 
     // Should have approval request event
-    let has_approval_request = events.iter().any(|e| {
-        matches!(e, AgentEvent::ToolApprovalRequest { name, .. } if name == "echo")
-    });
-    assert!(has_approval_request, "Should emit ToolApprovalRequest event");
+    let has_approval_request = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolApprovalRequest { name, .. } if name == "echo"));
+    assert!(
+        has_approval_request,
+        "Should emit ToolApprovalRequest event"
+    );
 
     // Tool should have been denied
     assert_eq!(response.tool_calls.len(), 1);
     assert!(!response.tool_calls[0].success);
-    assert!(response.tool_calls[0].result_summary.contains("denied by user"));
+    assert!(response.tool_calls[0]
+        .result_summary
+        .contains("denied by user"));
 }
 
 #[tokio::test]
@@ -731,9 +721,8 @@ async fn test_approval_callback_approves_tool() {
     ]);
 
     // Create approval callback that approves all tools
-    let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(|_tool_name, _params| {
-        Box::pin(async move { true })
-    });
+    let approval_fn: phazeai_core::agent::ApprovalFn =
+        Box::new(|_tool_name, _params| Box::pin(async move { true }));
 
     let agent = Agent::new(Box::new(mock))
         .with_tools(registry)

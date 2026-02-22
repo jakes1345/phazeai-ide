@@ -69,15 +69,13 @@ impl Tool for BashTool {
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c").arg(command).current_dir(&cwd);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| {
-            PhazeError::tool("bash", format!("Command timed out after {timeout_secs}s"))
-        })?
-        .map_err(|e| PhazeError::tool("bash", format!("Failed to execute: {e}")))?;
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .map_err(|_| {
+                    PhazeError::tool("bash", format!("Command timed out after {timeout_secs}s"))
+                })?
+                .map_err(|e| PhazeError::tool("bash", format!("Failed to execute: {e}")))?;
 
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();

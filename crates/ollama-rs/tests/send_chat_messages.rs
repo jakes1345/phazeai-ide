@@ -13,6 +13,7 @@ use ollama_rs::{
 const PROMPT: &str = "Why is the sky blue?";
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_stream() {
     let ollama = Ollama::default();
 
@@ -39,6 +40,7 @@ async fn test_send_chat_messages_stream() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages() {
     let ollama = Ollama::default();
 
@@ -56,6 +58,7 @@ async fn test_send_chat_messages() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_with_history_stream() {
     let mut ollama = Ollama::new_default_with_history(30);
     let id = "default";
@@ -88,6 +91,7 @@ async fn test_send_chat_messages_with_history_stream() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_with_history() {
     let mut ollama = Ollama::new_default_with_history(30);
     let id = "default".to_string();
@@ -132,6 +136,7 @@ async fn test_send_chat_messages_with_history() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_remove_old_history_with_limit_less_than_min() {
     // Setting history length to 1 but the minimum is 2
     let mut ollama = Ollama::new_default_with_history(1);
@@ -153,6 +158,7 @@ async fn test_send_chat_messages_remove_old_history_with_limit_less_than_min() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_remove_old_history() {
     let mut ollama = Ollama::new_default_with_history(3);
     let id = "default".to_string();
@@ -191,6 +197,7 @@ async fn test_send_chat_messages_remove_old_history() {
 const IMAGE_URL: &str = "https://images.pexels.com/photos/1054655/pexels-photo-1054655.jpeg";
 
 #[tokio::test]
+#[ignore]
 async fn test_send_chat_messages_with_images() {
     let ollama = Ollama::default();
 

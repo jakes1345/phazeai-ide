@@ -70,22 +70,26 @@ async fn main() -> Result<()> {
     }
 
     let extra_instructions = if let Some(ref instructions_path) = cli.instructions {
-        std::fs::read_to_string(instructions_path)
-            .ok()
+        std::fs::read_to_string(instructions_path).ok()
     } else {
         None
     };
 
     // Auto-provision phaze-beast if needed
-    if settings.llm.provider == phazeai_core::config::LlmProvider::Ollama 
-        && settings.llm.model == "phaze-beast" 
+    if settings.llm.provider == phazeai_core::config::LlmProvider::Ollama
+        && settings.llm.model == "phaze-beast"
     {
-        let base_url = settings.llm.base_url.clone()
+        let base_url = settings
+            .llm
+            .base_url
+            .clone()
             .unwrap_or_else(|| "http://localhost:11434".to_string());
-        
+
         if let Ok(manager) = phazeai_core::llm::OllamaManager::new(&base_url) {
             if let Err(e) = manager.ensure_phaze_beast().await {
-                tracing::warn!("Failed to auto-provision phaze-beast: {e}. Falling back to existing models.");
+                tracing::warn!(
+                    "Failed to auto-provision phaze-beast: {e}. Falling back to existing models."
+                );
             }
         }
     }
@@ -93,7 +97,14 @@ async fn main() -> Result<()> {
     if let Some(prompt) = cli.prompt {
         app::run_single_prompt(&settings, &prompt, extra_instructions.as_deref()).await?;
     } else {
-        app::run_tui(settings, &cli.theme, cli.continue_last, cli.resume, extra_instructions.as_deref()).await?;
+        app::run_tui(
+            settings,
+            &cli.theme,
+            cli.continue_last,
+            cli.resume,
+            extra_instructions.as_deref(),
+        )
+        .await?;
     }
 
     Ok(())

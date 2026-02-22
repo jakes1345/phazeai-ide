@@ -1,9 +1,9 @@
-mod history;
 mod builder;
-pub mod system_prompt;
+mod history;
 pub mod persistence;
+pub mod system_prompt;
 
-pub use history::ConversationHistory;
 pub use builder::ContextBuilder;
-pub use system_prompt::{SystemPromptBuilder, ProjectType, collect_git_info};
-pub use persistence::{ConversationStore, ConversationMetadata, SavedConversation, SavedMessage};
+pub use history::ConversationHistory;
+pub use persistence::{ConversationMetadata, ConversationStore, SavedConversation, SavedMessage};
+pub use system_prompt::{collect_git_info, ProjectType, SystemPromptBuilder};

@@ -35,14 +35,14 @@ impl Tool for DiagnosticsTool {
     }
 
     async fn execute(&self, params: Value) -> ToolResult {
-        let path_str = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let path = Path::new(path_str);
         if !path.exists() {
-            return Err(PhazeError::tool("diagnostics", format!("Path does not exist: {path_str}")));
+            return Err(PhazeError::tool(
+                "diagnostics",
+                format!("Path does not exist: {path_str}"),
+            ));
         }
 
         let language = params
@@ -145,13 +145,21 @@ fn parse_rust_diagnostic(line: &str) -> Option<Value> {
     // Format: "error[E0425]: cannot find value `foo` in this scope"
     // Or: "src/main.rs:10:5: error: description"
     if line.starts_with("error") || line.starts_with("warning") {
-        let severity = if line.starts_with("error") { "error" } else { "warning" };
+        let severity = if line.starts_with("error") {
+            "error"
+        } else {
+            "warning"
+        };
         Some(serde_json::json!({
             "severity": severity,
             "message": line,
         }))
     } else if line.contains(": error") || line.contains(": warning") {
-        let severity = if line.contains(": error") { "error" } else { "warning" };
+        let severity = if line.contains(": error") {
+            "error"
+        } else {
+            "warning"
+        };
         let parts: Vec<&str> = line.splitn(4, ':').collect();
         if parts.len() >= 3 {
             Some(serde_json::json!({
@@ -175,7 +183,11 @@ fn parse_rust_diagnostic(line: &str) -> Option<Value> {
 fn parse_ts_diagnostic(line: &str) -> Option<Value> {
     // Format: "src/index.ts(10,5): error TS2304: Cannot find name 'foo'."
     if line.contains("): error TS") || line.contains("): warning TS") {
-        let severity = if line.contains("): error") { "error" } else { "warning" };
+        let severity = if line.contains("): error") {
+            "error"
+        } else {
+            "warning"
+        };
         let paren_idx = line.find('(')?;
         let file = &line[..paren_idx];
         let rest = &line[paren_idx + 1..];

@@ -63,7 +63,9 @@ pub fn handle_command(input: &str) -> CommandResult {
         // Model commands
         "/model" => {
             if arg.is_empty() {
-                CommandResult::Message("Current model info will be shown in /status. Use: /model <model-name>".into())
+                CommandResult::Message(
+                    "Current model info will be shown in /status. Use: /model <model-name>".into(),
+                )
             } else {
                 CommandResult::ModelChanged(arg.to_string())
             }
@@ -81,7 +83,9 @@ pub fn handle_command(input: &str) -> CommandResult {
             } else {
                 match arg {
                     "auto" | "ask" | "ask-once" => CommandResult::SetApprovalMode(arg.to_string()),
-                    _ => CommandResult::Message("Invalid approval mode. Options: auto, ask, ask-once".into()),
+                    _ => CommandResult::Message(
+                        "Invalid approval mode. Options: auto, ask, ask-once".into(),
+                    ),
                 }
             }
         }
@@ -91,7 +95,9 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/theme" => {
             if arg.is_empty() {
                 let themes = crate::theme::Theme::all_names().join(", ");
-                CommandResult::Message(format!("Available themes: {themes}\nUsage: /theme <theme-name>"))
+                CommandResult::Message(format!(
+                    "Available themes: {themes}\nUsage: /theme <theme-name>"
+                ))
             } else {
                 CommandResult::ThemeChanged(arg.to_string())
             }
@@ -117,24 +123,27 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/log" => CommandResult::ShowLog,
         "/search" => {
             if arg.is_empty() {
-                CommandResult::Message("Usage: /search <glob-pattern>\nExample: /search **/*.rs".into())
+                CommandResult::Message(
+                    "Usage: /search <glob-pattern>\nExample: /search **/*.rs".into(),
+                )
             } else {
                 CommandResult::SearchFiles(arg.to_string())
             }
         }
-        "/pwd" => {
-            match std::env::current_dir() {
-                Ok(path) => CommandResult::Message(format!("Current directory: {}", path.display())),
-                Err(e) => CommandResult::Message(format!("Error getting current directory: {}", e)),
-            }
-        }
+        "/pwd" => match std::env::current_dir() {
+            Ok(path) => CommandResult::Message(format!("Current directory: {}", path.display())),
+            Err(e) => CommandResult::Message(format!("Error getting current directory: {}", e)),
+        },
         "/cd" => {
             if arg.is_empty() {
                 CommandResult::Message("Usage: /cd <directory>".into())
             } else {
                 match std::env::set_current_dir(arg) {
                     Ok(_) => match std::env::current_dir() {
-                        Ok(path) => CommandResult::Message(format!("Changed directory to: {}", path.display())),
+                        Ok(path) => CommandResult::Message(format!(
+                            "Changed directory to: {}",
+                            path.display()
+                        )),
                         Err(_) => CommandResult::Message("Directory changed.".into()),
                     },
                     Err(e) => CommandResult::Message(format!("Error changing directory: {}", e)),
@@ -153,16 +162,20 @@ pub fn handle_command(input: &str) -> CommandResult {
                 CommandResult::Message(format!("Usage: /mode <mode>\nAvailable modes: {modes}"))
             } else {
                 match arg {
-                    "plan" | "debug" | "chat" | "ask" | "edit" => CommandResult::SetMode(arg.to_string()),
-                    _ => CommandResult::Message(format!("Unknown mode '{arg}'. Available: {modes}")),
+                    "plan" | "debug" | "chat" | "ask" | "edit" => {
+                        CommandResult::SetMode(arg.to_string())
+                    }
+                    _ => {
+                        CommandResult::Message(format!("Unknown mode '{arg}'. Available: {modes}"))
+                    }
                 }
             }
         }
-        "/plan"  => CommandResult::SetMode("plan".into()),
+        "/plan" => CommandResult::SetMode("plan".into()),
         "/debug" => CommandResult::SetMode("debug".into()),
-        "/ask"   => CommandResult::SetMode("ask".into()),
-        "/edit"  => CommandResult::SetMode("edit".into()),
-        "/chat"  => CommandResult::SetMode("chat".into()),
+        "/ask" => CommandResult::SetMode("ask".into()),
+        "/edit" => CommandResult::SetMode("edit".into()),
+        "/chat" => CommandResult::SetMode("chat".into()),
 
         // Unknown command
         _ => {

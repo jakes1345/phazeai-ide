@@ -44,10 +44,7 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("grep", "Missing required parameter: pattern"))?;
 
-        let search_path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let search_path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let include_pattern = params.get("include").and_then(|v| v.as_str());
 

@@ -3,17 +3,17 @@ use egui::{Color32, RichText};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use similar::{ChangeTag, DiffOp, TextDiff};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::{mpsc, oneshot};
 
-use phazeai_core::{AgentEvent, ConversationHistory, LspEvent, LspManager, Settings};
 use crate::state::IdeState;
+use phazeai_core::{AgentEvent, ConversationHistory, LspEvent, LspManager, Settings};
 
 use crate::keybindings::{self, Action};
 use crate::panels::browser::BrowserPanel;
-use crate::panels::chat::{ChatPanel, AiMode};
+use crate::panels::chat::{AiMode, ChatPanel};
 use crate::panels::diff::DiffPanel;
 use crate::panels::editor::EditorPanel;
 use crate::panels::explorer::ExplorerPanel;
@@ -209,7 +209,9 @@ impl PhazeApp {
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
         // Use last workspace if available, otherwise cwd
-        let cwd = ide_state.last_workspace.clone()
+        let cwd = ide_state
+            .last_workspace
+            .clone()
             .filter(|p| p.exists())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
@@ -277,7 +279,7 @@ impl PhazeApp {
             agent_cancel: None,
 
             pending_approval: None,
-            approval_state: Arc::new(Mutex::new(ApprovalState { pending: None  })),
+            approval_state: Arc::new(Mutex::new(ApprovalState { pending: None })),
 
             runtime,
 
@@ -291,7 +293,7 @@ impl PhazeApp {
             agent_conversation: Arc::new(tokio::sync::Mutex::new({
                 let mut conv = ConversationHistory::new();
                 conv.set_system_prompt(
-                    "You are PhazeAI, an AI coding assistant. Help the user with their code."
+                    "You are PhazeAI, an AI coding assistant. Help the user with their code.",
                 );
                 conv
             })),
@@ -343,7 +345,10 @@ impl PhazeApp {
                 self.file_watcher = Some(w);
                 self.file_watch_rx = Some(rx);
                 // Watch all currently open files
-                let paths: Vec<PathBuf> = self.editor.tabs.iter()
+                let paths: Vec<PathBuf> = self
+                    .editor
+                    .tabs
+                    .iter()
                     .filter_map(|t| t.path.clone())
                     .collect();
                 for path in paths {
@@ -394,9 +399,9 @@ impl PhazeApp {
         }
     }
 
-    fn watch_file(&mut self, path: &PathBuf) {
+    fn watch_file(&mut self, path: &Path) {
         if let Some(ref mut watcher) = self.file_watcher {
-            let _ = watcher.watch(path.as_path(), RecursiveMode::NonRecursive);
+            let _ = watcher.watch(path, RecursiveMode::NonRecursive);
         }
     }
 
@@ -411,14 +416,15 @@ impl PhazeApp {
     }
 
     /// Notify LSP when a file is opened.
-    fn lsp_did_open(&mut self, path: &PathBuf, text: &str) {
+    fn lsp_did_open(&mut self, path: &Path, text: &str) {
         if let Some(ref manager) = self.lsp_manager {
             manager.did_open(path, text);
         }
     }
 
     /// Notify LSP when a file changes.
-    fn lsp_did_change(&mut self, path: &PathBuf, version: i32, text: &str) {
+    #[allow(dead_code)]
+    fn lsp_did_change(&mut self, path: &Path, version: i32, text: &str) {
         if let Some(ref manager) = self.lsp_manager {
             manager.did_change(path, version, text);
         }
@@ -432,7 +438,8 @@ impl PhazeApp {
                     LspEvent::Diagnostics { uri, diagnostics } => {
                         // Convert file:// URI to local path
                         let uri_str = uri.to_string();
-                        let path_opt = uri_str.strip_prefix("file://")
+                        let path_opt = uri_str
+                            .strip_prefix("file://")
                             .map(|s| PathBuf::from(percent_decode_uri(s)));
 
                         if let Some(diag_path) = path_opt {
@@ -441,37 +448,40 @@ impl PhazeApp {
                                     tab.diagnostics.clear();
                                     for diag in &diagnostics {
                                         let line_idx = diag.range.start.line as usize;
-                                        tab.diagnostics.entry(line_idx).or_default().push(diag.clone());
+                                        tab.diagnostics
+                                            .entry(line_idx)
+                                            .or_default()
+                                            .push(diag.clone());
                                     }
                                 }
                             }
                         }
                     }
                     LspEvent::Hover(hover_opt) => {
-                        let text = hover_opt.and_then(|h| {
-                            match h.contents {
-                                lsp_types::HoverContents::Scalar(markup) => {
-                                    Some(match markup {
+                        let text = hover_opt.map(|h| match h.contents {
+                            lsp_types::HoverContents::Scalar(markup) => match markup {
+                                lsp_types::MarkedString::String(s) => s,
+                                lsp_types::MarkedString::LanguageString(ls) => ls.value,
+                            },
+                            lsp_types::HoverContents::Array(arr) => {
+                                let parts: Vec<String> = arr
+                                    .into_iter()
+                                    .map(|ms| match ms {
                                         lsp_types::MarkedString::String(s) => s,
                                         lsp_types::MarkedString::LanguageString(ls) => ls.value,
                                     })
-                                }
-                                lsp_types::HoverContents::Array(arr) => {
-                                    let parts: Vec<String> = arr.into_iter().map(|ms| match ms {
-                                        lsp_types::MarkedString::String(s) => s,
-                                        lsp_types::MarkedString::LanguageString(ls) => ls.value,
-                                    }).collect();
-                                    Some(parts.join("\n"))
-                                }
-                                lsp_types::HoverContents::Markup(mc) => Some(mc.value),
+                                    .collect();
+                                parts.join("\n")
                             }
+                            lsp_types::HoverContents::Markup(mc) => mc.value,
                         });
                         self.editor.set_hover_result(text);
                     }
                     LspEvent::Definition(locations) => {
                         if let Some(loc) = locations.into_iter().next() {
                             let uri_str = loc.uri.to_string();
-                            let path_opt = uri_str.strip_prefix("file://")
+                            let path_opt = uri_str
+                                .strip_prefix("file://")
                                 .map(|s| PathBuf::from(percent_decode_uri(s)));
                             if let Some(path) = path_opt {
                                 let line = loc.range.start.line as usize;
@@ -493,7 +503,8 @@ impl PhazeApp {
                         // Open the first reference if any (same as goto-def for now)
                         if let Some(loc) = locations.into_iter().next() {
                             let uri_str = loc.uri.to_string();
-                            let path_opt = uri_str.strip_prefix("file://")
+                            let path_opt = uri_str
+                                .strip_prefix("file://")
                                 .map(|s| PathBuf::from(percent_decode_uri(s)));
                             if let Some(path) = path_opt {
                                 let line = loc.range.start.line as usize;
@@ -506,16 +517,16 @@ impl PhazeApp {
                             let mut sorted = edits;
                             // Reverse order so earlier edits don't shift later offsets
                             sorted.sort_by(|a, b| {
-                                b.range.start.line.cmp(&a.range.start.line)
+                                b.range
+                                    .start
+                                    .line
+                                    .cmp(&a.range.start.line)
                                     .then(b.range.start.character.cmp(&a.range.start.character))
                             });
                             tab.apply_lsp_edits(&sorted);
                         }
-                        self.status_notification = Some((
-                            "Document formatted".into(),
-                            true,
-                            std::time::Instant::now(),
-                        ));
+                        self.status_notification =
+                            Some(("Document formatted".into(), true, std::time::Instant::now()));
                     }
                     LspEvent::Initialized(server) => {
                         tracing::info!("LSP server initialized: {}", server);
@@ -769,13 +780,14 @@ impl PhazeApp {
                     }
                     AgentEvent::ToolStart { name } => {
                         self.chat.add_tool_call(&name, true, "Running...");
-                        self.status_notification = Some((
-                            format!("Running: {name}"),
-                            true,
-                            std::time::Instant::now(),
-                        ));
+                        self.status_notification =
+                            Some((format!("Running: {name}"), true, std::time::Instant::now()));
                     }
-                    AgentEvent::ToolResult { name, success, summary } => {
+                    AgentEvent::ToolResult {
+                        name,
+                        success,
+                        summary,
+                    } => {
                         self.chat.add_tool_call(&name, success, &summary);
                         self.status_notification = Some((
                             format!("{}: {}", name, if success { "done" } else { "failed" }),
@@ -805,15 +817,23 @@ impl PhazeApp {
                             std::time::Instant::now(),
                         ));
                         // Record in agent history
-                        let summary = self.chat.messages.iter().rev()
+                        let summary = self
+                            .chat
+                            .messages
+                            .iter()
+                            .rev()
                             .find(|m| matches!(m.role, crate::panels::chat::ChatMessageRole::User))
                             .map(|m| {
                                 let s = &m.content;
-                                if s.len() > 80 { format!("{}…", &s[..80]) } else { s.clone() }
+                                if s.len() > 80 {
+                                    format!("{}…", &s[..80])
+                                } else {
+                                    s.clone()
+                                }
                             })
                             .unwrap_or_else(|| "Agent run".to_string());
-                        let tool_count = self.chat.messages.iter()
-                            .map(|m| m.tool_calls.len()).sum();
+                        let tool_count =
+                            self.chat.messages.iter().map(|m| m.tool_calls.len()).sum();
                         self.agent_history.push(AgentRun {
                             timestamp: chrono::Local::now().format("%H:%M").to_string(),
                             mode_label: self.chat.mode.label().to_string(),
@@ -827,18 +847,19 @@ impl PhazeApp {
                     AgentEvent::Error(err) => {
                         self.chat.finish_streaming();
                         self.chat.add_assistant_message(&format!("Error: {}", err));
-                        self.status_notification = Some((
-                            format!("Error: {err}"),
-                            false,
-                            std::time::Instant::now(),
-                        ));
+                        self.status_notification =
+                            Some((format!("Error: {err}"), false, std::time::Instant::now()));
                     }
                     AgentEvent::BrowserFetchStart { url } => {
                         if self.browser.url == url {
                             self.browser.loading = true;
                         }
                     }
-                    AgentEvent::BrowserFetchComplete { url, title, content } => {
+                    AgentEvent::BrowserFetchComplete {
+                        url,
+                        title,
+                        content,
+                    } => {
                         self.browser.set_content(url, title, content);
                     }
                     AgentEvent::BrowserFetchError { url, error } => {
@@ -860,7 +881,7 @@ impl PhazeApp {
 
         self.runtime.spawn(async move {
             let _ = tx.send(AgentEvent::BrowserFetchStart { url: url.clone() });
-            
+
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .user_agent("PhazeAI/0.1.0")
@@ -875,18 +896,31 @@ impl PhazeApp {
                             Ok(text) => {
                                 let title = extract_title(&text).unwrap_or_else(|| url.clone());
                                 let content = clean_html_to_markdown(&text);
-                                let _ = tx.send(AgentEvent::BrowserFetchComplete { url, title, content });
+                                let _ = tx.send(AgentEvent::BrowserFetchComplete {
+                                    url,
+                                    title,
+                                    content,
+                                });
                             }
                             Err(e) => {
-                                let _ = tx.send(AgentEvent::BrowserFetchError { url, error: e.to_string() });
+                                let _ = tx.send(AgentEvent::BrowserFetchError {
+                                    url,
+                                    error: e.to_string(),
+                                });
                             }
                         }
                     } else {
-                        let _ = tx.send(AgentEvent::BrowserFetchError { url, error: format!("HTTP {}", status) });
+                        let _ = tx.send(AgentEvent::BrowserFetchError {
+                            url,
+                            error: format!("HTTP {}", status),
+                        });
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(AgentEvent::BrowserFetchError { url, error: e.to_string() });
+                    let _ = tx.send(AgentEvent::BrowserFetchError {
+                        url,
+                        error: e.to_string(),
+                    });
                 }
             }
         });
@@ -928,43 +962,44 @@ impl PhazeApp {
             self.runtime.spawn(async move {
                 match settings.build_llm_client() {
                     Ok(llm) => {
-                        let approval_fn: phazeai_core::ApprovalFn = Box::new(move |tool_name, params| {
-                            let approval_state = approval_state.clone();
-                            Box::pin(async move {
-                                let params_summary = if params.is_null() {
-                                    String::new()
-                                } else {
-                                    match serde_json::to_string_pretty(&params) {
-                                        Ok(s) => {
-                                            if s.chars().count() > 300 {
-                                                let t: String = s.chars().take(300).collect();
-                                                format!("{t}...")
-                                            } else { s }
+                        let approval_fn: phazeai_core::ApprovalFn =
+                            Box::new(move |tool_name, params| {
+                                let approval_state = approval_state.clone();
+                                Box::pin(async move {
+                                    let params_summary = if params.is_null() {
+                                        String::new()
+                                    } else {
+                                        match serde_json::to_string_pretty(&params) {
+                                            Ok(s) => {
+                                                if s.chars().count() > 300 {
+                                                    let t: String = s.chars().take(300).collect();
+                                                    format!("{t}...")
+                                                } else {
+                                                    s
+                                                }
+                                            }
+                                            Err(_) => format!("{:?}", params),
                                         }
-                                        Err(_) => format!("{:?}", params),
+                                    };
+
+                                    let (response_tx, response_rx) = oneshot::channel();
+                                    {
+                                        let mut state = approval_state.lock().unwrap();
+                                        state.pending =
+                                            Some((tool_name, params_summary, params, response_tx));
                                     }
-                                };
 
-                                let (response_tx, response_rx) = oneshot::channel();
-                                {
-                                    let mut state = approval_state.lock().unwrap();
-                                    state.pending = Some((
-                                        tool_name,
-                                        params_summary,
-                                        params,
-                                        response_tx,
-                                    ));
-                                }
-
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(300),
-                                    response_rx
-                                ).await {
-                                    Ok(Ok(approved)) => approved,
-                                    _ => false,
-                                }
-                            })
-                        });
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(300),
+                                        response_rx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(approved)) => approved,
+                                        _ => false,
+                                    }
+                                })
+                            });
 
                         let agent = phazeai_core::Agent::new(llm)
                             .with_tools(tool_registry)
@@ -994,7 +1029,10 @@ impl PhazeApp {
     /// Resolve `@filename` mentions in a message. When the user writes `@path/to/file`,
     /// the file's content is appended as context.
     fn resolve_at_mentions(&self, user_msg: &str) -> String {
-        let workspace_root = self.explorer.root().cloned()
+        let workspace_root = self
+            .explorer
+            .root()
+            .cloned()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         let mut extras = Vec::new();
@@ -1002,7 +1040,8 @@ impl PhazeApp {
         let mut remaining = user_msg;
         while let Some(at_pos) = remaining.find('@') {
             let after = &remaining[at_pos + 1..];
-            let end = after.find(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            let end = after
+                .find(|c: char| c.is_whitespace() || c == ',' || c == ';')
                 .unwrap_or(after.len());
             if end == 0 {
                 remaining = &remaining[at_pos + 1..];
@@ -1018,13 +1057,15 @@ impl PhazeApp {
                 };
                 if path.is_file() && !extras.iter().any(|(m, _): &(String, String)| m == mention) {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let lang: String = path.extension()
+                        let lang: String = path
+                            .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or("")
                             .to_string();
-                        extras.push((mention.to_string(), format!(
-                            "**@{mention}:**\n```{lang}\n{content}\n```"
-                        )));
+                        extras.push((
+                            mention.to_string(),
+                            format!("**@{mention}:**\n```{lang}\n{content}\n```"),
+                        ));
                     }
                 }
             }
@@ -1034,7 +1075,11 @@ impl PhazeApp {
         if extras.is_empty() {
             return user_msg.to_string();
         }
-        let attachment_block = extras.into_iter().map(|(_, b)| b).collect::<Vec<_>>().join("\n\n");
+        let attachment_block = extras
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         format!("{}\n\n---\n{}", user_msg, attachment_block)
     }
 
@@ -1084,7 +1129,10 @@ impl PhazeApp {
                 let file_ctx = self.current_file_context();
                 let mut ctx = user_msg.to_string();
                 if !proj_ctx.is_empty() {
-                    ctx.push_str(&format!("\n\n---\n**Project structure:**\n```\n{}\n```", proj_ctx));
+                    ctx.push_str(&format!(
+                        "\n\n---\n**Project structure:**\n```\n{}\n```",
+                        proj_ctx
+                    ));
                 }
                 if !file_ctx.is_empty() {
                     ctx.push_str(&format!("\n\n---\n{}", file_ctx));
@@ -1110,11 +1158,17 @@ impl PhazeApp {
             None => return String::new(),
         };
 
-        let path_str = tab.path.as_ref()
+        let path_str = tab
+            .path
+            .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
 
-        let lang = if tab.language.is_empty() { "" } else { tab.language.as_str() };
+        let lang = if tab.language.is_empty() {
+            ""
+        } else {
+            tab.language.as_str()
+        };
 
         // Get selected text or full file (capped at 8000 chars to avoid blowing context)
         let content = if let Some(ref sel) = tab.selection {
@@ -1126,18 +1180,29 @@ impl PhazeApp {
                 rope.slice(start_char..end_char).to_string()
             } else {
                 let full = tab.rope.to_string();
-                if full.len() > 8000 { full[..8000].to_string() + "\n... (truncated)" } else { full }
+                if full.len() > 8000 {
+                    full[..8000].to_string() + "\n... (truncated)"
+                } else {
+                    full
+                }
             }
         } else {
             let full = tab.rope.to_string();
-            if full.len() > 8000 { full[..8000].to_string() + "\n... (truncated)" } else { full }
+            if full.len() > 8000 {
+                full[..8000].to_string() + "\n... (truncated)"
+            } else {
+                full
+            }
         };
 
         if content.trim().is_empty() {
             return String::new();
         }
 
-        format!("**Current file:** `{}`\n```{}\n{}\n```", path_str, lang, content)
+        format!(
+            "**Current file:** `{}`\n```{}\n{}\n```",
+            path_str, lang, content
+        )
     }
 
     /// Get a compact project structure listing.
@@ -1185,7 +1250,12 @@ impl PhazeApp {
     fn drain_file_loads(&mut self) {
         let opened = self.editor.drain_file_loads();
         for path in opened {
-            if let Some(tab) = self.editor.tabs.iter().find(|t| t.path.as_ref() == Some(&path)) {
+            if let Some(tab) = self
+                .editor
+                .tabs
+                .iter()
+                .find(|t| t.path.as_ref() == Some(&path))
+            {
                 let text = tab.rope.to_string();
                 self.lsp_did_open(&path, &text);
             }
@@ -1264,10 +1334,22 @@ impl PhazeApp {
                 ("Settings", PaletteAction::OpenSettings),
                 // AI mode switching
                 ("Mode: Chat", PaletteAction::SwitchMode(AiMode::Chat)),
-                ("Mode: Ask (current file)", PaletteAction::SwitchMode(AiMode::Ask)),
-                ("Mode: Debug (file + terminal)", PaletteAction::SwitchMode(AiMode::Debug)),
-                ("Mode: Plan (project context)", PaletteAction::SwitchMode(AiMode::Plan)),
-                ("Mode: Edit (AI edits files)", PaletteAction::SwitchMode(AiMode::Edit)),
+                (
+                    "Mode: Ask (current file)",
+                    PaletteAction::SwitchMode(AiMode::Ask),
+                ),
+                (
+                    "Mode: Debug (file + terminal)",
+                    PaletteAction::SwitchMode(AiMode::Debug),
+                ),
+                (
+                    "Mode: Plan (project context)",
+                    PaletteAction::SwitchMode(AiMode::Plan),
+                ),
+                (
+                    "Mode: Edit (AI edits files)",
+                    PaletteAction::SwitchMode(AiMode::Edit),
+                ),
             ];
             for (label, action) in commands {
                 if cmd_query.is_empty() || label.to_lowercase().contains(cmd_query) {
@@ -1355,11 +1437,8 @@ impl PhazeApp {
             .show(ctx, |ui| {
                 let screen = ctx.screen_rect();
                 // Semi-transparent backdrop
-                ui.painter().rect_filled(
-                    screen,
-                    0.0,
-                    egui::Color32::from_black_alpha(100),
-                );
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(100));
             });
 
         egui::Window::new("Command Palette")
@@ -1409,10 +1488,7 @@ impl PhazeApp {
                         }
 
                         if filtered.is_empty() {
-                            ui.colored_label(
-                                self.theme.text_muted,
-                                "No results found",
-                            );
+                            ui.colored_label(self.theme.text_muted, "No results found");
                         }
                     });
             });
@@ -1480,7 +1556,9 @@ impl PhazeApp {
     }
 
     fn render_inline_chat(&mut self, ctx: &egui::Context) {
-        if !self.inline_chat.visible { return; }
+        if !self.inline_chat.visible {
+            return;
+        }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.inline_chat.visible = false;
@@ -1532,13 +1610,19 @@ impl PhazeApp {
                 ui.separator();
 
                 // Response area
-                let response_height = if self.inline_chat.streaming_text.is_empty() { 60.0 } else { 200.0 };
+                let response_height = if self.inline_chat.streaming_text.is_empty() {
+                    60.0
+                } else {
+                    200.0
+                };
                 egui::ScrollArea::vertical()
                     .max_height(response_height)
                     .auto_shrink([false, false])
                     .stick_to_bottom(self.inline_chat.is_streaming)
                     .show(ui, |ui| {
-                        if self.inline_chat.is_streaming && self.inline_chat.streaming_text.is_empty() {
+                        if self.inline_chat.is_streaming
+                            && self.inline_chat.streaming_text.is_empty()
+                        {
                             ui.horizontal(|ui| {
                                 ui.spinner();
                                 ui.colored_label(theme.text_muted, "Editing...");
@@ -1552,7 +1636,10 @@ impl PhazeApp {
                                 } else {
                                     theme.text_secondary
                                 };
-                                ui.colored_label(color, egui::RichText::new(line).monospace().size(11.0));
+                                ui.colored_label(
+                                    color,
+                                    egui::RichText::new(line).monospace().size(11.0),
+                                );
                             }
                         } else {
                             ui.colored_label(theme.text_muted, "Response will appear here...");
@@ -1561,7 +1648,10 @@ impl PhazeApp {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.colored_label(theme.text_muted, egui::RichText::new("Edit mode  ·  Esc to close").size(10.0));
+                    ui.colored_label(
+                        theme.text_muted,
+                        egui::RichText::new("Edit mode  ·  Esc to close").size(10.0),
+                    );
                     if ui.small_button("Clear").clicked() {
                         self.inline_chat.streaming_text.clear();
                         self.inline_chat.query.clear();
@@ -1592,8 +1682,8 @@ impl PhazeApp {
             self.runtime.spawn(async move {
                 match settings.build_llm_client() {
                     Ok(llm) => {
-                        let agent = phazeai_core::Agent::new(llm)
-                            .with_shared_conversation(conversation);
+                        let agent =
+                            phazeai_core::Agent::new(llm).with_shared_conversation(conversation);
                         if let Err(e) = agent.run_with_events(&augmented, tx.clone()).await {
                             let _ = tx.send(AgentEvent::Error(e.to_string()));
                         }
@@ -1612,16 +1702,29 @@ impl PhazeApp {
     fn render_welcome_screen(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         ui.add_space(ui.available_height() * 0.15);
         ui.vertical_centered(|ui| {
-            ui.heading(RichText::new("🔥 PhazeAI IDE").color(theme.accent).size(36.0));
+            ui.heading(
+                RichText::new("🔥 PhazeAI IDE")
+                    .color(theme.accent)
+                    .size(36.0),
+            );
             ui.add_space(8.0);
             ui.colored_label(theme.text_secondary, "Local AI-native code editor");
             ui.add_space(32.0);
 
             let btn_size = [200.0, 36.0];
 
-            if ui.add_sized(btn_size, egui::Button::new(
-                RichText::new("📂  Open Folder").color(theme.text).size(14.0)
-            ).fill(theme.background_secondary)).clicked() {
+            if ui
+                .add_sized(
+                    btn_size,
+                    egui::Button::new(
+                        RichText::new("📂  Open Folder")
+                            .color(theme.text)
+                            .size(14.0),
+                    )
+                    .fill(theme.background_secondary),
+                )
+                .clicked()
+            {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.explorer.set_root(path.clone());
                     self.search.set_root(path.clone());
@@ -1634,9 +1737,14 @@ impl PhazeApp {
 
             ui.add_space(8.0);
 
-            if ui.add_sized(btn_size, egui::Button::new(
-                RichText::new("📄  New File").color(theme.text).size(14.0)
-            ).fill(theme.background_secondary)).clicked() {
+            if ui
+                .add_sized(
+                    btn_size,
+                    egui::Button::new(RichText::new("📄  New File").color(theme.text).size(14.0))
+                        .fill(theme.background_secondary),
+                )
+                .clicked()
+            {
                 self.editor.new_tab();
             }
 
@@ -1658,9 +1766,7 @@ impl PhazeApp {
             for (key, desc) in &shortcuts {
                 ui.horizontal(|ui| {
                     ui.add_space(80.0);
-                    ui.colored_label(theme.accent,
-                        RichText::new(*key).monospace().size(12.0)
-                    );
+                    ui.colored_label(theme.accent, RichText::new(*key).monospace().size(12.0));
                     ui.add_space(16.0);
                     ui.colored_label(theme.text_secondary, RichText::new(*desc).size(12.0));
                 });
@@ -1673,19 +1779,34 @@ impl PhazeApp {
             return;
         }
 
-        let is_file_edit = self.pending_approval.as_ref()
+        let is_file_edit = self
+            .pending_approval
+            .as_ref()
             .map(|a| matches!(a.tool_name.as_str(), "write_file" | "edit_file"))
             .unwrap_or(false);
-        let has_hunks = self.pending_approval.as_ref()
+        let has_hunks = self
+            .pending_approval
+            .as_ref()
             .map(|a| !a.hunks.is_empty())
             .unwrap_or(false);
-        let window_height = if has_hunks { 560.0 } else if is_file_edit { 500.0 } else { 250.0 };
+        let window_height = if has_hunks {
+            560.0
+        } else if is_file_edit {
+            500.0
+        } else {
+            250.0
+        };
 
         let mut decision: Option<bool> = None;
         let mut apply_partial = false;
 
         let tool_name = self.pending_approval.as_ref().unwrap().tool_name.clone();
-        let params_summary = self.pending_approval.as_ref().unwrap().params_summary.clone();
+        let params_summary = self
+            .pending_approval
+            .as_ref()
+            .unwrap()
+            .params_summary
+            .clone();
 
         egui::Window::new(format!("Tool Request: {}", tool_name))
             .collapsible(false)
@@ -1694,28 +1815,47 @@ impl PhazeApp {
             .default_size([680.0, window_height])
             .show(ctx, |ui| {
                 // Header
-                let icon_color = if is_file_edit { self.theme.warning } else { self.theme.accent };
+                let icon_color = if is_file_edit {
+                    self.theme.warning
+                } else {
+                    self.theme.accent
+                };
                 ui.colored_label(icon_color, RichText::new(&tool_name).strong().size(14.0));
                 ui.add_space(4.0);
 
                 if has_hunks {
                     // ── Per-hunk view ────────────────────────────────────────
-                    let accepted_count = self.pending_approval.as_ref().unwrap().hunks.iter()
-                        .filter(|h| h.accepted).count();
+                    let accepted_count = self
+                        .pending_approval
+                        .as_ref()
+                        .unwrap()
+                        .hunks
+                        .iter()
+                        .filter(|h| h.accepted)
+                        .count();
                     let total_count = self.pending_approval.as_ref().unwrap().hunks.len();
 
                     ui.horizontal(|ui| {
-                        ui.colored_label(self.theme.text_muted,
-                            format!("Review changes — {} / {} hunks selected", accepted_count, total_count));
+                        ui.colored_label(
+                            self.theme.text_muted,
+                            format!(
+                                "Review changes — {} / {} hunks selected",
+                                accepted_count, total_count
+                            ),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Select All").clicked() {
                                 if let Some(a) = self.pending_approval.as_mut() {
-                                    for h in &mut a.hunks { h.accepted = true; }
+                                    for h in &mut a.hunks {
+                                        h.accepted = true;
+                                    }
                                 }
                             }
                             if ui.small_button("Deselect All").clicked() {
                                 if let Some(a) = self.pending_approval.as_mut() {
-                                    for h in &mut a.hunks { h.accepted = false; }
+                                    for h in &mut a.hunks {
+                                        h.accepted = false;
+                                    }
                                 }
                             }
                         });
@@ -1728,9 +1868,14 @@ impl PhazeApp {
                         .show(ui, |ui| {
                             let hunk_count = self.pending_approval.as_ref().unwrap().hunks.len();
                             for i in 0..hunk_count {
-                                let accepted = self.pending_approval.as_ref().unwrap().hunks[i].accepted;
-                                let header = self.pending_approval.as_ref().unwrap().hunks[i].header.clone();
-                                let lines = self.pending_approval.as_ref().unwrap().hunks[i].lines.clone();
+                                let accepted =
+                                    self.pending_approval.as_ref().unwrap().hunks[i].accepted;
+                                let header = self.pending_approval.as_ref().unwrap().hunks[i]
+                                    .header
+                                    .clone();
+                                let lines = self.pending_approval.as_ref().unwrap().hunks[i]
+                                    .lines
+                                    .clone();
 
                                 let hunk_bg = if accepted {
                                     self.theme.success.linear_multiply(0.08)
@@ -1740,8 +1885,13 @@ impl PhazeApp {
 
                                 egui::Frame::none()
                                     .fill(hunk_bg)
-                                    .stroke(egui::Stroke::new(1.0,
-                                        if accepted { self.theme.success } else { self.theme.border }
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        if accepted {
+                                            self.theme.success
+                                        } else {
+                                            self.theme.border
+                                        },
                                     ))
                                     .rounding(egui::Rounding::same(4.0))
                                     .inner_margin(egui::Margin::same(6.0))
@@ -1753,20 +1903,29 @@ impl PhazeApp {
                                                     a.hunks[i].accepted = acc;
                                                 }
                                             }
-                                            ui.colored_label(self.theme.accent,
-                                                RichText::new(&header).monospace().size(11.0));
+                                            ui.colored_label(
+                                                self.theme.accent,
+                                                RichText::new(&header).monospace().size(11.0),
+                                            );
                                         });
 
                                         for (kind, content) in &lines {
                                             let (prefix, color) = match kind {
-                                                HunkLineKind::Added    => ("+", self.theme.success),
-                                                HunkLineKind::Removed  => ("-", self.theme.error),
-                                                HunkLineKind::Context  => (" ", self.theme.text_muted),
+                                                HunkLineKind::Added => ("+", self.theme.success),
+                                                HunkLineKind::Removed => ("-", self.theme.error),
+                                                HunkLineKind::Context => {
+                                                    (" ", self.theme.text_muted)
+                                                }
                                             };
-                                            let text = format!("{} {}", prefix,
-                                                content.trim_end_matches('\n'));
-                                            ui.colored_label(color,
-                                                RichText::new(&text).monospace().size(11.0));
+                                            let text = format!(
+                                                "{} {}",
+                                                prefix,
+                                                content.trim_end_matches('\n')
+                                            );
+                                            ui.colored_label(
+                                                color,
+                                                RichText::new(&text).monospace().size(11.0),
+                                            );
                                         }
                                     });
                                 ui.add_space(4.0);
@@ -1777,22 +1936,24 @@ impl PhazeApp {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let apply_btn = egui::Button::new(
-                            RichText::new("  Apply Selected  ").color(Color32::WHITE)
-                        ).fill(self.theme.success);
+                            RichText::new("  Apply Selected  ").color(Color32::WHITE),
+                        )
+                        .fill(self.theme.success);
                         if ui.add(apply_btn).clicked() {
                             apply_partial = true;
                         }
                         ui.add_space(4.0);
                         let all_btn = egui::Button::new(
-                            RichText::new("  Accept All  (Y)  ").color(Color32::WHITE)
-                        ).fill(self.theme.accent);
+                            RichText::new("  Accept All  (Y)  ").color(Color32::WHITE),
+                        )
+                        .fill(self.theme.accent);
                         if ui.add(all_btn).clicked() {
                             decision = Some(true);
                         }
                         ui.add_space(4.0);
-                        let deny_btn = egui::Button::new(
-                            RichText::new("  Deny  (N)  ").color(Color32::WHITE)
-                        ).fill(self.theme.error);
+                        let deny_btn =
+                            egui::Button::new(RichText::new("  Deny  (N)  ").color(Color32::WHITE))
+                                .fill(self.theme.error);
                         if ui.add(deny_btn).clicked() {
                             decision = Some(false);
                         }
@@ -1801,8 +1962,8 @@ impl PhazeApp {
                     // ── Fallback: plain diff view ─────────────────────────
                     ui.colored_label(self.theme.text_muted, "Review the proposed changes:");
                     ui.add_space(4.0);
-                    if let Some(diff_str) = self.pending_approval.as_ref()
-                        .and_then(|a| a.diff.clone())
+                    if let Some(diff_str) =
+                        self.pending_approval.as_ref().and_then(|a| a.diff.clone())
                     {
                         egui::ScrollArea::vertical()
                             .max_height(380.0)
@@ -1818,20 +1979,38 @@ impl PhazeApp {
                                     } else {
                                         (self.theme.text_muted, line)
                                     };
-                                    ui.colored_label(color,
-                                        RichText::new(text).monospace().size(11.0));
+                                    ui.colored_label(
+                                        color,
+                                        RichText::new(text).monospace().size(11.0),
+                                    );
                                 }
                             });
                     }
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(
-                            RichText::new("  Allow  (Y)  ").color(Color32::WHITE)
-                        ).fill(self.theme.success)).clicked() { decision = Some(true); }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("  Allow  (Y)  ").color(Color32::WHITE),
+                                )
+                                .fill(self.theme.success),
+                            )
+                            .clicked()
+                        {
+                            decision = Some(true);
+                        }
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
-                            RichText::new("  Deny  (N)  ").color(Color32::WHITE)
-                        ).fill(self.theme.error)).clicked() { decision = Some(false); }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("  Deny  (N)  ").color(Color32::WHITE),
+                                )
+                                .fill(self.theme.error),
+                            )
+                            .clicked()
+                        {
+                            decision = Some(false);
+                        }
                     });
                 } else {
                     // ── Generic tool: params summary ─────────────────────
@@ -1841,20 +2020,38 @@ impl PhazeApp {
                         .fill(self.theme.background)
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
-                            ui.colored_label(self.theme.text_secondary,
-                                RichText::new(&params_summary).monospace().size(11.0));
+                            ui.colored_label(
+                                self.theme.text_secondary,
+                                RichText::new(&params_summary).monospace().size(11.0),
+                            );
                         });
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(
-                            RichText::new("  Allow  (Y)  ").color(Color32::WHITE)
-                        ).fill(self.theme.success)).clicked() { decision = Some(true); }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("  Allow  (Y)  ").color(Color32::WHITE),
+                                )
+                                .fill(self.theme.success),
+                            )
+                            .clicked()
+                        {
+                            decision = Some(true);
+                        }
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
-                            RichText::new("  Deny  (N)  ").color(Color32::WHITE)
-                        ).fill(self.theme.error)).clicked() { decision = Some(false); }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("  Deny  (N)  ").color(Color32::WHITE),
+                                )
+                                .fill(self.theme.error),
+                            )
+                            .clicked()
+                        {
+                            decision = Some(false);
+                        }
                     });
                 }
             });
@@ -1863,7 +2060,8 @@ impl PhazeApp {
         if apply_partial {
             if let Some(approval) = self.pending_approval.take() {
                 if let Some(ref path) = approval.file_path {
-                    let reconstructed = apply_selected_hunks(&approval.old_content, &approval.hunks);
+                    let reconstructed =
+                        apply_selected_hunks(&approval.old_content, &approval.hunks);
                     let _ = std::fs::write(path, &reconstructed);
                     // Force editor to reload
                     self.last_file_check = std::time::Instant::now()
@@ -1894,8 +2092,10 @@ impl PhazeApp {
             .default_size([360.0, 400.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(self.theme.text_secondary,
-                        format!("{} recent runs", self.agent_history.len()));
+                    ui.colored_label(
+                        self.theme.text_secondary,
+                        format!("{} recent runs", self.agent_history.len()),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("✕ Close").clicked() {
                             close = true;
@@ -1906,8 +2106,10 @@ impl PhazeApp {
 
                 if self.agent_history.is_empty() {
                     ui.add_space(20.0);
-                    ui.colored_label(self.theme.text_muted,
-                        "No agent runs yet. Start chatting to see history here.");
+                    ui.colored_label(
+                        self.theme.text_muted,
+                        "No agent runs yet. Start chatting to see history here.",
+                    );
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for run in self.agent_history.iter().rev() {
@@ -1917,26 +2119,36 @@ impl PhazeApp {
                                 .inner_margin(egui::Margin::same(8.0))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.colored_label(self.theme.accent,
-                                            RichText::new(&run.timestamp).size(11.0));
+                                        ui.colored_label(
+                                            self.theme.accent,
+                                            RichText::new(&run.timestamp).size(11.0),
+                                        );
                                         ui.add_space(6.0);
-                                        ui.colored_label(self.theme.text_muted,
-                                            RichText::new(&run.mode_label).size(11.0));
+                                        ui.colored_label(
+                                            self.theme.text_muted,
+                                            RichText::new(&run.mode_label).size(11.0),
+                                        );
                                         if run.tool_count > 0 {
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    ui.colored_label(self.theme.text_muted,
-                                                        RichText::new(
-                                                            format!("{} tools", run.tool_count)
-                                                        ).size(10.0));
-                                                }
+                                                    ui.colored_label(
+                                                        self.theme.text_muted,
+                                                        RichText::new(format!(
+                                                            "{} tools",
+                                                            run.tool_count
+                                                        ))
+                                                        .size(10.0),
+                                                    );
+                                                },
                                             );
                                         }
                                     });
                                     ui.add_space(2.0);
-                                    ui.colored_label(self.theme.text_secondary,
-                                        RichText::new(&run.summary).size(12.0));
+                                    ui.colored_label(
+                                        self.theme.text_secondary,
+                                        RichText::new(&run.summary).size(12.0),
+                                    );
                                 });
                             ui.add_space(4.0);
                         }
@@ -2044,11 +2256,9 @@ impl PhazeApp {
                     self.split_editor = Some(split);
                     ui.close_menu();
                 }
-                if self.split_editor.is_some() {
-                    if ui.button("Close Split").clicked() {
-                        self.split_editor = None;
-                        ui.close_menu();
-                    }
+                if self.split_editor.is_some() && ui.button("Close Split").clicked() {
+                    self.split_editor = None;
+                    ui.close_menu();
                 }
             });
 
@@ -2062,10 +2272,7 @@ impl PhazeApp {
             // Right-aligned status
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let model = &self.settings.llm.model;
-                ui.colored_label(
-                    self.theme.text_muted,
-                    RichText::new(model).small(),
-                );
+                ui.colored_label(self.theme.text_muted, RichText::new(model).small());
                 ui.colored_label(self.theme.text_muted, RichText::new("|").small());
                 ui.colored_label(
                     self.theme.text_muted,
@@ -2088,11 +2295,19 @@ impl PhazeApp {
                 ui.colored_label(self.theme.text_muted, RichText::new("|").small());
                 ui.colored_label(
                     self.theme.text_muted,
-                    RichText::new(format!("Ln {}, Col {}", tab.cursor_line + 1, tab.cursor_col + 1)).small(),
+                    RichText::new(format!(
+                        "Ln {}, Col {}",
+                        tab.cursor_line + 1,
+                        tab.cursor_col + 1
+                    ))
+                    .small(),
                 );
                 if !tab.language.is_empty() {
                     ui.colored_label(self.theme.text_muted, RichText::new("|").small());
-                    ui.colored_label(self.theme.text_secondary, RichText::new(&tab.language).small());
+                    ui.colored_label(
+                        self.theme.text_secondary,
+                        RichText::new(&tab.language).small(),
+                    );
                 }
                 if tab.modified {
                     ui.colored_label(self.theme.warning, RichText::new(" ●").small());
@@ -2117,23 +2332,30 @@ impl PhazeApp {
                             self.theme.text_muted
                         };
                         ui.colored_label(self.theme.text_muted, RichText::new("|").small());
-                        ui.colored_label(token_color,
-                            RichText::new(format!("~{}k ctx", tokens / 1000 + 1)).small()
+                        ui.colored_label(
+                            token_color,
+                            RichText::new(format!("~{}k ctx", tokens / 1000 + 1)).small(),
                         );
                     }
                 }
 
                 // AI mode indicator
                 let mode_color = match self.chat.mode {
-                    crate::panels::chat::AiMode::Chat  => self.theme.accent,
-                    crate::panels::chat::AiMode::Ask   => self.theme.text_secondary,
+                    crate::panels::chat::AiMode::Chat => self.theme.accent,
+                    crate::panels::chat::AiMode::Ask => self.theme.text_secondary,
                     crate::panels::chat::AiMode::Debug => self.theme.error,
-                    crate::panels::chat::AiMode::Plan  => self.theme.warning,
-                    crate::panels::chat::AiMode::Edit  => self.theme.success,
+                    crate::panels::chat::AiMode::Plan => self.theme.warning,
+                    crate::panels::chat::AiMode::Edit => self.theme.success,
                 };
                 ui.colored_label(self.theme.text_muted, RichText::new("|").small());
-                ui.colored_label(mode_color,
-                    RichText::new(format!("{} {}", self.chat.mode.icon(), self.chat.mode.label())).small()
+                ui.colored_label(
+                    mode_color,
+                    RichText::new(format!(
+                        "{} {}",
+                        self.chat.mode.icon(),
+                        self.chat.mode.label()
+                    ))
+                    .small(),
                 );
 
                 // Agent streaming indicator
@@ -2146,7 +2368,11 @@ impl PhazeApp {
                 // Timed notification (expires after 4s)
                 if let Some((ref msg, success, since)) = self.status_notification {
                     if since.elapsed().as_secs() < 4 {
-                        let color = if success { self.theme.success } else { self.theme.error };
+                        let color = if success {
+                            self.theme.success
+                        } else {
+                            self.theme.error
+                        };
                         ui.colored_label(self.theme.text_muted, RichText::new("|").small());
                         ui.colored_label(color, RichText::new(msg.as_str()).small());
                     } else {
@@ -2207,7 +2433,10 @@ impl PhazeApp {
                         ui.add_space(10.0);
                         ui.heading(RichText::new("PhazeAI IDE").size(24.0));
                         ui.add_space(5.0);
-                        ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(14.0));
+                        ui.label(
+                            RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                                .size(14.0),
+                        );
                         ui.add_space(15.0);
                         ui.label("An AI-powered coding assistant");
                         ui.add_space(20.0);
@@ -2383,7 +2612,7 @@ impl PhazeApp {
                         available.min,
                         egui::pos2(split_x - 2.0, available.max.y),
                     );
-                    let mut child = ui.child_ui(left_rect, ui.layout().clone(), None);
+                    let mut child = ui.child_ui(left_rect, *ui.layout(), None);
                     self.editor.show(&mut child, &theme);
                 }
 
@@ -2393,15 +2622,12 @@ impl PhazeApp {
                     egui::pos2(split_x + 2.0, available.max.y),
                 );
                 ui.painter().rect_filled(sep_rect, 0.0, theme.border);
-                let sep_resp = ui.interact(
-                    sep_rect,
-                    ui.id().with("split_sep"),
-                    egui::Sense::drag(),
-                );
+                let sep_resp =
+                    ui.interact(sep_rect, ui.id().with("split_sep"), egui::Sense::drag());
                 if sep_resp.dragged() {
                     let delta = sep_resp.drag_delta().x;
-                    let new_ratio = ((self.split_ratio * total_w + delta) / total_w)
-                        .clamp(0.15, 0.85);
+                    let new_ratio =
+                        ((self.split_ratio * total_w + delta) / total_w).clamp(0.15, 0.85);
                     self.split_ratio = new_ratio;
                 }
                 if sep_resp.hovered() || sep_resp.dragged() {
@@ -2414,7 +2640,7 @@ impl PhazeApp {
                         egui::pos2(split_x + 2.0, available.min.y),
                         available.max,
                     );
-                    let mut child = ui.child_ui(right_rect, ui.layout().clone(), None);
+                    let mut child = ui.child_ui(right_rect, *ui.layout(), None);
                     // Also drain file loads for split editor
                     if let Some(ref mut split) = self.split_editor {
                         split.drain_file_loads();
@@ -2429,17 +2655,13 @@ impl PhazeApp {
         // Update editor focus (not when showing git diff)
         if !showing_git_diff {
             if let Some(pos) = ctx.input(|i| i.pointer.press_origin()) {
-                if editor_resp.response.rect.contains(pos) {
-                    self.editor.has_focus = true;
-                } else {
-                    self.editor.has_focus = false;
-                }
+                self.editor.has_focus = editor_resp.response.rect.contains(pos);
             }
         }
-        
+
         // If anything else is explicitly focused (like a TextEdit), editor must lose focus
         if let Some(_focus_id) = ctx.memory(|mem| mem.focused()) {
-             self.editor.has_focus = false;
+            self.editor.has_focus = false;
         }
 
         // Request repaint for streaming updates
@@ -2517,7 +2739,13 @@ fn collect_project_files(dir: &std::path::Path, files: &mut Vec<PathBuf>, depth:
 fn compute_diff_data(
     tool_name: &str,
     params: &serde_json::Value,
-) -> (Option<String>, Vec<DiffHunk>, String, String, Option<String>) {
+) -> (
+    Option<String>,
+    Vec<DiffHunk>,
+    String,
+    String,
+    Option<String>,
+) {
     let empty = (None, Vec::new(), String::new(), String::new(), None);
     match tool_name {
         "write_file" => {
@@ -2525,24 +2753,46 @@ fn compute_diff_data(
                 Some(p) => p,
                 None => return empty,
             };
-            let new_content = params.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new_content = params
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let old_content = std::fs::read_to_string(path).unwrap_or_default();
             let diff = build_unified_diff(&old_content, &new_content, path);
             let hunks = compute_diff_hunks(&old_content, &new_content);
-            (Some(diff), hunks, old_content, new_content, Some(path.to_string()))
+            (
+                Some(diff),
+                hunks,
+                old_content,
+                new_content,
+                Some(path.to_string()),
+            )
         }
         "edit_file" => {
             let path = match params.get("path").and_then(|v| v.as_str()) {
                 Some(p) => p,
                 None => return empty,
             };
-            let old_text = params.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
-            let new_text = params.get("new_text").and_then(|v| v.as_str()).unwrap_or("");
+            let old_text = params
+                .get("old_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_text = params
+                .get("new_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let old_content = std::fs::read_to_string(path).unwrap_or_default();
             let new_content = old_content.replacen(old_text, new_text, 1);
             let diff = build_unified_diff(&old_content, &new_content, path);
             let hunks = compute_diff_hunks(&old_content, &new_content);
-            (Some(diff), hunks, old_content, new_content, Some(path.to_string()))
+            (
+                Some(diff),
+                hunks,
+                old_content,
+                new_content,
+                Some(path.to_string()),
+            )
         }
         _ => empty,
     }
@@ -2560,68 +2810,116 @@ fn compute_diff_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
             continue;
         }
         // Compute hunk ranges from the group
-        let old_start = group.first().map(|op| match op {
-            DiffOp::Equal { old_index, .. } => *old_index,
-            DiffOp::Delete { old_index, .. } => *old_index,
-            DiffOp::Insert { old_index, .. } => *old_index,
-            DiffOp::Replace { old_index, .. } => *old_index,
-        }).unwrap_or(0);
-        let old_end = group.last().map(|op| match op {
-            DiffOp::Equal { old_index, len, .. } => old_index + len,
-            DiffOp::Delete { old_index, old_len, .. } => old_index + old_len,
-            DiffOp::Insert { old_index, .. } => *old_index,
-            DiffOp::Replace { old_index, old_len, .. } => old_index + old_len,
-        }).unwrap_or(0);
-        let new_start = group.first().map(|op| match op {
-            DiffOp::Equal { new_index, .. } => *new_index,
-            DiffOp::Delete { new_index, .. } => *new_index,
-            DiffOp::Insert { new_index, .. } => *new_index,
-            DiffOp::Replace { new_index, .. } => *new_index,
-        }).unwrap_or(0);
-        let new_end = group.last().map(|op| match op {
-            DiffOp::Equal { new_index, len, .. } => new_index + len,
-            DiffOp::Delete { new_index, .. } => *new_index,
-            DiffOp::Insert { new_index, new_len, .. } => new_index + new_len,
-            DiffOp::Replace { new_index, new_len, .. } => new_index + new_len,
-        }).unwrap_or(0);
+        let old_start = group
+            .first()
+            .map(|op| match op {
+                DiffOp::Equal { old_index, .. } => *old_index,
+                DiffOp::Delete { old_index, .. } => *old_index,
+                DiffOp::Insert { old_index, .. } => *old_index,
+                DiffOp::Replace { old_index, .. } => *old_index,
+            })
+            .unwrap_or(0);
+        let old_end = group
+            .last()
+            .map(|op| match op {
+                DiffOp::Equal { old_index, len, .. } => old_index + len,
+                DiffOp::Delete {
+                    old_index, old_len, ..
+                } => old_index + old_len,
+                DiffOp::Insert { old_index, .. } => *old_index,
+                DiffOp::Replace {
+                    old_index, old_len, ..
+                } => old_index + old_len,
+            })
+            .unwrap_or(0);
+        let new_start = group
+            .first()
+            .map(|op| match op {
+                DiffOp::Equal { new_index, .. } => *new_index,
+                DiffOp::Delete { new_index, .. } => *new_index,
+                DiffOp::Insert { new_index, .. } => *new_index,
+                DiffOp::Replace { new_index, .. } => *new_index,
+            })
+            .unwrap_or(0);
+        let new_end = group
+            .last()
+            .map(|op| match op {
+                DiffOp::Equal { new_index, len, .. } => new_index + len,
+                DiffOp::Delete { new_index, .. } => *new_index,
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                } => new_index + new_len,
+                DiffOp::Replace {
+                    new_index, new_len, ..
+                } => new_index + new_len,
+            })
+            .unwrap_or(0);
 
-        let header = format!("@@ -{},{} +{},{} @@",
-            old_start + 1, old_end.saturating_sub(old_start),
-            new_start + 1, new_end.saturating_sub(new_start));
+        let header = format!(
+            "@@ -{},{} +{},{} @@",
+            old_start + 1,
+            old_end.saturating_sub(old_start),
+            new_start + 1,
+            new_end.saturating_sub(new_start)
+        );
 
         let mut lines = Vec::new();
         for op in &group {
             match op {
                 DiffOp::Equal { old_index, len, .. } => {
                     for i in 0..*len {
-                        let content = old_lines.get(old_index + i)
-                            .copied().unwrap_or("").to_string();
+                        let content = old_lines
+                            .get(old_index + i)
+                            .copied()
+                            .unwrap_or("")
+                            .to_string();
                         lines.push((HunkLineKind::Context, content));
                     }
                 }
-                DiffOp::Delete { old_index, old_len, .. } => {
+                DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
                     for i in 0..*old_len {
-                        let content = old_lines.get(old_index + i)
-                            .copied().unwrap_or("").to_string();
+                        let content = old_lines
+                            .get(old_index + i)
+                            .copied()
+                            .unwrap_or("")
+                            .to_string();
                         lines.push((HunkLineKind::Removed, content));
                     }
                 }
-                DiffOp::Insert { new_index, new_len, .. } => {
+                DiffOp::Insert {
+                    new_index, new_len, ..
+                } => {
                     for i in 0..*new_len {
-                        let content = new_lines.get(new_index + i)
-                            .copied().unwrap_or("").to_string();
+                        let content = new_lines
+                            .get(new_index + i)
+                            .copied()
+                            .unwrap_or("")
+                            .to_string();
                         lines.push((HunkLineKind::Added, content));
                     }
                 }
-                DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
                     for i in 0..*old_len {
-                        let content = old_lines.get(old_index + i)
-                            .copied().unwrap_or("").to_string();
+                        let content = old_lines
+                            .get(old_index + i)
+                            .copied()
+                            .unwrap_or("")
+                            .to_string();
                         lines.push((HunkLineKind::Removed, content));
                     }
                     for i in 0..*new_len {
-                        let content = new_lines.get(new_index + i)
-                            .copied().unwrap_or("").to_string();
+                        let content = new_lines
+                            .get(new_index + i)
+                            .copied()
+                            .unwrap_or("")
+                            .to_string();
                         lines.push((HunkLineKind::Added, content));
                     }
                 }
@@ -2698,7 +2996,7 @@ fn build_unified_diff(old: &str, new: &str, path: &str) -> String {
         match change.tag() {
             ChangeTag::Delete => result.push_str(&format!("- {}", change)),
             ChangeTag::Insert => result.push_str(&format!("+ {}", change)),
-            ChangeTag::Equal  => result.push_str(&format!("  {}", change)),
+            ChangeTag::Equal => result.push_str(&format!("  {}", change)),
         }
     }
     // Limit to 200 lines
@@ -2711,7 +3009,9 @@ fn build_unified_diff(old: &str, new: &str, path: &str) -> String {
 }
 
 fn collect_tree(dir: &std::path::Path, lines: &mut Vec<String>, depth: usize, max_depth: usize) {
-    if depth > max_depth { return; }
+    if depth > max_depth {
+        return;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -2725,8 +3025,14 @@ fn collect_tree(dir: &std::path::Path, lines: &mut Vec<String>, depth: usize, ma
 
     for entry in sorted.iter().take(50) {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "target" || name == "node_modules"
-            || name == "__pycache__" || name == "dist" { continue; }
+        if name.starts_with('.')
+            || name == "target"
+            || name == "node_modules"
+            || name == "__pycache__"
+            || name == "dist"
+        {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             lines.push(format!("{}{}/", indent, name));
@@ -2734,7 +3040,9 @@ fn collect_tree(dir: &std::path::Path, lines: &mut Vec<String>, depth: usize, ma
         } else {
             lines.push(format!("{}{}", indent, name));
         }
-        if lines.len() >= 200 { return; }
+        if lines.len() >= 200 {
+            return;
+        }
     }
 }
 
@@ -2743,7 +3051,11 @@ fn extract_title(html: &str) -> Option<String> {
     let end_tag = "</title>";
     if let Some(start) = html.find(start_tag) {
         if let Some(end) = html[start..].find(end_tag) {
-            return Some(html[start + start_tag.len()..start + end].trim().to_string());
+            return Some(
+                html[start + start_tag.len()..start + end]
+                    .trim()
+                    .to_string(),
+            );
         }
     }
     None
@@ -2786,8 +3098,8 @@ fn clean_html_to_markdown(html: &str) -> String {
                 None
             };
             match tag_name {
-                "p" | "div" | "section" | "article" | "main" | "h1" | "h2" | "h3"
-                | "h4" | "h5" | "h6" | "li" | "tr" | "blockquote" => {
+                "p" | "div" | "section" | "article" | "main" | "h1" | "h2" | "h3" | "h4" | "h5"
+                | "h6" | "li" | "tr" | "blockquote" => {
                     if !last_was_newline && !result.is_empty() {
                         result.push('\n');
                     }
@@ -2796,8 +3108,8 @@ fn clean_html_to_markdown(html: &str) -> String {
                     }
                     last_was_newline = true;
                 }
-                "/p" | "/div" | "/section" | "/article" | "/main" | "/h1" | "/h2"
-                | "/h3" | "/h4" | "/h5" | "/h6" | "/li" | "/tr" | "/blockquote" => {
+                "/p" | "/div" | "/section" | "/article" | "/main" | "/h1" | "/h2" | "/h3"
+                | "/h4" | "/h5" | "/h6" | "/li" | "/tr" | "/blockquote" => {
                     if !last_was_newline {
                         result.push('\n');
                         last_was_newline = true;
@@ -2831,21 +3143,23 @@ fn clean_html_to_markdown(html: &str) -> String {
                         break;
                     }
                     entity.push(ec);
-                    if entity.len() > 10 { break; }
+                    if entity.len() > 10 {
+                        break;
+                    }
                 }
                 if consumed {
                     let decoded = match entity.as_str() {
-                        "amp"  => "&",
-                        "lt"   => "<",
-                        "gt"   => ">",
+                        "amp" => "&",
+                        "lt" => "<",
+                        "gt" => ">",
                         "quot" => "\"",
                         "apos" => "'",
                         "nbsp" => " ",
                         "mdash" | "#8212" => "—",
                         "ndash" | "#8211" => "–",
                         "hellip" | "#8230" => "...",
-                        "laquo" | "#171"  => "«",
-                        "raquo" | "#187"  => "»",
+                        "laquo" | "#171" => "«",
+                        "raquo" | "#187" => "»",
                         _ => {
                             // Numeric entity &#NNN;
                             if let Some(num_str) = entity.strip_prefix('#') {
@@ -2895,7 +3209,9 @@ fn clean_html_to_markdown(html: &str) -> String {
     for line in result.lines() {
         if line.trim().is_empty() {
             blank_count += 1;
-            if blank_count <= 2 { out.push('\n'); }
+            if blank_count <= 2 {
+                out.push('\n');
+            }
         } else {
             blank_count = 0;
             out.push_str(line);
@@ -2923,7 +3239,7 @@ fn percent_decode_uri(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h1), Some(h2)) = (hex_val(bytes[i+1]), hex_val(bytes[i+2])) {
+            if let (Some(h1), Some(h2)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                 result.push(char::from(h1 * 16 + h2));
                 i += 3;
                 continue;

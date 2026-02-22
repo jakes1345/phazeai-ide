@@ -1,9 +1,9 @@
+use crate::error::PhazeError;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::error::PhazeError;
 
 /// Metadata about a saved conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,9 +64,8 @@ impl ConversationStore {
 
     /// Get the conversations directory path
     fn get_conversations_dir() -> Result<PathBuf, PhazeError> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            PhazeError::Config("Could not determine home directory".to_string())
-        })?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| PhazeError::Config("Could not determine home directory".to_string()))?;
 
         Ok(home.join(".phazeai").join("conversations"))
     }
@@ -89,35 +88,30 @@ impl ConversationStore {
             return Ok(ConversationIndex::default());
         }
 
-        let mut file = File::open(&path).map_err(|e| {
-            PhazeError::Config(format!("Failed to open index file: {}", e))
-        })?;
+        let mut file = File::open(&path)
+            .map_err(|e| PhazeError::Config(format!("Failed to open index file: {}", e)))?;
 
         let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|e| {
-            PhazeError::Config(format!("Failed to read index file: {}", e))
-        })?;
+        file.read_to_string(&mut contents)
+            .map_err(|e| PhazeError::Config(format!("Failed to read index file: {}", e)))?;
 
-        serde_json::from_str(&contents).map_err(|e| {
-            PhazeError::Config(format!("Failed to parse index file: {}", e))
-        })
+        serde_json::from_str(&contents)
+            .map_err(|e| PhazeError::Config(format!("Failed to parse index file: {}", e)))
     }
 
     /// Save the conversation index
     fn save_index(&self, index: &ConversationIndex) -> Result<(), PhazeError> {
         let path = self.index_path();
-        let contents = serde_json::to_string_pretty(index).map_err(|e| {
-            PhazeError::Config(format!("Failed to serialize index: {}", e))
-        })?;
+        let contents = serde_json::to_string_pretty(index)
+            .map_err(|e| PhazeError::Config(format!("Failed to serialize index: {}", e)))?;
 
         let tmp_path = path.with_extension("json.tmp");
         fs::write(&tmp_path, contents).map_err(|e| {
             PhazeError::Config(format!("Failed to write temporary index file: {}", e))
         })?;
 
-        fs::rename(&tmp_path, &path).map_err(|e| {
-            PhazeError::Config(format!("Failed to rename index file: {}", e))
-        })?;
+        fs::rename(&tmp_path, &path)
+            .map_err(|e| PhazeError::Config(format!("Failed to rename index file: {}", e)))?;
 
         Ok(())
     }
@@ -148,13 +142,15 @@ impl ConversationStore {
     pub fn save(&self, conversation: &SavedConversation) -> Result<(), PhazeError> {
         // Save the conversation file
         let path = self.conversation_path(&conversation.metadata.id);
-        let contents = serde_json::to_string_pretty(conversation).map_err(|e| {
-            PhazeError::Config(format!("Failed to serialize conversation: {}", e))
-        })?;
+        let contents = serde_json::to_string_pretty(conversation)
+            .map_err(|e| PhazeError::Config(format!("Failed to serialize conversation: {}", e)))?;
 
         let tmp_path = path.with_extension("json.tmp");
         fs::write(&tmp_path, contents).map_err(|e| {
-            PhazeError::Config(format!("Failed to write temporary conversation file: {}", e))
+            PhazeError::Config(format!(
+                "Failed to write temporary conversation file: {}",
+                e
+            ))
         })?;
 
         fs::rename(&tmp_path, &path).map_err(|e| {
@@ -165,13 +161,17 @@ impl ConversationStore {
         let mut index = self.load_index()?;
 
         // Remove existing entry if present
-        index.conversations.retain(|m| m.id != conversation.metadata.id);
+        index
+            .conversations
+            .retain(|m| m.id != conversation.metadata.id);
 
         // Add updated metadata
         index.conversations.push(conversation.metadata.clone());
 
         // Sort by updated_at (most recent first)
-        index.conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        index
+            .conversations
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         self.save_index(&index)?;
 
@@ -189,29 +189,22 @@ impl ConversationStore {
             )));
         }
 
-        let mut file = File::open(&path).map_err(|e| {
-            PhazeError::Config(format!("Failed to open conversation file: {}", e))
-        })?;
+        let mut file = File::open(&path)
+            .map_err(|e| PhazeError::Config(format!("Failed to open conversation file: {}", e)))?;
 
         let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|e| {
-            PhazeError::Config(format!("Failed to read conversation file: {}", e))
-        })?;
+        file.read_to_string(&mut contents)
+            .map_err(|e| PhazeError::Config(format!("Failed to read conversation file: {}", e)))?;
 
-        serde_json::from_str(&contents).map_err(|e| {
-            PhazeError::Config(format!("Failed to parse conversation file: {}", e))
-        })
+        serde_json::from_str(&contents)
+            .map_err(|e| PhazeError::Config(format!("Failed to parse conversation file: {}", e)))
     }
 
     /// List recent conversations
     pub fn list_recent(&self, limit: usize) -> Result<Vec<ConversationMetadata>, PhazeError> {
         let index = self.load_index()?;
 
-        Ok(index
-            .conversations
-            .into_iter()
-            .take(limit)
-            .collect())
+        Ok(index.conversations.into_iter().take(limit).collect())
     }
 
     /// Delete a conversation

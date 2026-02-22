@@ -41,49 +41,54 @@ impl Tool for MovePathTool {
         let destination = params
             .get("destination")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PhazeError::tool("move_path", "Missing required parameter: destination"))?;
+            .ok_or_else(|| {
+                PhazeError::tool("move_path", "Missing required parameter: destination")
+            })?;
 
         let source_path = Path::new(source);
         let dest_path = Path::new(destination);
 
         if !source_path.exists() {
-            return Err(PhazeError::tool("move_path", format!("Source path does not exist: {source}")));
+            return Err(PhazeError::tool(
+                "move_path",
+                format!("Source path does not exist: {source}"),
+            ));
         }
 
         // Ensure parent directory exists
         if let Some(parent) = dest_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| PhazeError::tool("move_path", format!("Failed to create parent dirs: {e}")))?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                PhazeError::tool("move_path", format!("Failed to create parent dirs: {e}"))
+            })?;
         }
 
         // Try rename first (fast, same filesystem)
         match tokio::fs::rename(source_path, dest_path).await {
-            Ok(()) => {
-                Ok(serde_json::json!({
-                    "success": true,
-                    "source": source,
-                    "destination": destination,
-                    "method": "rename",
-                }))
-            }
+            Ok(()) => Ok(serde_json::json!({
+                "success": true,
+                "source": source,
+                "destination": destination,
+                "method": "rename",
+            })),
             Err(_) => {
                 // Fallback: copy then delete (cross-filesystem)
                 if source_path.is_file() {
-                    tokio::fs::copy(source_path, dest_path)
-                        .await
-                        .map_err(|e| PhazeError::tool("move_path", format!("Failed to copy: {e}")))?;
-                    tokio::fs::remove_file(source_path)
-                        .await
-                        .map_err(|e| PhazeError::tool("move_path", format!("Failed to remove source: {e}")))?;
+                    tokio::fs::copy(source_path, dest_path).await.map_err(|e| {
+                        PhazeError::tool("move_path", format!("Failed to copy: {e}"))
+                    })?;
+                    tokio::fs::remove_file(source_path).await.map_err(|e| {
+                        PhazeError::tool("move_path", format!("Failed to remove source: {e}"))
+                    })?;
                 } else {
                     // For directories, use recursive copy then remove
                     super::copy_path::copy_dir_recursive(source_path, dest_path)
                         .await
-                        .map_err(|e| PhazeError::tool("move_path", format!("Failed to copy dir: {e}")))?;
-                    tokio::fs::remove_dir_all(source_path)
-                        .await
-                        .map_err(|e| PhazeError::tool("move_path", format!("Failed to remove source dir: {e}")))?;
+                        .map_err(|e| {
+                            PhazeError::tool("move_path", format!("Failed to copy dir: {e}"))
+                        })?;
+                    tokio::fs::remove_dir_all(source_path).await.map_err(|e| {
+                        PhazeError::tool("move_path", format!("Failed to remove source dir: {e}"))
+                    })?;
                 }
 
                 Ok(serde_json::json!({

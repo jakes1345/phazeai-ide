@@ -41,21 +41,26 @@ impl Tool for CopyPathTool {
         let destination = params
             .get("destination")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| PhazeError::tool("copy_path", "Missing required parameter: destination"))?;
+            .ok_or_else(|| {
+                PhazeError::tool("copy_path", "Missing required parameter: destination")
+            })?;
 
         let source_path = Path::new(source);
         let dest_path = Path::new(destination);
 
         if !source_path.exists() {
-            return Err(PhazeError::tool("copy_path", format!("Source path does not exist: {source}")));
+            return Err(PhazeError::tool(
+                "copy_path",
+                format!("Source path does not exist: {source}"),
+            ));
         }
 
         if source_path.is_file() {
             // Ensure parent directory exists
             if let Some(parent) = dest_path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| PhazeError::tool("copy_path", format!("Failed to create parent dirs: {e}")))?;
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    PhazeError::tool("copy_path", format!("Failed to create parent dirs: {e}"))
+                })?;
             }
 
             let bytes = tokio::fs::copy(source_path, dest_path)
@@ -70,8 +75,11 @@ impl Tool for CopyPathTool {
                 "bytes_copied": bytes,
             }))
         } else if source_path.is_dir() {
-            let count = copy_dir_recursive(source_path, dest_path).await
-                .map_err(|e| PhazeError::tool("copy_path", format!("Failed to copy directory: {e}")))?;
+            let count = copy_dir_recursive(source_path, dest_path)
+                .await
+                .map_err(|e| {
+                    PhazeError::tool("copy_path", format!("Failed to copy directory: {e}"))
+                })?;
 
             Ok(serde_json::json!({
                 "success": true,
@@ -81,7 +89,10 @@ impl Tool for CopyPathTool {
                 "files_copied": count,
             }))
         } else {
-            Err(PhazeError::tool("copy_path", format!("Unsupported file type: {source}")))
+            Err(PhazeError::tool(
+                "copy_path",
+                format!("Unsupported file type: {source}"),
+            ))
         }
     }
 }

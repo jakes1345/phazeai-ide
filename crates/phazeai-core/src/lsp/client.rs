@@ -83,8 +83,7 @@ impl LspClient {
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
 
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(Box::new(stdin)));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(stdin)));
         let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -153,57 +152,45 @@ impl LspClient {
         // Send initialized notification
         self.send_notification::<notification::Initialized>(InitializedParams {})?;
 
-        let _ = self.event_tx.send(LspEvent::Initialized(self.server_name.clone()));
+        let _ = self
+            .event_tx
+            .send(LspEvent::Initialized(self.server_name.clone()));
         Ok(())
     }
 
     /// Notify the server that a file was opened
     pub fn did_open(&self, path: &Path, language_id: &str, text: &str) -> Result<(), String> {
         let uri = path_to_uri(path)?;
-        self.send_notification::<notification::DidOpenTextDocument>(
-            DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri,
-                    language_id: language_id.to_string(),
-                    version: 0,
-                    text: text.to_string(),
-                },
+        self.send_notification::<notification::DidOpenTextDocument>(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: language_id.to_string(),
+                version: 0,
+                text: text.to_string(),
             },
-        )
+        })
     }
 
     /// Notify the server that a file changed
-    pub fn did_change(
-        &self,
-        path: &Path,
-        version: i32,
-        text: &str,
-    ) -> Result<(), String> {
+    pub fn did_change(&self, path: &Path, version: i32, text: &str) -> Result<(), String> {
         let uri = path_to_uri(path)?;
-        self.send_notification::<notification::DidChangeTextDocument>(
-            DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri,
-                    version,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: text.to_string(),
-                }],
-            },
-        )
+        self.send_notification::<notification::DidChangeTextDocument>(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri, version },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_string(),
+            }],
+        })
     }
 
     /// Notify the server that a file was saved
     pub fn did_save(&self, path: &Path, text: Option<&str>) -> Result<(), String> {
         let uri = path_to_uri(path)?;
-        self.send_notification::<notification::DidSaveTextDocument>(
-            DidSaveTextDocumentParams {
-                text_document: TextDocumentIdentifier { uri },
-                text: text.map(|t| t.to_string()),
-            },
-        )
+        self.send_notification::<notification::DidSaveTextDocument>(DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri },
+            text: text.map(|t| t.to_string()),
+        })
     }
 
     /// Request completions at a position
@@ -289,7 +276,9 @@ impl LspClient {
                 text_document: TextDocumentIdentifier { uri },
                 position: Position { line, character },
             },
-            context: ReferenceContext { include_declaration: true },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         };
@@ -322,31 +311,39 @@ impl LspClient {
 
     /// Send a hover result back through the event channel.
     pub fn send_hover_event(&self, hover: Option<lsp_types::Hover>) -> Result<(), String> {
-        self.event_tx.send(LspEvent::Hover(hover))
+        self.event_tx
+            .send(LspEvent::Hover(hover))
             .map_err(|e| e.to_string())
     }
 
     /// Send definition locations back through the event channel.
     pub fn send_definition_event(&self, locations: Vec<lsp_types::Location>) -> Result<(), String> {
-        self.event_tx.send(LspEvent::Definition(locations))
+        self.event_tx
+            .send(LspEvent::Definition(locations))
             .map_err(|e| e.to_string())
     }
 
     /// Send completion items back through the event channel.
-    pub fn send_completions_event(&self, items: Vec<lsp_types::CompletionItem>) -> Result<(), String> {
-        self.event_tx.send(LspEvent::Completions(items))
+    pub fn send_completions_event(
+        &self,
+        items: Vec<lsp_types::CompletionItem>,
+    ) -> Result<(), String> {
+        self.event_tx
+            .send(LspEvent::Completions(items))
             .map_err(|e| e.to_string())
     }
 
     /// Send references back through the event channel.
     pub fn send_references_event(&self, locations: Vec<lsp_types::Location>) -> Result<(), String> {
-        self.event_tx.send(LspEvent::References(locations))
+        self.event_tx
+            .send(LspEvent::References(locations))
             .map_err(|e| e.to_string())
     }
 
     /// Send formatting edits back through the event channel.
     pub fn send_formatting_event(&self, edits: Vec<lsp_types::TextEdit>) -> Result<(), String> {
-        self.event_tx.send(LspEvent::Formatting(edits))
+        self.event_tx
+            .send(LspEvent::Formatting(edits))
             .map_err(|e| e.to_string())
     }
 
@@ -433,13 +430,7 @@ impl LspClient {
     ) {
         let mut reader = BufReader::new(stdout);
 
-        loop {
-            // Read Content-Length header
-            let content_length = match Self::read_content_length(&mut reader) {
-                Ok(len) => len,
-                Err(_) => break, // Server closed
-            };
-
+        while let Ok(content_length) = Self::read_content_length(&mut reader) {
             // Read the JSON body
             let mut body = vec![0u8; content_length];
             if reader.read_exact(&mut body).is_err() {

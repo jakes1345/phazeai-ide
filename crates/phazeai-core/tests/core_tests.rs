@@ -1,5 +1,5 @@
-use phazeai_core::*;
 use phazeai_core::config::Settings;
+use phazeai_core::*;
 use tempfile::TempDir;
 
 // ========================================================================
@@ -11,8 +11,8 @@ fn test_settings_default_values() {
     let settings = Settings::default();
 
     // Check LLM defaults
-    assert_eq!(settings.llm.model, "claude-sonnet-4-5-20250929");
-    assert_eq!(settings.llm.api_key_env, "ANTHROPIC_API_KEY");
+    assert_eq!(settings.llm.model, "phaze-beast");
+    assert_eq!(settings.llm.api_key_env, "");
     assert_eq!(settings.llm.max_tokens, 8192);
     assert!(settings.llm.base_url.is_none());
 
@@ -77,7 +77,7 @@ fn test_settings_build_provider_registry_returns_correct_active() {
 
     let registry = settings.build_provider_registry();
 
-    assert_eq!(registry.active_provider(), &ProviderId::Claude);
+    assert_eq!(registry.active_provider(), &ProviderId::Ollama);
     assert_eq!(registry.active_model(), "custom-model");
 }
 
@@ -143,8 +143,7 @@ fn test_conversation_history_trimming_when_exceeding_max() {
 
 #[test]
 fn test_conversation_history_get_messages_includes_system_prompt() {
-    let mut history = ConversationHistory::new()
-        .with_system_prompt("You are a helpful assistant.");
+    let mut history = ConversationHistory::new().with_system_prompt("You are a helpful assistant.");
 
     history.add_user_message("Hello");
 
@@ -158,8 +157,7 @@ fn test_conversation_history_get_messages_includes_system_prompt() {
 
 #[test]
 fn test_conversation_history_get_conversation_messages_excludes_system_prompt() {
-    let mut history = ConversationHistory::new()
-        .with_system_prompt("You are a helpful assistant.");
+    let mut history = ConversationHistory::new().with_system_prompt("You are a helpful assistant.");
 
     history.add_user_message("Hello");
     history.add_assistant_message("Hi!");
@@ -225,8 +223,7 @@ fn test_system_prompt_builder_with_project_root_sets_type() {
     // Create a Cargo.toml to indicate Rust project
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
 
-    let builder = SystemPromptBuilder::new()
-        .with_project_root(root.to_path_buf());
+    let builder = SystemPromptBuilder::new().with_project_root(root.to_path_buf());
 
     let prompt = builder.build();
 
@@ -270,8 +267,7 @@ fn test_system_prompt_builder_with_tools_lists_them() {
 fn test_system_prompt_builder_with_custom_instructions() {
     let instructions = "Always write tests.\nUse tabs for indentation.".to_string();
 
-    let builder = SystemPromptBuilder::new()
-        .with_custom_instructions(instructions.clone());
+    let builder = SystemPromptBuilder::new().with_custom_instructions(instructions.clone());
 
     let prompt = builder.build();
 
@@ -440,7 +436,9 @@ fn test_provider_registry_available_providers_filters_by_api_key() {
     let available = registry.available_providers();
 
     // Local providers (Ollama, LmStudio) should be available
-    let has_local = available.iter().any(|p| p.id == ProviderId::Ollama || p.id == ProviderId::LmStudio);
+    let has_local = available
+        .iter()
+        .any(|p| p.id == ProviderId::Ollama || p.id == ProviderId::LmStudio);
     assert!(has_local);
 
     // All returned providers should be marked as available
@@ -493,8 +491,8 @@ fn test_usage_tracker_cost_estimation() {
     let mut tracker = UsageTracker::default();
 
     // Track some usage
-    tracker.track(1000, 500);  // 1000 input, 500 output
-    tracker.track(500, 250);   // 500 input, 250 output
+    tracker.track(1000, 500); // 1000 input, 500 output
+    tracker.track(500, 250); // 500 input, 250 output
 
     assert_eq!(tracker.total_input_tokens, 1500);
     assert_eq!(tracker.total_output_tokens, 750);
@@ -593,7 +591,10 @@ fn test_conversation_store_save_and_load_roundtrip() {
     assert_eq!(loaded.messages.len(), 2);
     assert_eq!(loaded.messages[0].content, "Hello");
     assert_eq!(loaded.messages[1].content, "Hi there!");
-    assert_eq!(loaded.system_prompt, Some("You are a test assistant.".to_string()));
+    assert_eq!(
+        loaded.system_prompt,
+        Some("You are a test assistant.".to_string())
+    );
 }
 
 #[test]
