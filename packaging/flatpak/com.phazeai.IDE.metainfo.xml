@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.phazeai.IDE</id>
+  <name>PhazeAI IDE</name>
+  <summary>AI-native local-first IDE</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      PhazeAI IDE is an open-source, AI-native development environment built for
+      developers who want powerful AI assistance without giving up privacy or control.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Multi-model AI support: Claude, OpenAI, Ollama (local), Groq, and more</li>
+      <li>Integrated terminal with full ANSI/VT100 support</li>
+      <li>LSP integration for code intelligence (hover, goto-def, completions)</li>
+      <li>Git integration with diff viewer and inline blame</li>
+      <li>Symbol outline, bracket matching, and code folding</li>
+      <li>AI-powered inline code editing with per-hunk review</li>
+      <li>Workspace search with ripgrep</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.phazeai.IDE.desktop</launchable>
+  <url type="homepage">https://github.com/phazeai/ide</url>
+  <url type="bugtracker">https://github.com/phazeai/ide/issues</url>
+  <provides>
+    <binary>phazeai-ide</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-02-21">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+  <developer id="com.phazeai">
+    <name>PhazeAI Technologies</name>
+  </developer>
+</component>

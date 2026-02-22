@@ -262,6 +262,8 @@ impl LlmClient for OpenAIClient {
         tokio::spawn(async move {
             use futures::StreamExt;
             let mut buffer = String::new();
+            // Maps tool_call index → id, since OpenAI only sends id on the first delta chunk
+            let mut tool_call_ids: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -284,6 +286,10 @@ impl LlmClient for OpenAIClient {
 
                     let data = &line[6..];
                     if data == "[DONE]" {
+                        // Finalize any tool calls that didn't get an explicit end event
+                        for (_, id) in tool_call_ids.drain() {
+                            let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
+                        }
                         let _ = tx.unbounded_send(StreamEvent::Done);
                         return;
                     }
@@ -305,37 +311,46 @@ impl LlmClient for OpenAIClient {
                                     delta.get("tool_calls").and_then(|t| t.as_array())
                                 {
                                     for tc in tool_calls {
+                                        let index = tc
+                                            .get("index")
+                                            .and_then(|i| i.as_u64())
+                                            .unwrap_or(0);
+                                        // Store id by index on first chunk (id absent on subsequent chunks)
+                                        if let Some(id) =
+                                            tc.get("id").and_then(|i| i.as_str())
+                                        {
+                                            if !id.is_empty() {
+                                                tool_call_ids.insert(index, id.to_string());
+                                            }
+                                        }
+                                        let id = tool_call_ids
+                                            .get(&index)
+                                            .cloned()
+                                            .unwrap_or_default();
                                         if let Some(func) = tc.get("function") {
                                             if let Some(name) =
                                                 func.get("name").and_then(|n| n.as_str())
                                             {
-                                                let id = tc
-                                                    .get("id")
-                                                    .and_then(|i| i.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                let _ = tx.unbounded_send(
-                                                    StreamEvent::ToolCallStart {
-                                                        id,
-                                                        name: name.to_string(),
-                                                    },
-                                                );
+                                                if !name.is_empty() {
+                                                    let _ = tx.unbounded_send(
+                                                        StreamEvent::ToolCallStart {
+                                                            id: id.clone(),
+                                                            name: name.to_string(),
+                                                        },
+                                                    );
+                                                }
                                             }
-                                            if let Some(args) = func
-                                                .get("arguments")
-                                                .and_then(|a| a.as_str())
+                                            if let Some(args) =
+                                                func.get("arguments").and_then(|a| a.as_str())
                                             {
-                                                let id = tc
-                                                    .get("id")
-                                                    .and_then(|i| i.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                let _ = tx.unbounded_send(
-                                                    StreamEvent::ToolCallDelta {
-                                                        id,
-                                                        arguments_delta: args.to_string(),
-                                                    },
-                                                );
+                                                if !args.is_empty() {
+                                                    let _ = tx.unbounded_send(
+                                                        StreamEvent::ToolCallDelta {
+                                                            id: id.clone(),
+                                                            arguments_delta: args.to_string(),
+                                                        },
+                                                    );
+                                                }
                                             }
                                         }
                                     }

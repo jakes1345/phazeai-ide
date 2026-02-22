@@ -30,3 +30,4 @@ syntect = { workspace = true }
 dirs = "5.0"
 tui-textarea = { workspace = true }
 tui-tree-widget = { workspace = true }
+arboard = { workspace = true }

@@ -20,6 +20,10 @@ pub enum AgentEvent {
     ToolResult { name: String, success: bool, summary: String },
     Complete { iterations: usize },
     Error(String),
+    // Browser Integration
+    BrowserFetchStart { url: String },
+    BrowserFetchComplete { url: String, title: String, content: String },
+    BrowserFetchError { url: String, error: String },
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,13 @@ impl Agent {
 
     pub fn with_approval(mut self, f: ApprovalFn) -> Self {
         self.approval_fn = Some(f);
+        self
+    }
+
+    /// Replace the internal conversation with a shared one, enabling history persistence
+    /// across multiple `run_with_events` calls from different Agent instances.
+    pub fn with_shared_conversation(mut self, conv: Arc<Mutex<ConversationHistory>>) -> Self {
+        self.conversation = conv;
         self
     }
 
@@ -338,9 +349,10 @@ impl Agent {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}...")
     }
 }

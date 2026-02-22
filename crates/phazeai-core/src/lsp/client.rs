@@ -40,6 +40,10 @@ pub enum LspEvent {
     Hover(Option<Hover>),
     /// Go-to-definition result
     Definition(Vec<Location>),
+    /// Find references result
+    References(Vec<Location>),
+    /// Document formatting edits
+    Formatting(Vec<TextEdit>),
     /// Server initialized successfully
     Initialized(String),
     /// Server exited
@@ -270,6 +274,80 @@ impl LspClient {
             Some(GotoDefinitionResponse::Link(_links)) => Ok(vec![]),
             None => Ok(vec![]),
         }
+    }
+
+    /// Request find references at a position
+    pub async fn find_references(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, String> {
+        let uri = path_to_uri(path)?;
+        let params = ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            context: ReferenceContext { include_declaration: true },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = self.send_request::<request::References>(params).await?;
+        Ok(result.unwrap_or_default())
+    }
+
+    /// Request document formatting
+    pub async fn formatting(
+        &self,
+        path: &Path,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> Result<Vec<TextEdit>, String> {
+        let uri = path_to_uri(path)?;
+        let params = DocumentFormattingParams {
+            text_document: TextDocumentIdentifier { uri },
+            options: FormattingOptions {
+                tab_size,
+                insert_spaces,
+                ..Default::default()
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let result = self.send_request::<request::Formatting>(params).await?;
+        Ok(result.unwrap_or_default())
+    }
+
+    // ── Event sender helpers (used by app.rs after async requests) ──────────
+
+    /// Send a hover result back through the event channel.
+    pub fn send_hover_event(&self, hover: Option<lsp_types::Hover>) -> Result<(), String> {
+        self.event_tx.send(LspEvent::Hover(hover))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Send definition locations back through the event channel.
+    pub fn send_definition_event(&self, locations: Vec<lsp_types::Location>) -> Result<(), String> {
+        self.event_tx.send(LspEvent::Definition(locations))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Send completion items back through the event channel.
+    pub fn send_completions_event(&self, items: Vec<lsp_types::CompletionItem>) -> Result<(), String> {
+        self.event_tx.send(LspEvent::Completions(items))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Send references back through the event channel.
+    pub fn send_references_event(&self, locations: Vec<lsp_types::Location>) -> Result<(), String> {
+        self.event_tx.send(LspEvent::References(locations))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Send formatting edits back through the event channel.
+    pub fn send_formatting_event(&self, edits: Vec<lsp_types::TextEdit>) -> Result<(), String> {
+        self.event_tx.send(LspEvent::Formatting(edits))
+            .map_err(|e| e.to_string())
     }
 
     /// Shutdown the language server

@@ -21,6 +21,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use arboard;
 
 use crate::commands::{self, CommandResult};
 use crate::theme::Theme;
@@ -132,6 +133,9 @@ struct AppState {
 
     // Tool approval
     approval_manager: ToolApprovalManager,
+
+    /// Current AI mode (chat, ask, debug, plan, edit)
+    ai_mode: String,
 }
 
 impl AppState {
@@ -180,6 +184,7 @@ impl AppState {
             conversation_store: store,
 
             approval_manager: ToolApprovalManager::default(),
+            ai_mode: "chat".into(),
         }
     }
 
@@ -777,6 +782,10 @@ fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: 
             Style::default().fg(theme.accent),
         ),
         Span::styled(
+            format!("| {} ", state.ai_mode),
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled(
             format!("| {} ", approval_str),
             Style::default().fg(theme.muted),
         ),
@@ -857,6 +866,9 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.add_message(MessageRole::System, format!("Error: {e}"));
             state.status_text = "Error".into();
         }
+        AgentEvent::BrowserFetchStart { .. }
+        | AgentEvent::BrowserFetchComplete { .. }
+        | AgentEvent::BrowserFetchError { .. } => {}
     }
 }
 
@@ -1020,6 +1032,19 @@ fn handle_key(
             let new_pos = word_boundary_left(&state.input, state.cursor_pos);
             state.input.drain(new_pos..state.cursor_pos);
             state.cursor_pos = new_pos;
+        }
+
+        // Clipboard paste (Ctrl+V)
+        (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+            if !state.is_processing {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if let Ok(text) = cb.get_text() {
+                        let text = text.replace('\r', ""); // strip CR
+                        state.input.insert_str(state.cursor_pos, &text);
+                        state.cursor_pos += text.len();
+                    }
+                }
+            }
         }
 
         // Tab completion for commands
@@ -1546,6 +1571,18 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
             }
 
             state.add_message(MessageRole::System, context_info);
+        }
+        CommandResult::SetMode(mode) => {
+            state.ai_mode = mode.clone();
+            let description = match mode.as_str() {
+                "plan"  => "Planning mode: creates structured plans and checklists",
+                "debug" => "Debug mode: focuses on diagnosing and fixing issues",
+                "ask"   => "Ask mode: read-only, answers questions about your code",
+                "edit"  => "Edit mode: makes targeted code changes",
+                "chat"  => "Chat mode: general conversation and assistance",
+                _       => "Mode changed",
+            };
+            state.add_message(MessageRole::System, format!("Mode: {mode} — {description}"));
         }
     }
 }

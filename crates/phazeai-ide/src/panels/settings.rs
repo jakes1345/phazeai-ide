@@ -1,6 +1,7 @@
 use egui::{self, RichText};
 use phazeai_core::config::{LlmProvider, Settings};
 
+use crate::keybindings::{binding_label, default_keybindings};
 use crate::themes::{ThemeColors, ThemePreset};
 
 pub struct SettingsPanel {
@@ -9,6 +10,8 @@ pub struct SettingsPanel {
     pub theme_preset: ThemePreset,
     pub settings_changed: bool,
     provider_idx: usize,
+    /// Filter query for the settings search bar.
+    search_query: String,
 }
 
 impl SettingsPanel {
@@ -28,6 +31,7 @@ impl SettingsPanel {
             theme_preset: ThemePreset::Dark,
             settings_changed: false,
             provider_idx,
+            search_query: String::new(),
         }
     }
 
@@ -43,18 +47,47 @@ impl SettingsPanel {
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(true)
-            .default_size([500.0, 600.0])
+            .default_size([520.0, 640.0])
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.show_appearance(ui, theme);
-                    ui.add_space(16.0);
-                    self.show_llm(ui, theme);
-                    ui.add_space(16.0);
-                    self.show_editor(ui, theme);
-                    ui.add_space(16.0);
-                    self.show_sidecar(ui, theme);
-                    ui.add_space(16.0);
+                // Search bar
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme.text_muted, "🔍");
+                    ui.add_space(4.0);
+                    let search = egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Filter settings…")
+                        .desired_width(ui.available_width());
+                    ui.add(search);
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
 
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let q = self.search_query.to_lowercase();
+
+                    if self.section_matches(&q, &["appearance", "theme", "font", "size", "color"]) {
+                        self.show_appearance(ui, theme);
+                        ui.add_space(16.0);
+                    }
+                    if self.section_matches(&q, &["llm", "provider", "model", "api", "key", "base", "url", "tokens", "claude", "openai", "ollama", "groq"]) {
+                        self.show_llm(ui, theme);
+                        ui.add_space(16.0);
+                    }
+                    if self.section_matches(&q, &["editor", "tab", "line", "numbers", "auto", "save", "indent"]) {
+                        self.show_editor(ui, theme);
+                        ui.add_space(16.0);
+                    }
+                    if self.section_matches(&q, &["sidecar", "python", "semantic", "search"]) {
+                        self.show_sidecar(ui, theme);
+                        ui.add_space(16.0);
+                    }
+                    if self.section_matches(&q, &["keybind", "shortcut", "hotkey", "key", "binding"]) {
+                        self.show_keybindings(ui, theme);
+                        ui.add_space(16.0);
+                    }
+
+                    ui.separator();
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if let Err(e) = self.settings.save() {
@@ -68,6 +101,10 @@ impl SettingsPanel {
                     });
                 });
             });
+    }
+
+    fn section_matches(&self, query: &str, keywords: &[&str]) -> bool {
+        query.is_empty() || keywords.iter().any(|k| query.contains(k))
     }
 
     fn show_appearance(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
@@ -228,5 +265,40 @@ impl SettingsPanel {
         {
             self.settings_changed = true;
         }
+    }
+
+    fn show_keybindings(&self, ui: &mut egui::Ui, theme: &ThemeColors) {
+        ui.colored_label(theme.text, RichText::new("Keyboard Shortcuts").strong().size(16.0));
+        ui.separator();
+        ui.add_space(4.0);
+
+        let bindings = default_keybindings();
+        egui::Grid::new("keybindings_grid")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for binding in &bindings {
+                    ui.colored_label(theme.text_secondary, binding.action.label());
+                    let label = binding_label(binding);
+                    egui::Frame::none()
+                        .fill(theme.background)
+                        .rounding(egui::Rounding::same(4.0))
+                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                theme.accent,
+                                RichText::new(&label).monospace().size(11.0),
+                            );
+                        });
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(4.0);
+        ui.colored_label(
+            theme.text_muted,
+            RichText::new("Custom keybinding editor coming soon.").size(11.0).italics(),
+        );
     }
 }

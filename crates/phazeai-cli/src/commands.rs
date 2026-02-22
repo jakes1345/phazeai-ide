@@ -45,6 +45,8 @@ pub enum CommandResult {
     DiscoverModels,
     /// Show project context information.
     ShowContext,
+    /// Switch AI mode (plan, debug, chat, ask, edit).
+    SetMode(String),
 }
 
 pub fn handle_command(input: &str) -> CommandResult {
@@ -144,6 +146,24 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/discover" => CommandResult::DiscoverModels,
         "/context" => CommandResult::ShowContext,
 
+        // AI Mode switching
+        "/mode" => {
+            let modes = "plan, debug, chat, ask, edit";
+            if arg.is_empty() {
+                CommandResult::Message(format!("Usage: /mode <mode>\nAvailable modes: {modes}"))
+            } else {
+                match arg {
+                    "plan" | "debug" | "chat" | "ask" | "edit" => CommandResult::SetMode(arg.to_string()),
+                    _ => CommandResult::Message(format!("Unknown mode '{arg}'. Available: {modes}")),
+                }
+            }
+        }
+        "/plan"  => CommandResult::SetMode("plan".into()),
+        "/debug" => CommandResult::SetMode("debug".into()),
+        "/ask"   => CommandResult::SetMode("ask".into()),
+        "/edit"  => CommandResult::SetMode("edit".into()),
+        "/chat"  => CommandResult::SetMode("chat".into()),
+
         // Unknown command
         _ => {
             if input.starts_with('/') {
@@ -179,6 +199,14 @@ fn show_help() -> CommandResult {
     /theme <name>             Change color theme
     /files, /tree             Toggle file tree panel
     /status                   Show status (model, tokens, directory)
+
+  AI MODES
+    /mode <mode>              Switch AI mode (chat, ask, debug, plan, edit)
+    /plan                     Switch to planning mode
+    /debug                    Switch to debug mode
+    /ask                      Switch to ask (read-only) mode
+    /edit                     Switch to edit mode
+    /chat                     Switch to chat mode
 
   PROJECT & GIT
     /diff                     Show git diff

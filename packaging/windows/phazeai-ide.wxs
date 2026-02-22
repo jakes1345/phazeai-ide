@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX Toolset installer definition for PhazeAI IDE (Windows)
+  Build with: cargo-wix or wix toolset v4
+
+  Prerequisites:
+    winget install WixToolset.WixToolset
+    cargo install cargo-wix
+    cargo wix --no-build --nocapture
+
+  Or manually:
+    cargo build --release -p phazeai-ide
+    wix build packaging/windows/phazeai-ide.wxs -o dist/PhazeAI-IDE-0.1.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="PhazeAI IDE"
+           Manufacturer="PhazeAI Technologies"
+           Version="0.1.0"
+           Language="1033"
+           Codepage="1252"
+           UpgradeCode="f8a2e5b1-3d4c-4f7e-9a1b-2c5d6e7f8a9b">
+
+    <SummaryInformation Keywords="IDE AI Editor Rust Python"
+                        Description="PhazeAI IDE - AI-native development environment"
+                        Manufacturer="PhazeAI Technologies" />
+
+    <Media Id="1" Cabinet="phazeai.cab" EmbedCab="yes" />
+
+    <!-- Upgrade handling -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of PhazeAI IDE is already installed." />
+
+    <!-- Main install directory -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="APPLICATIONFOLDER" Name="PhazeAI IDE">
+        <Component Id="MainExecutable" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567890">
+          <File Id="PhazeAIExe"
+                Name="phazeai-ide.exe"
+                Source="..\..\target\release\phazeai-ide.exe"
+                KeyPath="yes" />
+          <!-- Add to PATH -->
+          <Environment Id="PATH"
+                       Name="PATH"
+                       Value="[APPLICATIONFOLDER]"
+                       Permanent="no"
+                       Part="last"
+                       Action="set"
+                       System="yes" />
+        </Component>
+
+        <!-- App icon -->
+        <Component Id="AppIcon" Guid="b2c3d4e5-f6a7-8901-bcde-f12345678901">
+          <File Id="AppIconFile"
+                Name="phazeai-ide.ico"
+                Source="..\..\assets\icon.ico"
+                KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Desktop shortcut -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="c3d4e5f6-a7b8-9012-cdef-123456789012">
+        <Shortcut Id="DesktopSC"
+                  Name="PhazeAI IDE"
+                  Description="AI-native development environment"
+                  Target="[APPLICATIONFOLDER]phazeai-ide.exe"
+                  WorkingDirectory="APPLICATIONFOLDER"
+                  Icon="PhazeAIIcon" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\PhazeAI\IDE"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Start menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="PhazeAI IDE">
+        <Component Id="StartMenuShortcut" Guid="d4e5f6a7-b8c9-0123-defa-234567890123">
+          <Shortcut Id="StartMenuSC"
+                    Name="PhazeAI IDE"
+                    Description="AI-native development environment"
+                    Target="[APPLICATIONFOLDER]phazeai-ide.exe"
+                    WorkingDirectory="APPLICATIONFOLDER"
+                    Icon="PhazeAIIcon" />
+          <RemoveFolder Id="CleanupProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\PhazeAI\IDE"
+                         Name="StartMenuShortcut"
+                         Type="integer"
+                         Value="1"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- File associations for common source files -->
+    <Component Id="FileAssociations" Guid="e5f6a7b8-c9d0-1234-efab-345678901234" Directory="APPLICATIONFOLDER">
+      <ProgId Id="PhazeAI.SourceFile" Description="Source Code File" Icon="PhazeAIIcon">
+        <Extension Id="rs" ContentType="text/x-rust">
+          <Verb Id="open" Command="Open with PhazeAI IDE" TargetFile="PhazeAIExe" Argument='"%1"' />
+        </Extension>
+        <Extension Id="py" ContentType="text/x-python">
+          <Verb Id="open" Command="Open with PhazeAI IDE" TargetFile="PhazeAIExe" Argument='"%1"' />
+        </Extension>
+        <Extension Id="js" ContentType="text/javascript">
+          <Verb Id="open" Command="Open with PhazeAI IDE" TargetFile="PhazeAIExe" Argument='"%1"' />
+        </Extension>
+        <Extension Id="ts" ContentType="text/typescript">
+          <Verb Id="open" Command="Open with PhazeAI IDE" TargetFile="PhazeAIExe" Argument='"%1"' />
+        </Extension>
+      </ProgId>
+      <RegistryValue Root="HKCU"
+                     Key="Software\PhazeAI\IDE"
+                     Name="FileAssoc"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <Icon Id="PhazeAIIcon" SourceFile="..\..\assets\icon.ico" />
+
+    <!-- UI -->
+    <ui:WixUI Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+
+    <!-- License text shown during install -->
+    <WixVariable Id="WixUILicenseRtf" Value="LICENSE.rtf" />
+
+    <!-- Feature definition -->
+    <Feature Id="MainFeature" Title="PhazeAI IDE" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="AppIcon" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="FileAssociations" />
+    </Feature>
+
+  </Package>
+</Wix>

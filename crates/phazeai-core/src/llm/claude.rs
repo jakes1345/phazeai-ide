@@ -257,6 +257,8 @@ impl LlmClient for ClaudeClient {
         tokio::spawn(async move {
             use futures::StreamExt;
             let mut buffer = String::new();
+            // Maps content_block index → tool_use id, so delta events can find their tool call
+            let mut tool_block_ids: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -306,14 +308,18 @@ impl LlmClient for ClaudeClient {
                                                 .get("partial_json")
                                                 .and_then(|t| t.as_str())
                                             {
-                                                // Tool argument delta - we need the index to
-                                                // find the tool ID
-                                                let _ = tx.unbounded_send(
-                                                    StreamEvent::ToolCallDelta {
-                                                        id: String::new(),
-                                                        arguments_delta: partial.to_string(),
-                                                    },
-                                                );
+                                                let index = event
+                                                    .get("index")
+                                                    .and_then(|i| i.as_u64())
+                                                    .unwrap_or(0);
+                                                if let Some(id) = tool_block_ids.get(&index) {
+                                                    let _ = tx.unbounded_send(
+                                                        StreamEvent::ToolCallDelta {
+                                                            id: id.clone(),
+                                                            arguments_delta: partial.to_string(),
+                                                        },
+                                                    );
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -325,6 +331,10 @@ impl LlmClient for ClaudeClient {
                                     if cb.get("type").and_then(|t| t.as_str())
                                         == Some("tool_use")
                                     {
+                                        let index = event
+                                            .get("index")
+                                            .and_then(|i| i.as_u64())
+                                            .unwrap_or(0);
                                         let id = cb
                                             .get("id")
                                             .and_then(|v| v.as_str())
@@ -335,6 +345,7 @@ impl LlmClient for ClaudeClient {
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("")
                                             .to_string();
+                                        tool_block_ids.insert(index, id.clone());
                                         let _ = tx.unbounded_send(
                                             StreamEvent::ToolCallStart { id, name },
                                         );
@@ -342,7 +353,13 @@ impl LlmClient for ClaudeClient {
                                 }
                             }
                             Some("content_block_stop") => {
-                                // Could track which block stopped
+                                let index = event
+                                    .get("index")
+                                    .and_then(|i| i.as_u64())
+                                    .unwrap_or(0);
+                                if let Some(id) = tool_block_ids.remove(&index) {
+                                    let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
+                                }
                             }
                             Some("message_stop") => {
                                 let _ = tx.unbounded_send(StreamEvent::Done);

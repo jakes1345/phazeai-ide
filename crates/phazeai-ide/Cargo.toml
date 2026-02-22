@@ -28,3 +28,11 @@ chrono = { workspace = true }
 comrak = { workspace = true }
 portable-pty = { workspace = true }
 notify = { workspace = true }
+reqwest = { workspace = true }
+arboard = { workspace = true }
+vte = { workspace = true }
+similar = { workspace = true }
+lsp-types = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-highlight = { workspace = true }

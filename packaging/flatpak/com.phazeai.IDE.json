@@ -1,0 +1,60 @@
+{
+  "app-id": "com.phazeai.IDE",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "23.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "phazeai-ide",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--filesystem=home",
+    "--filesystem=host:ro",
+    "--env=RUST_LOG=warn",
+    "--env=PATH=/app/bin:/usr/bin:/app/extensions/rust-stable/bin",
+    "--env=CARGO_HOME=/var/data/cargo",
+    "--env=RUSTUP_HOME=/app/extensions/rust-stable"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/phazeai-ide/cargo",
+      "RUSTFLAGS": "-L /app/lib"
+    }
+  },
+  "modules": [
+    {
+      "name": "phazeai-ide",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline fetch --manifest-path Cargo.toml --verbose",
+        "cargo --offline build --release -p phazeai-ide",
+        "install -Dm755 target/release/phazeai-ide /app/bin/phazeai-ide",
+        "install -Dm644 packaging/flatpak/com.phazeai.IDE.desktop /app/share/applications/com.phazeai.IDE.desktop",
+        "install -Dm644 assets/icon-256.png /app/share/icons/hicolor/256x256/apps/com.phazeai.IDE.png",
+        "install -Dm644 packaging/flatpak/com.phazeai.IDE.metainfo.xml /app/share/metainfo/com.phazeai.IDE.metainfo.xml"
+      ],
+      "build-options": {
+        "env": {
+          "CARGO_NET_OFFLINE": "true"
+        }
+      },
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        },
+        {
+          "type": "file",
+          "path": "cargo-sources.json",
+          "dest": "cargo/registry/src"
+        }
+      ]
+    }
+  ]
+}

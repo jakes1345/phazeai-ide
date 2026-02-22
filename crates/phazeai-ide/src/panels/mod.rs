@@ -1,5 +1,9 @@
+pub mod browser;
+pub mod chat;
+pub mod diff;
 pub mod editor;
 pub mod explorer;
-pub mod chat;
+pub mod outline;
+pub mod search;
 pub mod terminal;
 pub mod settings;

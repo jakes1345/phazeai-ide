@@ -82,3 +82,35 @@ impl Default for ToolRegistry {
         registry
     }
 }
+
+impl ToolRegistry {
+    /// Read-only tool set: suitable for Ask / read-only AI modes.
+    /// Includes only tools that cannot modify the filesystem or run commands.
+    pub fn read_only() -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(super::ReadFileTool));
+        registry.register(Box::new(super::GrepTool));
+        registry.register(Box::new(super::GlobTool));
+        registry.register(Box::new(super::ListFilesTool));
+        registry.register(Box::new(super::FindPathTool));
+        registry.register(Box::new(super::NowTool));
+        registry
+    }
+
+    /// Standard tool set: read + write + diagnostics, but no destructive ops.
+    /// Suitable for Debug / Plan modes.
+    pub fn standard() -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(super::ReadFileTool));
+        registry.register(Box::new(super::GrepTool));
+        registry.register(Box::new(super::GlobTool));
+        registry.register(Box::new(super::ListFilesTool));
+        registry.register(Box::new(super::FindPathTool));
+        registry.register(Box::new(super::NowTool));
+        registry.register(Box::new(super::FetchTool));
+        registry.register(Box::new(super::WebSearchTool));
+        registry.register(Box::new(super::DiagnosticsTool));
+        registry.register(Box::new(super::BashTool::default()));
+        registry
+    }
+}

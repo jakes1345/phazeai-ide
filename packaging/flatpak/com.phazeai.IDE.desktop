@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=PhazeAI IDE
+GenericName=AI-Powered IDE
+Comment=Local-first AI-native IDE with multi-model support
+Exec=phazeai-ide %F
+Icon=com.phazeai.IDE
+Terminal=false
+Categories=Development;IDE;TextEditor;
+MimeType=text/plain;text/x-rust;text/x-python;text/javascript;application/json;
+Keywords=ide;editor;ai;rust;python;coding;
+StartupWMClass=phazeai-ide
+X-Flatpak=com.phazeai.IDE

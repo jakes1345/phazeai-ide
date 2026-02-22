@@ -432,7 +432,7 @@ fn default_model_for(id: &ProviderId) -> &str {
     match id {
         ProviderId::Claude => "claude-sonnet-4-5-20250929",
         ProviderId::OpenAI => "gpt-4o",
-        ProviderId::Ollama => "llama3.2",
+        ProviderId::Ollama => "phaze-beast",
         ProviderId::Groq => "llama-3.3-70b-versatile",
         ProviderId::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         ProviderId::OpenRouter => "anthropic/claude-sonnet-4-5-20250929",

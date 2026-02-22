@@ -3,7 +3,6 @@
 /// Inspired by Zed's outline view and Aider's repo map.
 use std::path::Path;
 
-use tree_sitter::{Node, Parser};
 
 /// A symbol extracted from source code
 #[derive(Debug, Clone)]
@@ -183,11 +182,11 @@ fn extract_rust_symbols(source: &str, symbols: &mut Vec<CodeSymbol>) {
         }
 
         // Functions and methods
-        if (trimmed.starts_with("pub fn ")
+        if trimmed.starts_with("pub fn ")
             || trimmed.starts_with("fn ")
             || trimmed.starts_with("pub async fn ")
             || trimmed.starts_with("async fn ")
-            || trimmed.starts_with("pub(crate) fn "))
+            || trimmed.starts_with("pub(crate) fn ")
         {
             let sig = trimmed.trim_end_matches('{').trim().to_string();
             let name = extract_fn_name(trimmed);

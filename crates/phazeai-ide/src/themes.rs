@@ -563,6 +563,8 @@ impl ThemeColors {
 
     pub fn apply(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
+        
+        // --- Premium Global Style ---
         style.visuals.extreme_bg_color = self.background;
         style.visuals.window_fill = self.surface;
         style.visuals.panel_fill = self.panel;
@@ -571,14 +573,60 @@ impl ThemeColors {
         style.visuals.selection.bg_fill = self.selection;
         style.visuals.selection.stroke.color = self.text;
         style.visuals.window_stroke.color = self.border;
+        style.visuals.window_stroke.width = 1.0;
+        style.visuals.window_rounding = egui::Rounding::same(12.0);
+        
+        // Widget states
         style.visuals.widgets.noninteractive.bg_fill = self.surface;
         style.visuals.widgets.noninteractive.fg_stroke.color = self.text;
+        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+        
         style.visuals.widgets.inactive.bg_fill = self.background_secondary;
-        style.visuals.widgets.inactive.fg_stroke.color = self.text;
+        style.visuals.widgets.inactive.fg_stroke.color = self.text_secondary;
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+        
         style.visuals.widgets.hovered.bg_fill = self.surface;
         style.visuals.widgets.hovered.fg_stroke.color = self.text;
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+        
         style.visuals.widgets.active.bg_fill = self.accent;
-        style.visuals.widgets.active.fg_stroke.color = self.text;
+        style.visuals.widgets.active.fg_stroke.color = Color32::WHITE;
+        style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+
+        // Spacing & Layout
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.spacing.window_margin = egui::Margin::same(12.0);
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.interact_size = egui::vec2(40.0, 20.0);
+
         ctx.set_style(style);
+    }
+}
+
+pub fn resolve_theme_preset(name: &str) -> ThemePreset {
+    match name.to_lowercase().as_str() {
+        "dark" => ThemePreset::Dark,
+        "tokyo night" | "tokyonight" => ThemePreset::TokyoNight,
+        "tokyo night storm" | "tokyonightstorm" => ThemePreset::TokyoNightStorm,
+        "dracula" => ThemePreset::Dracula,
+        "nord" => ThemePreset::Nord,
+        "one dark" | "onedark" => ThemePreset::OneDark,
+        "monokai" => ThemePreset::Monokai,
+        "solarized dark" | "solarizeddark" => ThemePreset::SolarizedDark,
+        "gruvbox dark" | "gruvboxdark" => ThemePreset::GruvboxDark,
+        "catppuccin mocha" | "catppuccinmocha" => ThemePreset::CatppuccinMocha,
+        "spectral purple" | "spectralpurple" => ThemePreset::SpectralPurple,
+        "midnight blue" | "midnightblue" => ThemePreset::MidnightBlue,
+        "cyberpunk" => ThemePreset::Cyberpunk,
+        "matrix" => ThemePreset::Matrix,
+        "light" => ThemePreset::Light,
+        "tokyo night day" | "tokyonightday" => ThemePreset::TokyoNightDay,
+        "solarized light" | "solarizedlight" => ThemePreset::SolarizedLight,
+        "gruvbox light" | "gruvboxlight" => ThemePreset::GruvboxLight,
+        "catppuccin latte" | "catppuccinlatte" => ThemePreset::CatppuccinLatte,
+        "github light" | "githublight" => ThemePreset::GitHubLight,
+        "high contrast dark" | "highcontrastdark" => ThemePreset::HighContrastDark,
+        "high contrast light" | "highcontrastlight" => ThemePreset::HighContrastLight,
+        _ => ThemePreset::Dark,
     }
 }

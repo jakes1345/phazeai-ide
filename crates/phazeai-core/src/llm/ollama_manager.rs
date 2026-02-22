@@ -19,6 +19,14 @@ impl OllamaManager {
         })
     }
 
+    /// Check if Ollama is reachable and responsive
+    pub async fn check_health(&self) -> Result<(), PhazeError> {
+        self.ollama.list_local_models()
+            .await
+            .map(|_| ())
+            .map_err(|e| PhazeError::Llm(format!("Ollama is not responding at {}. Is it running at that address? Error: {}", self._base_url, e)))
+    }
+
     /// Check if a model exists in the local Ollama instance.
     pub async fn model_exists(&self, model_name: &str) -> Result<bool, PhazeError> {
         let models = self.ollama.list_local_models()
@@ -86,6 +94,40 @@ impl OllamaManager {
             .await
             .map_err(|e| PhazeError::Llm(format!("Failed to list models: {e}")))?;
         Ok(models.iter().map(|m| m.name.clone()).collect())
+    }
+
+    /// Check health and provision essential models if missing.
+    /// Returns a list of models that were provisioned.
+    pub async fn setup_checks(&self) -> Result<Vec<String>, PhazeError> {
+        self.check_health().await?;
+        
+        let mut provisioned = Vec::new();
+        
+        if !self.model_exists("phaze-beast").await? {
+            info!("Provisioning phaze-beast...");
+            self.ensure_phaze_beast().await?;
+            provisioned.push("phaze-beast".to_string());
+        }
+        
+        if !self.model_exists("phaze-coder").await? {
+            info!("Provisioning phaze-coder...");
+            self.ensure_model_from_content("phaze-coder", MODELFILE_CODER).await?;
+            provisioned.push("phaze-coder".to_string());
+        }
+
+        if !self.model_exists("phaze-planner").await? {
+            info!("Provisioning phaze-planner...");
+            self.ensure_model_from_content("phaze-planner", MODELFILE_PLANNER).await?;
+            provisioned.push("phaze-planner".to_string());
+        }
+
+        if !self.model_exists("phaze-reviewer").await? {
+            info!("Provisioning phaze-reviewer...");
+            self.ensure_model_from_content("phaze-reviewer", MODELFILE_REVIEWER).await?;
+            provisioned.push("phaze-reviewer".to_string());
+        }
+        
+        Ok(provisioned)
     }
 }
 
