@@ -483,6 +483,7 @@ impl PhazeApp {
 
     /// Process pending LSP events (diagnostics, etc.)
     fn process_lsp_events(&mut self) {
+        let rt = self.runtime.handle().clone();
         if let Some(ref mut rx) = self.lsp_event_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -545,7 +546,7 @@ impl PhazeApp {
                                                     lines.get(line_idx).unwrap_or(&"").to_string();
 
                                                 let tx = self.ide_event_tx.clone();
-                                                tokio::spawn(async move {
+                                                rt.spawn(async move {
                                                     let prompt = format!(
                                                         "You are the Shadow Agent, an elite silent auto-fixer for a Rust IDE.\n\n\
                                                         I have an LSP Error:\n{}\n\n\
@@ -938,6 +939,7 @@ impl PhazeApp {
     }
 
     fn check_ghost_text(&mut self) {
+        let rt = self.runtime.handle().clone();
         let ide_tx = self.ide_event_tx.clone();
         for (idx, tab) in self.editor.tabs.iter_mut().enumerate() {
             if tab.ghost_text.is_none()
@@ -961,7 +963,7 @@ impl PhazeApp {
                 };
 
                 let tx = ide_tx.clone();
-                tokio::spawn(async move {
+                rt.spawn(async move {
                     let prompt = format!(
                         "You are an inline code autocomplete engine for an IDE. The cursor is tightly wedged between the following before and after text. Complete the code naturally. Return *ONLY* the string that should be inserted next. No markdown, no explanations, no wrappers.\n\nCode before cursor:\n{}\n\nCode after cursor:\n{}",
                         before, after
@@ -982,6 +984,7 @@ impl PhazeApp {
     }
 
     fn process_ide_events(&mut self) {
+        let rt = self.runtime.handle().clone();
         let mut rx = match self.ide_event_rx.take() {
             Some(rx) => rx,
             None => return,
@@ -1013,7 +1016,7 @@ impl PhazeApp {
                     modelfile_content,
                 } => {
                     let tx = self.ide_event_tx.clone();
-                    tokio::spawn(async move {
+                    rt.spawn(async move {
                         let manager = match phazeai_core::llm::ollama_manager::OllamaManager::new(
                             "http://localhost:11434",
                         ) {
