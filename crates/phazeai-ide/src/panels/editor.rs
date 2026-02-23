@@ -646,6 +646,15 @@ pub struct EditorTab {
     /// Recomputed when `ts_computed_len` differs from `rope.len_bytes()`.
     pub ts_spans: Vec<TsSpan>,
     pub ts_computed_len: usize,
+
+    // ── Ghost Text (Predictive Auto-complete) ─────────────────────────────
+    pub ghost_text: Option<String>,
+    pub last_edit_time: std::time::Instant,
+    pub ghost_request_pending: bool,
+
+    // ── Shadow Agent (Background Auto-fix) ────────────────────────────────
+    pub shadow_fixes: HashMap<usize, String>,
+    pub shadow_request_pending: HashSet<usize>,
 }
 
 impl EditorTab {
@@ -688,6 +697,11 @@ impl EditorTab {
             fold_cache_generation: u64::MAX,
             ts_spans: Vec::new(),
             ts_computed_len: usize::MAX,
+            ghost_text: None,
+            last_edit_time: Instant::now(),
+            ghost_request_pending: false,
+            shadow_fixes: HashMap::new(),
+            shadow_request_pending: HashSet::new(),
         }
     }
 
@@ -736,6 +750,11 @@ impl EditorTab {
             fold_cache_generation: u64::MAX,
             ts_spans: Vec::new(),
             ts_computed_len: usize::MAX,
+            ghost_text: None,
+            last_edit_time: Instant::now(),
+            ghost_request_pending: false,
+            shadow_fixes: HashMap::new(),
+            shadow_request_pending: HashSet::new(),
         })
     }
 
@@ -766,7 +785,7 @@ impl EditorTab {
         }
     }
 
-    fn sync_legacy_cursor(&mut self) {
+    pub fn sync_legacy_cursor(&mut self) {
         self.cursor_line = self.cursor.line;
         self.cursor_col = self.cursor.col;
     }
@@ -805,11 +824,38 @@ impl EditorTab {
         self.highlight_cache.invalidate_from(0);
     }
 
-    fn force_snapshot(&mut self) {
+    pub fn force_snapshot(&mut self) {
         let cur = self.cursor;
         let sel = self.selection.clone();
         self.undo_stack.push(&self.rope, cur, sel);
         self.edits_since_snapshot = 0;
+    }
+
+    /// Apply an AI-generated shadow fix to a specific line
+    pub fn apply_shadow_fix(&mut self, line_idx: usize) {
+        if let Some(fix_code) = self.shadow_fixes.remove(&line_idx) {
+            self.force_snapshot();
+            let start_char = self.rope.line_to_char(line_idx);
+            let end_char = if line_idx + 1 < self.rope.len_lines() {
+                self.rope.line_to_char(line_idx + 1)
+            } else {
+                self.rope.len_chars()
+            };
+            self.rope.remove(start_char..end_char);
+
+            // The fix might omit the newline if it was the last line, so ensure we append one if needed
+            let mut insert_code = fix_code;
+            if !insert_code.ends_with('\n') && line_idx + 1 < self.rope.len_lines() {
+                // Need to keep line structure intact if not at very EOF
+                insert_code.push('\n');
+            }
+
+            self.rope.insert(start_char, &insert_code);
+            self.modified = true;
+            self.highlight_cache.invalidate_from(line_idx);
+            self.shadow_request_pending.remove(&line_idx);
+            self.force_snapshot();
+        }
     }
 
     /// Convert TextPosition to rope char index
@@ -889,6 +935,9 @@ impl EditorTab {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        self.ghost_text = None;
+        self.last_edit_time = std::time::Instant::now();
+        self.ghost_request_pending = false;
         // Delete selection first if any
         self.delete_selection();
         let idx = self.cursor_char_idx();
@@ -909,6 +958,9 @@ impl EditorTab {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.ghost_text = None;
+        self.last_edit_time = std::time::Instant::now();
+        self.ghost_request_pending = false;
         self.delete_selection();
         let idx = self.cursor_char_idx();
         let dirty_line = self.cursor.line;
@@ -930,6 +982,9 @@ impl EditorTab {
     }
 
     pub fn delete_back(&mut self) {
+        self.ghost_text = None;
+        self.last_edit_time = std::time::Instant::now();
+        self.ghost_request_pending = false;
         if self.delete_selection() {
             self.maybe_snapshot();
             self.sync_legacy_cursor();
@@ -965,6 +1020,9 @@ impl EditorTab {
     }
 
     pub fn delete_forward(&mut self) {
+        self.ghost_text = None;
+        self.last_edit_time = std::time::Instant::now();
+        self.ghost_request_pending = false;
         if self.delete_selection() {
             self.maybe_snapshot();
             self.sync_legacy_cursor();
@@ -1100,6 +1158,9 @@ impl EditorTab {
 
     /// Move cursor to position, optionally extending selection
     pub fn move_cursor_to(&mut self, pos: TextPosition, extend_selection: bool) {
+        self.ghost_text = None;
+        self.last_edit_time = std::time::Instant::now();
+        self.ghost_request_pending = false;
         if extend_selection {
             if self.selection.is_none() {
                 self.selection = Some(Selection::new(self.cursor));
@@ -1878,6 +1939,11 @@ impl EditorPanel {
                             fold_cache_generation: u64::MAX,
                             ts_spans: Vec::new(),
                             ts_computed_len: usize::MAX,
+                            ghost_text: None,
+                            last_edit_time: std::time::Instant::now(),
+                            ghost_request_pending: false,
+                            shadow_fixes: HashMap::new(),
+                            shadow_request_pending: HashSet::new(),
                         };
                         self.tabs.push(tab);
                         self.tabs.len() - 1
@@ -1993,6 +2059,30 @@ impl EditorPanel {
 
     pub fn toggle_find(&mut self) {
         self.find_replace.toggle();
+    }
+
+    pub fn goto_next_diagnostic(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let mut next_line = None;
+            let current = tab.cursor.line;
+            let mut keys: Vec<usize> = tab.diagnostics.keys().copied().collect();
+            keys.sort_unstable();
+            for &k in &keys {
+                if k > current {
+                    next_line = Some(k);
+                    break;
+                }
+            }
+            if next_line.is_none() && !keys.is_empty() {
+                next_line = Some(keys[0]);
+            }
+            if let Some(line) = next_line {
+                tab.cursor = TextPosition::new(line, 0);
+                tab.selection = None;
+                tab.cursor_changed = true;
+                tab.sync_legacy_cursor();
+            }
+        }
     }
 
     // ── LSP helpers ───────────────────────────────────────────────────────
@@ -2566,7 +2656,7 @@ fn render_editor_content(
                     } => {
                         let shift = modifiers.shift;
                         let ctrl = modifiers.command || modifiers.ctrl;
-                        let _alt = modifiers.alt;
+                        let alt = modifiers.alt;
 
                         match key {
                             egui::Key::Escape => {
@@ -2577,7 +2667,9 @@ fn render_editor_content(
                                 tab.block_selection = None;
                             }
                             egui::Key::Enter => {
-                                if !ctrl {
+                                if alt && tab.shadow_fixes.contains_key(&tab.cursor.line) {
+                                    tab.apply_shadow_fix(tab.cursor.line);
+                                } else if !ctrl {
                                     tab.insert_newline_with_indent();
                                     needs_search_update = true;
                                 }
@@ -2600,8 +2692,12 @@ fn render_editor_content(
                             }
                             egui::Key::Tab => {
                                 if !shift {
-                                    // 4 spaces for tab (or smart tab for indent)
-                                    tab.insert_str("    ");
+                                    if let Some(ghost) = tab.ghost_text.take() {
+                                        tab.insert_str(&ghost);
+                                    } else {
+                                        // 4 spaces for tab (or smart tab for indent)
+                                        tab.insert_str("    ");
+                                    }
                                 }
                             }
                             egui::Key::ArrowUp => tab.move_up(shift),
@@ -2964,6 +3060,25 @@ fn render_editor_content(
                         theme.text,
                     );
 
+                    // Draw predictive ghost text overlay if applicable
+                    if line_idx == tab.cursor.line {
+                        if let Some(ghost) = &tab.ghost_text {
+                            let ghost_x = rect.left() + tab.cursor.col as f32 * char_width;
+                            for (i, gline) in ghost.lines().enumerate() {
+                                ui.painter().text(
+                                    egui::pos2(
+                                        if i == 0 { ghost_x } else { rect.left() },
+                                        rect.top() + i as f32 * line_height,
+                                    ),
+                                    egui::Align2::LEFT_TOP,
+                                    gline,
+                                    FontId::monospace(font_size),
+                                    theme.text_muted.linear_multiply(0.4),
+                                );
+                            }
+                        }
+                    }
+
                     // LSP diagnostic underlines (squiggles at bottom of line)
                     if let Some(diags) = tab.diagnostics.get(&line_idx) {
                         for diag in diags {
@@ -3009,6 +3124,54 @@ fn render_editor_content(
                                 diag_resp.on_hover_text(diag_msg);
                             }
                         }
+                    }
+
+                    // Shadow Agent Fix Visual Overlay
+                    if let Some(shadow_code) = tab.shadow_fixes.get(&line_idx) {
+                        let hint = "✨ Shadow Agent: Alt+Enter to apply fix";
+
+                        // Measure layout to position nicely
+                        let fix_galley = ui.painter().layout_no_wrap(
+                            shadow_code.clone(),
+                            FontId::monospace(font_size),
+                            theme.success,
+                        );
+                        let hint_galley = ui.painter().layout_no_wrap(
+                            hint.to_string(),
+                            FontId::proportional(font_size - 1.0),
+                            theme.text_muted,
+                        );
+
+                        // Draw background box for the fix preview (floating above the line)
+                        // Actually let's draw it right below the line to not occlude text
+                        let box_rect = egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + 20.0, rect.bottom() + 2.0),
+                            egui::pos2(
+                                rect.left()
+                                    + 20.0
+                                    + fix_galley.size().x.max(hint_galley.size().x)
+                                    + 16.0,
+                                rect.bottom() + fix_galley.size().y + hint_galley.size().y + 12.0,
+                            ),
+                        );
+
+                        ui.painter().rect(
+                            box_rect,
+                            4.0,
+                            theme.surface,
+                            egui::Stroke::new(1.0, theme.success.linear_multiply(0.5)),
+                        );
+
+                        ui.painter().galley(
+                            egui::pos2(box_rect.left() + 8.0, box_rect.top() + 4.0),
+                            hint_galley,
+                            theme.text_muted,
+                        );
+                        ui.painter().galley(
+                            egui::pos2(box_rect.left() + 8.0, box_rect.top() + 8.0 + font_size),
+                            fix_galley,
+                            theme.success,
+                        );
                     }
 
                     // Primary cursor bar

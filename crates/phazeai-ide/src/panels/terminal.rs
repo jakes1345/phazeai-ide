@@ -842,6 +842,23 @@ impl TerminalPanel {
         self.active_session().is_running()
     }
 
+    pub fn clear_output(&mut self) {
+        if let Some(session) = self.sessions.get_mut(self.active) {
+            if let Ok(mut state) = session.term_state.lock() {
+                state.lines.clear();
+                state.current_line = TermLine::new();
+            }
+        }
+    }
+
+    pub fn new_session(&mut self) {
+        let cwd = self.active_session().cwd.clone();
+        let idx = self.sessions.len() + 1;
+        let session = TerminalSession::new(cwd, idx.to_string());
+        self.sessions.push(session);
+        self.active = self.sessions.len() - 1;
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, theme: &ThemeColors) {
         // Apply scroll flag from outside
         if self.scroll_to_bottom {

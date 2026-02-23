@@ -1,0 +1,11 @@
+{
+    "name": "phazeai-ext-host",
+    "version": "1.0.0",
+    "description": "Node.js extension host process for PhazeAI IDE",
+    "main": "src/main.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node src/main.js"
+    },
+    "dependencies": {}
+}

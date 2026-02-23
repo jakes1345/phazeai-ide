@@ -4,6 +4,15 @@ use phazeai_core::config::{LlmProvider, Settings};
 use crate::keybindings::{binding_label, default_keybindings};
 use crate::themes::{ThemeColors, ThemePreset};
 
+#[derive(PartialEq, Clone, Copy)]
+pub enum SettingsCategory {
+    Appearance,
+    Llm,
+    Editor,
+    Sidecar,
+    Keybindings,
+}
+
 pub struct SettingsPanel {
     pub visible: bool,
     pub settings: Settings,
@@ -12,6 +21,13 @@ pub struct SettingsPanel {
     provider_idx: usize,
     /// Filter query for the settings search bar.
     search_query: String,
+    active_category: SettingsCategory,
+    /// Ollama/LM Studio connection test result message.
+    ollama_status: Option<String>,
+    /// Ollama/LM Studio available models (populated by connection test).
+    ollama_models: Vec<String>,
+    /// Instant when Save was last clicked (for transient "Saved!" label).
+    save_feedback: Option<std::time::Instant>,
 }
 
 impl SettingsPanel {
@@ -32,6 +48,10 @@ impl SettingsPanel {
             settings_changed: false,
             provider_idx,
             search_query: String::new(),
+            active_category: SettingsCategory::Appearance,
+            ollama_status: None,
+            ollama_models: Vec::new(),
+            save_feedback: None,
         }
     }
 
@@ -47,7 +67,8 @@ impl SettingsPanel {
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(true)
-            .default_size([520.0, 640.0])
+            .default_size([640.0, 480.0])
+            .min_size([500.0, 300.0])
             .show(ctx, |ui| {
                 // Search bar
                 ui.horizontal(|ui| {
@@ -62,52 +83,153 @@ impl SettingsPanel {
                 ui.separator();
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let q = self.search_query.to_lowercase();
+                let q = self.search_query.to_lowercase();
 
-                    if self.section_matches(&q, &["appearance", "theme", "font", "size", "color"]) {
-                        self.show_appearance(ui, theme);
-                        ui.add_space(16.0);
-                    }
-                    if self.section_matches(
-                        &q,
-                        &[
-                            "llm", "provider", "model", "api", "key", "base", "url", "tokens",
-                            "claude", "openai", "ollama", "groq",
-                        ],
-                    ) {
-                        self.show_llm(ui, theme);
-                        ui.add_space(16.0);
-                    }
-                    if self.section_matches(
-                        &q,
-                        &["editor", "tab", "line", "numbers", "auto", "save", "indent"],
-                    ) {
-                        self.show_editor(ui, theme);
-                        ui.add_space(16.0);
-                    }
-                    if self.section_matches(&q, &["sidecar", "python", "semantic", "search"]) {
-                        self.show_sidecar(ui, theme);
-                        ui.add_space(16.0);
-                    }
-                    if self
-                        .section_matches(&q, &["keybind", "shortcut", "hotkey", "key", "binding"])
-                    {
-                        self.show_keybindings(ui, theme);
-                        ui.add_space(16.0);
-                    }
+                // Main area with available top-level space (excluding bottom buttons)
+                ui.with_layout(
+                    egui::Layout::top_down(egui::Align::LEFT).with_cross_justify(true),
+                    |ui| {
+                        let available_height = ui.available_height() - 36.0; // Reserve space for footer
 
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), available_height),
+                            egui::Layout::left_to_right(egui::Align::Min),
+                            |ui| {
+                                if q.is_empty() {
+                                    // Hierarchical sidebar layout
+                                    ui.allocate_ui(egui::vec2(150.0, available_height), |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_source("settings_sidebar")
+                                            .show(ui, |ui| {
+                                                ui.vertical_centered_justified(|ui| {
+                                                    ui.selectable_value(
+                                                        &mut self.active_category,
+                                                        SettingsCategory::Appearance,
+                                                        "🎨 Appearance",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.selectable_value(
+                                                        &mut self.active_category,
+                                                        SettingsCategory::Llm,
+                                                        "🧠 LLM Provider",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.selectable_value(
+                                                        &mut self.active_category,
+                                                        SettingsCategory::Editor,
+                                                        "📝 Editor",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.selectable_value(
+                                                        &mut self.active_category,
+                                                        SettingsCategory::Sidecar,
+                                                        "🐍 Python Sidecar",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.selectable_value(
+                                                        &mut self.active_category,
+                                                        SettingsCategory::Keybindings,
+                                                        "⌨ Keybindings",
+                                                    );
+                                                });
+                                            });
+                                    });
+
+                                    ui.separator();
+
+                                    // Right content
+                                    egui::ScrollArea::vertical()
+                                        .id_source("settings_content")
+                                        .show(ui, |ui| match self.active_category {
+                                            SettingsCategory::Appearance => {
+                                                self.show_appearance(ui, theme)
+                                            }
+                                            SettingsCategory::Llm => self.show_llm(ui, theme),
+                                            SettingsCategory::Editor => self.show_editor(ui, theme),
+                                            SettingsCategory::Sidecar => {
+                                                self.show_sidecar(ui, theme)
+                                            }
+                                            SettingsCategory::Keybindings => {
+                                                self.show_keybindings(ui, theme)
+                                            }
+                                        });
+                                } else {
+                                    // Search results mode (scroll all matching)
+                                    egui::ScrollArea::vertical()
+                                        .id_source("settings_search")
+                                        .show(ui, |ui| {
+                                            if self.section_matches(
+                                                &q,
+                                                &["appearance", "theme", "font", "size", "color"],
+                                            ) {
+                                                self.show_appearance(ui, theme);
+                                                ui.add_space(16.0);
+                                            }
+                                            if self.section_matches(
+                                                &q,
+                                                &[
+                                                    "llm", "provider", "model", "api", "key",
+                                                    "base", "url", "tokens", "claude", "openai",
+                                                    "ollama", "groq",
+                                                ],
+                                            ) {
+                                                self.show_llm(ui, theme);
+                                                ui.add_space(16.0);
+                                            }
+                                            if self.section_matches(
+                                                &q,
+                                                &[
+                                                    "editor", "tab", "line", "numbers", "auto",
+                                                    "save", "indent",
+                                                ],
+                                            ) {
+                                                self.show_editor(ui, theme);
+                                                ui.add_space(16.0);
+                                            }
+                                            if self.section_matches(
+                                                &q,
+                                                &["sidecar", "python", "semantic", "search"],
+                                            ) {
+                                                self.show_sidecar(ui, theme);
+                                                ui.add_space(16.0);
+                                            }
+                                            if self.section_matches(
+                                                &q,
+                                                &[
+                                                    "keybind", "shortcut", "hotkey", "key",
+                                                    "binding",
+                                                ],
+                                            ) {
+                                                self.show_keybindings(ui, theme);
+                                                ui.add_space(16.0);
+                                            }
+                                        });
+                                }
+                            },
+                        );
+                    },
+                );
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
                     ui.separator();
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            self.visible = false;
+                        }
                         if ui.button("Save").clicked() {
                             if let Err(e) = self.settings.save() {
                                 tracing::error!("Failed to save settings: {e}");
                             }
                             self.settings_changed = true;
+                            self.save_feedback = Some(std::time::Instant::now());
                         }
-                        if ui.button("Close").clicked() {
-                            self.visible = false;
+                        if let Some(t) = self.save_feedback {
+                            if t.elapsed().as_secs() < 3 {
+                                ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "Saved!");
+                            } else {
+                                self.save_feedback = None;
+                            }
                         }
                     });
                 });
@@ -227,6 +349,85 @@ impl SettingsPanel {
                 self.settings_changed = true;
             }
         });
+
+        // Ollama / LM Studio: connection test + model picker
+        if matches!(
+            self.settings.llm.provider,
+            LlmProvider::Ollama | LlmProvider::LmStudio
+        ) {
+            ui.horizontal(|ui| {
+                if ui.button("Test Connection").clicked() {
+                    let base_url = self
+                        .settings
+                        .llm
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:11434".to_string());
+                    let output = std::process::Command::new("curl")
+                        .args(["-s", "--max-time", "3", &format!("{}/api/tags", base_url)])
+                        .output();
+                    match output {
+                        Ok(out) if out.status.success() => {
+                            let body = String::from_utf8_lossy(&out.stdout);
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                                let models: Vec<String> = json["models"]
+                                    .as_array()
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|m| {
+                                                m["name"].as_str().map(|s| s.to_string())
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let count = models.len();
+                                self.ollama_models = models;
+                                self.ollama_status =
+                                    Some(format!("Connected - {} model(s)", count));
+                            } else {
+                                self.ollama_status =
+                                    Some("Reachable (could not parse models)".to_string());
+                            }
+                        }
+                        Ok(_) => {
+                            self.ollama_status = Some("Ollama not responding".to_string());
+                        }
+                        Err(_) => {
+                            self.ollama_status =
+                                Some("curl not found - check if Ollama is running".to_string());
+                        }
+                    }
+                }
+                if let Some(ref status) = self.ollama_status {
+                    ui.label(status.as_str());
+                }
+            });
+
+            if !self.ollama_models.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme.text_secondary, "Available models:");
+                    egui::ComboBox::from_id_source("ollama_model_picker")
+                        .selected_text(&self.settings.llm.model)
+                        .show_ui(ui, |ui| {
+                            let models = self.ollama_models.clone();
+                            for model in &models {
+                                if ui
+                                    .selectable_label(&self.settings.llm.model == model, model)
+                                    .clicked()
+                                {
+                                    self.settings.llm.model = model.clone();
+                                    self.settings_changed = true;
+                                }
+                            }
+                        });
+                });
+            }
+
+            ui.colored_label(
+                egui::Color32::from_rgb(120, 120, 120),
+                "Local provider - no API key needed",
+            );
+        }
 
         ui.horizontal(|ui| {
             ui.colored_label(theme.text_secondary, "Max tokens:");

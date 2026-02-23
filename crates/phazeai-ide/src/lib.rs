@@ -1,4 +1,5 @@
 pub mod app;
+pub mod ext_host;
 pub mod keybindings;
 pub mod panels;
 pub mod state;

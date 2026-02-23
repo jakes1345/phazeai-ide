@@ -18,6 +18,7 @@ use crate::panels::diff::DiffPanel;
 use crate::panels::editor::EditorPanel;
 use crate::panels::explorer::ExplorerPanel;
 use crate::panels::outline::OutlinePanel;
+use crate::panels::problems::ProblemsPanel;
 use crate::panels::search::SearchPanel;
 use crate::panels::settings::SettingsPanel;
 use crate::panels::terminal::TerminalPanel;
@@ -103,6 +104,26 @@ enum PaletteAction {
     OpenSettings,
     SwitchMode(AiMode),
     ToggleInlineChat,
+    OpenModelfileEditor,
+}
+
+pub enum IdeEvent {
+    GhostText(usize, String),
+    ShadowFixProposal {
+        tab_idx: usize,
+        line_idx: usize,
+        code: String,
+    },
+    BuildOllamaModel {
+        name: String,
+        modelfile_content: String,
+    },
+    BuildOllamaModelResult {
+        success: bool,
+        message: String,
+    },
+    /// Message from the Node.js extension host
+    ExtHostMessage(serde_json::Value),
 }
 
 pub struct PhazeApp {
@@ -113,15 +134,18 @@ pub struct PhazeApp {
     pub chat: ChatPanel,
     pub browser: BrowserPanel,
     pub terminal: TerminalPanel,
+    pub problems: ProblemsPanel,
     pub settings_panel: SettingsPanel,
     pub diff: DiffPanel,
     pub outline: OutlinePanel,
+    pub modelfile_editor: crate::panels::modelfile_editor::ModelfileEditorPanel,
 
     // Panel visibility
     show_explorer: bool,
     show_chat: bool,
     show_browser: bool,
     show_terminal: bool,
+    show_problems: bool,
     show_about: bool,
     left_tab: LeftPanelTab,
 
@@ -151,6 +175,10 @@ pub struct PhazeApp {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     /// Cancellation token for the currently running agent
     agent_cancel: Option<tokio::sync::oneshot::Sender<()>>,
+
+    // IDE background events (Ghost text, etc)
+    ide_event_rx: Option<mpsc::UnboundedReceiver<IdeEvent>>,
+    pub ide_event_tx: mpsc::UnboundedSender<IdeEvent>,
 
     // Tool approval
     pending_approval: Option<PendingApproval>,
@@ -191,6 +219,13 @@ pub struct PhazeApp {
     // Split editor view
     split_editor: Option<EditorPanel>,
     split_ratio: f32,
+
+    // Go to Line dialog
+    show_goto_line: bool,
+    goto_line_input: String,
+
+    // Node.js Extension Host Manager
+    ext_host: Option<crate::ext_host::ExtHostManager>,
 }
 
 impl PhazeApp {
@@ -205,6 +240,7 @@ impl PhazeApp {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (inline_tx, inline_rx) = mpsc::unbounded_channel();
+        let (ide_tx, ide_rx) = mpsc::unbounded_channel();
 
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
@@ -224,6 +260,8 @@ impl PhazeApp {
         let mut terminal = TerminalPanel::new();
         terminal.set_cwd(cwd.clone());
 
+        let problems = ProblemsPanel::new();
+
         let mut diff_panel = DiffPanel::new();
         diff_panel.set_git_root(cwd);
 
@@ -240,9 +278,11 @@ impl PhazeApp {
             chat,
             browser,
             terminal,
+            problems,
             settings_panel,
             diff: diff_panel,
             outline,
+            modelfile_editor: crate::panels::modelfile_editor::ModelfileEditorPanel::default(),
 
             inline_chat: InlineChatState {
                 visible: false,
@@ -258,6 +298,7 @@ impl PhazeApp {
             show_chat: ide_state.show_chat,
             show_browser: false,
             show_terminal: ide_state.show_terminal,
+            show_problems: false,
             show_about: false,
             left_tab: LeftPanelTab::Explorer,
 
@@ -277,6 +318,9 @@ impl PhazeApp {
             event_rx: Some(event_rx),
             event_tx,
             agent_cancel: None,
+
+            ide_event_rx: Some(ide_rx),
+            ide_event_tx: ide_tx,
 
             pending_approval: None,
             approval_state: Arc::new(Mutex::new(ApprovalState { pending: None })),
@@ -308,6 +352,11 @@ impl PhazeApp {
 
             split_editor: None,
             split_ratio: 0.5,
+
+            show_goto_line: false,
+            goto_line_input: String::new(),
+
+            ext_host: Some(crate::ext_host::ExtHostManager::new(ide_tx.clone())),
         }
     }
 
@@ -443,7 +492,9 @@ impl PhazeApp {
                             .map(|s| PathBuf::from(percent_decode_uri(s)));
 
                         if let Some(diag_path) = path_opt {
-                            for tab in &mut self.editor.tabs {
+                            self.problems.set_diagnostics(diag_path.clone(), diagnostics.clone());
+
+                            for (tab_idx, tab) in self.editor.tabs.iter_mut().enumerate() {
                                 if tab.path.as_deref() == Some(&diag_path) {
                                     tab.diagnostics.clear();
                                     for diag in &diagnostics {
@@ -452,6 +503,55 @@ impl PhazeApp {
                                             .entry(line_idx)
                                             .or_default()
                                             .push(diag.clone());
+
+                                        // Shadow Agent: Intercept Errors and try to auto-fix
+                                        if let Some(lsp_types::DiagnosticSeverity::ERROR) = diag.severity {
+                                            if !tab.shadow_fixes.contains_key(&line_idx)
+                                                && !tab.shadow_request_pending.contains(&line_idx)
+                                            {
+                                                tab.shadow_request_pending.insert(line_idx);
+
+                                                let llm_client = match self.settings.build_llm_client() {
+                                                    Ok(client) => client,
+                                                    Err(_) => {
+                                                        tab.shadow_request_pending.remove(&line_idx);
+                                                        continue;
+                                                    }
+                                                };
+
+                                                let error_msg = diag.message.clone();
+                                                let doc = tab.rope.to_string();
+                                                let lines: Vec<&str> = doc.lines().collect();
+
+                                                let start = line_idx.saturating_sub(5);
+                                                let end = (line_idx + 6).min(lines.len());
+                                                let context = lines[start..end].join("\n");
+                                                let bad_line = lines.get(line_idx).unwrap_or(&"").to_string();
+
+                                                let tx = self.ide_event_tx.clone();
+                                                tokio::spawn(async move {
+                                                    let prompt = format!(
+                                                        "You are the Shadow Agent, an elite silent auto-fixer for a Rust IDE.\n\n\
+                                                        I have an LSP Error:\n{}\n\n\
+                                                        Context around the error:\n```rust\n{}\n```\n\n\
+                                                        The exact line with the error is:\n`{}`\n\n\
+                                                        Analyze the error and the context. Fix *only* that specific line. Return *only* the fixed replacement line. Do not wrap it in markdown. Do not provide explanations. Just the raw, drop-in replacement text.",
+                                                        error_msg, context, bad_line
+                                                    );
+                                                    let msg = phazeai_core::llm::Message::user(prompt);
+                                                    if let Ok(resp) = llm_client.chat(&[msg], &[]).await {
+                                                        let fixed_code = resp.message.content.trim_matches('`').trim().to_string();
+                                                        if !fixed_code.is_empty() && fixed_code != bad_line.trim() {
+                                                            let _ = tx.send(IdeEvent::ShadowFixProposal {
+                                                                tab_idx,
+                                                                line_idx,
+                                                                code: fixed_code,
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -756,6 +856,11 @@ impl PhazeApp {
                 }
             }
         }
+
+        // Ctrl+G: Go to Line
+        if ctx.input(|i| i.key_pressed(egui::Key::G) && i.modifiers.ctrl) {
+            self.show_goto_line = !self.show_goto_line;
+        }
     }
 
     fn open_file_dialog(&mut self) {
@@ -763,6 +868,131 @@ impl PhazeApp {
             self.watch_file(&path.clone());
             self.editor.open_file(path);
         }
+    }
+
+    fn check_ghost_text(&mut self) {
+        let ide_tx = self.ide_event_tx.clone();
+        for (idx, tab) in self.editor.tabs.iter_mut().enumerate() {
+            if tab.ghost_text.is_none()
+                && !tab.ghost_request_pending
+                && tab.last_edit_time.elapsed().as_millis() > 500
+                && !tab.rope.to_string().is_empty()
+            {
+                tab.ghost_request_pending = true;
+
+                let cursor_idx = tab.cursor_char_idx();
+                let doc = tab.rope.to_string();
+                let before = doc[..cursor_idx].to_string();
+                let after = doc[cursor_idx..].to_string();
+
+                let llm_client = match self.settings.build_llm_client() {
+                    Ok(client) => client,
+                    Err(_) => {
+                        let _ = ide_tx.send(IdeEvent::GhostText(idx, String::new()));
+                        continue;
+                    }
+                };
+                
+                let tx = ide_tx.clone();
+                tokio::spawn(async move {
+                    let prompt = format!(
+                        "You are an inline code autocomplete engine for an IDE. The cursor is tightly wedged between the following before and after text. Complete the code naturally. Return *ONLY* the string that should be inserted next. No markdown, no explanations, no wrappers.\n\nCode before cursor:\n{}\n\nCode after cursor:\n{}",
+                        before, after
+                    );
+                    let msg = phazeai_core::llm::Message::user(prompt);
+                    if let Ok(resp) = llm_client.chat(&[msg], &[]).await {
+                        let mut text = resp.message.content.trim_matches('`').to_string();
+                        if text.len() > 200 { text.truncate(200); }
+                        let _ = tx.send(IdeEvent::GhostText(idx, text));
+                    } else {
+                        let _ = tx.send(IdeEvent::GhostText(idx, String::new()));
+                    }
+                });
+            }
+        }
+    }
+
+    fn process_ide_events(&mut self) {
+        let mut rx = match self.ide_event_rx.take() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                IdeEvent::GhostText(tab_idx, text) => {
+                    if let Some(tab) = self.editor.tabs.get_mut(tab_idx) {
+                        tab.ghost_request_pending = false;
+                        if !text.is_empty() {
+                            tab.ghost_text = Some(text);
+                            tab.cursor_changed = true; // force visual update
+                        }
+                    }
+                }
+                IdeEvent::ShadowFixProposal { tab_idx, line_idx, code } => {
+                    if let Some(tab) = self.editor.tabs.get_mut(tab_idx) {
+                        tab.shadow_fixes.insert(line_idx, code);
+                        tab.cursor_changed = true; // force visual update
+                    }
+                }
+                IdeEvent::BuildOllamaModel { name, modelfile_content } => {
+                    let tx = self.ide_event_tx.clone();
+                    tokio::spawn(async move {
+                        let manager = match phazeai_core::llm::ollama_manager::OllamaManager::new("http://localhost:11434") {
+                            Ok(m) => m,
+                            Err(e) => {
+                                let _ = tx.send(IdeEvent::BuildOllamaModelResult {
+                                    success: false,
+                                    message: format!("Failed to connect to Ollama: {}", e),
+                                });
+                                return;
+                            }
+                        };
+                        match manager.ensure_model_from_content(&name, &modelfile_content).await {
+                            Ok(_) => {
+                                let _ = tx.send(IdeEvent::BuildOllamaModelResult {
+                                    success: true,
+                                    message: format!("Successfully built and registered {}!", name),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(IdeEvent::BuildOllamaModelResult {
+                                    success: false,
+                                    message: format!("Build failed: {}", e),
+                                });
+                            }
+                        }
+                    });
+                }
+                IdeEvent::BuildOllamaModelResult { success, message } => {
+                    self.modelfile_editor.is_building = false;
+                    self.modelfile_editor.build_status = Some((message.clone(), success));
+                    if success {
+                        self.status_notification = Some((message, true, std::time::Instant::now()));
+                    }
+                }
+                IdeEvent::ExtHostMessage(msg) => {
+                    tracing::info!("ExtHost Message: {}", msg);
+                    if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                        if method == "window.showInformationMessage" {
+                            if let Some(params) = msg.get("params").and_then(|p| p.as_object()) {
+                                if let Some(message) = params.get("message").and_then(|m| m.as_str()) {
+                                    self.status_notification = Some((format!("Ext: {}", message), true, std::time::Instant::now()));
+                                }
+                            }
+                        } else if method == "window.showErrorMessage" {
+                            if let Some(params) = msg.get("params").and_then(|p| p.as_object()) {
+                                if let Some(message) = params.get("message").and_then(|m| m.as_str()) {
+                                    self.status_notification = Some((format!("Ext Error: {}", message), false, std::time::Instant::now()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.ide_event_rx = Some(rx);
     }
 
     fn process_agent_events(&mut self) {
@@ -1331,6 +1561,7 @@ impl PhazeApp {
                 ("Toggle Terminal", PaletteAction::ToggleTerminal),
                 ("Search in Workspace", PaletteAction::ToggleSearch),
                 ("Inline Chat (Ctrl+K)", PaletteAction::ToggleInlineChat),
+                ("Modelfile Editor", PaletteAction::OpenModelfileEditor),
                 ("Settings", PaletteAction::OpenSettings),
                 // AI mode switching
                 ("Mode: Chat", PaletteAction::SwitchMode(AiMode::Chat)),
@@ -1392,6 +1623,7 @@ impl PhazeApp {
                 self.show_explorer = true;
                 self.left_tab = LeftPanelTab::Search;
             }
+            PaletteAction::OpenModelfileEditor => self.modelfile_editor.is_open = true,
             PaletteAction::OpenSettings => self.settings_panel.toggle(),
             PaletteAction::SwitchMode(mode) => {
                 self.chat.mode = mode;
@@ -2160,6 +2392,89 @@ impl PhazeApp {
         }
     }
 
+    fn render_goto_line(&mut self, ctx: &egui::Context) {
+        if !self.show_goto_line {
+            return;
+        }
+        egui::Window::new("Go to Line")
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([240.0, 60.0])
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Line:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.goto_line_input)
+                            .desired_width(120.0)
+                            .hint_text("e.g. 42"),
+                    );
+                    if resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if let Ok(n) = self.goto_line_input.trim().parse::<usize>() {
+                            if n > 0 {
+                                if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                                    tab.move_cursor_to(
+                                        crate::panels::editor::TextPosition::new(n - 1, 0),
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        self.show_goto_line = false;
+                        self.goto_line_input.clear();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_goto_line = false;
+                        self.goto_line_input.clear();
+                    }
+                });
+            });
+    }
+
+    fn detect_run_command(&self) -> String {
+        let root = self.explorer.root().cloned().unwrap_or_else(|| std::path::PathBuf::from("."));
+        if root.join("Cargo.toml").exists() {
+            "cargo run".to_string()
+        } else if root.join("package.json").exists() {
+            if root.join("bun.lockb").exists() || root.join("bun.lock").exists() {
+                "bun run".to_string()
+            } else if root.join("yarn.lock").exists() {
+                "yarn start".to_string()
+            } else {
+                "npm start".to_string()
+            }
+        } else if root.join("Makefile").exists() {
+            "make".to_string()
+        } else if root.join("go.mod").exists() {
+            "go run .".to_string()
+        } else if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
+            "python main.py".to_string()
+        } else {
+            "cargo run".to_string()
+        }
+    }
+
+    fn detect_test_command(&self) -> String {
+        let root = self.explorer.root().cloned().unwrap_or_else(|| std::path::PathBuf::from("."));
+        if root.join("Cargo.toml").exists() {
+            "cargo test".to_string()
+        } else if root.join("package.json").exists() {
+            if root.join("bun.lockb").exists() || root.join("bun.lock").exists() {
+                "bun test".to_string()
+            } else if root.join("yarn.lock").exists() {
+                "yarn test".to_string()
+            } else {
+                "npm test".to_string()
+            }
+        } else if root.join("go.mod").exists() {
+            "go test ./...".to_string()
+        } else if root.join("pyproject.toml").exists() {
+            "pytest".to_string()
+        } else {
+            "cargo test".to_string()
+        }
+    }
+
     fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -2182,6 +2497,8 @@ impl PhazeApp {
                         self.search.set_root(path.clone());
                         self.terminal.set_cwd(path.clone());
                         self.diff.set_git_root(path.clone());
+                        self.show_explorer = true;
+                        self.left_tab = LeftPanelTab::Explorer;
                         self.init_lsp(path);
                     }
                     ui.close_menu();
@@ -2189,6 +2506,106 @@ impl PhazeApp {
                 ui.separator();
                 if ui.button("Settings").clicked() {
                     self.settings_panel.toggle();
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Undo (Ctrl+Z)").clicked() {
+                    self.editor.undo();
+                    ui.close_menu();
+                }
+                if ui.button("Redo (Ctrl+Y)").clicked() {
+                    self.editor.redo();
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Cut (Ctrl+X)").clicked() {
+                    if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                        tab.cut_to_clipboard();
+                        tab.force_snapshot();
+                        tab.sync_legacy_cursor();
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Copy (Ctrl+C)").clicked() {
+                    if let Some(tab) = self.editor.tabs.get(self.editor.active_tab) {
+                        tab.copy_to_clipboard();
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Paste (Ctrl+V)").clicked() {
+                    if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                        tab.paste_from_clipboard();
+                        tab.force_snapshot();
+                        tab.sync_legacy_cursor();
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Find/Replace (Ctrl+F)").clicked() {
+                    self.editor.toggle_find();
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Select All (Ctrl+A)").clicked() {
+                    if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                        tab.select_all();
+                    }
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Go", |ui| {
+                if ui.button("Go to Definition (F12)").clicked() {
+                    self.lsp_goto_definition();
+                    ui.close_menu();
+                }
+                if ui.button("Find References (Shift+F12)").clicked() {
+                    self.lsp_find_references();
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Go to Line (Ctrl+G)").clicked() {
+                    self.show_goto_line = true;
+                    ui.close_menu();
+                }
+                if ui.button("Select All (Ctrl+A)").clicked() {
+                    if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                        tab.select_all();
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Next Problem").clicked() {
+                    self.editor.goto_next_diagnostic();
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Run", |ui| {
+                if ui.button("Run Project").clicked() {
+                    self.show_terminal = true;
+                    let run_cmd = self.detect_run_command();
+                    self.terminal.execute_command(&run_cmd);
+                    ui.close_menu();
+                }
+                if ui.button("Run Tests").clicked() {
+                    self.show_terminal = true;
+                    let test_cmd = self.detect_test_command();
+                    self.terminal.execute_command(&test_cmd);
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Terminal", |ui| {
+                if ui.button("New Terminal").clicked() {
+                    self.show_terminal = true;
+                    self.terminal.new_session();
+                    ui.close_menu();
+                }
+                if ui.button("Clear Terminal").clicked() {
+                    self.terminal.clear_output();
                     ui.close_menu();
                 }
             });
@@ -2222,6 +2639,14 @@ impl PhazeApp {
                     .checkbox(&mut self.show_terminal, "Terminal (Ctrl+`)")
                     .clicked()
                 {
+                    self.show_problems = false;
+                    ui.close_menu();
+                }
+                if ui
+                    .checkbox(&mut self.show_problems, "Problems Panel (Ctrl+Shift+M)")
+                    .clicked()
+                {
+                    self.show_terminal = false;
                     ui.close_menu();
                 }
                 ui.separator();
@@ -2263,6 +2688,21 @@ impl PhazeApp {
             });
 
             ui.menu_button("Help", |ui| {
+                if ui.button("Keyboard Shortcuts").clicked() {
+                    self.settings_panel.visible = true;
+                    ui.close_menu();
+                }
+                if ui.button("Documentation").clicked() {
+                    self.show_browser = true;
+                    self.browser.navigate_to("https://github.com/jakes1345/phazeai-ide#readme".to_string());
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Report Bug").clicked() {
+                    self.show_browser = true;
+                    self.browser.navigate_to("https://github.com/jakes1345/phazeai-ide/issues/new".to_string());
+                    ui.close_menu();
+                }
                 if ui.button("About").clicked() {
                     self.show_about = true;
                     ui.close_menu();
@@ -2404,6 +2844,8 @@ impl PhazeApp {
         self.process_chat_cancellation();
         self.process_chat_apply();
         self.process_inline_events();
+        self.process_ide_events();
+        self.check_ghost_text();
         self.check_settings_changes();
         self.check_explorer_file_open();
         self.check_search_file_open();
@@ -2465,6 +2907,9 @@ impl PhazeApp {
         // Inline chat popup (Ctrl+K)
         self.render_inline_chat(ctx);
 
+        // Go to Line dialog (Ctrl+G)
+        self.render_goto_line(ctx);
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu_bar(ui);
@@ -2481,16 +2926,41 @@ impl PhazeApp {
             self.process_browser_requests();
         }
 
-        // Terminal panel at bottom (above status bar)
-        if self.show_terminal {
-            egui::TopBottomPanel::bottom("terminal_panel")
+        // Bottom panel container for Terminal and Problems
+        if self.show_terminal || self.show_problems {
+            egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(true)
                 .default_height(self.terminal_height)
                 .min_height(100.0)
                 .max_height(400.0)
                 .show(ctx, |ui| {
                     let theme = self.theme.clone();
-                    self.terminal.show(ui, &theme);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(self.show_terminal, "Terminal").clicked() {
+                            self.show_terminal = true;
+                            self.show_problems = false;
+                        }
+                        if ui.selectable_label(self.show_problems, "Problems").clicked() {
+                            self.show_problems = true;
+                            self.show_terminal = false;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✕").clicked() {
+                                self.show_terminal = false;
+                                self.show_problems = false;
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    if self.show_terminal {
+                        self.terminal.show(ui, &theme);
+                    } else if self.show_problems {
+                        if let Some((path, line)) = self.problems.show(ui, &theme) {
+                            self.editor.open_file_at_line(path, line);
+                        }
+                    }
                 });
         }
 
@@ -2584,6 +3054,9 @@ impl PhazeApp {
                     self.browser.show(ui, &theme);
                 });
         }
+
+        // Floating Modelfile Editor Panel
+        self.modelfile_editor.show(ctx, &self.theme, &self.ide_event_tx);
 
         // Central panel - editor, diff view, or welcome screen
         let no_workspace = self.explorer.root().is_none();
