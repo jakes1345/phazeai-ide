@@ -14,3 +14,11 @@ rpc.on('loadExtension', async (params) => {
 
 // Setup some dummy API handlers to test connectivity
 rpc.notify('hostReady', { pid: process.pid });
+
+// Auto-load the dummy extension for testing
+const extPath = path.resolve(__dirname, '../dummy-extension');
+extensionLoader.loadExtension(extPath).then(extData => {
+    rpc.notify('extensionLoaded', extData);
+}).catch(err => {
+    rpc.notify('extensionLoadError', { path: extPath, error: err.message });
+});

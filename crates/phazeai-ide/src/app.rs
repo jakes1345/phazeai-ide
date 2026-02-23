@@ -224,7 +224,8 @@ pub struct PhazeApp {
     show_goto_line: bool,
     goto_line_input: String,
 
-    // Node.js Extension Host Manager
+    // Node.js Extension Host Manager (future VS Code extension compat)
+    #[allow(dead_code)]
     ext_host: Option<crate::ext_host::ExtHostManager>,
 }
 
@@ -320,7 +321,7 @@ impl PhazeApp {
             agent_cancel: None,
 
             ide_event_rx: Some(ide_rx),
-            ide_event_tx: ide_tx,
+            ide_event_tx: ide_tx.clone(),
 
             pending_approval: None,
             approval_state: Arc::new(Mutex::new(ApprovalState { pending: None })),
@@ -356,7 +357,8 @@ impl PhazeApp {
             show_goto_line: false,
             goto_line_input: String::new(),
 
-            ext_host: Some(crate::ext_host::ExtHostManager::new(ide_tx.clone())),
+            // ExtHostManager spawns a Tokio task — only init inside the runtime
+            ext_host: None,
         }
     }
 
@@ -492,7 +494,16 @@ impl PhazeApp {
                             .map(|s| PathBuf::from(percent_decode_uri(s)));
 
                         if let Some(diag_path) = path_opt {
-                            self.problems.set_diagnostics(diag_path.clone(), diagnostics.clone());
+                            self.problems
+                                .set_diagnostics(diag_path.clone(), diagnostics.clone());
+                            // Auto-show Problems panel when errors arrive
+                            let has_errors = diagnostics
+                                .iter()
+                                .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR));
+                            if has_errors && !self.show_problems {
+                                self.show_terminal = false;
+                                self.show_problems = true;
+                            }
 
                             for (tab_idx, tab) in self.editor.tabs.iter_mut().enumerate() {
                                 if tab.path.as_deref() == Some(&diag_path) {
@@ -505,19 +516,23 @@ impl PhazeApp {
                                             .push(diag.clone());
 
                                         // Shadow Agent: Intercept Errors and try to auto-fix
-                                        if let Some(lsp_types::DiagnosticSeverity::ERROR) = diag.severity {
+                                        if let Some(lsp_types::DiagnosticSeverity::ERROR) =
+                                            diag.severity
+                                        {
                                             if !tab.shadow_fixes.contains_key(&line_idx)
                                                 && !tab.shadow_request_pending.contains(&line_idx)
                                             {
                                                 tab.shadow_request_pending.insert(line_idx);
 
-                                                let llm_client = match self.settings.build_llm_client() {
-                                                    Ok(client) => client,
-                                                    Err(_) => {
-                                                        tab.shadow_request_pending.remove(&line_idx);
-                                                        continue;
-                                                    }
-                                                };
+                                                let llm_client =
+                                                    match self.settings.build_llm_client() {
+                                                        Ok(client) => client,
+                                                        Err(_) => {
+                                                            tab.shadow_request_pending
+                                                                .remove(&line_idx);
+                                                            continue;
+                                                        }
+                                                    };
 
                                                 let error_msg = diag.message.clone();
                                                 let doc = tab.rope.to_string();
@@ -526,7 +541,8 @@ impl PhazeApp {
                                                 let start = line_idx.saturating_sub(5);
                                                 let end = (line_idx + 6).min(lines.len());
                                                 let context = lines[start..end].join("\n");
-                                                let bad_line = lines.get(line_idx).unwrap_or(&"").to_string();
+                                                let bad_line =
+                                                    lines.get(line_idx).unwrap_or(&"").to_string();
 
                                                 let tx = self.ide_event_tx.clone();
                                                 tokio::spawn(async move {
@@ -538,15 +554,27 @@ impl PhazeApp {
                                                         Analyze the error and the context. Fix *only* that specific line. Return *only* the fixed replacement line. Do not wrap it in markdown. Do not provide explanations. Just the raw, drop-in replacement text.",
                                                         error_msg, context, bad_line
                                                     );
-                                                    let msg = phazeai_core::llm::Message::user(prompt);
-                                                    if let Ok(resp) = llm_client.chat(&[msg], &[]).await {
-                                                        let fixed_code = resp.message.content.trim_matches('`').trim().to_string();
-                                                        if !fixed_code.is_empty() && fixed_code != bad_line.trim() {
-                                                            let _ = tx.send(IdeEvent::ShadowFixProposal {
-                                                                tab_idx,
-                                                                line_idx,
-                                                                code: fixed_code,
-                                                            });
+                                                    let msg =
+                                                        phazeai_core::llm::Message::user(prompt);
+                                                    if let Ok(resp) =
+                                                        llm_client.chat(&[msg], &[]).await
+                                                    {
+                                                        let fixed_code = resp
+                                                            .message
+                                                            .content
+                                                            .trim_matches('`')
+                                                            .trim()
+                                                            .to_string();
+                                                        if !fixed_code.is_empty()
+                                                            && fixed_code != bad_line.trim()
+                                                        {
+                                                            let _ = tx.send(
+                                                                IdeEvent::ShadowFixProposal {
+                                                                    tab_idx,
+                                                                    line_idx,
+                                                                    code: fixed_code,
+                                                                },
+                                                            );
                                                         }
                                                     }
                                                 });
@@ -703,6 +731,45 @@ impl PhazeApp {
                         }
                     });
                 }
+            }
+        }
+    }
+
+    /// Auto-trigger LSP completion after typing `.` or 2+ identifier chars.
+    fn auto_trigger_completion(&mut self) {
+        // Only auto-trigger when LSP is available and no completion popup is open
+        if self.lsp_manager.is_none() {
+            return;
+        }
+        if let Some(tab) = self.editor.tabs.get(self.editor.active_tab) {
+            // Skip if completion popup already showing
+            if !tab.completions.is_empty() {
+                return;
+            }
+            // Check last character typed
+            let cursor = tab.cursor;
+            if cursor.col == 0 {
+                return;
+            }
+            let line_text = tab.line_text(cursor.line);
+            let bytes = line_text.as_bytes();
+            let col = cursor.col.min(bytes.len());
+            if col == 0 {
+                return;
+            }
+            let last_ch = bytes[col - 1] as char;
+            // Trigger on `.` (member access) or `::` (path)
+            let trigger_on_dot = last_ch == '.';
+            let trigger_on_colon = col >= 2 && last_ch == ':' && bytes[col - 2] as char == ':';
+            // Trigger when 2+ consecutive identifier chars are typed
+            let ident_len = bytes[..col]
+                .iter()
+                .rev()
+                .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_')
+                .count();
+            let trigger_on_ident = ident_len >= 2;
+            if trigger_on_dot || trigger_on_colon || trigger_on_ident {
+                self.lsp_trigger_completion();
             }
         }
     }
@@ -892,7 +959,7 @@ impl PhazeApp {
                         continue;
                     }
                 };
-                
+
                 let tx = ide_tx.clone();
                 tokio::spawn(async move {
                     let prompt = format!(
@@ -902,7 +969,9 @@ impl PhazeApp {
                     let msg = phazeai_core::llm::Message::user(prompt);
                     if let Ok(resp) = llm_client.chat(&[msg], &[]).await {
                         let mut text = resp.message.content.trim_matches('`').to_string();
-                        if text.len() > 200 { text.truncate(200); }
+                        if text.len() > 200 {
+                            text.truncate(200);
+                        }
                         let _ = tx.send(IdeEvent::GhostText(idx, text));
                     } else {
                         let _ = tx.send(IdeEvent::GhostText(idx, String::new()));
@@ -929,16 +998,25 @@ impl PhazeApp {
                         }
                     }
                 }
-                IdeEvent::ShadowFixProposal { tab_idx, line_idx, code } => {
+                IdeEvent::ShadowFixProposal {
+                    tab_idx,
+                    line_idx,
+                    code,
+                } => {
                     if let Some(tab) = self.editor.tabs.get_mut(tab_idx) {
                         tab.shadow_fixes.insert(line_idx, code);
                         tab.cursor_changed = true; // force visual update
                     }
                 }
-                IdeEvent::BuildOllamaModel { name, modelfile_content } => {
+                IdeEvent::BuildOllamaModel {
+                    name,
+                    modelfile_content,
+                } => {
                     let tx = self.ide_event_tx.clone();
                     tokio::spawn(async move {
-                        let manager = match phazeai_core::llm::ollama_manager::OllamaManager::new("http://localhost:11434") {
+                        let manager = match phazeai_core::llm::ollama_manager::OllamaManager::new(
+                            "http://localhost:11434",
+                        ) {
                             Ok(m) => m,
                             Err(e) => {
                                 let _ = tx.send(IdeEvent::BuildOllamaModelResult {
@@ -948,7 +1026,10 @@ impl PhazeApp {
                                 return;
                             }
                         };
-                        match manager.ensure_model_from_content(&name, &modelfile_content).await {
+                        match manager
+                            .ensure_model_from_content(&name, &modelfile_content)
+                            .await
+                        {
                             Ok(_) => {
                                 let _ = tx.send(IdeEvent::BuildOllamaModelResult {
                                     success: true,
@@ -976,14 +1057,26 @@ impl PhazeApp {
                     if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
                         if method == "window.showInformationMessage" {
                             if let Some(params) = msg.get("params").and_then(|p| p.as_object()) {
-                                if let Some(message) = params.get("message").and_then(|m| m.as_str()) {
-                                    self.status_notification = Some((format!("Ext: {}", message), true, std::time::Instant::now()));
+                                if let Some(message) =
+                                    params.get("message").and_then(|m| m.as_str())
+                                {
+                                    self.status_notification = Some((
+                                        format!("Ext: {}", message),
+                                        true,
+                                        std::time::Instant::now(),
+                                    ));
                                 }
                             }
                         } else if method == "window.showErrorMessage" {
                             if let Some(params) = msg.get("params").and_then(|p| p.as_object()) {
-                                if let Some(message) = params.get("message").and_then(|m| m.as_str()) {
-                                    self.status_notification = Some((format!("Ext Error: {}", message), false, std::time::Instant::now()));
+                                if let Some(message) =
+                                    params.get("message").and_then(|m| m.as_str())
+                                {
+                                    self.status_notification = Some((
+                                        format!("Ext Error: {}", message),
+                                        false,
+                                        std::time::Instant::now(),
+                                    ));
                                 }
                             }
                         }
@@ -2412,7 +2505,8 @@ impl PhazeApp {
                     if resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         if let Ok(n) = self.goto_line_input.trim().parse::<usize>() {
                             if n > 0 {
-                                if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab) {
+                                if let Some(tab) = self.editor.tabs.get_mut(self.editor.active_tab)
+                                {
                                     tab.move_cursor_to(
                                         crate::panels::editor::TextPosition::new(n - 1, 0),
                                         false,
@@ -2432,7 +2526,11 @@ impl PhazeApp {
     }
 
     fn detect_run_command(&self) -> String {
-        let root = self.explorer.root().cloned().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let root = self
+            .explorer
+            .root()
+            .cloned()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         if root.join("Cargo.toml").exists() {
             "cargo run".to_string()
         } else if root.join("package.json").exists() {
@@ -2455,7 +2553,11 @@ impl PhazeApp {
     }
 
     fn detect_test_command(&self) -> String {
-        let root = self.explorer.root().cloned().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let root = self
+            .explorer
+            .root()
+            .cloned()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         if root.join("Cargo.toml").exists() {
             "cargo test".to_string()
         } else if root.join("package.json").exists() {
@@ -2694,13 +2796,16 @@ impl PhazeApp {
                 }
                 if ui.button("Documentation").clicked() {
                     self.show_browser = true;
-                    self.browser.navigate_to("https://github.com/jakes1345/phazeai-ide#readme".to_string());
+                    self.browser
+                        .navigate_to("https://github.com/jakes1345/phazeai-ide#readme".to_string());
                     ui.close_menu();
                 }
                 ui.separator();
                 if ui.button("Report Bug").clicked() {
                     self.show_browser = true;
-                    self.browser.navigate_to("https://github.com/jakes1345/phazeai-ide/issues/new".to_string());
+                    self.browser.navigate_to(
+                        "https://github.com/jakes1345/phazeai-ide/issues/new".to_string(),
+                    );
                     ui.close_menu();
                 }
                 if ui.button("About").clicked() {
@@ -2759,6 +2864,83 @@ impl PhazeApp {
                     self.theme.text_muted,
                     RichText::new("PhazeAI IDE v0.1.0").small(),
                 );
+
+                // LSP status
+                let lsp_label = if self.lsp_manager.is_some() {
+                    ("⚡ LSP", self.theme.success)
+                } else {
+                    ("○ LSP", self.theme.text_muted)
+                };
+                ui.colored_label(self.theme.text_muted, RichText::new("|").small());
+                ui.colored_label(lsp_label.1, RichText::new(lsp_label.0).small());
+
+                // Error / warning count (click to toggle Problems)
+                let (errors, warnings) =
+                    self.problems
+                        .diagnostics
+                        .values()
+                        .fold((0usize, 0usize), |(e, w), diags| {
+                            let ne = diags
+                                .iter()
+                                .filter(|d| {
+                                    d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+                                })
+                                .count();
+                            let nw = diags
+                                .iter()
+                                .filter(|d| {
+                                    d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)
+                                })
+                                .count();
+                            (e + ne, w + nw)
+                        });
+                if errors > 0 || warnings > 0 {
+                    ui.colored_label(self.theme.text_muted, RichText::new("|").small());
+                    let err_resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("✗ {errors}  ⚠ {warnings}"))
+                                .small()
+                                .color(if errors > 0 {
+                                    self.theme.error
+                                } else {
+                                    self.theme.warning
+                                }),
+                        )
+                        .sense(egui::Sense::click()),
+                    );
+                    if err_resp.clicked() {
+                        self.show_problems = !self.show_problems;
+                        if self.show_problems {
+                            self.show_terminal = false;
+                        }
+                    }
+                    err_resp.on_hover_text("Click to toggle Problems panel");
+                }
+
+                // Git branch
+                if let Some(root) = self.explorer.root() {
+                    let branch_output = std::process::Command::new("git")
+                        .args([
+                            "-C",
+                            &root.to_string_lossy(),
+                            "rev-parse",
+                            "--abbrev-ref",
+                            "HEAD",
+                        ])
+                        .output();
+                    if let Ok(out) = branch_output {
+                        if out.status.success() {
+                            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            if !branch.is_empty() && branch != "HEAD" {
+                                ui.colored_label(self.theme.text_muted, RichText::new("|").small());
+                                ui.colored_label(
+                                    self.theme.text_secondary,
+                                    RichText::new(format!("⎇ {branch}")).small(),
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Token usage meter (estimated from conversation history)
                 if let Ok(conv) = self.agent_conversation.try_lock() {
@@ -2854,6 +3036,7 @@ impl PhazeApp {
         self.check_file_changes();
         self.process_lsp_events();
         self.lsp_poll_hover();
+        self.auto_trigger_completion();
         self.save_state_periodically();
 
         // Settings window (floating)
@@ -2935,13 +3118,19 @@ impl PhazeApp {
                 .max_height(400.0)
                 .show(ctx, |ui| {
                     let theme = self.theme.clone();
-                    
+
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(self.show_terminal, "Terminal").clicked() {
+                        if ui
+                            .selectable_label(self.show_terminal, "Terminal")
+                            .clicked()
+                        {
                             self.show_terminal = true;
                             self.show_problems = false;
                         }
-                        if ui.selectable_label(self.show_problems, "Problems").clicked() {
+                        if ui
+                            .selectable_label(self.show_problems, "Problems")
+                            .clicked()
+                        {
                             self.show_problems = true;
                             self.show_terminal = false;
                         }
@@ -3056,7 +3245,8 @@ impl PhazeApp {
         }
 
         // Floating Modelfile Editor Panel
-        self.modelfile_editor.show(ctx, &self.theme, &self.ide_event_tx);
+        self.modelfile_editor
+            .show(ctx, &self.theme, &self.ide_event_tx);
 
         // Central panel - editor, diff view, or welcome screen
         let no_workspace = self.explorer.root().is_none();
