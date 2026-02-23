@@ -16,6 +16,7 @@ pub struct Theme {
     pub system_color: Color,
     pub tool_color: Color,
     pub border: Color,
+    pub code_fg: Color,
 }
 
 impl Theme {
@@ -34,6 +35,7 @@ impl Theme {
             system_color: Color::Yellow,
             tool_color: Color::DarkGray,
             border: Color::Rgb(60, 60, 60),
+            code_fg: Color::Rgb(180, 210, 180),
         }
     }
 
@@ -52,6 +54,7 @@ impl Theme {
             system_color: Color::Rgb(224, 175, 104),
             tool_color: Color::Rgb(86, 95, 137),
             border: Color::Rgb(52, 53, 74),
+            code_fg: Color::Rgb(158, 206, 106),
         }
     }
 
@@ -70,6 +73,7 @@ impl Theme {
             system_color: Color::Rgb(241, 250, 140),
             tool_color: Color::Rgb(98, 114, 164),
             border: Color::Rgb(68, 71, 90),
+            code_fg: Color::Rgb(80, 250, 123),
         }
     }
 

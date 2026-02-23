@@ -198,6 +198,7 @@ pub fn handle_command(input: &str) -> CommandResult {
         }
         "/retry" => CommandResult::Retry,
         "/cancel" | "/stop" => CommandResult::Cancel,
+        "/yolo" => CommandResult::SetApprovalMode("auto".into()),
         "/grep" => {
             if arg.is_empty() {
                 CommandResult::Message(
@@ -266,6 +267,9 @@ fn show_help() -> CommandResult {
   SESSION CONTROL
     /retry                    Resend the last user message
     /cancel, /stop            Cancel the current agent run
+
+  QUICK TOGGLES
+    /yolo                     Auto-approve all tools (no more confirmations)
 
   OTHER
     /help, /h                 Show this help message

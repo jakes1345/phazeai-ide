@@ -91,6 +91,25 @@ enum MessageRole {
     Assistant,
     System,
     Tool,
+    DiffAdd,
+    DiffRemove,
+    DiffHeader,
+}
+
+/// A single entry in the chat history — either a plain message or a tool-call card.
+#[derive(Clone)]
+#[allow(dead_code)]
+enum ChatItem {
+    Message(ChatMessage),
+    ToolCard {
+        name: String,
+        args: String,
+        output: String,
+        /// None = running, Some(true) = ok, Some(false) = err
+        success: Option<bool>,
+        /// When true, only show the header line (for future collapsible UI)
+        collapsed: bool,
+    },
 }
 
 /// What we're waiting on from the user during tool approval
@@ -107,7 +126,7 @@ struct AppState {
     history_pos: Option<usize>,
 
     // Chat
-    messages: Vec<ChatMessage>,
+    messages: Vec<ChatItem>,
     scroll_offset: usize,
     total_content_lines: usize,
 
@@ -157,7 +176,7 @@ impl AppState {
             input_history: Vec::new(),
             history_pos: None,
 
-            messages: vec![ChatMessage {
+            messages: vec![ChatItem::Message(ChatMessage {
                 role: MessageRole::System,
                 content: format!(
                     "PhazeAI v0.1.0 | {} | {} | {}\n\
@@ -165,7 +184,7 @@ impl AppState {
                     provider_name, settings.llm.model, cwd
                 ),
                 timestamp: now_str(),
-            }],
+            })],
             scroll_offset: 0,
             total_content_lines: 0,
 
@@ -194,11 +213,42 @@ impl AppState {
     }
 
     fn add_message(&mut self, role: MessageRole, content: String) {
-        self.messages.push(ChatMessage {
+        self.messages.push(ChatItem::Message(ChatMessage {
             role,
             content,
             timestamp: now_str(),
+        }));
+        self.scroll_to_bottom();
+    }
+
+    fn add_tool_card(&mut self, name: String) {
+        self.messages.push(ChatItem::ToolCard {
+            name,
+            args: String::new(),
+            output: String::new(),
+            success: None,
+            collapsed: false,
         });
+        self.scroll_to_bottom();
+    }
+
+    fn finish_tool_card(&mut self, name: &str, output: String, success: bool) {
+        // Update the last ToolCard that matches this name and is still running
+        for item in self.messages.iter_mut().rev() {
+            if let ChatItem::ToolCard {
+                name: card_name,
+                output: card_output,
+                success: card_success,
+                ..
+            } = item
+            {
+                if card_name == name && card_success.is_none() {
+                    *card_output = output;
+                    *card_success = Some(success);
+                    break;
+                }
+            }
+        }
         self.scroll_to_bottom();
     }
 
@@ -249,30 +299,57 @@ impl AppState {
         let messages: Vec<SavedMessage> = self
             .messages
             .iter()
-            .map(|m| SavedMessage {
-                role: match m.role {
-                    MessageRole::User => "user".into(),
-                    MessageRole::Assistant => "assistant".into(),
-                    MessageRole::System => "system".into(),
-                    MessageRole::Tool => "tool".into(),
+            .map(|item| match item {
+                ChatItem::Message(m) => SavedMessage {
+                    role: match m.role {
+                        MessageRole::User => "user".into(),
+                        MessageRole::Assistant => "assistant".into(),
+                        MessageRole::System => "system".into(),
+                        MessageRole::Tool => "tool".into(),
+                        MessageRole::DiffAdd => "tool".into(),
+                        MessageRole::DiffRemove => "tool".into(),
+                        MessageRole::DiffHeader => "tool".into(),
+                    },
+                    content: m.content.clone(),
+                    timestamp: m.timestamp.clone(),
+                    tool_name: None,
                 },
-                content: m.content.clone(),
-                timestamp: m.timestamp.clone(),
-                tool_name: None,
+                ChatItem::ToolCard {
+                    name,
+                    output,
+                    success,
+                    ..
+                } => {
+                    let icon = match success {
+                        Some(true) => "ok",
+                        Some(false) => "err",
+                        None => "running",
+                    };
+                    SavedMessage {
+                        role: "tool".into(),
+                        content: format!("[{name}: {icon}] {output}"),
+                        timestamp: now_str(),
+                        tool_name: Some(name.clone()),
+                    }
+                }
             })
             .collect();
 
         let title = self
             .messages
             .iter()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| {
-                let t = m.content.chars().take(80).collect::<String>();
-                if m.content.len() > 80 {
-                    format!("{}...", t)
-                } else {
-                    t
+            .find_map(|item| {
+                if let ChatItem::Message(m) = item {
+                    if m.role == MessageRole::User {
+                        let t = m.content.chars().take(80).collect::<String>();
+                        return Some(if m.content.len() > 80 {
+                            format!("{}...", t)
+                        } else {
+                            t
+                        });
+                    }
                 }
+                None
             })
             .unwrap_or_else(|| "Untitled".into());
 
@@ -332,11 +409,11 @@ pub async fn run_tui(
                             "tool" => MessageRole::Tool,
                             _ => MessageRole::System,
                         };
-                        state.messages.push(ChatMessage {
+                        state.messages.push(ChatItem::Message(ChatMessage {
                             role: role.clone(),
                             content: msg.content.clone(),
                             timestamp: msg.timestamp.clone(),
-                        });
+                        }));
                         // Collect user/assistant pairs for agent context
                         if msg.role == "user" || msg.role == "assistant" {
                             restore_messages.push((msg.role.clone(), msg.content.clone()));
@@ -363,11 +440,11 @@ pub async fn run_tui(
                             "tool" => MessageRole::Tool,
                             _ => MessageRole::System,
                         };
-                        state.messages.push(ChatMessage {
+                        state.messages.push(ChatItem::Message(ChatMessage {
                             role: role.clone(),
                             content: msg.content.clone(),
                             timestamp: msg.timestamp.clone(),
-                        });
+                        }));
                         if msg.role == "user" || msg.role == "assistant" {
                             restore_messages.push((msg.role.clone(), msg.content.clone()));
                         }
@@ -673,39 +750,186 @@ fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     f.render_widget(files_text, area);
 }
 
+fn render_message_lines<'a>(msg: &'a ChatMessage, theme: &'a Theme) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    let (prefix, color) = match msg.role {
+        MessageRole::User => ("You > ", theme.user_color),
+        MessageRole::Assistant => ("AI > ", theme.assistant_color),
+        MessageRole::System => ("", theme.system_color),
+        MessageRole::Tool => ("  ", theme.tool_color),
+        MessageRole::DiffAdd => ("  ", theme.success),
+        MessageRole::DiffRemove => ("  ", theme.error),
+        MessageRole::DiffHeader => ("  ", theme.accent),
+    };
+
+    // For assistant messages, do code-block detection.
+    // For all others, render plainly.
+    let do_code_detection = msg.role == MessageRole::Assistant;
+
+    let mut in_code_block = false;
+    for (i, raw_line) in msg.content.lines().enumerate() {
+        let is_fence = raw_line.starts_with("```");
+
+        if do_code_detection {
+            if is_fence {
+                // Toggle code block state; render the fence line distinctly
+                let was_in = in_code_block;
+                in_code_block = !in_code_block;
+                let lang = if !was_in {
+                    raw_line.trim_start_matches('`').trim()
+                } else {
+                    ""
+                };
+                let label = if !lang.is_empty() {
+                    format!("  ```{lang}")
+                } else {
+                    "  ```".to_string()
+                };
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(label, Style::default().fg(theme.muted)),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        label,
+                        Style::default().fg(theme.muted),
+                    )));
+                }
+                continue;
+            }
+
+            if in_code_block {
+                let indent = " ".repeat(prefix.len());
+                lines.push(Line::from(vec![
+                    Span::raw(indent),
+                    Span::styled(raw_line, Style::default().fg(theme.code_fg)),
+                ]));
+                continue;
+            }
+        }
+
+        // Regular line rendering
+        if i == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(raw_line, Style::default().fg(color)),
+            ]));
+        } else {
+            let indent = " ".repeat(prefix.len());
+            lines.push(Line::from(vec![
+                Span::raw(indent),
+                Span::styled(raw_line, Style::default().fg(color)),
+            ]));
+        }
+    }
+
+    lines
+}
+
+fn render_tool_card_lines<'a>(
+    name: &'a str,
+    _args: &'a str,
+    output: &'a str,
+    success: Option<bool>,
+    theme: &'a Theme,
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Choose border color based on state
+    let (border_color, status_icon, status_text) = match success {
+        None => (theme.warning, "⟳", "running..."),
+        Some(true) => (theme.success, "✓", "completed"),
+        Some(false) => (theme.error, "✗", "failed"),
+    };
+
+    // Top border with tool name in title
+    let title_str = format!("─ {name} ");
+    let top_line = format!("  ┌{title_str}");
+    // Pad to a reasonable width; we'll just render the border open-ended
+    lines.push(Line::from(vec![
+        Span::styled(top_line, Style::default().fg(border_color)),
+        Span::styled(
+            "─".repeat(40usize.saturating_sub(title_str.len() + 4)),
+            Style::default().fg(border_color),
+        ),
+        Span::styled("┐", Style::default().fg(border_color)),
+    ]));
+
+    // Output lines (up to 8 lines to avoid flooding)
+    let content_lines: Vec<&str> = if output.is_empty() {
+        vec![]
+    } else {
+        output.lines().take(8).collect()
+    };
+
+    for content_line in &content_lines {
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", Style::default().fg(border_color)),
+            Span::styled(*content_line, Style::default().fg(theme.fg)),
+        ]));
+    }
+
+    if content_lines.is_empty() && success.is_none() {
+        // Show "running" placeholder
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", Style::default().fg(border_color)),
+            Span::styled(
+                "  waiting for output...",
+                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
+
+    // Status line
+    lines.push(Line::from(vec![
+        Span::styled("  │ ", Style::default().fg(border_color)),
+        Span::styled(
+            format!("{status_icon} {status_text}"),
+            Style::default().fg(border_color),
+        ),
+    ]));
+
+    // Bottom border
+    lines.push(Line::from(Span::styled(
+        "  └".to_string() + &"─".repeat(44),
+        Style::default().fg(border_color),
+    )));
+
+    lines.push(Line::raw(""));
+    lines
+}
+
 fn build_chat_lines<'a>(
-    messages: &'a [ChatMessage],
+    messages: &'a [ChatItem],
     is_processing: bool,
     theme: &'a Theme,
 ) -> Vec<Line<'a>> {
     let mut chat_lines: Vec<Line> = Vec::new();
 
-    for msg in messages {
-        let (prefix, color) = match msg.role {
-            MessageRole::User => ("You > ", theme.user_color),
-            MessageRole::Assistant => ("AI > ", theme.assistant_color),
-            MessageRole::System => ("", theme.system_color),
-            MessageRole::Tool => ("  ", theme.tool_color),
-        };
-
-        for (i, line) in msg.content.lines().enumerate() {
-            if i == 0 {
-                chat_lines.push(Line::from(vec![
-                    Span::styled(
-                        prefix,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(line, Style::default().fg(color)),
-                ]));
-            } else {
-                let indent = " ".repeat(prefix.len());
-                chat_lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(line, Style::default().fg(color)),
-                ]));
+    for item in messages {
+        match item {
+            ChatItem::Message(msg) => {
+                chat_lines.extend(render_message_lines(msg, theme));
+                chat_lines.push(Line::raw(""));
+            }
+            ChatItem::ToolCard {
+                name,
+                args,
+                output,
+                success,
+                collapsed: _,
+            } => {
+                chat_lines.extend(render_tool_card_lines(name, args, output, *success, theme));
             }
         }
-        chat_lines.push(Line::raw(""));
     }
 
     if is_processing {
@@ -762,7 +986,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Them
     } else if state.input.starts_with('/') {
         " Command "
     } else {
-        " Input "
+        " Input  Shift+Enter for newline "
     };
 
     let input = Paragraph::new(state.input.as_str())
@@ -870,9 +1094,9 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         }
         AgentEvent::TextDelta(text) => {
             // Append to existing assistant message or create new one
-            if let Some(last) = state.messages.last_mut() {
-                if last.role == MessageRole::Assistant {
-                    last.content.push_str(&text);
+            if let Some(ChatItem::Message(m)) = state.messages.last_mut() {
+                if m.role == MessageRole::Assistant {
+                    m.content.push_str(&text);
                     state.scroll_to_bottom();
                     return;
                 }
@@ -895,16 +1119,25 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                 });
             }
 
-            state.add_message(MessageRole::Tool, format!("[running: {name}]"));
-            state.status_text = format!("Running {name}...");
+            // Per-tool status text
+            state.status_text = match name.as_str() {
+                "bash" => "Running bash...".into(),
+                "read_file" => "Reading file...".into(),
+                "write_file" => "Writing file...".into(),
+                "edit_file" => "Editing file...".into(),
+                "grep" => "Searching...".into(),
+                "glob" | "list_files" => "Listing files...".into(),
+                _ => format!("Running {name}..."),
+            };
+
+            state.add_tool_card(name);
         }
         AgentEvent::ToolResult {
             name,
             success,
             summary,
         } => {
-            let icon = if success { "ok" } else { "ERR" };
-            state.add_message(MessageRole::Tool, format!("[{name}: {icon}] {summary}"));
+            state.finish_tool_card(&name, summary, success);
             state.pending_approval = None;
         }
         AgentEvent::Complete { iterations } => {
@@ -1210,10 +1443,9 @@ fn handle_command_result(
             }
 
             // Find the first user message (for context)
-            let first_user_idx = state
-                .messages
-                .iter()
-                .position(|m| m.role == MessageRole::User);
+            let first_user_idx = state.messages.iter().position(
+                |item| matches!(item, ChatItem::Message(m) if m.role == MessageRole::User),
+            );
 
             if first_user_idx.is_none() {
                 state.add_message(
@@ -1252,11 +1484,11 @@ fn handle_command_result(
             }
 
             // Build a structured summary from the compacted messages
-            let compacted_msgs = &state.messages[(first_user_idx + 1)..split_point];
-            let summary = build_compaction_summary(compacted_msgs);
+            let compacted_items = &state.messages[(first_user_idx + 1)..split_point];
+            let summary = build_compaction_summary(compacted_items);
 
             // Build new message list
-            let mut new_messages = Vec::new();
+            let mut new_messages: Vec<ChatItem> = Vec::new();
 
             // Keep everything up to and including the first user message
             for i in 0..=first_user_idx {
@@ -1264,11 +1496,11 @@ fn handle_command_result(
             }
 
             // Add the compaction summary as a system message
-            new_messages.push(ChatMessage {
+            new_messages.push(ChatItem::Message(ChatMessage {
                 role: MessageRole::System,
                 content: summary,
                 timestamp: now_str(),
-            });
+            }));
 
             // Keep the last 6 messages
             for i in split_point..msg_count {
@@ -1299,11 +1531,11 @@ fn handle_command_result(
                         "tool" => MessageRole::Tool,
                         _ => MessageRole::System,
                     };
-                    state.messages.push(ChatMessage {
+                    state.messages.push(ChatItem::Message(ChatMessage {
                         role,
                         content: msg.content,
                         timestamp: msg.timestamp,
-                    });
+                    }));
                 }
                 state.add_message(
                     MessageRole::System,
@@ -1404,22 +1636,38 @@ fn handle_command_result(
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                 .unwrap_or_else(|| "Not a git repository".into());
 
-            // Truncate to 100 lines if too long
-            let lines: Vec<&str> = diff.lines().take(100).collect();
-            let truncated = lines.join("\n");
-            let suffix = if diff.lines().count() > 100 {
-                format!(
-                    "\n\n... (truncated at 100 lines, {} total)",
-                    diff.lines().count()
-                )
-            } else {
-                String::new()
-            };
+            if diff.trim().is_empty() || diff == "Not a git repository" {
+                state.add_message(MessageRole::System, diff);
+                return;
+            }
 
-            state.add_message(
-                MessageRole::System,
-                format!("Git diff:{}{}", truncated, suffix),
-            );
+            // Header
+            state.add_message(MessageRole::System, "Git diff:".into());
+
+            let all_lines: Vec<&str> = diff.lines().collect();
+            let display_lines = &all_lines[..all_lines.len().min(100)];
+
+            for line in display_lines {
+                let role = if line.starts_with("+++") || line.starts_with("---") {
+                    MessageRole::DiffHeader
+                } else if line.starts_with('+') {
+                    MessageRole::DiffAdd
+                } else if line.starts_with('-') {
+                    MessageRole::DiffRemove
+                } else if line.starts_with("@@") {
+                    MessageRole::DiffHeader
+                } else {
+                    MessageRole::Tool
+                };
+                state.add_message(role, line.to_string());
+            }
+
+            if all_lines.len() > 100 {
+                state.add_message(
+                    MessageRole::System,
+                    format!("... (truncated at 100 lines, {} total)", all_lines.len()),
+                );
+            }
         }
         CommandResult::ShowGitStatus => {
             // Get branch name
@@ -1823,9 +2071,12 @@ fn complete_command(input: &str) -> Option<String> {
         "/quit",
         "/clear",
         "/model",
+        "/models",
+        "/mode",
         "/provider",
         "/theme",
         "/files",
+        "/tree",
         "/compact",
         "/save",
         "/load",
@@ -1840,11 +2091,21 @@ fn complete_command(input: &str) -> Option<String> {
         "/log",
         "/search",
         "/pwd",
+        "/cd",
         "/cost",
         "/version",
         "/context",
-        "/models",
         "/discover",
+        "/plan",
+        "/debug",
+        "/ask",
+        "/edit",
+        "/chat",
+        "/add",
+        "/retry",
+        "/cancel",
+        "/grep",
+        "/yolo",
     ];
 
     let matches: Vec<&&str> = commands.iter().filter(|c| c.starts_with(input)).collect();
@@ -1868,60 +2129,79 @@ fn format_tokens(n: u64) -> String {
 
 /// Build a structured summary from compacted messages.
 /// Extracts user requests and key assistant responses to preserve context.
-fn build_compaction_summary(messages: &[ChatMessage]) -> String {
+fn build_compaction_summary(items: &[ChatItem]) -> String {
     let mut summary = String::from("[Conversation Summary]\n");
 
     let mut user_requests: Vec<String> = Vec::new();
     let mut assistant_actions: Vec<String> = Vec::new();
     let mut tool_results: Vec<String> = Vec::new();
 
-    for msg in messages {
-        match msg.role {
-            MessageRole::User => {
-                // Extract the first line or first 120 chars as the request summary
-                let text = msg.content.trim();
-                let brief = if let Some(first_line) = text.lines().next() {
-                    if first_line.len() > 120 {
-                        format!("{}...", &first_line[..117])
+    for item in items {
+        match item {
+            ChatItem::Message(msg) => match msg.role {
+                MessageRole::User => {
+                    // Extract the first line or first 120 chars as the request summary
+                    let text = msg.content.trim();
+                    let brief = if let Some(first_line) = text.lines().next() {
+                        if first_line.len() > 120 {
+                            format!("{}...", &first_line[..117])
+                        } else {
+                            first_line.to_string()
+                        }
                     } else {
-                        first_line.to_string()
+                        continue;
+                    };
+                    user_requests.push(brief);
+                }
+                MessageRole::Assistant => {
+                    // Extract the first meaningful line (skip empty lines)
+                    let text = msg.content.trim();
+                    let brief = text
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .to_string();
+                    if !brief.is_empty() {
+                        let truncated = if brief.len() > 150 {
+                            format!("{}...", &brief[..147])
+                        } else {
+                            brief
+                        };
+                        assistant_actions.push(truncated);
                     }
+                }
+                MessageRole::Tool
+                | MessageRole::DiffAdd
+                | MessageRole::DiffRemove
+                | MessageRole::DiffHeader => {
+                    // Capture tool execution summaries (first line only)
+                    let text = msg.content.trim();
+                    if let Some(first_line) = text.lines().next() {
+                        let truncated = if first_line.len() > 100 {
+                            format!("{}...", &first_line[..97])
+                        } else {
+                            first_line.to_string()
+                        };
+                        tool_results.push(truncated);
+                    }
+                }
+                MessageRole::System => {
+                    // Skip system messages in summary
+                }
+            },
+            ChatItem::ToolCard { name, output, .. } => {
+                // Summarize tool cards as tool results
+                let brief = if output.is_empty() {
+                    format!("[tool: {name}]")
                 } else {
-                    continue;
+                    let first_line = output.lines().next().unwrap_or("");
+                    if first_line.len() > 100 {
+                        format!("[{name}] {}...", &first_line[..97])
+                    } else {
+                        format!("[{name}] {first_line}")
+                    }
                 };
-                user_requests.push(brief);
-            }
-            MessageRole::Assistant => {
-                // Extract the first meaningful line (skip empty lines)
-                let text = msg.content.trim();
-                let brief = text
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                if !brief.is_empty() {
-                    let truncated = if brief.len() > 150 {
-                        format!("{}...", &brief[..147])
-                    } else {
-                        brief
-                    };
-                    assistant_actions.push(truncated);
-                }
-            }
-            MessageRole::Tool => {
-                // Capture tool execution summaries (first line only)
-                let text = msg.content.trim();
-                if let Some(first_line) = text.lines().next() {
-                    let truncated = if first_line.len() > 100 {
-                        format!("{}...", &first_line[..97])
-                    } else {
-                        first_line.to_string()
-                    };
-                    tool_results.push(truncated);
-                }
-            }
-            MessageRole::System => {
-                // Skip system messages in summary
+                tool_results.push(brief);
             }
         }
     }
@@ -1974,7 +2254,9 @@ fn now_str() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("{secs}")
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    format!("{:02}:{:02}", h, m)
 }
 
 /// Attempt to start the Python sidecar for semantic search.

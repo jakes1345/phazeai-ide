@@ -36,3 +36,4 @@ lsp-types = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
 tree-sitter-highlight = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
