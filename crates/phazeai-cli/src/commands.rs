@@ -47,6 +47,14 @@ pub enum CommandResult {
     ShowContext,
     /// Switch AI mode (plan, debug, chat, ask, edit).
     SetMode(String),
+    /// Add a file to the conversation context (/add <path>).
+    AddFile(String),
+    /// Retry the last user message.
+    Retry,
+    /// Cancel the current agent run.
+    Cancel,
+    /// Grep for a pattern in the project (/grep <pattern>).
+    Grep(String),
 }
 
 pub fn handle_command(input: &str) -> CommandResult {
@@ -177,6 +185,29 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/edit" => CommandResult::SetMode("edit".into()),
         "/chat" => CommandResult::SetMode("chat".into()),
 
+        // Context and session control
+        "/add" => {
+            if arg.is_empty() {
+                CommandResult::Message(
+                    "Usage: /add <file-path>\nAdds file contents to the conversation context."
+                        .into(),
+                )
+            } else {
+                CommandResult::AddFile(arg.to_string())
+            }
+        }
+        "/retry" => CommandResult::Retry,
+        "/cancel" | "/stop" => CommandResult::Cancel,
+        "/grep" => {
+            if arg.is_empty() {
+                CommandResult::Message(
+                    "Usage: /grep <pattern>\nSearch for pattern in project files.".into(),
+                )
+            } else {
+                CommandResult::Grep(arg.to_string())
+            }
+        }
+
         // Unknown command
         _ => {
             if input.starts_with('/') {
@@ -226,9 +257,15 @@ fn show_help() -> CommandResult {
     /git                      Show git status
     /log                      Show git log (last 20 commits)
     /search <pattern>         Search files with glob pattern
+    /grep <pattern>           Grep for pattern in project source files
+    /add <file>               Include file contents in conversation context
     /pwd                      Show current directory
     /cd <dir>                 Change directory
     /context                  Show loaded project context
+
+  SESSION CONTROL
+    /retry                    Resend the last user message
+    /cancel, /stop            Cancel the current agent run
 
   OTHER
     /help, /h                 Show this help message

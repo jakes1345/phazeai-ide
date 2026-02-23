@@ -138,6 +138,8 @@ struct AppState {
 
     /// Current AI mode (chat, ask, debug, plan, edit)
     ai_mode: String,
+    /// Last user message sent, used by /retry
+    last_user_input: String,
 }
 
 impl AppState {
@@ -187,6 +189,7 @@ impl AppState {
 
             approval_manager: ToolApprovalManager::default(),
             ai_mode: "chat".into(),
+            last_user_input: String::new(),
         }
     }
 
@@ -511,6 +514,38 @@ pub async fn run_tui(
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// Prepend mode-specific instructions to the user's message so the LLM
+/// knows which role it should take for this turn.
+fn apply_mode_prefix(mode: &str, input: &str) -> String {
+    let prefix = match mode {
+        "plan" => {
+            "[PLANNING MODE] You are a senior software architect. \
+            Your task is to produce a clear, structured, step-by-step plan. \
+            Use numbered lists and headers. Do NOT write code yet — only plan.\n\n"
+        }
+        "debug" => {
+            "[DEBUG MODE] You are an expert debugger. \
+            Diagnose the root cause of the issue described below before suggesting any fix. \
+            Show your reasoning step by step.\n\n"
+        }
+        "ask" => {
+            "[READ-ONLY MODE] Answer the question below. \
+            Do NOT modify any files. Do NOT write new code. \
+            Only read, explain, and answer.\n\n"
+        }
+        "edit" => {
+            "[EDIT MODE] Make precise, minimal code changes to satisfy the request. \
+            Use the edit_file tool. Keep changes focused and avoid unrelated refactors.\n\n"
+        }
+        _ => "", // "chat" — no prefix, natural conversation
+    };
+    if prefix.is_empty() {
+        input.to_string()
+    } else {
+        format!("{prefix}{input}")
+    }
 }
 
 fn build_system_prompt(extra_instructions: Option<&str>) -> String {
@@ -958,14 +993,16 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
 
             // Handle slash commands
             if input.starts_with('/') {
-                handle_command_result(state, commands::handle_command(&input));
+                handle_command_result(state, commands::handle_command(&input), user_input_tx);
                 return;
             }
 
             state.add_message(MessageRole::User, input.clone());
             state.is_processing = true;
             state.status_text = "Sending...".into();
-            let _ = user_input_tx.send(input);
+            state.last_user_input = input.clone();
+            let agent_input = apply_mode_prefix(&state.ai_mode, &input);
+            let _ = user_input_tx.send(agent_input);
         }
 
         // Input editing
@@ -1122,7 +1159,11 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-fn handle_command_result(state: &mut AppState, result: CommandResult) {
+fn handle_command_result(
+    state: &mut AppState,
+    result: CommandResult,
+    user_input_tx: &mpsc::UnboundedSender<String>,
+) {
     match result {
         CommandResult::Message(msg) => {
             state.add_message(MessageRole::System, msg);
@@ -1625,6 +1666,111 @@ fn handle_command_result(state: &mut AppState, result: CommandResult) {
                 _ => "Mode changed",
             };
             state.add_message(MessageRole::System, format!("Mode: {mode} — {description}"));
+        }
+        CommandResult::AddFile(path_str) => {
+            let path = std::path::Path::new(&path_str);
+            match std::fs::read_to_string(path) {
+                Ok(contents) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or(path_str.clone());
+                    let char_count = contents.chars().count();
+                    let context_msg = format!(
+                        "[File context added: {name} ({char_count} chars)]\n\n```\n{}\n```",
+                        contents
+                    );
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Added file: {path_str} ({char_count} chars)"),
+                    );
+                    // Send file contents as a context message to the agent
+                    if !state.is_processing {
+                        let _ = user_input_tx.send(format!(
+                            "I'm providing the contents of `{name}` for context. You don't need to respond yet, just acknowledge briefly.\n\n{context_msg}"
+                        ));
+                        state.is_processing = true;
+                        state.status_text = "Loading file context...".into();
+                    }
+                }
+                Err(e) => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to read file '{path_str}': {e}"),
+                    );
+                }
+            }
+        }
+        CommandResult::Retry => {
+            let last = state.last_user_input.clone();
+            if last.is_empty() {
+                state.add_message(MessageRole::System, "Nothing to retry.".into());
+            } else if state.is_processing {
+                state.add_message(
+                    MessageRole::System,
+                    "Agent is still running. Wait for it to finish.".into(),
+                );
+            } else {
+                state.add_message(MessageRole::User, format!("[retry] {last}"));
+                state.is_processing = true;
+                state.status_text = "Retrying...".into();
+                let agent_input = apply_mode_prefix(&state.ai_mode, &last);
+                let _ = user_input_tx.send(agent_input);
+            }
+        }
+        CommandResult::Cancel => {
+            state.add_message(
+                MessageRole::System,
+                "Cancel requested. The current run will stop after the next tool call completes."
+                    .into(),
+            );
+            state.is_processing = false;
+            state.status_text = "Cancelled".into();
+        }
+        CommandResult::Grep(pattern) => {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let output = std::process::Command::new("rg")
+                .args([
+                    "--color=never",
+                    "--line-number",
+                    "--with-filename",
+                    &pattern,
+                ])
+                .current_dir(&root)
+                .output()
+                .or_else(|_| {
+                    // Fallback to grep if rg not available
+                    std::process::Command::new("grep")
+                        .args(["-rn", &pattern, "."])
+                        .current_dir(&root)
+                        .output()
+                });
+            match output {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if text.is_empty() {
+                        state.add_message(
+                            MessageRole::System,
+                            format!("No matches for '{pattern}'"),
+                        );
+                    } else {
+                        let lines: Vec<&str> = text.lines().take(50).collect();
+                        let result = lines.join("\n");
+                        let truncated = if text.lines().count() > 50 {
+                            "\n... (showing first 50 matches)"
+                        } else {
+                            ""
+                        };
+                        state.add_message(
+                            MessageRole::System,
+                            format!("Grep results for '{pattern}':\n{result}{truncated}"),
+                        );
+                    }
+                }
+                Err(e) => {
+                    state.add_message(MessageRole::System, format!("Search failed: {e}"));
+                }
+            }
         }
     }
 }
