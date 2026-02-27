@@ -12,7 +12,7 @@ use floem::{
 };
 use phazeai_core::Settings;
 
-use crate::lsp_bridge::{start_lsp_bridge, DiagEntry, DiagSeverity, LspCommand};
+use crate::lsp_bridge::{start_lsp_bridge, CompletionEntry, DiagEntry, DiagSeverity, LspCommand};
 
 use crate::{
     components::icon::{icons, phaze_icon},
@@ -95,6 +95,15 @@ pub struct IdeState {
     // LSP — populated async by start_lsp_bridge()
     pub diagnostics: RwSignal<Vec<DiagEntry>>,
     pub lsp_cmd: tokio::sync::mpsc::UnboundedSender<LspCommand>,
+    /// Latest completion list from the LSP server (set after RequestCompletions).
+    pub completions: RwSignal<Vec<CompletionEntry>>,
+    /// Whether the completion popup is visible.
+    pub completion_open: RwSignal<bool>,
+    /// Index of the highlighted item in the completion popup.
+    pub completion_selected: RwSignal<usize>,
+    /// Active cursor position: (path, 0-based line, 0-based col).
+    /// Written by the editor; read by Ctrl+Space handler to know where to request.
+    pub active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
     // Panel resize drag state (used by the divider + overlay)
     pub panel_drag_active: RwSignal<bool>,
     pub panel_drag_start_x: RwSignal<f64>,
@@ -146,7 +155,7 @@ impl IdeState {
 
         // Start LSP bridge — background tokio thread running LspManager.
         // Must be called in a Floem reactive scope (we're inside the window callback).
-        let (lsp_cmd, diagnostics) = start_lsp_bridge(workspace.clone());
+        let (lsp_cmd, diagnostics, completions) = start_lsp_bridge(workspace.clone());
 
         // Wire: whenever the active file changes, send did_open to the LSP server.
         {
@@ -181,6 +190,10 @@ impl IdeState {
             search_results: create_rw_signal(Vec::new()),
             diagnostics,
             lsp_cmd,
+            completions,
+            completion_open: create_rw_signal(false),
+            completion_selected: create_rw_signal(0usize),
+            active_cursor: create_rw_signal(None),
             panel_drag_active: create_rw_signal(false),
             panel_drag_start_x: create_rw_signal(0.0),
             panel_drag_start_width: create_rw_signal(0.0),
@@ -1228,8 +1241,152 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
     })
 }
 
+fn completion_popup(state: IdeState) -> impl IntoView {
+    let items    = state.completions;
+    let selected = state.completion_selected;
+
+    let list = scroll(
+        dyn_stack(
+            move || items.get().into_iter().enumerate().collect::<Vec<_>>(),
+            |(idx, _)| *idx,
+            {
+                let state = state.clone();
+                move |(idx, entry): (usize, CompletionEntry)| {
+                    let is_sel = move || selected.get() == idx;
+                    let item_detail = entry.detail.clone().unwrap_or_default();
+                    let item_label  = entry.label.clone();
+                    stack((
+                        label(move || item_label.clone())
+                            .style(move |s: floem::style::Style| {
+                                let p = state.theme.get().palette;
+                                s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
+                            }),
+                        label(move || item_detail.clone())
+                            .style(move |s: floem::style::Style| {
+                                let p = state.theme.get().palette;
+                                s.font_size(11.0).color(p.text_muted).margin_left(8.0)
+                            }),
+                    ))
+                    .style(move |s: floem::style::Style| {
+                        let p = state.theme.get().palette;
+                        s.items_center()
+                         .width_full()
+                         .padding_horiz(12.0)
+                         .padding_vert(5.0)
+                         .border_radius(4.0)
+                         .cursor(floem::style::CursorStyle::Pointer)
+                         .background(if is_sel() { p.accent_dim } else { floem::peniko::Color::TRANSPARENT })
+                    })
+                    .on_click_stop({
+                        let state = state.clone();
+                        move |_| {
+                            selected.set(idx);
+                            state.completion_open.set(false);
+                        }
+                    })
+                    .on_event_stop(EventListener::PointerEnter, move |_| selected.set(idx))
+                }
+            },
+        )
+        .style(|s| s.flex_col().width_full()),
+    )
+    .style(|s| s.width_full().max_height(280.0));
+
+    let header = stack((
+        label(|| "Completions")
+            .style(move |s| {
+                s.font_size(11.0)
+                 .color(state.theme.get().palette.text_muted)
+                 .flex_grow(1.0)
+            }),
+        container(label(|| "Esc"))
+            .style(move |s| {
+                let p = state.theme.get().palette;
+                s.font_size(10.0)
+                 .color(p.text_muted)
+                 .background(p.bg_elevated)
+                 .padding_horiz(5.0)
+                 .padding_vert(2.0)
+                 .border_radius(3.0)
+                 .cursor(floem::style::CursorStyle::Pointer)
+            })
+            .on_click_stop(move |_| state.completion_open.set(false)),
+    ))
+    .style(move |s| {
+        s.items_center()
+         .width_full()
+         .padding_horiz(12.0)
+         .padding_vert(6.0)
+         .border_bottom(1.0)
+         .border_color(state.theme.get().palette.border)
+         .margin_bottom(4.0)
+    });
+
+    let empty_hint = label(|| "No completions")
+        .style(move |s| {
+            s.font_size(12.0)
+             .color(state.theme.get().palette.text_muted)
+             .padding(12.0)
+             .apply_if(!items.get().is_empty(), |s| s.display(floem::style::Display::None))
+        });
+
+    let popup_box = stack((header, empty_hint, list))
+        .style(move |s| {
+            let t = state.theme.get();
+            let p = &t.palette;
+            s.flex_col()
+             .width(420.0)
+             .background(p.bg_panel)
+             .border(1.0)
+             .border_color(p.glass_border)
+             .border_radius(8.0)
+             .box_shadow_h_offset(0.0)
+             .box_shadow_v_offset(4.0)
+             .box_shadow_blur(32.0)
+             .box_shadow_color(p.glow)
+             .box_shadow_spread(0.0)
+        })
+        .on_event_stop(EventListener::KeyDown, move |e| {
+            if let Event::KeyDown(ke) = e {
+                match &ke.key.logical_key {
+                    Key::Named(floem::keyboard::NamedKey::Escape) => {
+                        state.completion_open.set(false);
+                    }
+                    Key::Named(floem::keyboard::NamedKey::ArrowDown) => {
+                        let max = items.get().len().saturating_sub(1);
+                        selected.update(|v| *v = (*v + 1).min(max));
+                    }
+                    Key::Named(floem::keyboard::NamedKey::ArrowUp) => {
+                        selected.update(|v| *v = v.saturating_sub(1));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+    container(popup_box)
+        .style(move |s| {
+            let shown = state.completion_open.get();
+            s.absolute()
+             .inset(0)
+             .items_start()
+             .justify_center()
+             .padding_top(120.0)
+             .z_index(300)
+             .background(floem::peniko::Color::TRANSPARENT)
+             .apply_if(!shown, |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| state.completion_open.set(false))
+}
+
 fn ide_root(state: IdeState) -> impl IntoView {
-    let editor = editor_panel(state.open_file, state.theme, state.ai_thinking, state.lsp_cmd.clone());
+    let editor = editor_panel(
+        state.open_file,
+        state.theme,
+        state.ai_thinking,
+        state.lsp_cmd.clone(),
+        state.active_cursor,
+    );
     let chat = chat_panel(state.theme, state.ai_thinking);
 
     let chat_wrap = container(chat)
@@ -1309,8 +1466,9 @@ pub fn launch_phaze_ide() {
                 let state = IdeState::new(&settings);
 
                 // Overlay layers — rendered after IDE content so they paint on top.
-                let palette = command_palette(state.clone());
-                let picker  = file_picker(state.clone());
+                let palette    = command_palette(state.clone());
+                let picker     = file_picker(state.clone());
+                let completions_popup = completion_popup(state.clone());
 
                 // Full-window drag capture overlay — only visible while a panel
                 // resize is in progress (panel_drag_active == true).  By covering
@@ -1348,9 +1506,10 @@ pub fn launch_phaze_ide() {
                 stack((
                     cosmic_bg_canvas(state.theme),
                     ide_root(state.clone()),
-                    palette,      // z_index(100)
-                    picker,       // z_index(200) — on top of palette
-                    drag_overlay, // z_index(50) — below overlays, only shown during resize
+                    palette,           // z_index(100)
+                    picker,            // z_index(200) — on top of palette
+                    completions_popup, // z_index(300) — above palette/picker
+                    drag_overlay,      // z_index(50)  — only shown during resize
                 ))
                 .style(move |s| {
                     let t = state.theme.get();
@@ -1368,6 +1527,10 @@ pub fn launch_phaze_ide() {
                             // ── Named keys ───────────────────────────────────────
                             if let Key::Named(ref named) = key_event.key.logical_key {
                                 if *named == floem::keyboard::NamedKey::Escape {
+                                    if state.completion_open.get() {
+                                        state.completion_open.set(false);
+                                        return;
+                                    }
                                     if state.file_picker_open.get() {
                                         state.file_picker_open.set(false);
                                         state.file_picker_query.set(String::new());
@@ -1379,6 +1542,18 @@ pub fn launch_phaze_ide() {
                                         return;
                                     }
                                 }
+                            }
+
+                            // Ctrl+Space → request LSP completions and open popup
+                            if ctrl && key_event.key.logical_key == Key::Named(floem::keyboard::NamedKey::Space) {
+                                if let Some((path, line, col)) = state.active_cursor.get() {
+                                    let _ = state.lsp_cmd.send(LspCommand::RequestCompletions {
+                                        path, line, col,
+                                    });
+                                }
+                                state.completion_selected.set(0);
+                                state.completion_open.set(true);
+                                return;
                             }
 
                             // Ctrl+P → file picker; Ctrl+Shift+P → command palette

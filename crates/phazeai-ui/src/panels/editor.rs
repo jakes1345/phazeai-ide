@@ -244,12 +244,15 @@ struct TabState {
 /// Full multi-tab code editor with syntect syntax highlighting.
 ///
 /// `ai_thinking` drives the sentient-gutter glow on the left edge.
-/// `lsp_cmd` is used to notify the LSP server on every edit (did_change).
+/// `lsp_cmd` notifies the LSP server on every edit (did_change).
+/// `active_cursor` is written with (path, 0-based line, 0-based col) whenever
+///   the active editor's cursor moves — read by the completion popup.
 pub fn editor_panel(
     open_file: RwSignal<Option<PathBuf>>,
     theme: RwSignal<PhazeTheme>,
     ai_thinking: RwSignal<bool>,
     lsp_cmd: tokio::sync::mpsc::UnboundedSender<crate::lsp_bridge::LspCommand>,
+    active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -446,6 +449,24 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
+                });
+            }
+
+            // ── Cursor position tracking → active_cursor signal ──────────
+            // Fires whenever cursor moves in the active editor; converts the
+            // byte offset to (line, col) and writes to the shared signal so
+            // Ctrl+Space can pass the right position to the LSP.
+            {
+                let track_path = tab.path.clone();
+                let track_doc  = doc.clone();
+                create_effect(move |_| {
+                    if active_idx.get() != Some(i) { return; }
+                    let cursor = cursor_sig.get();
+                    let offset = cursor.offset();
+                    let rope  = track_doc.rope_text();
+                    let line  = rope.line_of_offset(offset) as u32;
+                    let col   = (offset - rope.offset_of_line(line as usize)) as u32;
+                    active_cursor.set(Some((track_path.clone(), line, col)));
                 });
             }
 
