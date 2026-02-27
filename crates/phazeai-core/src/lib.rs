@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod analysis;
 pub mod config;
+pub mod constants;
 pub mod context;
 pub mod error;
 pub mod git;

@@ -1,9 +1,9 @@
+use crate::constants::{defaults, paths};
+use crate::llm::model_router::{ModelRoute, ModelRouter, TaskType};
+use crate::llm::provider::{ProviderConfig, ProviderId, ProviderRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-use crate::llm::model_router::{ModelRoute, ModelRouter, TaskType};
-use crate::llm::provider::{ProviderConfig, ProviderId, ProviderRegistry};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -81,22 +81,22 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             llm: LlmSettings {
-                provider: LlmProvider::Ollama, // Default to local Ollama for zero-key setup
-                model: "phaze-beast".to_string(), // Our custom optimized model
+                provider: LlmProvider::Ollama,
+                model: defaults::DEFAULT_MODEL.to_string(),
                 api_key_env: "".to_string(),
                 base_url: None,
-                max_tokens: 8192,
+                max_tokens: defaults::MAX_TOKENS,
             },
             editor: EditorSettings {
-                theme: "Dark".to_string(),
-                font_size: 14.0,
-                tab_size: 4,
+                theme: defaults::THEME.to_string(),
+                font_size: defaults::FONT_SIZE,
+                tab_size: defaults::TAB_SIZE,
                 show_line_numbers: true,
                 auto_save: true,
             },
             sidecar: SidecarSettings {
                 enabled: true,
-                python_path: "python3".to_string(),
+                python_path: defaults::PYTHON_PATH.to_string(),
                 auto_start: true,
             },
             providers: Vec::new(),
@@ -109,8 +109,8 @@ impl Settings {
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("phazeai")
-            .join("config.toml")
+            .join(paths::CONFIG_DIR)
+            .join(paths::CONFIG_FILE)
     }
 
     pub fn load() -> Self {

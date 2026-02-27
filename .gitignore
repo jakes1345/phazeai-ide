@@ -56,3 +56,15 @@ models/fine_tuned/
 
 # Node (if any tooling pulls it in)
 node_modules/
+.aider*
+
+# Session continuation files
+*.txt
+"Debugging IDE Launch.md"
+
+# Dev screenshots (kept locally, not in repo)
+screenshot*.png
+final_ui_v*.png
+
+# Sisyphus internal state
+.sisyphus/

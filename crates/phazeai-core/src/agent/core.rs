@@ -170,7 +170,10 @@ impl Agent {
             });
 
             let messages = {
-                let conversation = self.conversation.lock().await;
+                let mut conversation = self.conversation.lock().await;
+                // Trim conversation to stay within the configured token budget.
+                // Keeps the most recent messages; old ones are evicted from the front.
+                conversation.trim_to_token_budget(self.max_context_tokens);
                 conversation.get_messages()
             };
 

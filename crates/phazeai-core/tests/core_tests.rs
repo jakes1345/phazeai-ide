@@ -17,7 +17,7 @@ fn test_settings_default_values() {
     assert!(settings.llm.base_url.is_none());
 
     // Check editor defaults
-    assert_eq!(settings.editor.theme, "Dark");
+    assert_eq!(settings.editor.theme, "Midnight Blue");
     assert_eq!(settings.editor.font_size, 14.0);
     assert_eq!(settings.editor.tab_size, 4);
     assert!(settings.editor.show_line_numbers);

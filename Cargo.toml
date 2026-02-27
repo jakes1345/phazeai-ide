@@ -4,7 +4,8 @@ members = [
     "crates/phazeai-core",
     "crates/phazeai-sidecar",
     "crates/phazeai-cli",
-    "crates/phazeai-ide",
+    "crates/phazeai-ui",
+    "crates/phazeai-cloud",
     "crates/ollama-rs",
 ]
 
@@ -33,6 +34,8 @@ notify = "6.0"
 futures = "0.3"
 uuid = { version = "1.6", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+toml = "0.8"
 
 # CLI
 ratatui = "0.28"
@@ -40,11 +43,12 @@ crossterm = "0.28"
 clap = { version = "4.5", features = ["derive"] }
 syntect = "5.2"
 
-# IDE
-egui = "0.28"
-eframe = "0.28"
 ropey = "1.6"
 rfd = "0.15"
+
+# phazeai-ui / Floem
+floem = { git = "https://github.com/lapce/floem", rev = "e0dd862564e3afbad5cba8ebe60df166a7a41e56", features = ["editor", "serde", "default-image-formats"] }
+floem-editor-core = { git = "https://github.com/lapce/floem", rev = "e0dd862564e3afbad5cba8ebe60df166a7a41e56" }
 
 # New Arsenal Integrations
 ollama-rs = { package = "ollama-rs-phazeai", path = "crates/ollama-rs", features = ["stream", "chat-history"] }

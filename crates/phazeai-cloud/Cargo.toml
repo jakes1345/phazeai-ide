@@ -1,0 +1,21 @@
+[package]
+name = "phazeai-cloud"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "PhazeAI Cloud client — authentication, hosted AI, and team features"
+
+[dependencies]
+phazeai-core = { path = "../phazeai-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+toml.workspace = true
+
+[features]
+default = []

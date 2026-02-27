@@ -1,3 +1,4 @@
+use crate::constants::endpoints;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,13 +40,13 @@ impl ProviderId {
 
     pub fn default_base_url(&self) -> &str {
         match self {
-            Self::Claude => "https://api.anthropic.com",
-            Self::OpenAI => "https://api.openai.com",
-            Self::Ollama => "http://localhost:11434",
-            Self::Groq => "https://api.groq.com/openai",
-            Self::Together => "https://api.together.xyz",
-            Self::OpenRouter => "https://openrouter.ai/api",
-            Self::LmStudio => "http://localhost:1234",
+            Self::Claude => endpoints::CLAUDE_BASE_URL,
+            Self::OpenAI => endpoints::OPENAI_BASE_URL,
+            Self::Ollama => endpoints::OLLAMA_BASE_URL,
+            Self::Groq => endpoints::GROQ_BASE_URL,
+            Self::Together => endpoints::TOGETHER_BASE_URL,
+            Self::OpenRouter => endpoints::OPENROUTER_BASE_URL,
+            Self::LmStudio => endpoints::LMSTUDIO_BASE_URL,
             Self::Custom(_) => "",
         }
     }
