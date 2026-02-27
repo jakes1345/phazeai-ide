@@ -13,6 +13,7 @@ pub enum ProviderId {
     Together,
     OpenRouter,
     LmStudio,
+    Gemini,
     Custom(String),
 }
 
@@ -26,6 +27,7 @@ impl ProviderId {
             Self::Together => "Together.ai",
             Self::OpenRouter => "OpenRouter",
             Self::LmStudio => "LM Studio (Local)",
+            Self::Gemini => "Google Gemini",
             Self::Custom(name) => name,
         }
     }
@@ -47,6 +49,7 @@ impl ProviderId {
             Self::Together => endpoints::TOGETHER_BASE_URL,
             Self::OpenRouter => endpoints::OPENROUTER_BASE_URL,
             Self::LmStudio => endpoints::LMSTUDIO_BASE_URL,
+            Self::Gemini => endpoints::GEMINI_BASE_URL,
             Self::Custom(_) => "",
         }
     }
@@ -60,6 +63,7 @@ impl ProviderId {
             Self::Together => "TOGETHER_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::LmStudio => "",
+            Self::Gemini => "GEMINI_API_KEY",
             Self::Custom(_) => "",
         }
     }
@@ -68,6 +72,7 @@ impl ProviderId {
         vec![
             Self::Claude,
             Self::OpenAI,
+            Self::Gemini,
             Self::Ollama,
             Self::Groq,
             Self::Together,
@@ -419,6 +424,32 @@ impl ProviderRegistry {
                     output_cost_per_m: 0.28,
                 },
             ],
+            ProviderId::Gemini => vec![
+                ModelInfo {
+                    id: "gemini-2.0-flash".into(),
+                    name: "Gemini 2.0 Flash".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 0.10,
+                    output_cost_per_m: 0.40,
+                },
+                ModelInfo {
+                    id: "gemini-2.0-flash-lite".into(),
+                    name: "Gemini 2.0 Flash Lite".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 0.075,
+                    output_cost_per_m: 0.30,
+                },
+                ModelInfo {
+                    id: "gemini-1.5-pro".into(),
+                    name: "Gemini 1.5 Pro".into(),
+                    context_window: 2_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 1.25,
+                    output_cost_per_m: 5.0,
+                },
+            ],
             ProviderId::LmStudio | ProviderId::Ollama => {
                 // Dynamic - must query the server
                 vec![]
@@ -437,6 +468,7 @@ fn default_model_for(id: &ProviderId) -> &str {
         ProviderId::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         ProviderId::OpenRouter => "anthropic/claude-sonnet-4-5-20250929",
         ProviderId::LmStudio => "default",
+        ProviderId::Gemini => "gemini-2.0-flash",
         ProviderId::Custom(_) => "default",
     }
 }

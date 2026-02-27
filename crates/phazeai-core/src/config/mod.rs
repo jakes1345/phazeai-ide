@@ -35,6 +35,7 @@ pub enum LlmProvider {
     Together,
     OpenRouter,
     LmStudio,
+    Gemini,
 }
 
 impl LlmProvider {
@@ -47,6 +48,7 @@ impl LlmProvider {
             LlmProvider::Together => ProviderId::Together,
             LlmProvider::OpenRouter => ProviderId::OpenRouter,
             LlmProvider::LmStudio => ProviderId::LmStudio,
+            LlmProvider::Gemini => ProviderId::Gemini,
         }
     }
 }
@@ -155,6 +157,7 @@ impl Settings {
                 "together" => ProviderId::Together,
                 "openrouter" => ProviderId::OpenRouter,
                 "lmstudio" | "lm_studio" => ProviderId::LmStudio,
+                "gemini" => ProviderId::Gemini,
                 other => ProviderId::Custom(other.to_string()),
             };
             let config = ProviderConfig {

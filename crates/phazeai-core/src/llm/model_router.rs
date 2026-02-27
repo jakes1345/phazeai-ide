@@ -197,6 +197,7 @@ impl ModelRouter {
             "together" => ProviderId::Together,
             "openrouter" => ProviderId::OpenRouter,
             "lmstudio" | "lm_studio" => ProviderId::LmStudio,
+            "gemini" => ProviderId::Gemini,
             other => ProviderId::Custom(other.to_string()),
         }
     }

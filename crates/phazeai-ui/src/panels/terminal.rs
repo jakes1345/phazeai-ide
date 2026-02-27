@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use arboard;
 use std::thread;
 
 use floem::{
@@ -9,8 +10,8 @@ use floem::{
     peniko::Color,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     text::{Attrs, AttrsList, FamilyOwned, TextLayout, Weight},
-    views::{container, dyn_stack, label, scroll, stack, Decorators},
-    IntoView,
+    views::{canvas, container, dyn_stack, label, scroll, stack, Decorators},
+    IntoView, Renderer,
 };
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use vte::{Params, Perform};
@@ -131,6 +132,7 @@ struct TermState {
     cur_fg: TermColor,
     cur_bg: TermColor,
     cur_bold: bool,
+    cursor_col: usize,
 }
 
 impl TermState {
@@ -141,6 +143,7 @@ impl TermState {
             cur_fg: TermColor::Default,
             cur_bg: TermColor::Default,
             cur_bold: false,
+            cursor_col: 0,
         }
     }
 
@@ -150,6 +153,7 @@ impl TermState {
         if self.lines.len() > term_consts::SCROLLBACK_LIMIT {
             self.lines.drain(0..term_consts::SCROLLBACK_DRAIN);
         }
+        self.cursor_col = 0;
     }
 
     fn push_char(&mut self, ch: char) {
@@ -157,6 +161,7 @@ impl TermState {
         let bg = self.cur_bg;
         let bold = self.cur_bold;
         self.current_line.push_char(ch, fg, bg, bold);
+        self.cursor_col += 1;
     }
 
     fn reset_attrs(&mut self) {
@@ -243,7 +248,7 @@ impl Perform for VtePerformer {
         if let Ok(mut state) = self.state.lock() {
             match byte {
                 b'\n' | 0x0B | 0x0C => state.commit_line(),
-                b'\r' => {}
+                b'\r' => state.cursor_col = 0,
                 b'\x08' => {
                     if let Some(last) = state.current_line.segments.last_mut() {
                         last.text.pop();
@@ -463,6 +468,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     let lines: RwSignal<Vec<TermLine>> = create_rw_signal(vec![]);
     // Increment on every update so auto-scroll can detect new output
     let line_version: RwSignal<u64> = create_rw_signal(0);
+    // Cursor column position for rendering the cursor block
+    let cursor_col_sig: RwSignal<usize> = create_rw_signal(0usize);
 
     // ── Spawn PTY thread ──────────────────────────────────────────────────
     {
@@ -565,6 +572,7 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                 }
                 lines.set(all_lines);
                 line_version.update(|v| *v += 1);
+                cursor_col_sig.set(state.cursor_col);
             }
         });
     }
@@ -683,9 +691,39 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
          .border_color(border_color)
     });
 
+    // ── Cursor overlay ────────────────────────────────────────────────────
+    // Renders a semi-transparent block cursor at the current column position
+    // on the last (current) line. Uses 8.4 px per character as approximation.
+    let cursor_view = canvas(move |cx, _size| {
+        let col = cursor_col_sig.get() as f64;
+        let x = 8.0 + col * 8.4;
+        let y = 0.0;
+        cx.fill(
+            &floem::kurbo::Rect::new(x, y, x + 7.0, y + 16.0),
+            floem::peniko::Color::from_rgba8(200, 200, 200, 180),
+            0.0,
+        );
+    })
+    .style(|s| {
+        s.absolute()
+         .width_full()
+         .height(16.0)
+         .inset_bottom(0.0)
+         .inset_left(0.0)
+         .z_index(5)
+         .pointer_events_none()
+    });
+
+    let terminal_with_cursor = stack((output_scroll, cursor_view))
+        .style(|s| s.flex_col().flex_grow(1.0).min_height(0.0).width_full());
+
+    // Clones for the clipboard key handler closure.
+    let pty_writer_c = Arc::clone(&pty_writer);
+    let term_state_c = Arc::clone(&term_state);
+
     // Wrap scroll in a keyboard-navigable container so it can receive focus
     // and capture all key events to forward to the PTY.
-    let output_area = container(output_scroll)
+    let output_area = container(terminal_with_cursor)
         .keyboard_navigable()
         .on_event_stop(EventListener::FocusGained, move |_| {
             is_focused.set(true);
@@ -695,6 +733,53 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         })
         .on_event_stop(EventListener::KeyDown, move |event| {
             if let Event::KeyDown(e) = event {
+                let ctrl  = e.modifiers.contains(Modifiers::CONTROL);
+                let shift = e.modifiers.contains(Modifiers::SHIFT);
+
+                // Ctrl+Shift+V — paste clipboard text into terminal
+                if ctrl && shift {
+                    if let Key::Character(ref ch) = e.key.logical_key {
+                        if ch.as_str() == "v" || ch.as_str() == "V" {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                if let Ok(text) = clipboard.get_text() {
+                                    if let Ok(mut w) = pty_writer_c.lock() {
+                                        if let Some(writer) = w.as_mut() {
+                                            let _ = writer.write_all(text.as_bytes());
+                                            let _ = writer.flush();
+                                        }
+                                    }
+                                }
+                            }
+                            return;
+                        }
+
+                        // Ctrl+Shift+C — copy all visible terminal text to clipboard
+                        if ch.as_str() == "c" || ch.as_str() == "C" {
+                            if let Ok(state) = term_state_c.lock() {
+                                let mut parts: Vec<String> = state.lines.iter()
+                                    .map(|line| {
+                                        line.segments.iter()
+                                            .map(|seg| seg.text.as_str())
+                                            .collect::<String>()
+                                    })
+                                    .collect();
+                                if !state.current_line.is_empty() {
+                                    parts.push(
+                                        state.current_line.segments.iter()
+                                            .map(|seg| seg.text.as_str())
+                                            .collect::<String>()
+                                    );
+                                }
+                                let text = parts.join("\n");
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    let _ = clipboard.set_text(text);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 let bytes = key_to_pty_bytes(e);
                 send_to_pty(bytes);
             }

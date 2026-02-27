@@ -19,6 +19,7 @@ use floem::{
             core::{
                 buffer::rope_text::RopeText,
                 cursor::{Cursor, CursorMode},
+                editor::EditType,
                 selection::Selection,
             },
             id::EditorId,
@@ -253,6 +254,8 @@ pub fn editor_panel(
     ai_thinking: RwSignal<bool>,
     lsp_cmd: tokio::sync::mpsc::UnboundedSender<crate::lsp_bridge::LspCommand>,
     active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
+    pending_completion: RwSignal<Option<String>>,
+    diagnostics: RwSignal<Vec<crate::lsp_bridge::DiagEntry>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -271,6 +274,14 @@ pub fn editor_panel(
     let find_jump_nonce:  RwSignal<u64>   = create_rw_signal(0u64);
     let find_jump_offset: RwSignal<usize> = create_rw_signal(0usize);
     let find_cur_match:   RwSignal<usize> = create_rw_signal(0usize);
+
+    // ── Replace (Ctrl+H) ─────────────────────────────────────────────────────
+    let replace_query: RwSignal<String> = create_rw_signal(String::new());
+    let replace_open:  RwSignal<bool>   = create_rw_signal(false);
+    // Incremented to trigger "replace current match" in the active editor.
+    let replace_nonce:     RwSignal<u64> = create_rw_signal(0u64);
+    // Incremented to trigger "replace all matches" in the active editor.
+    let replace_all_nonce: RwSignal<u64> = create_rw_signal(0u64);
 
     // Compute match offsets reactively (for display + navigation)
     let find_match_offsets = create_memo({
@@ -335,12 +346,32 @@ pub fn editor_panel(
         let content = doc.text().to_string();
         if std::fs::write(&tab.path, content).is_ok() {
             tab.dirty.set(false);
+            // Run formatter in background — file is already saved to disk
+            let path = tab.path.clone();
+            std::thread::spawn(move || {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let formatter: Option<(&str, Vec<String>)> = match ext {
+                    "rs" => Some(("rustfmt", vec![path.to_string_lossy().to_string()])),
+                    "js" | "ts" | "jsx" | "tsx" | "json" => Some((
+                        "prettier",
+                        vec![
+                            "--write".to_string(),
+                            path.to_string_lossy().to_string(),
+                        ],
+                    )),
+                    "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
+                    _ => None,
+                };
+                if let Some((cmd, args)) = formatter {
+                    let _ = std::process::Command::new(cmd).args(&args).status();
+                }
+            });
         }
     });
     let save_fn_bar = save_fn.clone();
     let save_fn_key = save_fn.clone();
 
-    let tab_bar = tab_bar_view(tabs, active_idx, theme, save_fn_bar);
+    let tab_bar = tab_bar_view(tabs, active_idx, theme, save_fn_bar, diagnostics);
 
     // ── Sentient gutter ────────────────────────────────────────────────────
     let sentient_gutter = canvas(move |cx, size| {
@@ -364,30 +395,27 @@ pub fn editor_panel(
     });
 
     // ── Editor body ─────────────────────────────────────────────────────────
-    // `font_size` and `goto_nonce` (for active tab only) in the item key forces
-    // targeted editor recreation on zoom and goto-line.
+    // Key by path only — editors are NEVER recreated on font-size or goto-line
+    // changes.  Font-size updates call editor.update_styling() reactively.
+    // Goto-line uses the same nonce-effect pattern as find-cursor-jump.
+    // This preserves the undo/redo stack across zoom and navigation.
     let editor_body = dyn_stack(
         move || {
-            let fs:    usize = font_size.get();
-            let nonce: u64   = goto_nonce.get();
-            let active = active_idx.get();
             tabs.get()
                 .into_iter()
                 .enumerate()
-                .map(|(i, tab)| {
-                    // Only active tab includes the nonce so only it recreates.
-                    let jump = if active == Some(i) { nonce } else { 0 };
-                    (i, tab, fs, jump)
-                })
                 .collect::<Vec<_>>()
         },
-        |(_, tab, fs, jump)| format!("{}@{}@{}", tab.path.to_string_lossy(), fs, jump),
-        move |(i, tab, fs, jump)| {
+        |(_i, tab)| format!("{}", tab.path.to_string_lossy()),
+        move |(i, tab)| {
             let is_active = move || active_idx.get() == Some(i);
             let key = tab.path.to_string_lossy().to_string();
             let dirty = tab.dirty;
 
-            // Preserve unsaved edits across recreation by reading doc registry first.
+            // Read font_size once for initial construction (not tracked).
+            let initial_fs = font_size.get_untracked();
+
+            // Preserve unsaved edits across tab switches by reading doc registry first.
             let content = {
                 let reg = docs_for_stack.borrow();
                 reg.get(&key)
@@ -395,22 +423,30 @@ pub fn editor_panel(
                     .unwrap_or_else(|| std::fs::read_to_string(&tab.path).unwrap_or_default())
             };
 
-            let base_styling = Rc::new(
-                SimpleStylingBuilder::default()
-                    .wrap(WrapMethod::None)
-                    .font_size(fs)
-                    .font_family(vec![
-                        FamilyOwned::Name("JetBrains Mono".to_string()),
-                        FamilyOwned::Name("Fira Code".to_string()),
-                        FamilyOwned::Name("Cascadia Code".to_string()),
-                        FamilyOwned::Monospace,
-                    ])
-                    .build(),
-            );
+            let tab_ext = tab.path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let make_base_styling = |fs: usize| -> Rc<dyn Styling> {
+                Rc::new(
+                    SimpleStylingBuilder::default()
+                        .wrap(WrapMethod::None)
+                        .font_size(fs)
+                        .font_family(vec![
+                            FamilyOwned::Name("JetBrains Mono".to_string()),
+                            FamilyOwned::Name("Fira Code".to_string()),
+                            FamilyOwned::Name("Cascadia Code".to_string()),
+                            FamilyOwned::Monospace,
+                        ])
+                        .build(),
+                )
+            };
 
             // Build the raw editor first so we can grab the doc and cursor.
             let raw_editor = text_editor(content);
             let cursor_sig  = raw_editor.editor().cursor;   // RwSignal<Cursor>
+            let editor_ref  = raw_editor.editor().clone();  // Clone for reactive updates
             let doc         = raw_editor.doc().clone();
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
@@ -418,19 +454,25 @@ pub fn editor_panel(
             let lsp_path    = tab.path.clone();
             let lsp_tx      = lsp_cmd.clone();
 
-            // ── Goto-line cursor jump ─────────────────────────────────────
-            // When this editor is recreated with a new goto_nonce, set the
-            // initial cursor position before the view is first rendered.
-            if jump > 0 {
-                let rope      = doc.rope_text();
-                let line_0    = goto_line.get().saturating_sub(1); // 0-indexed
-                let max_line  = rope.num_lines().saturating_sub(1);
-                let offset    = rope.offset_of_line(line_0.min(max_line));
-                cursor_sig.set(Cursor::new(
-                    CursorMode::Insert(Selection::caret(offset)),
-                    None,
-                    None,
-                ));
+            // ── Goto-line cursor jump (reactive effect, no editor recreation) ─
+            {
+                let last_nonce = create_rw_signal(0u64);
+                let doc_for_goto = doc.clone();
+                create_effect(move |_| {
+                    let nonce = goto_nonce.get();
+                    if nonce == 0 || nonce == last_nonce.get() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_nonce.set(nonce);
+                    let rope     = doc_for_goto.rope_text();
+                    let line_0   = goto_line.get().saturating_sub(1);
+                    let max_line = rope.num_lines().saturating_sub(1);
+                    let offset   = rope.offset_of_line(line_0.min(max_line));
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::caret(offset)),
+                        None,
+                        None,
+                    ));
+                });
             }
 
             // ── Find-in-file cursor jump effect ──────────────────────────
@@ -470,10 +512,87 @@ pub fn editor_panel(
                 });
             }
 
-            // Build syntect-based styling for this file's language
-            let ext = tab.path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let mut syn_style = SyntaxStyle::for_extension(ext, base_styling);
+            // ── Completion insertion effect ───────────────────────────────
+            // When `pending_completion` is set and this tab is active, insert
+            // the text at the current cursor offset and clear the signal.
+            {
+                let doc_for_comp = doc.clone();
+                let last_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let Some(text) = pending_completion.get() else { return };
+                    if active_idx.get() != Some(i) { return; }
+                    // Consume the signal immediately to avoid re-triggering.
+                    pending_completion.set(None);
+                    let offset = cursor_sig.get().offset();
+                    let sel = Selection::caret(offset);
+                    doc_for_comp.edit_single(sel, &text, EditType::InsertChars);
+                    // Suppress the nonce-based spurious re-run
+                    last_nonce.update(|n| *n += 1);
+                });
+            }
+
+            // ── Replace current match ─────────────────────────────────────
+            {
+                let doc_for_repl = doc.clone();
+                let last_repl_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = replace_nonce.get();
+                    if nonce == 0 || nonce == last_repl_nonce.get() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_repl_nonce.set(nonce);
+                    let offsets = find_match_offsets.get();
+                    let cur = find_cur_match.get();
+                    let Some(&start) = offsets.get(cur) else { return };
+                    let q = find_query.get();
+                    let end = start + q.len();
+                    let sel = Selection::region(start, end);
+                    let replacement = replace_query.get();
+                    doc_for_repl.edit_single(sel, &replacement, EditType::InsertChars);
+                });
+            }
+
+            // ── Replace all matches ───────────────────────────────────────
+            {
+                let doc_for_repl_all = doc.clone();
+                let last_repl_all_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = replace_all_nonce.get();
+                    if nonce == 0 || nonce == last_repl_all_nonce.get() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_repl_all_nonce.set(nonce);
+                    let offsets = find_match_offsets.get();
+                    if offsets.is_empty() { return; }
+                    let q = find_query.get();
+                    let replacement = replace_query.get();
+                    // Replace from last to first to preserve earlier offsets.
+                    for &start in offsets.iter().rev() {
+                        let end = start + q.len();
+                        let sel = Selection::region(start, end);
+                        doc_for_repl_all.edit_single(sel, &replacement, EditType::InsertChars);
+                    }
+                });
+            }
+
+            // Build initial syntect-based styling for this file's language
+            let base_styling = make_base_styling(initial_fs);
+            let mut syn_style = SyntaxStyle::for_extension(&tab_ext, base_styling);
             syn_style.set_doc(doc.clone());
+
+            // ── Reactive font-size update (preserves undo stack) ──────────
+            // When font_size changes, rebuild styling in place instead of
+            // recreating the editor (which would destroy undo history).
+            {
+                let doc_for_style = doc.clone();
+                let ext_for_style = tab_ext.clone();
+                let editor_for_style = editor_ref.clone();
+                create_effect(move |_| {
+                    let fs = font_size.get();
+                    let new_base = make_base_styling(fs);
+                    let mut new_style = SyntaxStyle::for_extension(&ext_for_style, new_base);
+                    new_style.set_doc(doc_for_style.clone());
+                    editor_for_style.update_styling(Rc::new(new_style));
+                });
+            }
 
             // Store in registry for save + find
             docs_for_stack.borrow_mut().insert(key, doc);
@@ -629,7 +748,7 @@ pub fn editor_panel(
                 find_query.set(String::new());
             });
 
-        let input = text_input(find_query)
+        let find_input = text_input(find_query)
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
@@ -642,8 +761,69 @@ pub fn editor_panel(
                  .border_radius(4.0)
             });
 
+        let replace_input = text_input(replace_query)
+            .placeholder("Replace…")
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width(180.0).padding_horiz(8.0).padding_vert(4.0)
+                 .font_size(13.0)
+                 .color(p.text_primary)
+                 .background(p.bg_elevated)
+                 .border(1.0)
+                 .border_color(p.border)
+                 .border_radius(4.0)
+                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+            });
+
+        let replace_btn = container(label(|| "Replace"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(8.0).padding_vert(3.0).font_size(12.0)
+                 .color(p.text_secondary)
+                 .background(p.bg_elevated)
+                 .border(1.0).border_color(p.border)
+                 .border_radius(4.0)
+                 .cursor(floem::style::CursorStyle::Pointer)
+                 .hover(|s| s.background(p.accent_dim))
+                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                replace_nonce.update(|n| *n += 1);
+            });
+
+        let replace_all_btn = container(label(|| "All"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(8.0).padding_vert(3.0).font_size(12.0)
+                 .color(p.accent)
+                 .background(p.bg_elevated)
+                 .border(1.0).border_color(p.border)
+                 .border_radius(4.0)
+                 .cursor(floem::style::CursorStyle::Pointer)
+                 .hover(|s| s.background(p.accent_dim))
+                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                replace_all_nonce.update(|n| *n += 1);
+            });
+
+        let replace_toggle = container(label(move || if replace_open.get() { "▾" } else { "▸" }))
+            .style(move |s| {
+                let t = theme.get();
+                s.padding_horiz(6.0).padding_vert(3.0).font_size(11.0)
+                 .color(t.palette.text_muted)
+                 .cursor(floem::style::CursorStyle::Pointer)
+                 .border_radius(3.0)
+                 .hover(|s| s.background(t.palette.bg_elevated))
+            })
+            .on_click_stop(move |_| replace_open.update(|v| *v = !*v));
+
         container(
-            stack((input, match_label, prev_btn, next_btn, close_btn))
+            stack((replace_toggle, find_input, match_label, prev_btn, next_btn,
+                   replace_input, replace_btn, replace_all_btn, close_btn))
                 .style(|s| s.items_center().gap(4.0)),
         )
         .style(move |s| {
@@ -664,6 +844,7 @@ pub fn editor_panel(
                     Key::Named(floem::keyboard::NamedKey::Escape) => {
                         find_open.set(false);
                         find_query.set(String::new());
+                        replace_open.set(false);
                     }
                     Key::Named(floem::keyboard::NamedKey::Enter) => {
                         let offs = find_match_offsets.get();
@@ -774,6 +955,12 @@ pub fn editor_panel(
                             "0"       => font_size.set(14),
                             "f"       => {
                                 find_open.set(true);
+                                replace_open.set(false);
+                                find_cur_match.set(0);
+                            }
+                            "h"       => {
+                                find_open.set(true);
+                                replace_open.set(true);
                                 find_cur_match.set(0);
                             }
                             "g"       => {
@@ -795,6 +982,7 @@ fn tab_bar_view(
     active_idx: RwSignal<Option<usize>>,
     theme: RwSignal<PhazeTheme>,
     _save_fn: Rc<dyn Fn()>,
+    diagnostics: RwSignal<Vec<crate::lsp_bridge::DiagEntry>>,
 ) -> impl IntoView {
     dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
@@ -804,15 +992,37 @@ fn tab_bar_view(
             let is_hovered = create_rw_signal(false);
             let name = tab.name.clone();
             let dirty = tab.dirty;
+            let tab_path = tab.path.clone();
+
+            // Compute this tab's highest-severity diagnostic.
+            let diag_color = move || -> Option<floem::peniko::Color> {
+                let p = theme.get().palette;
+                let diags = diagnostics.get();
+                let has_err = diags.iter().any(|d| d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Error);
+                let has_warn = diags.iter().any(|d| d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Warning);
+                if has_err { Some(p.error) }
+                else if has_warn { Some(p.warning) }
+                else { None }
+            };
 
             container(
                 stack((
+                    // Dirty indicator
                     container(label(|| "●"))
                         .style(move |s| {
                             s.font_size(8.0)
                              .color(theme.get().palette.accent)
                              .margin_right(4.0)
                              .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
+                        }),
+                    // Diagnostic dot (error=red, warning=yellow)
+                    container(label(|| "●"))
+                        .style(move |s| {
+                            let color = diag_color();
+                            s.font_size(8.0)
+                             .margin_right(4.0)
+                             .apply_if(color.is_none(), |s| s.display(floem::style::Display::None))
+                             .apply_if(color.is_some(), move |s| s.color(color.unwrap_or(floem::peniko::Color::TRANSPARENT)))
                         }),
                     label(move || name.clone())
                         .style(move |s| {

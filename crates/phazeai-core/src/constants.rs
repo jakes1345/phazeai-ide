@@ -26,6 +26,7 @@ pub mod models {
     pub const DEFAULT_TOGETHER_MODEL: &str = "deepseek-r1-distill-llama-70b";
     pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-sonnet-4-5";
     pub const DEFAULT_LMSTUDIO_MODEL: &str = "local-model";
+    pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 }
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -38,6 +39,8 @@ pub mod endpoints {
     pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
     pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
     pub const LMSTUDIO_BASE_URL: &str = "http://localhost:1234";
+    // Google Gemini uses an OpenAI-compatible endpoint
+    pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
     pub const SEARCH_ENGINE_URL: &str = "https://html.duckduckgo.com/html/?q={}";
 }
 

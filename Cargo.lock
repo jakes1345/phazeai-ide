@@ -4041,6 +4041,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tokio",
+ "toml",
  "vte",
  "walkdir",
 ]

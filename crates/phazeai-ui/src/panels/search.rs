@@ -58,7 +58,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                 .on_event_stop(floem::event::EventListener::KeyDown, move |event| {
                     if let floem::event::Event::KeyDown(key_event) = event {
                         if key_event.key.logical_key == floem::keyboard::Key::Named(floem::keyboard::NamedKey::Enter) {
-                            perform_search(state.clone(), is_searching);
+                            let root = state.workspace_root.get();
+                            perform_search(state.clone(), is_searching, root);
                         }
                     }
                 })
@@ -154,45 +155,73 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         })
 }
 
-fn perform_search(state: IdeState, is_searching: RwSignal<bool>) {
+fn perform_search(state: IdeState, is_searching: RwSignal<bool>, root: std::path::PathBuf) {
     let query = state.search_query.get();
     if query.is_empty() { return; }
-    
+
     is_searching.set(true);
     let (tx, rx) = std::sync::mpsc::channel();
-    
+
     // Spawn background search
     std::thread::spawn(move || {
         let mut found = Vec::new();
-        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        
-        // Simple walkdir + grep
-        for entry in walkdir::WalkDir::new(&root)
-            .into_iter()
-            .filter_entry(|e: &walkdir::DirEntry| {
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && name != "target" && name != "node_modules"
-            })
-            .flatten() 
-        {
-            let entry: walkdir::DirEntry = entry;
-            if entry.file_type().is_file() {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    for (i, line) in content.lines().enumerate() {
-                        if line.contains(&query) {
-                            found.push(SearchResult {
-                                path: entry.path().to_path_buf(),
-                                line: i + 1,
-                                content: line.to_string(),
-                            });
-                            if found.len() > 100 { break; } // Cap results
-                        }
+
+        // Try ripgrep first
+        let rg_ok = std::process::Command::new("rg")
+            .args([
+                "--line-number",
+                "--no-heading",
+                "--color=never",
+                "--max-count=1",
+                "--max-depth=50",
+                "-e", &query,
+            ])
+            .current_dir(&root)
+            .output();
+
+        if let Ok(output) = rg_ok {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines().take(200) {
+                // rg format: path:line_num:content
+                let parts: Vec<&str> = line.splitn(3, ':').collect();
+                if parts.len() == 3 {
+                    if let Ok(line_num) = parts[1].parse::<usize>() {
+                        found.push(SearchResult {
+                            path: root.join(parts[0]),
+                            line: line_num,
+                            content: parts[2].to_string(),
+                        });
                     }
                 }
             }
-            if found.len() > 100 { break; }
+        } else {
+            // Fallback: walkdir + contains
+            for entry in walkdir::WalkDir::new(&root)
+                .into_iter()
+                .filter_entry(|e: &walkdir::DirEntry| {
+                    let name = e.file_name().to_string_lossy();
+                    !name.starts_with('.') && name != "target" && name != "node_modules"
+                })
+                .flatten()
+            {
+                if entry.file_type().is_file() {
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        for (i, line) in content.lines().enumerate() {
+                            if line.to_lowercase().contains(&query.to_lowercase()) {
+                                found.push(SearchResult {
+                                    path: entry.path().to_path_buf(),
+                                    line: i + 1,
+                                    content: line.to_string(),
+                                });
+                                if found.len() >= 200 { break; }
+                            }
+                        }
+                    }
+                }
+                if found.len() >= 200 { break; }
+            }
         }
-        
+
         let _ = tx.send(found);
     });
 
