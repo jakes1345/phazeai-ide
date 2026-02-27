@@ -33,3 +33,5 @@ lsp-types = { workspace = true }
 [dev-dependencies]
 image = "0.25"
 tempfile = "3.10"
+serde = { workspace = true }
+toml = { workspace = true }

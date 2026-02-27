@@ -110,7 +110,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/phazeai dist/phazeai
-          cp target/${{ matrix.target }}/release/phazeai-ide dist/phazeai-ide
+          cp target/${{ matrix.target }}/release/phazeai-ui dist/phazeai-ui 2>/dev/null || true
           tar czf ${{ matrix.artifact }}.tar.gz -C dist .
 
       - name: Package (macOS)
@@ -118,7 +118,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/phazeai dist/phazeai
-          cp target/${{ matrix.target }}/release/phazeai-ide dist/phazeai-ide
+          cp target/${{ matrix.target }}/release/phazeai-ui dist/phazeai-ui 2>/dev/null || true
           tar czf ${{ matrix.artifact }}.tar.gz -C dist .
 
       - name: Package (Windows)
@@ -127,7 +127,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item target/${{ matrix.target }}/release/phazeai.exe dist/
-          Copy-Item target/${{ matrix.target }}/release/phazeai-ide.exe dist/
+          if (Test-Path "target/${{ matrix.target }}/release/phazeai-ui.exe") { Copy-Item target/${{ matrix.target }}/release/phazeai-ui.exe dist/ }
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip
 
       - name: Upload artifacts

@@ -781,3 +781,123 @@ fn test_conversation_store_integration_search() {
     let results = store.search("xyz").unwrap();
     assert_eq!(results.len(), 1);
 }
+
+// ========================================================================
+// ConversationHistory::trim_to_token_budget tests
+// ========================================================================
+
+#[test]
+fn test_trim_to_token_budget_removes_oldest_messages() {
+    let mut history = ConversationHistory::new();
+    // Each "aaaa..." message is exactly N chars → N/4 tokens (integer division)
+    // Use 400-char messages = 100 tokens each
+    let long_msg = "a".repeat(400);
+    history.add_user_message(&long_msg);      // msg 1: 100 tokens
+    history.add_assistant_message(&long_msg); // msg 2: 100 tokens
+    history.add_user_message(&long_msg);      // msg 3: 100 tokens
+    history.add_assistant_message(&long_msg); // msg 4: 100 tokens
+
+    assert!(history.estimate_tokens() >= 400);
+
+    // Trim to budget that keeps only 2 messages worth
+    history.trim_to_token_budget(210); // 210 → should keep msgs 3+4 (200 tokens)
+
+    assert!(history.estimate_tokens() <= 210);
+    assert!(history.len() <= 2);
+}
+
+#[test]
+fn test_trim_to_token_budget_noop_when_under_budget() {
+    let mut history = ConversationHistory::new();
+    history.add_user_message("short");
+    history.add_assistant_message("short");
+
+    let before = history.len();
+    history.trim_to_token_budget(100_000); // huge budget → nothing removed
+    assert_eq!(history.len(), before);
+}
+
+#[test]
+fn test_trim_to_token_budget_clears_all_when_single_message_exceeds_budget() {
+    let mut history = ConversationHistory::new();
+    let giant = "x".repeat(4000); // 1000 tokens
+    history.add_user_message(&giant);
+
+    // Budget smaller than a single message → drains completely
+    history.trim_to_token_budget(10);
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
+fn test_trim_to_token_budget_preserves_recency() {
+    let mut history = ConversationHistory::new();
+    for i in 0..10u32 {
+        history.add_user_message(&format!("message number {i}"));
+    }
+    let before_tokens = history.estimate_tokens();
+    // Trim to half
+    history.trim_to_token_budget(before_tokens / 2);
+    // Surviving messages should be the MOST recent ones
+    let remaining = history.get_conversation_messages();
+    if !remaining.is_empty() {
+        // Last message should still be "message number 9"
+        assert!(remaining.last().unwrap().content.contains('9'));
+    }
+}
+
+#[test]
+fn test_estimate_tokens_includes_system_prompt() {
+    let system = "a".repeat(400); // 100 tokens
+    let mut history = ConversationHistory::new().with_system_prompt(&system);
+    history.add_user_message("a".repeat(400).as_str()); // 100 more
+
+    let tokens = history.estimate_tokens();
+    assert_eq!(tokens, 200);
+}
+
+// ========================================================================
+// LSP bridge helper: line/col ↔ byte offset math
+// ========================================================================
+
+/// Mirrors the math used in editor.rs cursor tracking and
+/// LspCommand::RequestCompletions parameter calculation.
+fn offset_to_line_col(text: &str, byte_offset: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (i, ch) in text.char_indices() {
+        if i >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    let col = (byte_offset - line_start) as u32;
+    (line, col)
+}
+
+#[test]
+fn lsp_offset_first_line() {
+    let text = "fn main() {\n    println!(\"hi\");\n}";
+    let (line, col) = offset_to_line_col(text, 3); // "fn " → column 3
+    assert_eq!(line, 0);
+    assert_eq!(col, 3);
+}
+
+#[test]
+fn lsp_offset_second_line() {
+    let text = "fn main() {\n    println!(\"hi\");\n}";
+    // "fn main() {" = 11 chars (0-10), '\n' at 11, first char of line 2 at 12
+    let (line, col) = offset_to_line_col(text, 12);
+    assert_eq!(line, 1);
+    assert_eq!(col, 0);
+}
+
+#[test]
+fn lsp_offset_zero_is_origin() {
+    let text = "hello";
+    let (line, col) = offset_to_line_col(text, 0);
+    assert_eq!(line, 0);
+    assert_eq!(col, 0);
+}
