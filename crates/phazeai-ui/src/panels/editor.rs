@@ -16,6 +16,7 @@ use floem::{
         canvas,
         container,
         editor::{
+            command::{Command, CommandExecuted},
             core::{
                 buffer::rope_text::RopeText,
                 cursor::{Cursor, CursorMode},
@@ -31,6 +32,7 @@ use floem::{
     },
     IntoView, Renderer,
 };
+use floem_editor_core::command::EditCommand;
 use lazy_static::lazy_static;
 use syntect::{
     highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator, ThemeSet},
@@ -238,6 +240,8 @@ struct TabState {
     path: PathBuf,
     name: String,
     dirty: RwSignal<bool>,
+    /// Content of the file as it was last saved to disk, for clean-state detection.
+    saved_content: RwSignal<String>,
 }
 
 // ── Editor panel ──────────────────────────────────────────────────────────────
@@ -256,16 +260,27 @@ pub fn editor_panel(
     active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
     pending_completion: RwSignal<Option<String>>,
     diagnostics: RwSignal<Vec<crate::lsp_bridge::DiagEntry>>,
+    active_dirty: RwSignal<bool>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
     let font_size: RwSignal<usize> = create_rw_signal(14);
+
+    let undo_nonce: RwSignal<u64> = create_rw_signal(0u64);
+    let redo_nonce: RwSignal<u64> = create_rw_signal(0u64);
 
     let docs: Rc<RefCell<HashMap<String, Rc<dyn Document>>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let docs_for_stack = docs.clone();
     let docs_for_save  = docs.clone();
     let docs_for_find  = docs.clone();
+    let docs_for_undo  = docs.clone();
+    let docs_for_redo  = docs.clone();
+
+    let editors: Rc<RefCell<HashMap<String, floem::views::editor::Editor>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let editors_for_undo = editors.clone();
+    let editors_for_redo = editors.clone();
 
     // ── Find in file (Ctrl+F) ────────────────────────────────────────────────
     let find_open:  RwSignal<bool>   = create_rw_signal(false);
@@ -328,7 +343,13 @@ pub fn editor_panel(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string());
                 tabs.update(|list| {
-                    list.push(TabState { path: p.clone(), name, dirty: create_rw_signal(false) });
+                    let initial_content = std::fs::read_to_string(&p).unwrap_or_default();
+                    list.push(TabState {
+                        path: p.clone(),
+                        name,
+                        dirty: create_rw_signal(false),
+                        saved_content: create_rw_signal(initial_content),
+                    });
                     active_idx.set(Some(list.len() - 1));
                 });
             }
@@ -344,8 +365,10 @@ pub fn editor_panel(
         let registry = docs_for_save.borrow();
         let Some(doc) = registry.get(&key) else { return };
         let content = doc.text().to_string();
-        if std::fs::write(&tab.path, content).is_ok() {
+        if std::fs::write(&tab.path, content.clone()).is_ok() {
             tab.dirty.set(false);
+            tab.saved_content.set(content);
+            active_dirty.set(false);
             // Run formatter in background — file is already saved to disk
             let path = tab.path.clone();
             std::thread::spawn(move || {
@@ -450,6 +473,11 @@ pub fn editor_panel(
             let doc         = raw_editor.doc().clone();
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
+            let doc_for_undo_effect = doc.clone();
+            let doc_for_redo_effect = doc.clone();
+            let editor_ref_for_undo = editor_ref.clone();
+            let editor_ref_for_redo = editor_ref.clone();
+            let saved_content = tab.saved_content;
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
             let lsp_path    = tab.path.clone();
             let lsp_tx      = lsp_cmd.clone();
@@ -573,6 +601,52 @@ pub fn editor_panel(
                 });
             }
 
+            // ── Undo nonce effect ─────────────────────────────────────────────
+            {
+                let last_nonce = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = undo_nonce.get();
+                    if nonce == 0 || nonce == last_nonce.get() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_nonce.set(nonce);
+                    doc_for_undo_effect.run_command(
+                        &editor_ref_for_undo,
+                        &Command::Edit(EditCommand::Undo),
+                        None,
+                        floem::keyboard::Modifiers::empty(),
+                    );
+                    let current_text = doc_for_undo_effect.text().to_string();
+                    let is_dirty = current_text != saved_content.get_untracked();
+                    dirty.set(is_dirty);
+                    if active_idx.get() == Some(i) {
+                        active_dirty.set(is_dirty);
+                    }
+                });
+            }
+
+            // ── Redo nonce effect ─────────────────────────────────────────────
+            {
+                let last_nonce = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = redo_nonce.get();
+                    if nonce == 0 || nonce == last_nonce.get() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_nonce.set(nonce);
+                    doc_for_redo_effect.run_command(
+                        &editor_ref_for_redo,
+                        &Command::Edit(EditCommand::Redo),
+                        None,
+                        floem::keyboard::Modifiers::empty(),
+                    );
+                    let current_text = doc_for_redo_effect.text().to_string();
+                    let is_dirty = current_text != saved_content.get_untracked();
+                    dirty.set(is_dirty);
+                    if active_idx.get() == Some(i) {
+                        active_dirty.set(is_dirty);
+                    }
+                });
+            }
+
             // Build initial syntect-based styling for this file's language
             let base_styling = make_base_styling(initial_fs);
             let mut syn_style = SyntaxStyle::for_extension(&tab_ext, base_styling);
@@ -594,7 +668,7 @@ pub fn editor_panel(
                 });
             }
 
-            // Store in registry for save + find
+            // Store in registry for save + find + undo/redo
             docs_for_stack.borrow_mut().insert(key, doc);
 
             raw_editor
@@ -611,6 +685,9 @@ pub fn editor_panel(
                 })
                 .update(move |_| {
                     dirty.set(true);
+                    if active_idx.get() == Some(i) {
+                        active_dirty.set(true);
+                    }
                     // Notify LSP server of content change (textDocument/didChange).
                     let text = doc_for_lsp.text().to_string();
                     let ver = lsp_ver.get();
@@ -935,6 +1012,74 @@ pub fn editor_panel(
             })
     };
 
+    // ── Sync active_dirty when switching tabs ─────────────────────────────────
+    {
+        let docs_for_dirty = docs.clone();
+        create_effect(move |_| {
+            let Some(idx) = active_idx.get() else {
+                active_dirty.set(false);
+                return;
+            };
+            let tab_list = tabs.get();
+            let Some(tab) = tab_list.get(idx) else {
+                active_dirty.set(false);
+                return;
+            };
+            active_dirty.set(tab.dirty.get());
+        });
+    }
+
+    // ── Global undo effect (reads docs + editors maps) ────────────────────────
+    {
+        let last_nonce = create_rw_signal(0u64);
+        create_effect(move |_| {
+            let nonce = undo_nonce.get();
+            if nonce == 0 || nonce == last_nonce.get() { return; }
+            last_nonce.set(nonce);
+            let Some(idx) = active_idx.get() else { return };
+            let tab_list = tabs.get();
+            let Some(tab) = tab_list.get(idx) else { return };
+            let key = tab.path.to_string_lossy().to_string();
+            let reg = docs_for_undo.borrow();
+            let Some(doc) = reg.get(&key) else { return };
+            let reg_ed = editors_for_undo.borrow();
+            let Some(ed) = reg_ed.get(&key) else { return };
+            doc.run_command(ed, &Command::Edit(EditCommand::Undo), None, floem::keyboard::Modifiers::empty());
+            let current_text = doc.text().to_string();
+            let is_dirty = current_text != tab.saved_content.get_untracked();
+            tab.dirty.set(is_dirty);
+            active_dirty.set(is_dirty);
+        });
+    }
+
+    // ── Global redo effect ────────────────────────────────────────────────────
+    {
+        let last_nonce = create_rw_signal(0u64);
+        create_effect(move |_| {
+            let nonce = redo_nonce.get();
+            if nonce == 0 || nonce == last_nonce.get() { return; }
+            last_nonce.set(nonce);
+            let Some(idx) = active_idx.get() else { return };
+            let tab_list = tabs.get();
+            let Some(tab) = tab_list.get(idx) else { return };
+            let key = tab.path.to_string_lossy().to_string();
+            let reg = docs_for_redo.borrow();
+            let Some(doc) = reg.get(&key) else { return };
+            let reg_ed = editors_for_redo.borrow();
+            let Some(ed) = reg_ed.get(&key) else { return };
+            doc.run_command(ed, &Command::Edit(EditCommand::Redo), None, floem::keyboard::Modifiers::empty());
+            let current_text = doc.text().to_string();
+            let is_dirty = current_text != tab.saved_content.get_untracked();
+            tab.dirty.set(is_dirty);
+            active_dirty.set(is_dirty);
+        });
+    }
+
+    let _ = docs_for_undo;
+    let _ = docs_for_redo;
+    let _ = editors_for_undo;
+    let _ = editors_for_redo;
+
     stack((tab_bar, find_bar, editor_row, goto_overlay))
         .style(move |s| {
             let t = theme.get();
@@ -946,26 +1091,32 @@ pub fn editor_panel(
             if let Event::KeyDown(e) = event {
                 let ctrl  = e.modifiers.contains(Modifiers::CONTROL);
                 let shift = e.modifiers.contains(Modifiers::SHIFT);
-                if ctrl && !shift {
+                if ctrl {
                     if let Key::Character(ref ch) = e.key.logical_key {
-                        match ch.as_str() {
-                            "s" => save_fn_key(),
-                            "=" | "+" => font_size.update(|s| *s = (*s + 1).min(32)),
-                            "-"       => font_size.update(|s| { if *s > 8 { *s -= 1; } }),
-                            "0"       => font_size.set(14),
-                            "f"       => {
+                        match (ch.as_str(), shift) {
+                            ("s", false) => save_fn_key(),
+                            ("=" | "+", false) => font_size.update(|s| *s = (*s + 1).min(32)),
+                            ("-", false)       => font_size.update(|s| { if *s > 8 { *s -= 1; } }),
+                            ("0", false)       => font_size.set(14),
+                            ("f", false)       => {
                                 find_open.set(true);
                                 replace_open.set(false);
                                 find_cur_match.set(0);
                             }
-                            "h"       => {
+                            ("h", false)       => {
                                 find_open.set(true);
                                 replace_open.set(true);
                                 find_cur_match.set(0);
                             }
-                            "g"       => {
+                            ("g", false)       => {
                                 goto_open.set(true);
                                 goto_query.set(String::new());
+                            }
+                            ("z", false) => {
+                                undo_nonce.update(|n| *n += 1);
+                            }
+                            ("z", true) | ("y", false) => {
+                                redo_nonce.update(|n| *n += 1);
                             }
                             _ => {}
                         }
