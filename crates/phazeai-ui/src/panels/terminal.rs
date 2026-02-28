@@ -9,6 +9,7 @@ use floem::{
     keyboard::{Key, Modifiers},
     peniko::Color,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    style::{CursorStyle, Display},
     text::{Attrs, AttrsList, FamilyOwned, TextLayout, Weight},
     views::{canvas, container, dyn_stack, label, scroll, stack, Decorators},
     IntoView, Renderer,
@@ -449,13 +450,9 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
     layout
 }
 
-/// Real PTY terminal panel.
-///
-/// Click the terminal output area to focus it, then type directly — every
-/// keystroke is forwarded to the shell with proper ANSI encoding.  Tab
-/// completion, arrow-key history, vim, htop — everything works because input
-/// goes straight to the PTY with no intermediate buffer.
-pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
+/// One independent PTY terminal session rendered into a Floem view.
+/// Each terminal tab gets its own call to `single_terminal()`.
+fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
     let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
@@ -591,30 +588,6 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
     // ── Focus state ───────────────────────────────────────────────────────
     let is_focused = create_rw_signal(false);
-
-    // ── Header ────────────────────────────────────────────────────────────
-    let header = container(
-        stack((
-            label(|| "TERMINAL")
-                .style(move |s| {
-                    let t = theme.get();
-                    s.font_size(10.0).color(t.palette.text_muted).font_weight(Weight::BOLD)
-                }),
-            // Focus hint — disappears once user clicks in
-            label(move || if is_focused.get() { "" } else { "  ·  click to focus" })
-                .style(move |s| {
-                    let t = theme.get();
-                    s.font_size(10.0).color(t.palette.text_disabled)
-                }),
-        ))
-        .style(|s| s.items_center()),
-    )
-    .style(move |s| {
-        let t = theme.get();
-        s.padding_horiz(12.0).padding_vert(6.0)
-         .border_bottom(1.0).border_color(t.palette.border)
-         .width_full()
-    });
 
     // ── Output list ───────────────────────────────────────────────────────
     let output_list = dyn_stack(
@@ -786,8 +759,143 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         })
         .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
-    // ── Assemble ──────────────────────────────────────────────────────────
-    stack((header, output_area))
+    // ── Assemble — just the output area (no header; tabs manage the title) ──
+    output_area
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.flex_grow(1.0)
+             .min_height(0.0)
+             .width_full()
+             .background(p.bg_base)
+        })
+}
+
+// ── Multi-tab terminal panel ───────────────────────────────────────────────────
+
+/// Real PTY terminal panel with multiple tab support.
+///
+/// A "+" button spawns a new shell session. Each session is independent —
+/// closing a tab kills that PTY (the OS will reap it) and removes the tab.
+pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
+    // Tab list: each entry is a unique numeric ID.  Stable IDs let dyn_stack
+    // keep existing terminal instances alive when new tabs are added.
+    let tab_ids: RwSignal<Vec<usize>> = create_rw_signal(vec![1]);
+    let active_tab: RwSignal<usize>   = create_rw_signal(1);
+    let next_id:    RwSignal<usize>   = create_rw_signal(2);
+
+    // ── Tab bar ───────────────────────────────────────────────────────────
+    let tab_bar = stack((
+        // Scrollable row of tabs
+        dyn_stack(
+            move || tab_ids.get().into_iter().enumerate().collect::<Vec<_>>(),
+            |(_, id)| *id,
+            move |(_, id)| {
+                let is_active = move || active_tab.get() == id;
+                let hovered   = create_rw_signal(false);
+
+                let title = label(move || format!("Terminal {id}"))
+                    .style(move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        let active = is_active();
+                        let hov    = hovered.get();
+                        s.font_size(11.0)
+                         .color(if active { p.text_primary } else if hov { p.text_secondary } else { p.text_muted })
+                         .padding_horiz(10.0)
+                         .padding_vert(5.0)
+                         .border_bottom(if active { 2.0 } else { 0.0 })
+                         .border_color(p.accent)
+                         .cursor(CursorStyle::Pointer)
+                    })
+                    .on_click_stop(move |_| active_tab.set(id));
+
+                // × close button — only show when hovered and there is more than 1 tab
+                let close_btn = container(label(|| "×"))
+                    .style(move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        let show = hovered.get() && tab_ids.get().len() > 1;
+                        s.font_size(11.0)
+                         .color(p.text_muted)
+                         .padding_horiz(4.0)
+                         .padding_vert(4.0)
+                         .border_radius(3.0)
+                         .cursor(CursorStyle::Pointer)
+                         .hover(|s| s.background(p.error.with_alpha(0.25)))
+                         .apply_if(!show, |s| s.display(Display::None))
+                    })
+                    .on_click_stop(move |_| {
+                        tab_ids.update(|ids| ids.retain(|&x| x != id));
+                        // Switch to last remaining tab if we closed the active one
+                        if active_tab.get_untracked() == id {
+                            if let Some(&last) = tab_ids.get_untracked().last() {
+                                active_tab.set(last);
+                            }
+                        }
+                    });
+
+                container(stack((title, close_btn)).style(|s| s.items_center()))
+                    .on_event_stop(EventListener::PointerEnter, move |_| hovered.set(true))
+                    .on_event_stop(EventListener::PointerLeave, move |_| hovered.set(false))
+                    .style(move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        s.items_center()
+                         .border_right(1.0)
+                         .border_color(p.border)
+                         .apply_if(is_active(), |s| s.background(p.bg_elevated))
+                    })
+            },
+        )
+        .style(|s| s.flex_row()),
+
+        // "+" new terminal button
+        container(label(|| "+"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(10.0)
+                 .padding_vert(6.0)
+                 .font_size(16.0)
+                 .color(p.text_muted)
+                 .cursor(CursorStyle::Pointer)
+                 .hover(|s| s.background(p.bg_elevated).color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                let id = next_id.get();
+                next_id.set(id + 1);
+                tab_ids.update(|ids| ids.push(id));
+                active_tab.set(id);
+            }),
+    ))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_row()
+         .items_stretch()
+         .border_bottom(1.0)
+         .border_color(p.border)
+         .background(p.bg_panel)
+         .width_full()
+         .min_height(30.0)
+    });
+
+    // ── Terminal instances (one per tab, hidden when not active) ──────────
+    let instances = dyn_stack(
+        move || tab_ids.get().into_iter().collect::<Vec<_>>(),
+        |id| *id,
+        move |id| {
+            single_terminal(theme)
+                .style(move |s| {
+                    s.size_full()
+                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
+                })
+        },
+    )
+    .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+
+    stack((tab_bar, instances))
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;

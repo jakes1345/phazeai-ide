@@ -136,30 +136,30 @@ impl PhazePalette {
         Self {
             // Deep space — all backgrounds semi-transparent so the cosmic
             // canvas behind shows through the glass panels.
-            bg_deep:        Color::from_rgba8(2,  4,  15,  220), // Very slightly transparent
+            bg_deep:        Color::from_rgba8(5,  3,  16,  235), // #050310 deep purple-black
             bg_base:        Color::from_rgba8(0,  0,  0,   0),   // Truly transparent base
-            bg_surface:     Color::from_rgba8(10, 8,  20,  180),
-            bg_panel:       Color::from_rgba8(5,  4,  12,  140),
-            bg_elevated:    Color::from_rgba8(18, 14, 30,  210),
+            bg_surface:     Color::from_rgba8(13, 11, 30,  185),
+            bg_panel:       Color::from_rgba8(10, 9,  22,  145),
+            bg_elevated:    Color::from_rgba8(21, 18, 40,  215),
 
             text_primary:   Color::from_rgb8(215, 220, 255),
-            text_secondary: Color::from_rgb8(140, 160, 235), 
+            text_secondary: Color::from_rgb8(140, 160, 235),
             text_muted:     Color::from_rgb8(85,  95,  150),
             text_disabled:  Color::from_rgb8(40,  45,  75),
 
-            // Electric Cyan/Blue — matches the mockup better than purple
-            accent:         Color::from_rgb8(45,  190, 255), 
-            accent_hover:   Color::from_rgb8(100, 215, 255),
-            accent_dim:     Color::from_rgba8(45,  190, 255, 60),
+            // Soft blue-white accent — matches screenshot deep space aesthetic
+            accent:         Color::from_rgb8(123, 159, 255),
+            accent_hover:   Color::from_rgb8(160, 184, 255),
+            accent_dim:     Color::from_rgba8(123, 159, 255, 60),
 
             success:        Color::from_rgb8(72,  230, 150),
             warning:        Color::from_rgb8(255, 200, 60),
             error:          Color::from_rgb8(255, 80,  100),
 
-            border:         Color::from_rgba8(45,  190, 255, 70), 
-            border_focus:   Color::from_rgba8(45,  190, 255, 180),
+            border:         Color::from_rgba8(80,  60,  160, 100),
+            border_focus:   Color::from_rgba8(120, 90,  255, 200),
 
-            selection:      Color::from_rgba8(45,  190, 255, 50),
+            selection:      Color::from_rgba8(80,  60,  160, 60),
 
             syn_keyword:    Color::from_rgb8(196, 148, 255),
             syn_string:     Color::from_rgb8(80,  220, 150),
@@ -170,9 +170,9 @@ impl PhazePalette {
             syn_operator:   Color::from_rgb8(140, 160, 235),
             syn_macro:      Color::from_rgb8(255, 136, 80),
 
-            glass_bg:       Color::from_rgba8(6,   4,  18,  150), // More transparent glass
-            glass_border:   Color::from_rgba8(45,  190, 255, 140), // Brighter neon border
-            glow:           Color::from_rgba8(45,  190, 255, 180), // Stronger glow
+            glass_bg:       Color::from_rgba8(8,   5,  20,  165), // Deep purple tint
+            glass_border:   Color::from_rgba8(80,  60, 160, 200), // Visible purple border
+            glow:           Color::from_rgba8(100, 60, 255, 80),  // Violet/indigo glow
         }
     }
 
@@ -212,8 +212,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(86,  156, 214),
 
             glass_bg:       Color::from_rgba8(18, 18, 18, 220),
-            glass_border:   Color::from_rgba8(80, 80, 80, 80),
-            glow:           Color::from_rgba8(0,  122, 204, 35),
+            glass_border:   Color::from_rgba8(80, 80, 80, 185),
+            glow:           Color::from_rgba8(0,  122, 204, 60),
         }
     }
 
@@ -253,8 +253,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(0,   0,   180),
 
             glass_bg:       Color::from_rgba8(255, 255, 255, 210),
-            glass_border:   Color::from_rgba8(88,  66,  225, 45),
-            glow:           Color::from_rgba8(88,  66,  225, 30),
+            glass_border:   Color::from_rgba8(88,  66,  225, 185),
+            glow:           Color::from_rgba8(88,  66,  225, 55),
         }
     }
 
@@ -280,8 +280,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(255, 240, 0),
             error:          Color::from_rgb8(255, 40,  80),
 
-            border:         Color::from_rgba8(255, 0,   220, 60),
-            border_focus:   Color::from_rgba8(255, 240, 0,   180),
+            border:         Color::from_rgba8(255, 0,   220, 180),
+            border_focus:   Color::from_rgba8(255, 240, 0,   220),
 
             selection:      Color::from_rgba8(255, 240, 0,   60),
 
@@ -294,9 +294,9 @@ impl PhazePalette {
             syn_operator:   Color::from_rgb8(0,   255, 255),
             syn_macro:      Color::from_rgb8(255, 150, 0),
 
-            glass_bg:       Color::from_rgba8(13,  2,   33,  180),
-            glass_border:   Color::from_rgba8(255, 0,   220, 110),
-            glow:           Color::from_rgba8(255, 0,   220, 80),
+            glass_bg:       Color::from_rgba8(8,   2,  22,  190),
+            glass_border:   Color::from_rgba8(255, 240, 0,  195), // Yellow border — distinctive
+            glow:           Color::from_rgba8(255, 0,  220, 130), // Strong magenta glow
         }
     }
 
@@ -337,7 +337,7 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(255, 155, 60),
 
             glass_bg:       Color::from_rgba8(26,  10,  52,  165),
-            glass_border:   Color::from_rgba8(252, 86,  255, 115),
+            glass_border:   Color::from_rgba8(252, 86,  255, 185),
             glow:           Color::from_rgba8(252, 86,  255, 90),
         }
     }
@@ -364,8 +364,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(255, 195, 60),
             error:          Color::from_rgb8(255, 80,  90),
 
-            border:         Color::from_rgba8(100, 80,  200, 60),
-            border_focus:   Color::from_rgba8(120, 100, 255, 160),
+            border:         Color::from_rgba8(100, 80,  200, 120),
+            border_focus:   Color::from_rgba8(120, 100, 255, 200),
 
             selection:      Color::from_rgba8(120, 100, 255, 50),
 
@@ -379,8 +379,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(255, 140, 80),
 
             glass_bg:       Color::from_rgba8(23,  23,  33,  200),
-            glass_border:   Color::from_rgba8(120, 100, 255, 90),
-            glow:           Color::from_rgba8(120, 100, 255, 60),
+            glass_border:   Color::from_rgba8(120, 100, 255, 185),
+            glow:           Color::from_rgba8(120, 100, 255, 80),
         }
     }
 
@@ -406,8 +406,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(255, 184, 108),
             error:          Color::from_rgb8(255, 85,  85),
 
-            border:         Color::from_rgba8(100, 80,  200, 50),
-            border_focus:   Color::from_rgba8(189, 147, 249, 160),
+            border:         Color::from_rgba8(100, 80,  200, 100),
+            border_focus:   Color::from_rgba8(189, 147, 249, 200),
 
             selection:      Color::from_rgba8(189, 147, 249, 50),
 
@@ -421,8 +421,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(255, 184, 108),
 
             glass_bg:       Color::from_rgba8(40,  42,  54,  210),
-            glass_border:   Color::from_rgba8(189, 147, 249, 85),
-            glow:           Color::from_rgba8(189, 147, 249, 55),
+            glass_border:   Color::from_rgba8(189, 147, 249, 185),
+            glow:           Color::from_rgba8(189, 147, 249, 80),
         }
     }
 
@@ -448,8 +448,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(224, 175, 104),
             error:          Color::from_rgb8(247, 118, 142),
 
-            border:         Color::from_rgba8(80,  100, 180, 55),
-            border_focus:   Color::from_rgba8(122, 162, 247, 160),
+            border:         Color::from_rgba8(80,  100, 180, 110),
+            border_focus:   Color::from_rgba8(122, 162, 247, 200),
 
             selection:      Color::from_rgba8(122, 162, 247, 45),
 
@@ -463,8 +463,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(224, 175, 104),
 
             glass_bg:       Color::from_rgba8(26,  27,  38,  210),
-            glass_border:   Color::from_rgba8(122, 162, 247, 80),
-            glow:           Color::from_rgba8(122, 162, 247, 50),
+            glass_border:   Color::from_rgba8(122, 162, 247, 185),
+            glow:           Color::from_rgba8(122, 162, 247, 75),
         }
     }
 
@@ -490,8 +490,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(253, 151, 31),
             error:          Color::from_rgb8(249, 38,  114),
 
-            border:         Color::from_rgba8(100, 100, 80,  55),
-            border_focus:   Color::from_rgba8(166, 226, 46,  150),
+            border:         Color::from_rgba8(100, 100, 80,  110),
+            border_focus:   Color::from_rgba8(166, 226, 46,  200),
 
             selection:      Color::from_rgba8(73,  72,  62,  200),
 
@@ -505,8 +505,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(253, 151, 31),
 
             glass_bg:       Color::from_rgba8(39,  40,  34,  215),
-            glass_border:   Color::from_rgba8(166, 226, 46,  70),
-            glow:           Color::from_rgba8(166, 226, 46,  45),
+            glass_border:   Color::from_rgba8(166, 226, 46,  180),
+            glow:           Color::from_rgba8(166, 226, 46,  70),
         }
     }
 
@@ -532,8 +532,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(235, 203, 139),
             error:          Color::from_rgb8(191, 97,  106),
 
-            border:         Color::from_rgba8(90,  110, 140, 60),
-            border_focus:   Color::from_rgba8(136, 192, 208, 160),
+            border:         Color::from_rgba8(90,  110, 140, 120),
+            border_focus:   Color::from_rgba8(136, 192, 208, 200),
 
             selection:      Color::from_rgba8(136, 192, 208, 45),
 
@@ -547,8 +547,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(235, 203, 139),
 
             glass_bg:       Color::from_rgba8(46,  52,  64,  210),
-            glass_border:   Color::from_rgba8(136, 192, 208, 80),
-            glow:           Color::from_rgba8(136, 192, 208, 50),
+            glass_border:   Color::from_rgba8(136, 192, 208, 185),
+            glow:           Color::from_rgba8(136, 192, 208, 75),
         }
     }
 
@@ -574,8 +574,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(150, 255, 0),
             error:          Color::from_rgb8(255, 0,   0),
 
-            border:         Color::from_rgba8(0,   255, 65,  45),
-            border_focus:   Color::from_rgba8(0,   255, 65,  160),
+            border:         Color::from_rgba8(0,   255, 65,  90),
+            border_focus:   Color::from_rgba8(0,   255, 65,  200),
 
             selection:      Color::from_rgba8(0,   255, 65,  60),
 
@@ -589,8 +589,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(200, 255, 0),
 
             glass_bg:       Color::from_rgba8(0,   8,   0,   185),
-            glass_border:   Color::from_rgba8(0,   255, 65,  90),
-            glow:           Color::from_rgba8(0,   255, 65,  70),
+            glass_border:   Color::from_rgba8(0,   255, 65,  185),
+            glow:           Color::from_rgba8(0,   255, 65,  90),
         }
     }
 
@@ -616,8 +616,8 @@ impl PhazePalette {
             warning:        Color::from_rgb8(220, 220, 0),
             error:          Color::from_rgb8(220, 0,   0),
 
-            border:         Color::from_rgba8(0,   180, 0,  40),
-            border_focus:   Color::from_rgba8(0,   255, 0,  140),
+            border:         Color::from_rgba8(0,   180, 0,  90),
+            border_focus:   Color::from_rgba8(0,   255, 0,  200),
 
             selection:      Color::from_rgba8(0,   255, 0,  50),
 
@@ -631,8 +631,8 @@ impl PhazePalette {
             syn_macro:      Color::from_rgb8(180, 255, 0),
 
             glass_bg:       Color::from_rgba8(0,   5,   0,   220),
-            glass_border:   Color::from_rgba8(0,   200, 0,   80),
-            glow:           Color::from_rgba8(0,   200, 0,   60),
+            glass_border:   Color::from_rgba8(0,   200, 0,   180),
+            glow:           Color::from_rgba8(0,   200, 0,   85),
         }
     }
 }

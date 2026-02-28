@@ -221,10 +221,37 @@ impl LlmClient for OpenAIClient {
         let oai_messages: Vec<Value> = messages
             .iter()
             .map(|m| {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": m.content,
-                })
+                if let Some(ref tool_call_id) = m.tool_call_id {
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": m.content,
+                    })
+                } else if let Some(ref tool_calls) = m.tool_calls {
+                    let tcs: Vec<Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                }
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": m.content,
+                        "tool_calls": tcs,
+                    })
+                } else {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                    })
+                }
             })
             .collect();
 
@@ -296,6 +323,20 @@ impl LlmClient for OpenAIClient {
                     }
 
                     if let Ok(event) = serde_json::from_str::<Value>(data) {
+                        // OpenAI stream_options: { include_usage: true } emits usage
+                        // on the final chunk (choices=[]) — capture it here.
+                        if let Some(usage) = event.get("usage") {
+                            let input = usage.get("prompt_tokens")
+                                .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let output = usage.get("completion_tokens")
+                                .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            if input > 0 || output > 0 {
+                                let _ = tx.unbounded_send(StreamEvent::Usage(
+                                    crate::llm::Usage { input_tokens: input, output_tokens: output }
+                                ));
+                            }
+                        }
+
                         if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
                             if let Some(delta) = choices.first().and_then(|c| c.get("delta")) {
                                 if let Some(content) = delta.get("content").and_then(|c| c.as_str())

@@ -28,6 +28,9 @@ pub enum PhazeError {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("Agent execution cancelled")]
+    Cancelled,
 }
 
 impl PhazeError {

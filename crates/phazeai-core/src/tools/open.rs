@@ -47,9 +47,23 @@ impl Tool for OpenTool {
             }
         }
 
-        // Use xdg-open on Linux
-        let output = tokio::process::Command::new("xdg-open")
-            .arg(path_str)
+        // Use the platform-appropriate open command.
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "xdg-open"
+        };
+
+        let mut cmd = tokio::process::Command::new(opener);
+        if cfg!(target_os = "windows") {
+            cmd.args(["/C", "start", "", path_str]);
+        } else {
+            cmd.arg(path_str);
+        }
+
+        let output = cmd
             .output()
             .await
             .map_err(|e| PhazeError::tool("open", format!("Failed to open: {e}")))?;

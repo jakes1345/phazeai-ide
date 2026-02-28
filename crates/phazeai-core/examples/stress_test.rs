@@ -20,10 +20,14 @@ async fn main() -> Result<(), PhazeError> {
     println!("🔌 Connecting to Ollama at {}...", base_url);
     let ollama_client = Arc::new(OllamaClient::new("qwen2.5-coder:14b").with_base_url(base_url));
 
+    let planner_client  = Arc::clone(&ollama_client);
+    let coder_client    = Arc::clone(&ollama_client);
+    let reviewer_client = Arc::clone(&ollama_client);
+
     let orchestrator = MultiAgentOrchestrator::new(ollama_client)
-        .with_role_model(AgentRole::Planner, "phaze-planner".to_string())
-        .with_role_model(AgentRole::Coder, "phaze-coder".to_string())
-        .with_role_model(AgentRole::Reviewer, "phaze-reviewer".to_string());
+        .with_role_client(AgentRole::Planner,  planner_client)
+        .with_role_client(AgentRole::Coder,    coder_client)
+        .with_role_client(AgentRole::Reviewer, reviewer_client);
 
     let task = AgentTask {
         user_request: "Create a new module `analysis/benchmark.rs` that can run a sample prompt against all `phaze-*` local models and measure tokens per second (TPS) and total latency. Wire it into the CLI as a `/benchmark` command.".to_string(),

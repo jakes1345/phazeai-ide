@@ -152,6 +152,16 @@ impl LspManager {
         }
     }
 
+    /// Notify all relevant servers that a file was saved (textDocument/didSave)
+    pub fn did_save(&self, path: &Path) {
+        let language_id = Self::language_id_from_path(path);
+        if let Some(client) = self.clients.get(&language_id) {
+            if let Err(e) = client.did_save(path, None) {
+                tracing::warn!("LSP didSave failed: {}", e);
+            }
+        }
+    }
+
     /// Shutdown all language servers
     pub async fn shutdown_all(&mut self) {
         for (lang, arc_client) in self.clients.drain() {

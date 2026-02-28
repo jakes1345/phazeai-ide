@@ -106,6 +106,8 @@ pub enum StreamEvent {
     ToolCallStart { id: String, name: String },
     ToolCallDelta { id: String, arguments_delta: String },
     ToolCallEnd { id: String },
+    /// Emitted by providers that report usage in the stream (before Done).
+    Usage(Usage),
     Done,
     Error(String),
 }

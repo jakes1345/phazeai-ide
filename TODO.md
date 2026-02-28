@@ -1,4 +1,4 @@
-# PhazeAI IDE — Master TODO
+# PhazeAI IDE — Master Feature TODO
 
 > **Mission**: Best open-source AI-native IDE. Local-first, all Rust, GPU-rendered.
 > **Legend**: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `[-]` dropped
@@ -6,337 +6,371 @@
 
 ---
 
-## 🔴 PHASE 2 — SHIP (Target: 4-6 weeks)
-> **Definition of done**: Someone can download, install, and use this daily without losing work.
+## ✅ ALREADY DONE (Phase 1 + Phase 2 progress)
+
+- [x] Multi-tab editor with syntect syntax highlighting
+- [x] LSP completions popup with 300ms debounce + prefix filter
+- [x] LSP go-to-definition (F12)
+- [x] LSP hover (Ctrl+F1)
+- [x] LSP diagnostic squiggles (wave_line for errors, under_line for warnings)
+- [x] Diagnostic colored dots in tab bar
+- [x] Terminal panel (PTY via portable-pty + vte, 256-color)
+- [x] Terminal clipboard (Ctrl+Shift+C/V)
+- [x] Git status/stage/unstage/discard/commit UI
+- [x] Git "Stage All" button
+- [x] Per-file +/−/↩ hover buttons in git panel
+- [x] Workspace search (grep-based, click to jump)
+- [x] AI chat panel with real streaming
+- [x] Find/replace in file (Ctrl+F / Ctrl+H)
+- [x] Goto line (Ctrl+G)
+- [x] Vim mode (Normal/Insert, motions h/j/k/l/w/b/0/$, dd/x, o, i/a)
+- [x] FIM ghost text completions with Tab to accept
+- [x] Settings panel (theme, font size, tab size, AI provider/model)
+- [x] 12 color themes (MidnightBlue, Dracula, Nord, Tokyo Night, etc.)
+- [x] Command palette (Ctrl+P)
+- [x] File picker overlay
+- [x] File explorer (expand/collapse dirs, click to open)
+- [x] Output/Debug Console/Ports bottom tabs
+- [x] Session persistence (open tabs, theme, font size, panel layout)
+- [x] Ctrl+K inline AI editing overlay
+- [x] Comment toggle (Ctrl+/)
+- [x] Format on save (rustfmt / prettier / black)
+- [x] Cross-platform open tool (xdg-open / open / start)
+- [x] Cloud sign-in stub opens browser
+- [x] Undo/redo (Floem built-in via default_key_handler)
+- [x] LSP bridge (textDocument/didOpen, didChange, publishDiagnostics)
+- [x] Ctrl+B toggle left panel, Ctrl+J toggle terminal, Ctrl+\ toggle chat
+- [x] Font zoom (Ctrl+= / Ctrl+-)
+- [x] Sentient gutter AI glow animation
+- [x] Neon scrollbar heatmap canvas
+- [x] AI multi-agent: Planner → Coder → Reviewer pipeline
+- [x] Cancel token for agent runs
+- [x] Usage tracking (input/output tokens)
+- [x] phazeai-core: OpenAI streaming serialization fix
+- [x] phazeai-cli: real tool approval (oneshot channel), /cancel abort, file tree
 
 ---
 
-### BLOCK 1: Critical Editor Fixes (blocking daily use)
+## 🔴 PHASE 2 — CRITICAL (ship blockers)
 
-#### Undo / Redo
-- [ ] Wire Floem text_editor undo (`Ctrl+Z`) and redo (`Ctrl+Shift+Z` / `Ctrl+Y`)
-- [ ] Persist undo stack per document (survives tab switching — rope history per EditorId)
-- [ ] Undo indicator in status bar ("Unsaved changes" disappears after undo-to-clean)
+### Editor — Core Editing
+- [x] **Multi-cursor (Ctrl+D)** — Ctrl+D selects next occurrence of word/selection and adds as second cursor region via Selection::add_region(SelRegion)
+- [ ] **Column/box selection** — Alt+Shift+drag or Alt+Shift+Arrow
+- [x] **Code folding** — Ctrl+Shift+[ fold / Ctrl+Shift+] unfold, fold icon in gutter; brace-matching-based ranges; line_height=0 for collapsed lines
+- [ ] **Bracket pair colorization** — highlight matching brackets with distinct colors
+- [ ] **Bracket pair guides** — vertical indent guides connecting bracket pairs
+- [x] **Auto-close brackets** — type `(` → inserts `()` with cursor inside (cursor-watching effect)
+- [x] **Auto-close quotes** — type `"` → inserts `""` with cursor inside (escape-aware, lifetime-aware for `'`)
+- [ ] **Auto-surround** — select text, type `(` → wraps selection in parens
+- [x] **Smart indent on Enter** — auto-indent to same or deeper level after `{`, `:`, etc.
+- [x] **De-indent on `}`** — type `}` and it un-indents the current line (4-space / 2-space / 1-tab)
+- [x] **Word wrap toggle** — Alt+Z toggles, WrapMethod::EditorWidth via settings + reactive styling rebuild
+- [ ] **Sticky scroll** — function/class headers stay pinned at top of viewport while scrolling
+- [ ] **Minimap** — optional right-side miniature overview of the whole file, click to scroll
+- [x] **Breadcrumbs** — file path segments in toolbar bar above editor (path relative to workspace root)
+- [ ] **Indentation guides** — vertical lines showing indent depth
+- [ ] **Whitespace rendering** — show/hide spaces and tabs as dots/arrows
+- [ ] **Line numbers** — already have them; add relative line numbers toggle for vim users
+- [x] **Highlight current line** — rgba(255,255,255,12) background via LineExtraStyle on current_line
+- [ ] **Match bracket highlight** — when cursor is on bracket, highlight matching bracket
+- [x] **Find: regex mode** — .* toggle in Ctrl+F find bar (uses regex crate)
+- [x] **Find: case-sensitive toggle** — Aa toggle in Ctrl+F find bar
+- [ ] **Find: whole word toggle** — toggle `\b` matching in find bar
+- [ ] **Find: match count** — already done; add result index display in status bar
+- [ ] **Multi-line find** — allow newlines in search pattern
+- [ ] **Split editor** — Ctrl+\ split right, support side-by-side editing of different files
+- [ ] **Diff view** — show inline git diff (before/after) in a special diff editor tab
+- [x] **Large file handling** — files > 2MB skip syntect highlighting (fall back to plain-text styling)
+- [x] **Line ending indicator** — show CRLF/LF/Mixed in status bar (auto-detected per file)
+- [ ] **Encoding indicator** — show UTF-8/etc in status bar, click to re-open with encoding
+- [ ] **Read-only mode** — lock a tab when file is not writable (show indicator)
 
-#### Find & Replace (Ctrl+H)
-- [ ] Find input already exists — add Replace input below it
-- [ ] "Replace" button: replace current match and advance
-- [ ] "Replace All" button: replace every match in document
-- [ ] Match count display ("3 of 12 matches")
-- [ ] Case-sensitive toggle + regex toggle
+### Editor — LSP / Language Intelligence
+- [x] **Find all references** (Shift+F12) — results in References bottom tab (LSP + ripgrep fallback)
+- [x] **Rename symbol** (F2) — rename overlay + LSP workspace/rename + ripgrep replace fallback
+- [x] **Code actions / Quick fix** (Ctrl+.) — LSP code actions dropdown popup
+- [x] **Signature help** (Ctrl+Shift+Space) — shows function signature + active param at bottom of editor
+- [x] **Document symbols** (Ctrl+Shift+O) — Symbols left-panel tab, click to jump, LSP + regex fallback
+- [x] **Workspace symbols** (Ctrl+T) — search symbols across all files (LSP + ripgrep fallback)
+- [ ] **Peek definition** (Alt+F12) — show definition inline without navigating away
+- [ ] **Call hierarchy** — who calls this function / what does it call
+- [ ] **Semantic token highlighting** — LSP semantic tokens override syntect colors
+- [ ] **Inlay hints** — show type hints inline after variable names (`let x/*: i32*/`)
+- [ ] **Code lens** — clickable annotations above functions (reference count, run test, etc.)
+- [x] **Inline diagnostics** — diagnostic message for current cursor line shown in status bar
 
-#### Session Persistence
-- [ ] Save open file paths to `~/.config/phazeai/session.toml` on quit
-- [ ] Restore open tabs + active tab index on next launch
-- [ ] Save/restore panel layout (left width, bottom height, right width)
-- [ ] Save/restore editor scroll positions per tab
+### Git
+- [x] **Git gutter decorations** — green bar (added), yellow bar (modified), red triangle (deleted) via canvas in editor.rs
+- [x] **Inline diff hunk preview** — GitDiff bottom tab shows colorized diff output per file (git diff HEAD)
+- [ ] **Revert hunk** — button in hunk popup to undo that specific change
+- [ ] **Git blame** — show last commit info per line on hover or in gutter
+- [x] **Branch display** — current branch name in status bar (git rev-parse --abbrev-ref HEAD)
+- [x] **Branch switching** — click branch in status bar → branch picker overlay → checkout selected
+- [ ] **Create branch** — from status bar branch menu, prompt for name and create
+- [ ] **Branch merge** — merge another branch into current (with conflict indicator)
+- [ ] **Stash** — git stash push / stash pop from the git panel
+- [ ] **Pull/push buttons** — pull and push in the git panel header
+- [ ] **Commit history log** — scrollable log of recent commits (hash, message, author, date)
+- [ ] **Diff between commits** — click commit in log → show what changed
+- [ ] **Multi-repo support** — detect and show multiple git repos in one workspace
 
-#### Completion Insertion
-- [ ] On Enter/Tab in completion popup → insert `CompletionEntry::insert_text` at cursor
-- [ ] Close popup after insertion
-- [ ] Replace the word before the cursor (not just insert at position)
-- [ ] Filter popup items as user types (prefix filter against `label`)
+### Terminal
+- [x] **Multiple terminal instances** — "+" button, tab bar to switch, × to close tabs
+- [ ] **Named terminals** — rename terminals (e.g. "server", "tests", "build")
+- [ ] **Shell profile selection** — choose between bash/zsh/fish/pwsh when creating new terminal
+- [ ] **Terminal split** — split terminal pane horizontally or vertically
+- [ ] **Terminal find** (Ctrl+Shift+F in terminal) — search through terminal output
+- [ ] **Hyperlink detection** — detect URLs and file paths in terminal output, make them clickable
+- [ ] **Command navigation** — Shell Integration: track commands with markers, jump between them
+- [ ] **Working directory tracking** — show current directory in terminal tab title
+- [ ] **Terminal zoom** — independent font size for terminal panel
+- [ ] **Scrollback limit** — configurable scrollback buffer size (default 10k lines)
+- [ ] **Clear terminal** — Ctrl+K or "Clear" button in terminal toolbar
+- [ ] **Run in terminal** — right-click in editor → "Run in Terminal" sends selected code
 
-#### Diagnostic Gutter
-- [ ] Render error/warning squiggle underlines in editor using LSP DiagEntry signal
-- [ ] Show colored dot in gutter (red=error, yellow=warning) per affected line
-- [ ] Problems panel: list all DiagEntry items, click → jump to file:line
-- [ ] Status bar badge: show error count (E: 3) and warning count (W: 7) live
+### Search
+- [x] **Regex search** — .* toggle button in workspace search panel
+- [x] **Case-sensitive toggle** — Aa toggle button in workspace search panel
+- [ ] **Whole word toggle** — in workspace search panel
+- [ ] **Include/exclude globs** — filter by `*.rs` or exclude `target/`, `node_modules/`
+- [x] **Replace in files** — replace input + "Replace All" button with regex/case-sensitive support
+- [ ] **Show only open editors** — search only currently-open tabs
+- [ ] **Search history** — up/down arrows to cycle through previous search queries
+- [ ] **Symbol search** — search for symbols (functions, classes) across workspace
+- [ ] **Search result tree view** — toggle between flat list and grouped-by-file tree
 
----
+### File Explorer
+- [x] **Create new file** — right-click context menu in explorer, prompts for filename
+- [x] **Create new folder** — right-click context menu in explorer, prompts for folder name
+- [x] **Rename file/folder** — right-click → rename dialog (fs_rename helper)
+- [x] **Delete file/folder** — right-click → delete (fs_delete helper), files only
+- [ ] **Duplicate file** — right-click → duplicate
+- [ ] **Reveal in file manager** — right-click → open in Finder/Nautilus/Explorer
+- [x] **Copy relative path** — right-click → "Copy Path" → clipboard via arboard
+- [ ] **Drag-and-drop** — drag file to move it to a different directory
+- [x] **File watcher** — auto-refresh explorer when files change on disk (notify + debounce 300 ms)
+- [ ] **Git status decorations in explorer** — M/U/D badges next to modified/untracked/deleted files
+- [ ] **Collapse all** — button to collapse entire tree back to root
+- [ ] **Exclude patterns** — configurable list of folders/files to hide (`.git`, `target`, `node_modules`)
 
-### BLOCK 2: UI Completeness
-
-#### Panel Resize (drag divider)
-- [ ] Left panel width: draggable divider between explorer and editor
-- [ ] Bottom panel height: draggable divider above terminal/search area
-- [ ] Right panel width: draggable divider between editor and chat
-- [ ] Persist panel sizes to session.toml
-
-#### Terminal
-- [ ] Render blinking cursor caret at current PTY cursor position
-- [ ] Terminal scrollbar: clickable + draggable to navigate scrollback
-- [ ] Ctrl+Shift+C / Ctrl+Shift+V for copy/paste in terminal
-- [ ] Multiple terminal tabs ("+") button spawns new PTY
-
-#### Git Panel — Stage/Unstage
-- [ ] Checkbox per file to stage: run `git add <path>` on check
-- [ ] Checkbox to unstage: run `git reset HEAD <path>` on uncheck
-- [ ] Click on file → show inline diff (run `git diff <path>`, display in split view)
-- [ ] Diff view panel for staged vs unstaged changes
-
-#### Search Panel — Real Implementation
-- [ ] Wire `perform_search(query, workspace_root)` using `ripgrep` binary or `grep_lite` crate
-- [ ] Display results: file path + line number + matched line preview
-- [ ] Click result → open file at that line in editor
-- [ ] Regex toggle, case-sensitive toggle
-- [ ] Replace-in-files: input + "Replace All in Workspace" button
-
-#### Settings Panel — Fix Font
-- [ ] Actually apply font_size change to editor when stepper changes
-- [ ] Font family picker: at minimum MonoLisa, Fira Code, JetBrains Mono, Cascadia Code presets
-- [ ] Persist font settings to `~/.config/phazeai/settings.toml`
-- [ ] Live preview: change font → editor updates without restart
-
----
-
-### BLOCK 3: phazeai-cli Fixes
-
-#### File Tree (remove the stub)
-- [ ] Implement real ratatui file tree (use `tui-tree-widget` crate or hand-roll)
-- [ ] Arrow keys navigate, Enter opens file into `/add` context
-- [ ] `j`/`k` vim navigation, `o` to expand/collapse
-- [ ] Show git status badges (M/A/D/?) next to file names
-
-#### Tool Approval (remove auto-approve hack)
-- [ ] Block the agent coroutine when approval_fn is called
-- [ ] Show approval popup in TUI: tool name + params + y/n/a (always) / s (skip)
-- [ ] `y` = approve once, `a` = approve all, `n` = deny, `s` = skip session
-- [ ] Remove the "For now, auto-approve" comment and implement real blocking
-
-#### Code Viewer
-- [ ] `/view <file>` command: opens file in a scrollable pane with syntax highlighting
-- [ ] Uses `bat`-style rendering via syntect in ratatui
-- [ ] Arrow keys + PgUp/PgDn to scroll
-- [ ] `q` to close
-
----
-
-### BLOCK 4: Testing Infrastructure
-
-#### phazeai-core tests
-- [ ] Mock LLM client (`MockLlmClient`) that returns scripted responses/tool calls
-- [ ] Agent loop test: send message → verify TextDelta events arrive in order
-- [ ] Agent loop test: tool call → mock execute → verify ToolResult → verify next LLM call
-- [ ] Context trimming test: add 200 messages → verify trim_to_token_budget leaves ≤N tokens
-- [ ] ConversationHistory tests: add/get/clear/system prompt roundtrip
-
-#### phazeai-ui tests (GUI snapshot tests)
-- [ ] State unit tests: `IdeState` signal reads/writes (no GUI needed)
-- [ ] Theme tests: verify all 12 variants produce valid Color values (no NaN, no out-of-range)
-- [ ] LSP bridge tests: mock LSP events → verify DiagEntry signal gets updated correctly
-- [ ] Completion insertion test: verify cursor offset math (byte offset → line/col → back)
-- [ ] Session persistence test: write session.toml → reload → verify same tabs/layout
-
-#### phazeai-cli tests
-- [ ] Existing 57 command parser tests: keep passing ✅
-- [ ] Add: TUI state tests (AppState transitions on key events)
-- [ ] Add: conversation roundtrip (save → load → verify same messages)
-- [ ] Add: token count estimation accuracy test
-
-#### Integration tests
-- [ ] Build test: `cargo build --workspace` must be warning-free
-- [ ] `cargo clippy --workspace -- -D warnings` must pass
-- [ ] `cargo fmt --all --check` must pass
-- [ ] Run all with `cargo test --workspace` in CI
-
-#### CI (GitHub Actions)
-- [ ] `.github/workflows/ci.yml`: build + test on push/PR
-- [ ] Matrix: ubuntu-latest, macos-latest, windows-latest
-- [ ] Cache: `~/.cargo/registry` and `./target`
-- [ ] Badge: show CI status in README
+### UI / Workbench
+- [x] **Status bar diagnostic summary** — shows ⊗ N  ⚠ N in status bar, colored by severity
+- [x] **Problems panel** — "PROBLEMS" bottom tab with full workspace diagnostic list (problems_view)
+- [x] **Notifications** — toast notifications (`show_toast()` + auto-dismiss overlay at z_index 450)
+- [ ] **Progress indicator** — spinning indicator in status bar during AI requests / indexing
+- [ ] **Keybindings editor** — UI to view and remap all keyboard shortcuts
+- [ ] **Panel resize** — persist panel sizes across launches (already done for layout, add fine-grained control)
+- [ ] **Activity bar reorder** — drag-and-drop to reorder activity bar icons
+- [x] **Zen mode** — Ctrl+Shift+Z — hides all panels, distraction-free editor
+- [ ] **Full-screen toggle** — F11 full-screen mode
+- [x] **Context menus** — right-click in editor → Copy/Paste/Go to Def/Find Refs/Rename/Code Actions; right-click in explorer → CRUD + Copy Path
+- [ ] **Drag tab to split** — drag a tab to the side to create a split view
+- [ ] **Tab overflow** — when too many tabs, add left/right scroll arrows or dropdown
 
 ---
 
-### BLOCK 5: Monetization Infrastructure
+## 🟡 PHASE 3 — SHOULD HAVE (competitive with modern IDEs)
 
-> Strategy: **MIT open-source core** (phazeai-ui, phazeai-core, phazeai-cli) +
-> **Paid PhazeAI Cloud** (hosted AI credits, no API key needed, team features).
-> Model: Cursor/Continue.dev approach — IDE is free forever, you pay for AI usage.
+### AI Features (Differentiators)
+- [ ] **AI explain code** — select code → right-click → "Explain with AI" → shows in chat
+- [ ] **AI generate tests** — right-click → "Generate Tests" → inserts test code
+- [ ] **AI fix diagnostic** — click lightbulb on error → "Fix with AI" auto-applies suggestion
+- [ ] **AI code review** — button in git panel → AI reviews the full diff, posts comments
+- [ ] **AI chat with file context** — @file mentions to include specific files in chat context
+- [ ] **AI chat with selection** — select code → "Chat about selection" → sends to AI with code
+- [ ] **AI refactor** — select code → "Refactor with AI" → shows before/after diff to approve
+- [x] **AI commit message** — ✨ AI button in git commit area → runs git diff --cached → AI generates message
+- [ ] **AI docstrings** — cursor on function → "Generate Docstring" → inserts doc comment
+- [ ] **AI rename suggestions** — F2 rename → AI suggests better names based on usage
+- [ ] **AI PR description** — generate PR description from branch diff
+- [ ] **AI chat history** — persist chat sessions across restarts, browse history
+- [ ] **AI model context window indicator** — show token usage / limit in chat panel
+- [ ] **Multi-file AI editing** — AI can propose edits across multiple files simultaneously
+- [ ] **AI ask about error** — click diagnostic → "Ask AI about this error"
+- [ ] **Inline AI diff review** — when Ctrl+K applies changes, show before/after inline diff to approve
 
-#### phazeai-cloud crate (skeleton exists, needs implementation)
-- [ ] `CloudClient::login(email, password)` → POST /v1/auth/login → save CloudCredentials
-- [ ] `CloudClient::verify_token()` → GET /v1/auth/me → return CloudSession
-- [ ] `CloudClient::chat_stream(messages, model)` → POST /v1/chat/stream (SSE) → returns LlmClient impl
-- [ ] `CloudClient::usage()` → GET /v1/usage → return credits_remaining, tokens_used_this_month
-- [ ] Token credit deduction tracked server-side (not in IDE — prevents bypassing)
-- [ ] `CloudLlmClient` struct: implements `LlmClient` trait, routes to our hosted model endpoint
+### Debugging (DAP)
+- [ ] **Debug Adapter Protocol (DAP) client** — connect to any DAP-compatible debugger
+- [ ] **Breakpoints** — click gutter → set/clear breakpoints, shown as red circles
+- [ ] **Conditional breakpoints** — right-click breakpoint → add condition expression
+- [ ] **Run/Continue/Step Over/Step Into/Step Out** — standard debug controls in toolbar
+- [ ] **Variables panel** — show all locals and their values when paused
+- [ ] **Watch panel** — add expressions to watch, updated on each pause
+- [ ] **Call stack panel** — show call stack, click frame to navigate to source
+- [ ] **Debug console** — REPL for evaluating expressions during debug session
+- [ ] **Inline variable values** — show current variable values inline in editor while paused
+- [ ] **Exception breakpoints** — break on uncaught/all exceptions
+- [ ] **Debug toolbar** — floating toolbar with play/pause/step buttons while debugging
+- [ ] **Hover to evaluate** — hover over expression in editor during debug to see value
 
-#### Cloud auth UI in phazeai-ui
-- [ ] Account panel: shows login form if unauthenticated, shows tier + credits if logged in
-- [ ] "Sign in with PhazeAI Cloud" → opens browser to `https://app.phazeai.com/oauth`
-- [ ] After OAuth callback → save token → update IdeState::cloud_session signal
-- [ ] Show cloud status in status bar: "☁ Cloud · 4,231 credits" or "☁ Sign in"
-- [ ] "Upgrade to Pro" button → opens browser to pricing page
+### Testing
+- [ ] **Test runner panel** — list tests from LSP/cargo test output, show pass/fail
+- [ ] **Run test at cursor** — Ctrl+Shift+T or code lens → run the test the cursor is in
+- [ ] **Run all tests** — button to run entire test suite, stream output
+- [ ] **Test status decorations** — green tick / red X in gutter next to test functions
+- [ ] **Test failure inline** — show assertion failure message inline in editor
+- [ ] **Code coverage** — highlight covered/uncovered lines with green/red background
+- [ ] **Re-run failed tests** — filter to failed and re-run only those
 
-#### Feature gating (what's free vs paid)
-```
-FREE (BYOK — bring your own key):
-  - Full IDE (all panels, all features)
-  - phazeai-cli (all slash commands)
-  - Ollama/local models (unlimited)
-  - Your own OpenAI/Claude/Groq keys
+### Editor — Advanced
+- [ ] **Emmet expansion** — type `div.container>p` + Tab → expands to HTML
+- [ ] **Snippet support** — define custom snippets triggered by prefix + Tab
+- [ ] **Tab stops in snippets** — cursor cycles through $1, $2 placeholders with Tab
+- [ ] **Parameter hints** — show all overloads for a function signature
+- [ ] **Type hierarchy** — show super/sub-types for a class/trait
+- [ ] **Sort lines** — sort selected lines alphabetically
+- [ ] **Join lines** — Ctrl+J join selected lines (remove newlines)
+- [ ] **Transform case** — uppercase/lowercase/title case selected text
+- [ ] **Transpose characters** — swap character before/after cursor (Ctrl+T in Emacs)
+- [ ] **Delete line** — Ctrl+Shift+K delete line without clipboard
+- [ ] **Duplicate line** — Alt+Shift+Down duplicate current line below
+- [ ] **Move line up/down** — Alt+Up/Down move current line up or down
+- [ ] **Indent / outdent** — Tab/Shift+Tab without selection indents/outdents whole line
+- [ ] **Balance brackets** — select from bracket to its matching bracket
+- [ ] **Code minimap highlight** — highlight search results in minimap
 
-PHAZEAI CLOUD ($15/mo):
-  - Hosted phaze-beast model (no API key needed)
-  - 500,000 tokens/month included
-  - Faster inference (priority queue)
-  - One-click setup (no config needed for new users)
+### Git — Advanced
+- [ ] **Interactive rebase UI** — visual reorder/squash/fixup of commits
+- [ ] **Cherry-pick** — pick a specific commit onto current branch
+- [ ] **Git tag support** — create, list, push tags
+- [ ] **Submodule support** — show/update submodules in explorer
+- [ ] **Merge conflict editor** — when conflicts exist, show 3-way merge UI (incoming/current/result)
+- [ ] **Commit amend** — amend the last commit (add --amend flag to commit)
+- [ ] **Sign commits** — GPG signing support
 
-TEAM ($35/seat/mo):
-  - Everything in Cloud
-  - Shared conversation history (see what teammates asked)
-  - Agent audit log (who ran what commands)
-  - Shared workspace context (teammate's open files visible)
-  - Team Modelfile sharing
+### Settings & Config
+- [ ] **JSON settings file** — edit `settings.toml` raw with syntax highlighting and LSP
+- [ ] **Workspace settings** — per-workspace `.phazeai/settings.toml` override
+- [ ] **Keybindings JSON** — edit keybindings in a structured file (like VS Code's keybindings.json)
+- [ ] **Settings sync** — sync settings via PhazeAI Cloud account
+- [ ] **Font family picker** — dropdown/search to select from installed monospace fonts
+- [ ] **Editor cursor style** — beam / block / underline cursor shapes
+- [ ] **Minimap settings** — enable/disable, show slider, max columns
+- [x] **Auto-save** — configurable in settings panel; 1.5 s debounce after last keystroke (AtomicU64 cancel token)
+- [ ] **Trim trailing whitespace on save** — configurable per language
+- [ ] **Insert final newline** — ensure file ends with `\n` on save
+- [ ] **Detect indentation** — auto-detect tab/space indent from file content
 
-ENTERPRISE (contact):
-  - On-premise deployment
-  - SSO (SAML/OIDC)
-  - VPC model hosting
-  - SLA + dedicated support
-```
-- [ ] `Tier::feature_check(feature: Feature) -> bool` in subscription.rs
-- [ ] Gated features show lock icon + "Upgrade" tooltip instead of being hidden
-- [ ] Trial mode: 7 days of Cloud tier free on signup (50,000 tokens)
-
----
-
-### BLOCK 6: Release Prep
-
-#### README
-- [ ] Write real README.md: what it is, key features, install instructions, screenshots
-- [ ] Record a 60-second GIF/video showing: file open → syntax highlight → chat with AI → terminal
-- [ ] Badges: CI status, crates.io version, license (MIT), Discord
-
-#### Distribution
-- [ ] `cargo install phazeai-cli` works (publish to crates.io)
-- [ ] Linux AppImage: `cargo build --release`, bundle into AppImage via `appimagetool`
-- [ ] macOS DMG: universal binary (x86_64 + aarch64), signed if possible
-- [ ] Windows MSI: via `cargo-wix` or GitHub Actions windows runner
-- [ ] GitHub Releases: automated via `release.yml` workflow on `v*` tag push
-
-#### Legal / Open Source
-- [ ] Audit all dependencies for license compatibility (MIT/Apache-2.0 only)
-- [ ] Add `LICENSE` file (MIT)
-- [ ] Add `CONTRIBUTING.md`: dev setup, how to file issues, PR guidelines
-- [ ] Privacy policy for PhazeAI Cloud (what data is stored)
-- [ ] Terms of service for paid tiers
-
-#### Community
-- [ ] Set up Discord server: #general, #bugs, #feature-requests, #show-and-tell
-- [ ] GitHub issue templates: bug report, feature request
-- [ ] Product Hunt listing draft (schedule for launch day)
-- [ ] HackerNews "Show HN" draft
-
----
-
-## 🟡 PHASE 3 — GROWTH (After launch, priority order)
-
-### High Priority (most-requested features)
-- [ ] **Multi-cursor**: Ctrl+D to select next match, Alt+Click to add cursor
-- [ ] **Breadcrumb bar**: shows `crate > mod > fn` above editor, clickable
-- [ ] **Symbol outline panel**: tree of functions/structs/traits in current file via tree-sitter
-- [ ] **Go-to-definition** (F12): LSP textDocument/definition → jump to file:line
-- [ ] **Hover popup**: LSP textDocument/hover → show type info + docs on Ctrl+hover
-- [ ] **Rename symbol**: F2 → LSP workspace/rename → apply edits across all files
-- [ ] **Inline diff approval**: agent proposes edit → show before/after → Accept/Reject per hunk
-- [ ] **Ghost text AI completions**: Tab to accept gray inline prediction (FIM request to LLM)
-- [ ] **Ctrl+K inline AI edit**: select code → Ctrl+K → type instruction → AI rewrites in place
-- [ ] **Format on save**: run `rustfmt`/`prettier`/`black` on Ctrl+S
-- [ ] **Split editor**: Ctrl+\ to split right, Ctrl+- to split down, drag tabs between splits
-
-### Medium Priority
-- [ ] Word wrap toggle (Ctrl+Alt+Z)
-- [ ] Zen mode: F11 → hide all panels, full screen editor
-- [ ] Inlay hints: LSP textDocument/inlayHint → grayed type annotations inline
-- [ ] Minimap: right-side code overview with viewport indicator
-- [ ] Command palette improvements: recently used, fuzzy score ranking
-- [ ] Tab bar overflow: scroll when > 10 tabs open
-- [ ] File rename inline: F2 in explorer
-- [ ] Drag-and-drop files in explorer to move them
-- [ ] Split view for git diff (side-by-side before/after)
-- [ ] Branch switcher UI in git panel: list branches, click to checkout
-- [ ] Multiple terminal tabs
-- [ ] `phazeai-cli`: real file tree (remove stub)
-- [ ] `phazeai-cli`: real tool approval (remove auto-approve)
-
-### phazeai-core improvements
-- [ ] Web search tool (`brave_search` or `serper.dev` API)
-- [ ] `run_tests` tool: detect test framework, run, parse output
-- [ ] `git_commit` tool: stage + commit from agent
-- [ ] `install_package` tool: `cargo add`, `pip install`, `npm install`
-- [ ] Gemini provider (Google AI API)
-- [ ] xAI / Grok provider
-- [ ] DeepSeek direct API
-- [ ] Provider fallback chain (primary → secondary on error)
-- [ ] Cost estimation before long agent runs
-- [ ] `.phazeai/instructions.md` auto-loaded as system context
+### Workbench
+- [ ] **Workspace switcher** — quick-switch between recently opened workspaces/folders
+- [ ] **Recent files** — Ctrl+P recent files at the top, sorted by last-opened
+- [ ] **Welcome tab** — show welcome/getting-started page on first launch
+- [ ] **Keyboard shortcuts reference** — Ctrl+K Ctrl+S show all keybindings in a searchable panel
+- [ ] **Multi-root workspace** — open multiple root folders in one window
+- [ ] **Window title** — show `filename — folder — PhazeAI` in window title bar
+- [ ] **Confirm before close** — prompt if unsaved files exist when quitting
+- [ ] **Auto-detect project type** — detect Rust/Python/Node project, configure LSP automatically
+- [ ] **Project template** — "New Project" dialog with templates (Rust binary, Node, Python)
 
 ---
 
-## 🟢 PHASE 4 — SCALE (6+ months out)
+## 🟢 PHASE 4 — NICE TO HAVE (stretch / long-term)
 
-- [ ] **Real-time collaboration** (CRDT): see teammate's cursor live
-- [ ] **Remote SSH development**: open remote folder via SSH
-- [ ] **devcontainer support**: open project in Docker container
-- [ ] **Extension/plugin system**: WASM Component Model, sandboxed plugins
-- [ ] **Integrated debugger**: DAP protocol, breakpoints, watch, stack trace
-- [ ] **Notebook mode**: Jupyter-style code cells in editor
-- [ ] **Voice control**: local Whisper model → agent commands
-- [ ] **Browser-based version**: phazeai-web (Floem WASM target)
-- [ ] **Mobile companion**: review diffs + chat from phone
-- [ ] **LLM fine-tuning UI**: fine-tune local model on your codebase
+### Extensions / Plugin System
+- [ ] **Plugin API design** — define stable Rust/WASM plugin API
+- [ ] **Plugin discovery** — built-in marketplace or link to curated plugin list
+- [ ] **Plugin sandboxing** — WASM sandbox for safe plugin execution
+- [ ] **Extension pack** — group of plugins installed together
+- [ ] **Theme plugin** — allow third-party themes as plugins
+- [ ] **Language server plugin** — auto-install LSP servers via plugin
+
+### Notebooks
+- [ ] **Jupyter notebook renderer** — .ipynb file support with cell-by-cell execution
+- [ ] **REPL panel** — language-specific REPL (Python, Node, Julia)
+- [ ] **Output rendering** — render images, tables, plots from notebook output
+
+### Remote Development
+- [ ] **SSH remote** — open folder on remote machine via SSH
+- [ ] **Container dev** — open project inside Docker container
+- [ ] **WSL support** — open WSL filesystem on Windows
+- [ ] **Remote terminal** — terminal connects to remote process
+
+### Performance
+- [ ] **Treesitter parsing** — faster, more accurate parse tree (replace syntect for some langs)
+- [ ] **Incremental re-highlighting** — only re-highlight changed regions of file
+- [ ] **Virtual rendering** — only render visible lines in huge files (100k+ lines)
+- [ ] **File indexing** — background index of all symbols for fast workspace search
+- [ ] **Code search index** — ripgrep-based index for instant search results
+
+### Collaboration
+- [ ] **Live Share** — real-time collaborative editing with cursor sharing
+- [ ] **Session recording** — record and replay terminal/editing sessions
+- [ ] **Code review UI** — browse PR comments alongside the diff
+
+### Accessibility
+- [ ] **High contrast themes** — dedicated HC Black and HC Light themes
+- [ ] **Screen reader mode** — ARIA announcements for cursor position, errors, completions
+- [ ] **Keyboard-only navigation** — full access to all panels without mouse
+- [ ] **Focus mode** — reduce motion / animations for users with vestibular disorders
+
+### Mobile / Tablet
+- [ ] **Touch input** — handle touch events in editor for basic editing on tablets
+- [ ] **Virtual keyboard aware** — adjust layout when software keyboard appears
+
+### Integrations
+- [ ] **Jira / Linear integration** — show issues, link commits to issues
+- [ ] **GitHub Actions log** — stream CI run output from PR/commit in IDE
+- [ ] **Docker panel** — list running containers, attach terminal, view logs
+- [ ] **Database viewer** — connect to Postgres/SQLite, browse schema, run queries
+- [ ] **HTTP client** — send HTTP requests like REST Client extension
+- [ ] **Markdown preview** — live rendered preview of .md files side-by-side
+- [ ] **Image preview** — show PNG/JPG/SVG directly in an editor tab
+- [ ] **PDF viewer** — view PDFs inline
+- [ ] **CSV viewer** — show CSV files as sortable table
+- [ ] **Hex editor** — view binary files as hex + ASCII
+- [ ] **JSON tree view** — show JSON files as collapsible tree
+
+### AI — Advanced
+- [ ] **Project-wide AI context** — vector index of codebase for semantic search in chat
+- [ ] **AI agent mode** — agent autonomously edits files, runs commands, iterates
+- [ ] **AI test generation** — generate full test suite for a module
+- [ ] **AI migration assistant** — upgrade dependencies, migrate API versions
+- [ ] **AI security scan** — flag potential security issues with explanations
+- [ ] **AI code review bot** — auto-review every commit with AI comments
+- [ ] **Custom system prompt** — per-project AI instructions in `.phazeai/instructions.md`
+- [ ] **AI chat slash commands** — `/explain`, `/fix`, `/test`, `/refactor`, `/doc`
+- [ ] **Multiple AI chat threads** — tabs in chat panel for different conversations
+- [ ] **AI suggested follow-ups** — after response, show clickable follow-up questions
+
+### Cloud / Team (PhazeAI Cloud — paid tier)
+- [ ] **Shared AI credits** — team pool of tokens, usage dashboard
+- [ ] **Team settings sync** — shared linting rules, formatter config
+- [ ] **Audit log** — record all AI interactions for enterprise compliance
+- [ ] **SSO / SAML login** — enterprise auth
+- [ ] **Private model routing** — route AI requests to company-hosted models
+- [ ] **Codebase context upload** — send private codebase to PhazeAI Cloud for better suggestions
 
 ---
 
-## 💰 MONETIZATION REFERENCE
+## 📊 METRICS TO TRACK
 
-### Why Open Source + Paid Cloud works
-- **VS Code** is open source → $0 → Microsoft monetizes via GitHub Copilot
-- **Cursor** is ~$20/mo for AI features → 100k+ paying users
-- **Continue.dev** is open source → enterprise support contracts
-- **Zed** is open source → planning paid cloud sync
-
-### Our model (already architected in `phazeai-cloud`)
-```
-Tier          Price     What you get
-─────────────────────────────────────────────────────
-Self-Hosted   FREE      Full IDE + CLI + BYOK (Ollama, OpenAI, Anthropic, etc.)
-Cloud         $15/mo    Hosted phaze model, 500K tokens/mo, priority queue, no setup
-Team          $35/seat  Cloud + shared context, audit logs, team Modelfiles
-Enterprise    Contact   On-premise, SSO, VPC, SLA
-```
-
-### How to make money fast
-1. Launch free tier → get GitHub stars + HN front page
-2. Add "Get Started Free" + "PhazeAI Cloud $15/mo" CTA in README + IDE
-3. Even 100 Cloud users = $1,500/mo recurring. 1000 = $15K/mo.
-4. Model inference margin: ~70% (we pay ~$0.004/1K tokens wholesale, charge ~$0.015)
-
-### What NOT to gate (would kill open source adoption)
-- Never gate IDE features
-- Never gate local model support
-- Never gate the CLI
-- Never require account to use
+- [ ] Time-to-first-keypress (< 300ms cold start)
+- [ ] Memory usage idle (< 200MB)
+- [ ] LSP response latency (< 100ms for completions)
+- [ ] AI streaming TTFT (< 1s for first token)
+- [ ] Frame rate (60fps during typing, 144fps capable)
 
 ---
 
-## ✅ CURRENTLY WORKING
+## 🐛 KNOWN BUGS / TECH DEBT
 
-- `cargo run -p phazeai-ui` — Floem IDE (primary GUI, ~47% complete)
-- `cargo run -p phazeai-cli` — ratatui TUI (~70% complete)
-- `cargo build --workspace` — all 5 crates compile clean
-- `cargo test --workspace` — all tests passing
-- LSP bridge: debounce + completions + cursor tracking ✅
-- Git panel: status + commit ✅
-- Terminal: PTY + VTE + 256-color + scrollback ✅
-- Chat: real AI streaming via phazeai-core ✅
-- Explorer: real file tree + git badges + context menu ✅
-- Syntax highlighting: 25+ languages via syntect ✅
-- 12 themes: MidnightBlue, Cyberpunk, Dracula, Tokyo Night, etc. ✅
-- Command palette, file picker, Ctrl+P, Ctrl+G, Ctrl+F ✅
+- [x] Explorer file watcher — notify crate, debounced 300 ms, auto-refresh tree
+- [ ] Completion popup position can overlap status bar on short files
+- [ ] Ghost text FIM fires on empty prefix — should skip
+- [x] Vim mode: paste (p/P) implemented (after-line / before-line from register)
+- [ ] Vim mode: visual mode (v/V) not yet implemented
+- [x] Vim mode: yank (y/yy) to internal RwSignal register — implemented
+- [ ] Git panel doesn't auto-refresh on external `git` command (requires panel switch)
+- [ ] Terminal: no Ctrl+Left/Right word navigation
+- [ ] Terminal: resize not propagated to PTY on window resize (may cause display glitches)
+- [ ] Settings: ai_provider change doesn't update the FIM client (uses Settings::load() each time — OK)
+- [ ] Multi-tab session restore: if a file was deleted, tab shows empty (no error message)
+- [ ] Syntax highlighting cache can get stale after large edits (states_cache truncation)
+- [ ] Find/replace: `\n` in replace string not handled
+- [x] LSP: textDocument/didSave sent via LspCommand::SaveFile on every Ctrl+S
+- [ ] Python sidecar server.py does not exist — phazeai-sidecar Rust client stubs
+- [ ] phazeai-cloud crate is a skeleton — no real auth/API calls
 
 ---
 
-## 📊 PHASE 2 TASK TRACKING
-
-| Block | Tasks | Done | % |
-|-------|-------|------|---|
-| Block 1: Editor critical | 16 | 0 | 0% |
-| Block 2: UI completeness | 21 | 0 | 0% |
-| Block 3: CLI fixes | 9 | 0 | 0% |
-| Block 4: Testing | 18 | 0 | 0% |
-| Block 5: Monetization | 14 | 0 | 0% |
-| Block 6: Release prep | 14 | 0 | 0% |
-| **Total Phase 2** | **92** | **0** | **0%** |
+*Last updated: 2026-02-27*

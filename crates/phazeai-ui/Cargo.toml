@@ -27,8 +27,10 @@ arboard = { workspace = true }
 rfd = { workspace = true }
 walkdir = "2.4"
 syntect = { workspace = true }
+regex = "1"
 lazy_static = "1.5"
 lsp-types = { workspace = true }
+notify = { workspace = true }
 
 [dev-dependencies]
 image = "0.25"

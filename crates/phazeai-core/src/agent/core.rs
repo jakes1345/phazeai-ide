@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -53,6 +54,9 @@ pub struct AgentResponse {
     pub content: String,
     pub tool_calls: Vec<ToolExecution>,
     pub iterations: usize,
+    /// Cumulative token usage across all LLM calls in this run.
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
 }
 
 /// Callback invoked before tool execution. Returns true to approve, false to deny.
@@ -75,6 +79,8 @@ pub struct Agent {
     max_iterations: usize,
     max_context_tokens: usize,
     approval_fn: Option<ApprovalFn>,
+    /// Optional cancellation token — set to `true` to abort the running loop.
+    cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl Agent {
@@ -86,7 +92,28 @@ impl Agent {
             max_iterations: 15,
             max_context_tokens: 32768, // Default budget
             approval_fn: None,
+            cancel_token: None,
         }
+    }
+
+    /// Attach a cancellation token. Set the `AtomicBool` to `true` from any
+    /// thread to abort the agent loop after the current LLM/tool step.
+    pub fn with_cancel_token(mut self, token: Arc<AtomicBool>) -> Self {
+        self.cancel_token = Some(token);
+        self
+    }
+
+    /// Returns a clone of the cancellation token, if one was attached.
+    /// The caller can store this and call `.store(true, Ordering::Relaxed)` to cancel.
+    pub fn cancel_token(&self) -> Option<Arc<AtomicBool>> {
+        self.cancel_token.clone()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .map(|t| t.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -149,6 +176,8 @@ impl Agent {
         let user_input = user_input.into();
         let mut iterations = 0;
         let mut tool_executions = Vec::new();
+        let mut total_input_tokens: u64 = 0;
+        let mut total_output_tokens: u64 = 0;
 
         {
             let mut conversation = self.conversation.lock().await;
@@ -156,6 +185,12 @@ impl Agent {
         }
 
         loop {
+            // Check cancellation at the start of every iteration.
+            if self.is_cancelled() {
+                let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                return Err(PhazeError::Cancelled);
+            }
+
             if iterations >= self.max_iterations {
                 let _ = event_tx.send(AgentEvent::Error(format!(
                     "Exceeded maximum iterations ({})",
@@ -218,6 +253,10 @@ impl Agent {
                                 function: FunctionCall { name, arguments },
                             });
                         }
+                    }
+                    StreamEvent::Usage(u) => {
+                        total_input_tokens += u.input_tokens as u64;
+                        total_output_tokens += u.output_tokens as u64;
                     }
                     StreamEvent::Done => {
                         break;
@@ -326,6 +365,8 @@ impl Agent {
                 content,
                 tool_calls: tool_executions,
                 iterations,
+                total_input_tokens,
+                total_output_tokens,
             });
         }
     }

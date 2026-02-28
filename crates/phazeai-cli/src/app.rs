@@ -20,7 +20,7 @@ use ratatui::{
 };
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::commands::{self, CommandResult};
@@ -159,6 +159,13 @@ struct AppState {
     ai_mode: String,
     /// Last user message sent, used by /retry
     last_user_input: String,
+
+    /// Handle to the running agent task — aborted on /cancel
+    agent_task: Option<tokio::task::JoinHandle<()>>,
+
+    /// Oneshot sender used to respond to the pending approval callback.
+    /// When the user presses y/n/a/s, we send true/false through this channel.
+    approval_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 impl AppState {
@@ -209,6 +216,9 @@ impl AppState {
             approval_manager: ToolApprovalManager::default(),
             ai_mode: "chat".into(),
             last_user_input: String::new(),
+
+            agent_task: None,
+            approval_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -494,32 +504,45 @@ pub async fn run_tui(
         let event_tx = agent_event_tx;
         let restore_msgs = restore_messages.clone();
 
+        // Share the approval_tx with the agent callback so it can block on user input.
+        let approval_tx_shared = state.approval_tx.clone();
+
         // Create approval callback
         let approval_manager_clone =
             Arc::new(std::sync::Mutex::new(ToolApprovalManager::default()));
         let approval_mgr = approval_manager_clone.clone();
         let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(move |tool_name, params| {
             let mgr = approval_mgr.clone();
+            let tx_slot = approval_tx_shared.clone();
             Box::pin(async move {
                 let needs = {
                     let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
                     mgr.needs_approval(&tool_name, &params)
                 };
                 if !needs {
-                    return true; // Auto-approved
+                    return true; // Auto-approved by manager policy
                 }
-                // For now, auto-approve. The pending_approval UI already exists
-                // but blocking here would freeze the agent. We'll approve and let
-                // the UI show the notification.
+
+                // Block until the UI responds via the oneshot channel.
+                let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
                 {
+                    let mut slot = tx_slot.lock().unwrap_or_else(|e| e.into_inner());
+                    *slot = Some(tx);
+                }
+
+                // Await user response; default to deny on channel error.
+                let approved = rx.await.unwrap_or(false);
+
+                if approved {
                     let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
                     mgr.record_approval(&tool_name);
                 }
-                true
+
+                approved
             })
         });
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut agent = Agent::new(llm)
                 .with_system_prompt(system_prompt)
                 .with_approval(approval_fn);
@@ -559,6 +582,9 @@ pub async fn run_tui(
                 forward.abort();
             }
         });
+
+        // Store the outer worker handle so /cancel can abort it.
+        state.agent_task = Some(handle);
     }
 
     loop {
@@ -740,14 +766,83 @@ fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header: show the working directory path.
+    lines.push(Line::from(Span::styled(
+        format!(" {cwd}"),
+        Style::default().fg(theme.accent),
+    )));
+    lines.push(Line::raw(""));
+
+    if let Ok(entries) = std::fs::read_dir(".") {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        // Directories first, then files; both sorted alphabetically.
+        entries.sort_by_key(|e| {
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            (!is_dir, e.file_name())
+        });
+
+        let mut count = 0usize;
+        for entry in &entries {
+            if count >= 50 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip hidden entries and common noise dirs.
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let icon = if is_dir { "▸ " } else { "  " };
+            let color = if is_dir { theme.accent } else { theme.fg };
+            lines.push(Line::from(Span::styled(
+                format!(" {icon}{name}"),
+                Style::default().fg(color),
+            )));
+            count += 1;
+
+            // Show immediate children of directories (depth 1).
+            if is_dir {
+                if let Ok(sub) = std::fs::read_dir(entry.path()) {
+                    let mut sub: Vec<_> = sub.flatten().collect();
+                    sub.sort_by_key(|e| e.file_name());
+                    let mut sub_count = 0usize;
+                    for sub_entry in &sub {
+                        if sub_count >= 20 || count >= 50 {
+                            break;
+                        }
+                        let sub_name = sub_entry.file_name().to_string_lossy().to_string();
+                        if sub_name.starts_with('.') {
+                            continue;
+                        }
+                        let sub_is_dir =
+                            sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let sub_icon = if sub_is_dir { "▸ " } else { "  " };
+                        let sub_color = if sub_is_dir { theme.accent } else { theme.muted };
+                        lines.push(Line::from(Span::styled(
+                            format!("   {sub_icon}{sub_name}"),
+                            Style::default().fg(sub_color),
+                        )));
+                        sub_count += 1;
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+
     let files_block = Block::default()
         .borders(Borders::ALL)
         .title(" Files ")
         .border_style(Style::default().fg(theme.border));
-    let files_text = Paragraph::new(format!("  {cwd}\n  (Ctrl+E to close)"))
+
+    let paragraph = Paragraph::new(lines)
         .block(files_block)
-        .style(Style::default().fg(theme.muted));
-    f.render_widget(files_text, area);
+        .style(Style::default().fg(theme.fg));
+
+    f.render_widget(paragraph, area);
 }
 
 fn render_message_lines<'a>(msg: &'a ChatMessage, theme: &'a Theme) -> Vec<Line<'a>> {
@@ -1171,7 +1266,20 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         // Quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if state.is_processing {
-                // First Ctrl+C cancels the current operation
+                // First Ctrl+C aborts the running agent task.
+                if let Some(handle) = state.agent_task.take() {
+                    handle.abort();
+                }
+                // Unblock any pending approval.
+                let sender = state
+                    .approval_tx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(tx) = sender {
+                    let _ = tx.send(false);
+                }
+                state.pending_approval = None;
                 state.is_processing = false;
                 state.status_text = "Cancelled".into();
                 state.add_message(MessageRole::System, "Request cancelled.".into());
@@ -1356,21 +1464,35 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
 }
 
 fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
+    /// Helper: drain the oneshot sender from state and send the user's decision.
+    fn send_approval(state: &mut AppState, approved: bool) {
+        let sender = state
+            .approval_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(tx) = sender {
+            // Ignore send errors (agent may have been aborted).
+            let _ = tx.send(approved);
+        }
+    }
+
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Some(ref approval) = state.pending_approval {
-                state.approval_manager.record_approval(&approval.tool_name);
-            }
+            send_approval(state, true);
             state.pending_approval = None;
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
+            send_approval(state, false);
             state.add_message(MessageRole::System, "Tool execution denied.".into());
             state.pending_approval = None;
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
+            // Auto-approve this and all future tools.
             state
                 .approval_manager
                 .set_mode(ToolApprovalMode::AutoApprove);
+            send_approval(state, true);
             state.pending_approval = None;
             state.add_message(
                 MessageRole::System,
@@ -1378,12 +1500,15 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
             );
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
+            // Allow this one tool for the session (record then approve).
             if let Some(ref approval) = state.pending_approval {
                 state.approval_manager.record_approval(&approval.tool_name);
             }
+            send_approval(state, true);
             state.pending_approval = None;
         }
         KeyCode::Char('q') | KeyCode::Esc => {
+            send_approval(state, false);
             state.pending_approval = None;
             state.is_processing = false;
             state.status_text = "Cancelled".into();
@@ -1967,13 +2092,26 @@ fn handle_command_result(
             }
         }
         CommandResult::Cancel => {
-            state.add_message(
-                MessageRole::System,
-                "Cancel requested. The current run will stop after the next tool call completes."
-                    .into(),
-            );
+            // Abort the running agent task immediately.
+            if let Some(handle) = state.agent_task.take() {
+                handle.abort();
+            }
+            // Also unblock any pending approval by sending false.
+            let sender = state
+                .approval_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(tx) = sender {
+                let _ = tx.send(false);
+            }
+            state.pending_approval = None;
             state.is_processing = false;
             state.status_text = "Cancelled".into();
+            state.add_message(
+                MessageRole::System,
+                "Agent task aborted.".into(),
+            );
         }
         CommandResult::Grep(pattern) => {
             let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

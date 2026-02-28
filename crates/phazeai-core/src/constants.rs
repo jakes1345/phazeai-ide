@@ -1,6 +1,6 @@
-/// PhazeAI — centralized constants.
-/// All magic numbers, strings, and limits live here.
-/// Never hardcode these values elsewhere.
+// PhazeAI — centralized constants.
+// All magic numbers, strings, and limits live here.
+// Never hardcode these values elsewhere.
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 

@@ -44,6 +44,8 @@ pub enum LspEvent {
     References(Vec<Location>),
     /// Document formatting edits
     Formatting(Vec<TextEdit>),
+    /// Document symbols (outline view)
+    DocumentSymbols(Vec<DocumentSymbol>),
     /// Server initialized successfully
     Initialized(String),
     /// Server exited
@@ -263,6 +265,45 @@ impl LspClient {
         }
     }
 
+    /// Request signature help at a position (textDocument/signatureHelp)
+    pub async fn signature_help(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<SignatureHelp>, String> {
+        let uri = path_to_uri(path)?;
+        let params = SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            work_done_progress_params: Default::default(),
+            context: None,
+        };
+        self.send_request::<request::SignatureHelpRequest>(params).await
+    }
+
+    /// Request workspace rename (workspace/rename)
+    pub async fn rename_symbol(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        new_name: String,
+    ) -> Result<Option<WorkspaceEdit>, String> {
+        let uri = path_to_uri(path)?;
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            new_name,
+            work_done_progress_params: Default::default(),
+        };
+        self.send_request::<request::Rename>(params).await
+    }
+
     /// Request find references at a position
     pub async fn find_references(
         &self,
@@ -305,6 +346,80 @@ impl LspClient {
         };
         let result = self.send_request::<request::Formatting>(params).await?;
         Ok(result.unwrap_or_default())
+    }
+
+    /// Request all symbols in a document (outline view).
+    pub async fn document_symbols(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<DocumentSymbol>, String> {
+        let uri = path_to_uri(path)?;
+        let params = DocumentSymbolParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = self.send_request::<request::DocumentSymbolRequest>(params).await?;
+        let symbols = match result {
+            Some(DocumentSymbolResponse::Nested(syms)) => syms,
+            Some(DocumentSymbolResponse::Flat(syms)) => {
+                // Convert SymbolInformation to DocumentSymbol
+                syms.into_iter().map(|si| DocumentSymbol {
+                    name: si.name,
+                    detail: None,
+                    kind: si.kind,
+                    tags: None,
+                    #[allow(deprecated)]
+                    deprecated: None,
+                    range: si.location.range,
+                    selection_range: si.location.range,
+                    children: None,
+                }).collect()
+            }
+            None => vec![],
+        };
+        Ok(symbols)
+    }
+
+    /// Request workspace symbols matching a query string (Ctrl+T).
+    pub async fn workspace_symbol(
+        &self,
+        query: &str,
+    ) -> Result<Vec<SymbolInformation>, String> {
+        use lsp_types::WorkspaceSymbolParams;
+        let params = WorkspaceSymbolParams {
+            query: query.to_string(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = self.send_request::<request::WorkspaceSymbolRequest>(params).await?;
+        let syms = match result {
+            Some(lsp_types::WorkspaceSymbolResponse::Flat(items)) => items,
+            Some(lsp_types::WorkspaceSymbolResponse::Nested(items)) => {
+                // Flatten WorkspaceSymbol → SymbolInformation (best-effort)
+                items.into_iter().map(|ws| {
+                    use lsp_types::{Location, Range, Position};
+                    let loc = match ws.location {
+                        lsp_types::OneOf::Left(loc) => loc,
+                        lsp_types::OneOf::Right(ws_loc) => Location {
+                            uri: ws_loc.uri,
+                            range: Range { start: Position::default(), end: Position::default() },
+                        },
+                    };
+                    #[allow(deprecated)]
+                    SymbolInformation {
+                        name: ws.name,
+                        kind: ws.kind,
+                        tags: ws.tags,
+                        deprecated: None,
+                        location: loc,
+                        container_name: ws.container_name,
+                    }
+                }).collect()
+            }
+            None => vec![],
+        };
+        Ok(syms)
     }
 
     // ── Event sender helpers (used by app.rs after async requests) ──────────

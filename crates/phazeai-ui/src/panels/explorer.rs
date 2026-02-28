@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc::channel};
 
 use floem::{
     action::show_context_menu,
@@ -10,6 +10,7 @@ use floem::{
     views::{container, dyn_stack, label, scroll, stack, Decorators},
     IntoView,
 };
+use notify::{EventKind, RecursiveMode, Watcher};
 
 use crate::{
     components::icon::{icons, phaze_icon},
@@ -155,6 +156,64 @@ pub fn explorer_panel(
         });
         std::thread::spawn(move || { send(fetch_git_status(&root)); });
     });
+
+    // ── File watcher — auto-refresh tree when files change on disk ─────────
+    // We use the `notify` crate to watch the workspace root recursively.
+    // Events are debounced (300 ms) and delivered via a sync_channel so
+    // tree rebuilds happen on the Floem UI thread via create_effect.
+    {
+        let root = workspace_root.get();
+        // Bounded channel of size 1 — coalesces rapid bursts naturally.
+        let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+        // UI-thread side: react when the background watcher fires.
+        use floem::ext_event::create_signal_from_channel;
+        let refresh_sig = create_signal_from_channel(refresh_rx);
+        create_effect(move |_| {
+            if refresh_sig.get().is_some() {
+                let r = workspace_root.get();
+                let existing = entries.get();
+                entries.set(rebuild_tree(&r, &existing));
+            }
+        });
+
+        // Background thread: watch and debounce filesystem events.
+        std::thread::spawn(move || {
+            let (ev_tx, ev_rx) = channel();
+            let mut watcher = match notify::recommended_watcher(
+                move |res: notify::Result<notify::Event>| {
+                    if let Ok(ev) = res {
+                        match ev.kind {
+                            EventKind::Create(_) | EventKind::Remove(_)
+                            | EventKind::Modify(_) | EventKind::Any => {
+                                let _ = ev_tx.send(());
+                            }
+                            _ => {}
+                        }
+                    }
+                },
+            ) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+
+            if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+                return;
+            }
+
+            // Debounce: collect events for 300 ms then fire once.
+            loop {
+                if ev_rx.recv().is_err() { break; }
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_millis(300);
+                while std::time::Instant::now() < deadline {
+                    let _ = ev_rx.recv_timeout(std::time::Duration::from_millis(50));
+                }
+                // try_send: skip if the previous refresh hasn't been consumed yet.
+                let _ = refresh_tx.try_send(());
+            }
+        });
+    }
 
     // Index of the keyboard-focused row (None = no focus)
     let focused_idx: RwSignal<Option<usize>> = create_rw_signal(None);

@@ -77,13 +77,15 @@ pub enum MultiAgentEvent {
 }
 
 /// The multi-agent orchestrator.
-/// All agents run through the SAME local Ollama instance.
+/// All agents run through the SAME local Ollama instance by default, but each
+/// role can be given its own `LlmClient` for model specialisation.
 pub struct MultiAgentOrchestrator {
     llm: Arc<dyn LlmClient>,
     /// Whether to run the full pipeline (plan → code → review) or just single-shot
     full_pipeline: bool,
-    /// Optional model override per role (e.g. use a smaller model for planning)
-    role_models: std::collections::HashMap<AgentRole, String>,
+    /// Optional per-role LLM client overrides.
+    /// If a role has no entry the default `self.llm` is used.
+    role_clients: std::collections::HashMap<AgentRole, Arc<dyn LlmClient>>,
 }
 
 impl MultiAgentOrchestrator {
@@ -91,7 +93,7 @@ impl MultiAgentOrchestrator {
         Self {
             llm,
             full_pipeline: true,
-            role_models: std::collections::HashMap::new(),
+            role_clients: std::collections::HashMap::new(),
         }
     }
 
@@ -101,11 +103,16 @@ impl MultiAgentOrchestrator {
         self
     }
 
-    /// Override which Ollama model to use for a specific role
-    /// (e.g. use qwen2.5-coder:7b for coding, llama3.2:3b for planning)
-    pub fn with_role_model(mut self, role: AgentRole, model: String) -> Self {
-        self.role_models.insert(role, model);
+    /// Override the LLM client used for a specific role.
+    /// E.g. use a fast coding-focused model for the Coder role.
+    pub fn with_role_client(mut self, role: AgentRole, client: Arc<dyn LlmClient>) -> Self {
+        self.role_clients.insert(role, client);
         self
+    }
+
+    /// Convenience: get the appropriate client for a role (falls back to default).
+    fn client_for_role(&self, role: &AgentRole) -> &Arc<dyn LlmClient> {
+        self.role_clients.get(role).unwrap_or(&self.llm)
     }
 
     /// Run the full multi-agent pipeline on a task.
@@ -248,8 +255,8 @@ impl MultiAgentOrchestrator {
             },
         ];
 
-        let response = self
-            .llm
+        let client = self.client_for_role(&role);
+        let response = client
             .chat(&messages, &[])
             .await
             .map_err(|e| PhazeError::Other(format!("Agent {} failed: {}", role.name(), e)))?;

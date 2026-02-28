@@ -357,6 +357,20 @@ impl LlmClient for ClaudeClient {
                                     let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
                                 }
                             }
+                            Some("message_delta") => {
+                                // Claude emits usage in message_delta at the end
+                                if let Some(usage) = event.get("usage") {
+                                    let input = usage.get("input_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let output = usage.get("output_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    if input > 0 || output > 0 {
+                                        let _ = tx.unbounded_send(StreamEvent::Usage(
+                                            crate::llm::Usage { input_tokens: input, output_tokens: output }
+                                        ));
+                                    }
+                                }
+                            }
                             Some("message_stop") => {
                                 let _ = tx.unbounded_send(StreamEvent::Done);
                                 return;
