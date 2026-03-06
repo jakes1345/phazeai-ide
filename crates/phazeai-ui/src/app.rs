@@ -236,6 +236,20 @@ pub struct IdeState {
     pub delete_line_nonce: RwSignal<u64>,
     /// Inline blame annotation for the current cursor line (shown in status bar).
     pub active_blame: RwSignal<String>,
+    /// Whether the split editor pane is visible (Ctrl+Alt+\).
+    pub split_editor: RwSignal<bool>,
+    /// Active file in the split editor pane (independent of primary pane).
+    pub split_open_file: RwSignal<Option<PathBuf>>,
+    /// Open tabs in the split editor pane.
+    pub split_open_tabs: RwSignal<Vec<PathBuf>>,
+    /// Cursor position in the split editor pane.
+    pub split_active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
+    /// Column cursor up nonce — Ctrl+Alt+Up adds cursor on line above at same column.
+    pub col_cursor_up_nonce: RwSignal<u64>,
+    /// Column cursor down nonce — Ctrl+Alt+Down adds cursor on line below at same column.
+    pub col_cursor_down_nonce: RwSignal<u64>,
+    /// Sticky scroll lines for the active tab — enclosing scope headers pinned above editor.
+    pub sticky_lines: RwSignal<Vec<String>>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -679,6 +693,13 @@ impl IdeState {
             duplicate_line_nonce: create_rw_signal(0u64),
             delete_line_nonce: create_rw_signal(0u64),
             active_blame: create_rw_signal(String::new()),
+            split_editor: create_rw_signal(false),
+            split_open_file: create_rw_signal(None),
+            split_open_tabs: create_rw_signal(Vec::new()),
+            split_active_cursor: create_rw_signal(None),
+            col_cursor_up_nonce: create_rw_signal(0u64),
+            col_cursor_down_nonce: create_rw_signal(0u64),
+            sticky_lines: create_rw_signal(Vec::new()),
         }
     }
 }
@@ -3762,7 +3783,61 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.duplicate_line_nonce,
         state.delete_line_nonce,
         state.active_blame,
+        state.col_cursor_up_nonce,
+        state.col_cursor_down_nonce,
+        state.sticky_lines,
     );
+
+    // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
+    let split_raw = editor_panel(
+        state.split_open_file,
+        state.theme,
+        state.ai_thinking,
+        state.lsp_cmd.clone(),
+        state.split_active_cursor,
+        state.pending_completion,
+        state.diagnostics,
+        create_rw_signal(0u32), // independent goto_line for split pane
+        create_rw_signal(0u64), // independent comment nonce
+        vec![],                 // no session restore for split pane
+        state.split_open_tabs,
+        state.vim_motion,
+        state.ghost_text,
+        state.auto_save,
+        state.workspace_root.get_untracked(),
+        state.font_size,
+        state.word_wrap,
+        create_rw_signal(0u64), // ctrl_d
+        create_rw_signal(0u64), // fold
+        create_rw_signal(0u64), // unfold
+        create_rw_signal(0u64), // move_up
+        create_rw_signal(0u64), // move_down
+        create_rw_signal(0u64), // duplicate
+        create_rw_signal(0u64), // delete_line
+        create_rw_signal(String::new()), // blame
+        create_rw_signal(0u64), // col_cursor_up
+        create_rw_signal(0u64), // col_cursor_down
+        create_rw_signal(Vec::new()), // sticky_lines
+    );
+    let split_pane = container(split_raw)
+        .style(move |s| {
+            s.flex_grow(1.0)
+                .min_width(0.0)
+                .min_height(0.0)
+                .apply_if(!state.split_editor.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        });
+    let split_divider = container(floem::views::empty())
+        .style(move |s| {
+            let t = state.theme.get();
+            s.width(3.0)
+                .height_full()
+                .background(t.palette.glass_border)
+                .apply_if(!state.split_editor.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        });
 
     // ── Editor right-click context menu ──────────────────────────────────────
     let editor = {
@@ -3951,12 +4026,16 @@ fn ide_root(state: IdeState) -> impl IntoView {
     let chat_zen_wrap = container(chat_wrap)
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
 
-    // Main content row: activity bar + left panel + resize handle + editor + chat
+    // Editor area: primary pane + optional split divider + split pane
+    let editor_area = stack((editor, split_divider, split_pane))
+        .style(|s| s.flex_grow(1.0).min_width(0.0).min_height(0.0));
+
+    // Main content row: activity bar + left panel + resize handle + editor area + chat
     let content_row = stack((
         activity_wrap,
         left_wrap,
         divider_wrap,
-        editor,
+        editor_area,
         chat_zen_wrap,
     ))
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
@@ -4586,6 +4665,15 @@ pub fn launch_phaze_ide() {
                                         }
                                         return;
                                     }
+                                    // Ctrl+Alt+Up/Down — add column cursor on adjacent line
+                                    floem::keyboard::NamedKey::ArrowUp if ctrl && alt && !shift => {
+                                        state.col_cursor_up_nonce.update(|n| *n += 1);
+                                        return;
+                                    }
+                                    floem::keyboard::NamedKey::ArrowDown if ctrl && alt && !shift => {
+                                        state.col_cursor_down_nonce.update(|n| *n += 1);
+                                        return;
+                                    }
                                     _ => {}
                                 }
                             }
@@ -4706,11 +4794,14 @@ pub fn launch_phaze_ide() {
                                     return;
                                 }
 
-                                // Alt+Up/Down — move line; Alt+Shift+Down — duplicate
-                                if alt && !ctrl {
-                                    match ch.as_str() {
-                                        _ => {}
+                                // Ctrl+Alt+\ — toggle split editor pane
+                                if ctrl && alt && !shift && ch.as_str() == "\\" {
+                                    let was_open = state.split_editor.get();
+                                    state.split_editor.update(|v| *v = !*v);
+                                    if !was_open && state.split_open_file.get().is_none() {
+                                        state.split_open_file.set(state.open_file.get());
                                     }
+                                    return;
                                 }
 
                                 if ctrl && !shift && !alt {

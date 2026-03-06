@@ -10,16 +10,16 @@
 - [~] **Inlay hints** — show type/param hints inline (e.g. `let x/*: i32*/`) via LSP `textDocument/inlayHint` — *deprioritized: requires Floem Document fork*
 - [ ] **Semantic token highlighting** — LSP semantic tokens override syntect colors per-token
 - [x] **Bracket pair colorization** — matching bracket pairs get distinct cycling colors (4 levels)
-- [ ] **Bracket pair guides** — vertical lines connecting `{`→`}` at matching indent
-- [ ] **Split editor right** (Ctrl+\\) — side-by-side editing of two different files
+- [x] **Bracket pair guides** — vertical lines connecting `{`→`}` at matching indent
+- [x] **Split editor right** (Ctrl+Alt+\) (Ctrl+\\) — side-by-side editing of two different files
 - [ ] **Split editor down** — horizontal split for top/bottom layout
 - [ ] **Split editor: sync scroll** — optional linked scrolling between splits
 - [x] **Indent guides** — vertical lines at each indent level
 - [x] **Matching bracket highlight** — when cursor is on `(`, highlight the matching `)`
 - [x] **Auto-surround** — select text, type `(` → wraps selection in `(…)`; same for `[`, `{`, `"`, `'`
-- [ ] **Sticky scroll** — function/class signature stays pinned at top while scrolling into body
-- [ ] **Minimap** — right-side pixel-art overview of full file; click to scroll; highlight viewport region
-- [ ] **Column/box selection** — Alt+Shift+drag or Alt+Shift+Arrow for rectangular multi-line selection
+- [x] **Sticky scroll** — function/class signature stays pinned at top while scrolling into body
+- [x] **Minimap** — right-side pixel-art overview of full file; click to scroll; highlight viewport region
+- [x] **Column/box selection** (Ctrl+Alt+Up/Down) — Alt+Shift+drag or Alt+Shift+Arrow for rectangular multi-line selection
 - [ ] **Multi-line find** — allow `\n` in search pattern for cross-line matching
 - [ ] **Whole word toggle** — `\b` boundary toggle in find bar (already done in workspace search; add to editor find)
 - [x] **Find: highlight all** — all matches softly highlighted in editor body simultaneously
@@ -48,14 +48,14 @@
 - [x] **Push button** — push to remote in git panel header
 - [x] **Git blame** — inline blame annotation per line (author + date + commit hash), collapsible section with "Blame File" button
 - [x] **Commit history log** — scrollable list of recent commits with hash/message/author/date
-- [ ] **Diff between commits** — click commit in log → open diff editor showing what changed
-- [ ] **Git stash push** — stash current changes from git panel
-- [ ] **Git stash pop** — apply latest stash from git panel
+- [x] **Diff between commits** — click commit in log → open diff editor showing what changed
+- [x] **Git stash push** — stash current changes from git panel
+- [x] **Git stash pop** — apply latest stash from git panel
 - [ ] **Stash list** — view all stashes, apply or drop any of them
 - [ ] **Revert hunk** — button in hunk popup to undo that specific changed section
-- [ ] **Create branch** — prompt for name, create and checkout from git panel
-- [ ] **Delete branch** — delete local branch from branch picker
-- [ ] **Fetch** — fetch from all remotes without merging
+- [x] **Create branch** — prompt for name, create and checkout from git panel
+- [x] **Delete branch** — delete local branch from branch picker
+- [x] **Fetch** — fetch from all remotes without merging
 - [ ] **Merge branch** — merge another branch into current from git panel
 - [ ] **Discard single file changes** — right-click unstaged file → discard
 - [ ] **Cherry-pick** — apply a specific commit from history to current branch
@@ -74,10 +74,10 @@
 - [ ] **Cursor surrounding lines** — configurable min lines above/below cursor when scrolling
 - [ ] **Sort lines** — sort selected lines alphabetically (ascending/descending)
 - [ ] **Join lines** — merge current line with next (remove newline + trim whitespace)
-- [ ] **Duplicate line up** — copy current line above cursor
-- [ ] **Duplicate line down** — copy current line below cursor
-- [ ] **Move line up** — swap current line with line above (Alt+Up)
-- [ ] **Move line down** — swap current line with line below (Alt+Down)
+- [x] **Duplicate line up** — copy current line above cursor
+- [x] **Duplicate line down** — copy current line below cursor
+- [x] **Move line up** (Alt+Up) — swap current line with line above (Alt+Up)
+- [x] **Move line down** (Alt+Down) — swap current line with line below (Alt+Down)
 - [ ] **Transform to uppercase** — selected text → UPPER CASE
 - [ ] **Transform to lowercase** — selected text → lower case
 - [ ] **Transform to title case** — selected text → Title Case

@@ -6,7 +6,7 @@
 
 use floem::{
     ext_event::{create_ext_action, create_signal_from_channel},
-    reactive::{create_effect, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
+    reactive::{create_effect, create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -296,6 +296,55 @@ fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["fetch", "--all", "--prune"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["branch", "-d", branch])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(format!("Deleted branch {branch}"))
+    } else {
+        // Try force delete
+        let out2 = std::process::Command::new("git")
+            .args(["branch", "-D", branch])
+            .current_dir(root)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out2.status.success() {
+            Ok(format!("Force-deleted branch {branch}"))
+        } else {
+            Err(String::from_utf8_lossy(&out2.stderr).trim().to_string())
+        }
+    }
+}
+
+/// Get the diff for a specific commit hash.
+fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["show", "--stat", "--patch", "--no-color", hash])
+        .current_dir(root)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
+        Err(e) => e.to_string(),
     }
 }
 
@@ -705,11 +754,52 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         stash_pop_hov.set(false)
     });
 
+    // ── Fetch button ──────────────────────────────────────────────────────────
+    let fetch_hov = create_rw_signal(false);
+    let state_fetch = state.clone();
+    let fetch_btn = container(label(|| "Fetch").style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0).color(if fetch_hov.get() {
+            p.accent_hover
+        } else {
+            p.text_muted
+        })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0)
+            .padding_vert(3.0)
+            .border_radius(4.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if fetch_hov.get() {
+                p.bg_elevated
+            } else {
+                floem::peniko::Color::TRANSPARENT
+            })
+    })
+    .on_click_stop(move |_| {
+        let root = state_fetch.workspace_root.get();
+        let scope = Scope::new();
+        let status_msg2 = status_msg;
+        let send = create_ext_action(scope, move |result: Result<String, String>| {
+            match result {
+                Ok(_) => status_msg2.set("Fetch complete.".to_string()),
+                Err(e) => status_msg2.set(format!("Fetch error: {}", e.lines().next().unwrap_or("?"))),
+            }
+        });
+        std::thread::spawn(move || send(run_git_fetch(&root)));
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| fetch_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| fetch_hov.set(false));
+
     // ── Stage All + Refresh buttons ───────────────────────────────────────────
     let refresh_hov = create_rw_signal(false);
     let stage_all_hov = create_rw_signal(false);
     let state_r = state.clone();
     let state_sa = state.clone();
+    let state_for_diff = state.clone();
 
     let stage_all_btn = container(label(|| "+A").style(move |s| {
         let t = theme.get();
@@ -808,6 +898,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         push_btn,
         stash_btn,
         stash_pop_btn,
+        fetch_btn,
         stage_all_btn,
         refresh_btn,
     ))
@@ -866,27 +957,76 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         |b| b.clone(),
         move |branch_name: String| {
             let row_hov = create_rw_signal(false);
+            let del_hov = create_rw_signal(false);
             let bn = branch_name.clone();
             let bn2 = branch_name.clone();
+            let bn_del = branch_name.clone();
             let root = state_checkout.workspace_root.get();
-            container(label(move || bn.clone()).style(move |s| {
+            let root_del = root.clone();
+
+            let del_btn = container(label(|| "×").style(move |s| {
                 let t = theme.get();
-                let p = &t.palette;
-                let is_current = current_branch.get() == bn2;
                 s.font_size(12.0)
-                    .color(if is_current { p.accent } else { p.text_primary })
-                    .font_weight(if is_current {
-                        floem::text::Weight::BOLD
+                    .color(if del_hov.get() {
+                        floem::peniko::Color::from_rgb8(255, 85, 85)
                     } else {
-                        floem::text::Weight::NORMAL
+                        t.palette.text_muted
                     })
             }))
+            .style(move |s| {
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                let b = bn_del.clone();
+                let r = root_del.clone();
+                if current_branch.get() == b {
+                    status_msg.set("Cannot delete current branch".to_string());
+                    return;
+                }
+                let scope = Scope::new();
+                let r2 = r.clone();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(msg) => {
+                            status_msg.set(msg);
+                            refresh_branches(r2.clone(), current_branch, branches);
+                        }
+                        Err(e) => {
+                            status_msg.set(format!("Delete error: {}", e.lines().next().unwrap_or("?")));
+                        }
+                    }
+                });
+                std::thread::spawn(move || send(run_git_delete_branch(&r, &b)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| del_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| del_hov.set(false));
+
+            stack((
+                label(move || bn.clone()).style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    let is_current = current_branch.get() == bn2;
+                    s.font_size(12.0)
+                        .flex_grow(1.0)
+                        .color(if is_current { p.accent } else { p.text_primary })
+                        .font_weight(if is_current {
+                            floem::text::Weight::BOLD
+                        } else {
+                            floem::text::Weight::NORMAL
+                        })
+                }),
+                del_btn,
+            ))
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
                 s.padding_horiz(10.0)
                     .padding_vert(5.0)
                     .width_full()
+                    .items_center()
                     .cursor(floem::style::CursorStyle::Pointer)
                     .background(if row_hov.get() {
                         p.bg_elevated
@@ -1402,6 +1542,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         history_hov.set(false)
     });
 
+    // Track which commit hash is expanded for diff view
+    let expanded_diff_hash: RwSignal<Option<String>> = create_rw_signal(None);
+    let expanded_diff_text: RwSignal<String> = create_rw_signal(String::new());
+
     let commit_rows = dyn_stack(
         move || {
             if !history_expanded.get() {
@@ -1413,57 +1557,106 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         move |entry: CommitEntry| {
             let row_hov = create_rw_signal(false);
             let hash = entry.hash.clone();
+            let hash2 = hash.clone();
+            let hash3 = hash.clone();
             let msg = entry.message.clone();
             let author = entry.author.clone();
             let date = entry.date.clone();
 
-            container(
-                stack((
-                    label(move || hash.clone()).style(move |s| {
-                        let t = theme.get();
-                        s.font_size(10.0)
-                            .color(t.palette.accent)
-                            .min_width(50.0)
-                            .font_family("monospace".to_string())
-                    }),
-                    label(move || msg.clone()).style(move |s| {
-                        let t = theme.get();
-                        s.font_size(11.0)
-                            .color(t.palette.text_primary)
-                            .flex_grow(1.0)
-                            .min_width(0.0)
-                    }),
-                    label(move || format!(" {author}")).style(move |s| {
-                        let t = theme.get();
-                        s.font_size(10.0).color(t.palette.text_muted)
-                    }),
-                    label(move || format!(" ({date})")).style(move |s| {
-                        let t = theme.get();
-                        s.font_size(10.0).color(t.palette.text_muted)
-                    }),
-                ))
-                .style(|s| s.items_center().width_full().min_width(0.0)),
+            let diff_shown = create_memo(move |_| {
+                expanded_diff_hash.get().as_deref() == Some(&hash3)
+            });
+
+            let diff_row = container(
+                label(move || {
+                    let text = expanded_diff_text.get();
+                    if text.len() > 4000 { format!("{}…", &text[..4000]) } else { text }
+                })
+                .style(move |s| {
+                    let t = theme.get();
+                    s.font_size(10.0)
+                        .color(t.palette.text_muted)
+                        .font_family("monospace".to_string())
+                        .width_full()
+                        .padding_horiz(12.0)
+                        .padding_vert(4.0)
+                }),
             )
             .style(move |s| {
                 let t = theme.get();
-                let p = &t.palette;
                 s.width_full()
-                    .padding_horiz(12.0)
-                    .padding_vert(3.0)
-                    .border_radius(3.0)
-                    .cursor(floem::style::CursorStyle::Default)
-                    .background(if row_hov.get() {
-                        p.bg_elevated
+                    .background(t.palette.bg_deep)
+                    .apply_if(!diff_shown.get(), |s| s.display(floem::style::Display::None))
+            });
+
+            let root_for_diff = state_for_diff.workspace_root.clone();
+            stack((
+                container(
+                    stack((
+                        label(move || hash.clone()).style(move |s| {
+                            let t = theme.get();
+                            s.font_size(10.0)
+                                .color(t.palette.accent)
+                                .min_width(50.0)
+                                .font_family("monospace".to_string())
+                        }),
+                        label(move || msg.clone()).style(move |s| {
+                            let t = theme.get();
+                            s.font_size(11.0)
+                                .color(t.palette.text_primary)
+                                .flex_grow(1.0)
+                                .min_width(0.0)
+                        }),
+                        label(move || format!(" {author}")).style(move |s| {
+                            let t = theme.get();
+                            s.font_size(10.0).color(t.palette.text_muted)
+                        }),
+                        label(move || format!(" ({date})")).style(move |s| {
+                            let t = theme.get();
+                            s.font_size(10.0).color(t.palette.text_muted)
+                        }),
+                    ))
+                    .style(|s| s.items_center().width_full().min_width(0.0)),
+                )
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    s.width_full()
+                        .padding_horiz(12.0)
+                        .padding_vert(3.0)
+                        .border_radius(3.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .background(if row_hov.get() {
+                            p.bg_elevated
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                })
+                .on_click_stop(move |_| {
+                    let cur = expanded_diff_hash.get();
+                    if cur.as_deref() == Some(&hash2) {
+                        // Collapse
+                        expanded_diff_hash.set(None);
                     } else {
-                        floem::peniko::Color::TRANSPARENT
-                    })
-            })
-            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-                row_hov.set(true)
-            })
-            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-                row_hov.set(false)
-            })
+                        expanded_diff_hash.set(Some(hash2.clone()));
+                        let root = root_for_diff.get();
+                        let scope = Scope::new();
+                        let h = hash2.clone();
+                        let send = create_ext_action(scope, move |diff: String| {
+                            expanded_diff_text.set(diff);
+                        });
+                        std::thread::spawn(move || send(run_git_show_diff(&root, &h)));
+                    }
+                })
+                .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                    row_hov.set(true)
+                })
+                .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                    row_hov.set(false)
+                }),
+                diff_row,
+            ))
+            .style(|s| s.flex_col().width_full())
         },
     )
     .style(|s: floem::style::Style| s.flex_col().width_full());

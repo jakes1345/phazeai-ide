@@ -94,6 +94,8 @@ struct SyntaxStyle {
     char_width_px: f64,
     /// Inline git blame: `(0-based line, "author • date")` — only for the current cursor line.
     blame_line: Option<(usize, String)>,
+    /// Bracket pair guides: (open_line, open_col_chars, close_line, depth) for vertical lines.
+    bracket_pair_guides: Vec<(usize, usize, usize, usize)>,
 }
 
 impl SyntaxStyle {
@@ -153,6 +155,7 @@ impl SyntaxStyle {
             bracket_pairs: Vec::new(),
             char_width_px: 8.4,
             blame_line: None,
+            bracket_pair_guides: Vec::new(),
         }
     }
 
@@ -558,6 +561,33 @@ impl Styling for SyntaxStyle {
             }
         }
 
+        // ── Bracket pair guides ───────────────────────────────────────────────
+        // Draw 1px vertical lines at the open-bracket column from open_line+1
+        // to close_line, connecting matching `{}`/`()`/`[]` pairs across lines.
+        for &(open_line, open_col, close_line, depth) in &self.bracket_pair_guides {
+            if line <= open_line || line > close_line {
+                continue;
+            }
+            let x = (open_col as f64) * self.char_width_px + 1.0; // +1 to be inside the char
+            let line_h = self.inner.line_height(edid, line) as f64;
+            // Cycle through 4 colors by depth
+            let color = match depth % 4 {
+                0 => floem::peniko::Color::from_rgba8(255, 215, 0, 50),   // gold
+                1 => floem::peniko::Color::from_rgba8(86, 182, 194, 50),  // sky blue
+                2 => floem::peniko::Color::from_rgba8(198, 120, 221, 50), // violet
+                _ => floem::peniko::Color::from_rgba8(152, 195, 121, 50), // mint
+            };
+            layout_line.extra_style.push(LineExtraStyle {
+                x,
+                y: 0.0,
+                width: Some(1.0),
+                height: line_h,
+                bg_color: Some(color),
+                under_line: None,
+                wave_line: None,
+            });
+        }
+
         // ── Find-bar: highlight ALL matches ─────────────────────────────────
         // Distinct yellow boxes on every search match (not just the jump target).
         if !self.find_match_ranges.is_empty() {
@@ -866,6 +896,9 @@ pub fn editor_panel(
     duplicate_line_nonce: RwSignal<u64>,
     delete_line_nonce: RwSignal<u64>,
     active_blame: RwSignal<String>,
+    col_cursor_up_nonce: RwSignal<u64>,
+    col_cursor_down_nonce: RwSignal<u64>,
+    sticky_lines_out: RwSignal<Vec<String>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -2280,6 +2313,161 @@ pub fn editor_panel(
                 });
             }
 
+            // ── Column cursor up (Ctrl+Alt+Up) ───────────────────────────
+            // Adds a new cursor on the line above at the same byte column.
+            {
+                let doc_col = doc.clone();
+                let last_ccu: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = col_cursor_up_nonce.get();
+                    if nonce == 0 || nonce == last_ccu.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_ccu.set(nonce);
+                    let rope = doc_col.rope_text();
+                    let cur = cursor_sig.get();
+                    let offset = cur.offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    if cur_line == 0 {
+                        return;
+                    }
+                    let cur_col = offset - rope.offset_of_line(cur_line);
+                    let prev_line_start = rope.offset_of_line(cur_line - 1);
+                    let prev_line_end = rope.offset_of_line(cur_line).saturating_sub(1);
+                    let prev_line_len = prev_line_end.saturating_sub(prev_line_start);
+                    let new_off = prev_line_start + cur_col.min(prev_line_len);
+                    // Build multi-region selection: existing region + new one
+                    // Build multi-region selection from existing cursor
+                    let existing_sel = match &cur.mode {
+                        CursorMode::Insert(s) => s.clone(),
+                        _ => Selection::caret(offset),
+                    };
+                    let mut regions: Vec<SelRegion> = existing_sel.regions().to_vec();
+                    regions.push(SelRegion::new(new_off, new_off, None));
+                    let mut sel = Selection::new();
+                    for r in regions {
+                        sel.add_region(r);
+                    }
+                    cursor_sig.set(Cursor::new(CursorMode::Insert(sel), None, None));
+                });
+            }
+
+            // ── Column cursor down (Ctrl+Alt+Down) ──────────────────────
+            // Adds a new cursor on the line below at the same byte column.
+            {
+                let doc_col = doc.clone();
+                let last_ccd: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = col_cursor_down_nonce.get();
+                    if nonce == 0 || nonce == last_ccd.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_ccd.set(nonce);
+                    let rope = doc_col.rope_text();
+                    let cur = cursor_sig.get();
+                    let offset = cur.offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    if cur_line + 1 >= rope.num_lines() {
+                        return;
+                    }
+                    let cur_col = offset - rope.offset_of_line(cur_line);
+                    let next_line_start = rope.offset_of_line(cur_line + 1);
+                    let next_line_end = if cur_line + 2 < rope.num_lines() {
+                        rope.offset_of_line(cur_line + 2).saturating_sub(1)
+                    } else {
+                        rope.len()
+                    };
+                    let next_line_len = next_line_end.saturating_sub(next_line_start);
+                    let new_off = next_line_start + cur_col.min(next_line_len);
+                    let existing_sel = match &cur.mode {
+                        CursorMode::Insert(s) => s.clone(),
+                        _ => Selection::caret(offset),
+                    };
+                    let mut regions: Vec<SelRegion> = existing_sel.regions().to_vec();
+                    regions.push(SelRegion::new(new_off, new_off, None));
+                    let mut sel = Selection::new();
+                    for r in regions {
+                        sel.add_region(r);
+                    }
+                    cursor_sig.set(Cursor::new(CursorMode::Insert(sel), None, None));
+                });
+            }
+
+            // ── Sticky scroll ────────────────────────────────────────────
+            // Scans backward from cursor line to find enclosing scope
+            // headers (fn, struct, impl, class, def, etc.) and publishes
+            // them to `sticky_lines_out` so the view can pin them at top.
+            {
+                let doc_sticky = doc.clone();
+                create_effect(move |_| {
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    let _ = cursor_sig.get(); // track cursor changes
+                    let rope = doc_sticky.rope_text();
+                    let offset = cursor_sig.get_untracked().offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    let text = rope.slice_to_cow(0..rope.len()).to_string();
+                    let lines: Vec<&str> = text.lines().collect();
+
+                    // Patterns that start a scope block
+                    fn is_scope_header(line: &str) -> bool {
+                        let trimmed = line.trim();
+                        trimmed.starts_with("fn ")
+                            || trimmed.starts_with("pub fn ")
+                            || trimmed.starts_with("async fn ")
+                            || trimmed.starts_with("pub async fn ")
+                            || trimmed.starts_with("struct ")
+                            || trimmed.starts_with("pub struct ")
+                            || trimmed.starts_with("enum ")
+                            || trimmed.starts_with("pub enum ")
+                            || trimmed.starts_with("impl ")
+                            || trimmed.starts_with("trait ")
+                            || trimmed.starts_with("pub trait ")
+                            || trimmed.starts_with("mod ")
+                            || trimmed.starts_with("pub mod ")
+                            || trimmed.starts_with("class ")
+                            || trimmed.starts_with("def ")
+                            || trimmed.starts_with("interface ")
+                            || trimmed.starts_with("function ")
+                    }
+
+                    fn indent_of(line: &str) -> usize {
+                        line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+                    }
+
+                    let cur_indent = lines
+                        .get(cur_line)
+                        .map(|l| indent_of(l))
+                        .unwrap_or(0);
+
+                    let mut headers: Vec<String> = Vec::new();
+                    let mut last_indent = cur_indent;
+                    for line_idx in (0..cur_line).rev() {
+                        let line = match lines.get(line_idx) {
+                            Some(l) => l,
+                            None => continue,
+                        };
+                        let ind = indent_of(line);
+                        if is_scope_header(line) && ind < last_indent {
+                            headers.push(line.trim().to_string());
+                            last_indent = ind;
+                            if ind == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    headers.reverse();
+                    sticky_lines_out.set(headers);
+                });
+            }
+
             // ── Vim motion effect ─────────────────────────────────────────
             // When `vim_motion` is set and this tab is active, execute the
             // corresponding cursor movement or edit, then clear the signal.
@@ -2755,7 +2943,25 @@ pub fn editor_panel(
                     new_style.current_line = cur_line;
                     new_style.foldable_ranges = fold_ranges;
                     new_style.folded_starts = folded;
-                    new_style.bracket_pairs = bp_pairs;
+                    new_style.bracket_pairs = bp_pairs.clone();
+                    // Build bracket pair guides from pairs that span multiple lines
+                    if let Some(ref rope_doc) = new_style.doc {
+                        let rope = rope_doc.rope_text();
+                        let guides: Vec<(usize, usize, usize, usize)> = bp_pairs
+                            .iter()
+                            .filter_map(|&(open_b, close_b, depth)| {
+                                let open_line = rope.line_of_offset(open_b);
+                                let close_line = rope.line_of_offset(close_b);
+                                if close_line <= open_line + 1 {
+                                    return None; // same or adjacent line, no guide needed
+                                }
+                                let line_start = rope.offset_of_line(open_line);
+                                let open_col = open_b.saturating_sub(line_start);
+                                Some((open_line, open_col, close_line, depth))
+                            })
+                            .collect();
+                        new_style.bracket_pair_guides = guides;
+                    }
                     new_style.matching_bracket = match_brkt;
                     // Inline blame for the current cursor line
                     new_style.blame_line = if cur_line < blame_entries.len() {
@@ -3395,9 +3601,44 @@ pub fn editor_panel(
             .apply_if(!shown, |s| s.display(floem::style::Display::None))
     });
 
+    // ── Sticky scroll bar ────────────────────────────────────────────────────
+    // Shows the enclosing scope headers (fn/struct/impl) pinned just above the
+    // editor body when the cursor is scrolled into a nested block.
+    let sticky_bar = {
+        let sticky_theme = theme;
+        dyn_stack(
+            move || sticky_lines_out.get(),
+            |line| line.clone(),
+            move |line| {
+                let txt = label(move || line.clone()).style(move |s| {
+                    let t = sticky_theme.get();
+                    s.font_size(12.0)
+                        .color(t.palette.text_muted)
+                        .padding_horiz(12.0)
+                        .padding_vert(2.0)
+                        .font_family("JetBrains Mono".to_string())
+                });
+                container(txt).style(move |s| {
+                    let t = sticky_theme.get();
+                    s.width_full()
+                        .background(t.palette.bg_elevated.with_alpha(0.92))
+                        .border_bottom(1.0)
+                        .border_color(t.palette.border)
+                })
+            },
+        )
+        .style(move |s| {
+            let empty = sticky_lines_out.get().is_empty();
+            s.flex_col()
+                .width_full()
+                .apply_if(empty, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     stack((
         tab_bar,
         breadcrumbs,
+        sticky_bar,
         find_bar,
         editor_row,
         ghost_strip,
