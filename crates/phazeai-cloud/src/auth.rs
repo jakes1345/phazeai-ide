@@ -28,7 +28,10 @@ impl CloudCredentials {
     }
 
     pub fn is_authenticated(&self) -> bool {
-        self.api_token.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+        self.api_token
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
     }
 }
 

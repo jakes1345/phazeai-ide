@@ -15,7 +15,11 @@ pub struct TabItem {
 
 impl TabItem {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), icon: None }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            icon: None,
+        }
     }
 
     pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
@@ -50,20 +54,20 @@ pub fn phaze_tabs(
                     let p = &t.palette;
                     let is_active = active_id.get() == item_id;
                     s.padding_horiz(12.0)
-                     .padding_vert(7.0)
-                     .border_radius(6.0)
-                     .font_size(12.0)
-                     .cursor(floem::style::CursorStyle::Pointer)
-                     .apply_if(is_active, |s| {
-                         s.background(p.bg_elevated)
-                          .color(p.text_primary)
-                          .border_bottom(2.0)
-                          .border_color(p.accent)
-                     })
-                     .apply_if(!is_active, |s| {
-                         s.background(floem::peniko::Color::TRANSPARENT)
-                          .color(p.text_muted)
-                     })
+                        .padding_vert(7.0)
+                        .border_radius(6.0)
+                        .font_size(12.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .apply_if(is_active, |s| {
+                            s.background(p.bg_elevated)
+                                .color(p.text_primary)
+                                .border_bottom(2.0)
+                                .border_color(p.accent)
+                        })
+                        .apply_if(!is_active, |s| {
+                            s.background(floem::peniko::Color::TRANSPARENT)
+                                .color(p.text_muted)
+                        })
                 })
                 .on_click_stop(move |_| {
                     active_id.set(item_id_click.clone());
@@ -74,8 +78,8 @@ pub fn phaze_tabs(
         let t = theme.get();
         let p = &t.palette;
         s.border_bottom(1.0)
-         .border_color(p.border)
-         .gap(2.0)
-         .padding_horiz(4.0)
+            .border_color(p.border)
+            .gap(2.0)
+            .padding_horiz(4.0)
     })
 }

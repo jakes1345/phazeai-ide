@@ -16,7 +16,9 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(creds: &CloudCredentials, model: impl Into<String>) -> Result<Self> {
-        let token = creds.api_token.clone()
+        let token = creds
+            .api_token
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("No PhazeAI Cloud API token configured"))?;
         Ok(Self {
             http: Client::new(),
@@ -28,7 +30,8 @@ impl CloudClient {
     /// Validate credentials against the cloud API and return account info.
     pub async fn validate(&self) -> Result<AccountInfo> {
         let url = format!("{}/account", cloud_api_url());
-        let resp = self.http
+        let resp = self
+            .http
             .get(&url)
             .bearer_auth(&self.token)
             .send()

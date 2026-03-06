@@ -55,6 +55,10 @@ pub enum CommandResult {
     Cancel,
     /// Grep for a pattern in the project (/grep <pattern>).
     Grep(String),
+    /// Run a custom agent skill or command (.md file).
+    RunSkill { name: String, args: String },
+    /// Set up a PhazeAI GitHub Action workflow.
+    InstallGithubApp,
 }
 
 pub fn handle_command(input: &str) -> CommandResult {
@@ -208,6 +212,19 @@ pub fn handle_command(input: &str) -> CommandResult {
                 CommandResult::Grep(arg.to_string())
             }
         }
+        "/skill" | "/cmd" | "/run" => {
+            let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+            if parts[0].is_empty() {
+                CommandResult::Message("Usage: /skill <name> [args...]\nRuns a custom command from .phazeai/commands/<name>.md".into())
+            } else {
+                let name = parts[0].to_string();
+                let params = parts.get(1).unwrap_or(&"").to_string();
+                CommandResult::RunSkill { name, args: params }
+            }
+        }
+        "/install-github-action" | "/install-github-app" | "/setup-github-action" => {
+            CommandResult::InstallGithubApp
+        }
 
         // Unknown command
         _ => {
@@ -271,10 +288,19 @@ fn show_help() -> CommandResult {
   QUICK TOGGLES
     /yolo                     Auto-approve all tools (no more confirmations)
 
+  KEYBOARD SHORTCUTS
+    Ctrl+E                    Open external editor ($EDITOR) for prompt
+    Ctrl+B                    Toggle file tree pane
+    Ctrl+L                    Clear chat
+    Ctrl+U                    Kill line
+    Ctrl+W                    Delete word backward
+    Ctrl+C                    Copy (or Abort if running/empty)
+
   OTHER
     /help, /h                 Show this help message
     /version                  Show version information
     /exit, /quit, /q          Quit the application
+    /install-github-app       Setup PhazeAI GitHub Action workflow
 
 ╰────────────────────────────────────────────────────────────────╯";
 

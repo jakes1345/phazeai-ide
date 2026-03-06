@@ -20,13 +20,13 @@ async fn main() -> Result<(), PhazeError> {
     println!("🔌 Connecting to Ollama at {}...", base_url);
     let ollama_client = Arc::new(OllamaClient::new("qwen2.5-coder:14b").with_base_url(base_url));
 
-    let planner_client  = Arc::clone(&ollama_client);
-    let coder_client    = Arc::clone(&ollama_client);
+    let planner_client = Arc::clone(&ollama_client);
+    let coder_client = Arc::clone(&ollama_client);
     let reviewer_client = Arc::clone(&ollama_client);
 
     let orchestrator = MultiAgentOrchestrator::new(ollama_client)
-        .with_role_client(AgentRole::Planner,  planner_client)
-        .with_role_client(AgentRole::Coder,    coder_client)
+        .with_role_client(AgentRole::Planner, planner_client)
+        .with_role_client(AgentRole::Coder, coder_client)
         .with_role_client(AgentRole::Reviewer, reviewer_client);
 
     let task = AgentTask {
@@ -60,6 +60,18 @@ async fn main() -> Result<(), PhazeError> {
                         "--- Output Snippet ---\n{}\n---",
                         result.output.chars().take(200).collect::<String>()
                     );
+                }
+                MultiAgentEvent::RefinementStarted { max_iterations } => {
+                    println!("\n▶️  Refinement Started (max iter: {})", max_iterations);
+                }
+                MultiAgentEvent::BuildCheck { success, error_count, warning_count, .. } => {
+                    println!("\n▶️  Build Check: success={}, errs={}, warns={}", success, error_count, warning_count);
+                }
+                MultiAgentEvent::RefinementIteration { iteration, errors_remaining, .. } => {
+                    println!("\n▶️  Refinement Iteration: {} ({} errors remaining)", iteration, errors_remaining);
+                }
+                MultiAgentEvent::RefinementComplete { clean_build, iterations_used } => {
+                    println!("\n▶️  Refinement Complete (clean: {}, iters: {})", clean_build, iterations_used);
                 }
                 MultiAgentEvent::PipelineComplete { plan, code, review } => {
                     println!("\n🏁 PIPELINE COMPLETE!");

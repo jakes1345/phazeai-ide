@@ -35,7 +35,9 @@ impl FileEntry {
 
 /// Load the immediate children of `parent` at `depth`, sorted dirs-first.
 fn load_children(parent: &PathBuf, depth: usize) -> Vec<FileEntry> {
-    let Ok(rd) = std::fs::read_dir(parent) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return vec![];
+    };
 
     let mut entries: Vec<FileEntry> = rd
         .flatten()
@@ -43,19 +45,27 @@ fn load_children(parent: &PathBuf, depth: usize) -> Vec<FileEntry> {
             let path = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             // Skip hidden files/dirs and common noise
-            if name.starts_with('.') { return None; }
-            if name == "target" { return None; }
+            if name.starts_with('.') {
+                return None;
+            }
+            if name == "target" {
+                return None;
+            }
             let is_dir = path.is_dir();
-            Some(FileEntry { path, name, is_dir, depth, expanded: false })
+            Some(FileEntry {
+                path,
+                name,
+                is_dir,
+                depth,
+                expanded: false,
+            })
         })
         .collect();
 
-    entries.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     entries
@@ -84,7 +94,11 @@ fn build_visible_tree(root: &PathBuf) -> Vec<FileEntry> {
 /// Rebuild visible tree respecting expanded state from existing entries.
 fn rebuild_tree(root: &PathBuf, existing: &[FileEntry]) -> Vec<FileEntry> {
     fn collect_expanded(entries: &[FileEntry]) -> std::collections::HashSet<PathBuf> {
-        entries.iter().filter(|e| e.expanded).map(|e| e.path.clone()).collect()
+        entries
+            .iter()
+            .filter(|e| e.expanded)
+            .map(|e| e.path.clone())
+            .collect()
     }
 
     fn walk(
@@ -114,7 +128,9 @@ fn rebuild_tree(root: &PathBuf, existing: &[FileEntry]) -> Vec<FileEntry> {
 /// Perform a file operation and refresh the tree.
 /// Returns an error string on failure, or None on success.
 fn fs_create_file(path: &PathBuf) -> Result<(), String> {
-    std::fs::File::create(path).map(|_| ()).map_err(|e| e.to_string())
+    std::fs::File::create(path)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn fs_create_dir(path: &PathBuf) -> Result<(), String> {
@@ -154,7 +170,9 @@ pub fn explorer_panel(
         let send = create_ext_action(scope, move |map: HashMap<String, char>| {
             git_status.set(map);
         });
-        std::thread::spawn(move || { send(fetch_git_status(&root)); });
+        std::thread::spawn(move || {
+            send(fetch_git_status(&root));
+        });
     });
 
     // ── File watcher — auto-refresh tree when files change on disk ─────────
@@ -180,22 +198,23 @@ pub fn explorer_panel(
         // Background thread: watch and debounce filesystem events.
         std::thread::spawn(move || {
             let (ev_tx, ev_rx) = channel();
-            let mut watcher = match notify::recommended_watcher(
-                move |res: notify::Result<notify::Event>| {
+            let mut watcher =
+                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                     if let Ok(ev) = res {
                         match ev.kind {
-                            EventKind::Create(_) | EventKind::Remove(_)
-                            | EventKind::Modify(_) | EventKind::Any => {
+                            EventKind::Create(_)
+                            | EventKind::Remove(_)
+                            | EventKind::Modify(_)
+                            | EventKind::Any => {
                                 let _ = ev_tx.send(());
                             }
                             _ => {}
                         }
                     }
-                },
-            ) {
-                Ok(w) => w,
-                Err(_) => return,
-            };
+                }) {
+                    Ok(w) => w,
+                    Err(_) => return,
+                };
 
             if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
                 return;
@@ -203,9 +222,10 @@ pub fn explorer_panel(
 
             // Debounce: collect events for 300 ms then fire once.
             loop {
-                if ev_rx.recv().is_err() { break; }
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_millis(300);
+                if ev_rx.recv().is_err() {
+                    break;
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
                 while std::time::Instant::now() < deadline {
                     let _ = ev_rx.recv_timeout(std::time::Duration::from_millis(50));
                 }
@@ -224,7 +244,11 @@ pub fn explorer_panel(
         move |entry| {
             let indent = entry.depth as f64 * 16.0;
             let icon = if entry.is_dir {
-                if entry.expanded { icons::FOLDER_OPEN } else { icons::FOLDER }
+                if entry.expanded {
+                    icons::FOLDER_OPEN
+                } else {
+                    icons::FOLDER
+                }
             } else {
                 file_icon(&entry.name)
             };
@@ -243,14 +267,12 @@ pub fn explorer_panel(
 
             // Git badge label (reactive — updates when git_status refreshes)
             let badge_key = entry_path_badge.to_string_lossy().to_string();
-            let git_badge = label(move || {
-                match git_status.get().get(&badge_key).copied() {
-                    Some('M') => "M",
-                    Some('A') => "A",
-                    Some('D') => "D",
-                    Some('?') => "?",
-                    _ => "",
-                }
+            let git_badge = label(move || match git_status.get().get(&badge_key).copied() {
+                Some('M') => "M",
+                Some('A') => "A",
+                Some('D') => "D",
+                Some('?') => "?",
+                _ => "",
             })
             .style({
                 let badge_key2 = entry_path_badge.to_string_lossy().to_string();
@@ -264,7 +286,11 @@ pub fn explorer_panel(
                         Some('?') => p.warning,
                         _ => floem::peniko::Color::TRANSPARENT,
                     };
-                    s.font_size(10.0).color(color).margin_left(4.0).width(12.0).font_weight(floem::text::Weight::BOLD)
+                    s.font_size(10.0)
+                        .color(color)
+                        .margin_left(4.0)
+                        .width(12.0)
+                        .font_weight(floem::text::Weight::BOLD)
                 }
             });
 
@@ -272,17 +298,19 @@ pub fn explorer_panel(
                 stack((
                     // Indent spacer
                     container(label(|| "")).style(move |s| s.width(indent).height_full()),
-                    phaze_icon(icon, 13.0, move |p| if is_dir { p.accent } else { p.text_muted }, theme)
-                    .style(move |s: floem::style::Style| {
-                        s.margin_right(4.0)
-                    }),
+                    phaze_icon(
+                        icon,
+                        13.0,
+                        move |p| if is_dir { p.accent } else { p.text_muted },
+                        theme,
+                    )
+                    .style(move |s: floem::style::Style| s.margin_right(4.0)),
                     // Filename
-                    label(move || name.clone())
-                        .style(move |s| {
-                            let t = theme.get();
-                            let p = &t.palette;
-                            s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
-                        }),
+                    label(move || name.clone()).style(move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
+                    }),
                     // Git status badge
                     git_badge,
                 ))
@@ -304,11 +332,11 @@ pub fn explorer_panel(
                     floem::peniko::Color::TRANSPARENT
                 };
                 s.width_full()
-                 .height(22.0)
-                 .background(bg)
-                 .border_radius(3.0)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .padding_horiz(4.0)
+                    .height(22.0)
+                    .background(bg)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .padding_horiz(4.0)
             })
             .on_click_stop({
                 let entry_path2 = entry.path.clone();
@@ -352,8 +380,8 @@ pub fn explorer_panel(
 
                             // ── New File ──────────────────────────────────────
                             let pdir = parent_dir.clone();
-                            let menu = Menu::new("")
-                                .entry(MenuItem::new("New File").action(move || {
+                            let menu =
+                                Menu::new("").entry(MenuItem::new("New File").action(move || {
                                     // Create an untitled file in parent dir
                                     let new_path = find_unique_path(&pdir, "untitled", "");
                                     let _ = fs_create_file(&new_path);
@@ -413,24 +441,21 @@ pub fn explorer_panel(
     .style(|s| s.flex_col().padding(4.0).gap(1.0));
 
     // Panel header
-    let header = container(
-        label(|| "EXPLORER")
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.color(p.text_muted)
-                 .font_size(11.0)
-                 .font_weight(floem::text::Weight::BOLD)
-            }),
-    )
+    let header = container(label(|| "EXPLORER").style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.color(p.text_muted)
+            .font_size(11.0)
+            .font_weight(floem::text::Weight::BOLD)
+    }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.padding_horiz(12.0)
-         .padding_vert(8.0)
-         .border_bottom(1.0)
-         .border_color(p.border)
-         .width_full()
+            .padding_vert(8.0)
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .width_full()
     });
 
     // Scrollable tree wrapped in a container that captures keyboard events
@@ -473,7 +498,9 @@ pub fn explorer_panel(
                             if let Some(entry) = entry_opt {
                                 if entry.is_dir && !entry.expanded {
                                     entries.update(|list| {
-                                        if let Some(e) = list.iter_mut().find(|e| e.path == entry.path) {
+                                        if let Some(e) =
+                                            list.iter_mut().find(|e| e.path == entry.path)
+                                        {
                                             e.expanded = true;
                                         }
                                         let root = root_sig.get();
@@ -491,7 +518,9 @@ pub fn explorer_panel(
                                 if entry.is_dir && entry.expanded {
                                     // Collapse this dir
                                     entries.update(|list| {
-                                        if let Some(e) = list.iter_mut().find(|e| e.path == entry.path) {
+                                        if let Some(e) =
+                                            list.iter_mut().find(|e| e.path == entry.path)
+                                        {
                                             e.expanded = false;
                                         }
                                         let root = root_sig.get();
@@ -502,7 +531,9 @@ pub fn explorer_panel(
                                     let parent = entry.path.parent().map(|p| p.to_path_buf());
                                     if let Some(parent_path) = parent {
                                         let list = entries.get();
-                                        if let Some(parent_idx) = list.iter().position(|e| e.path == parent_path) {
+                                        if let Some(parent_idx) =
+                                            list.iter().position(|e| e.path == parent_path)
+                                        {
                                             focused_idx.set(Some(parent_idx));
                                         }
                                     }
@@ -517,7 +548,9 @@ pub fn explorer_panel(
                             if let Some(entry) = entry_opt {
                                 if entry.is_dir {
                                     entries.update(|list| {
-                                        if let Some(e) = list.iter_mut().find(|e| e.path == entry.path) {
+                                        if let Some(e) =
+                                            list.iter_mut().find(|e| e.path == entry.path)
+                                        {
                                             e.expanded = !e.expanded;
                                         }
                                         let root = root_sig.get();
@@ -534,17 +567,13 @@ pub fn explorer_panel(
             }
         });
 
-    stack((
-        header,
-        panel_body,
-    ))
-    .style(move |s| {
+    stack((header, panel_body)).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.flex_col()
-         .width_full()
-         .height_full()
-         .background(p.bg_panel)
+            .width_full()
+            .height_full()
+            .background(p.bg_panel)
     })
 }
 
@@ -586,18 +615,32 @@ fn fetch_git_status(root: &PathBuf) -> HashMap<String, char> {
     else {
         return map;
     };
-    if !out.status.success() { return map; }
+    if !out.status.success() {
+        return map;
+    }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if line.len() < 4 { continue; }
+        if line.len() < 4 {
+            continue;
+        }
         let xy = &line[..2];
         let rel = line[3..].trim();
         // Handle rename format "old -> new"
-        let rel = if let Some(arrow) = rel.find(" -> ") { &rel[arrow + 4..] } else { rel };
-        let status = if xy.contains('M') { 'M' }
-            else if xy.starts_with('A') { 'A' }
-            else if xy.contains('D') { 'D' }
-            else if xy == "??" { '?' }
-            else { continue };
+        let rel = if let Some(arrow) = rel.find(" -> ") {
+            &rel[arrow + 4..]
+        } else {
+            rel
+        };
+        let status = if xy.contains('M') {
+            'M'
+        } else if xy.starts_with('A') {
+            'A'
+        } else if xy.contains('D') {
+            'D'
+        } else if xy == "??" {
+            '?'
+        } else {
+            continue;
+        };
         let abs = root.join(rel);
         map.insert(abs.to_string_lossy().to_string(), status);
     }

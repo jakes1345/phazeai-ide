@@ -163,26 +163,30 @@ impl OllamaManager {
 
 // ── Inline Modelfile content ────────────────────────────────────────
 
-const MODELFILE_CODER: &str = r#"FROM qwen2.5-coder:14b
+const MODELFILE_CODER: &str = r#"FROM qwen2.5-coder:7b
 SYSTEM """You are PhazeAI Coder, an elite AI coding assistant.
 RULES: Write COMPLETE production code. No placeholders. No TODOs.
 Include error handling. Match codebase style. Output diffs with file paths."""
 PARAMETER temperature 0.3
 PARAMETER top_p 0.9
-PARAMETER num_ctx 32768
+PARAMETER num_ctx 8192
 PARAMETER repeat_penalty 1.1
+PARAMETER num_predict 4096
 "#;
 
-const MODELFILE_PLANNER: &str = r#"FROM llama3.2:3b
+const MODELFILE_PLANNER: &str = r#"FROM qwen3:8b
 SYSTEM """You are PhazeAI Planner. Analyze coding requests, produce step-by-step plans.
-Output: analysis, numbered steps, files to change, risks. Never write code."""
+Output: analysis, numbered steps, files to change, risks. Never write code.
+Use chain-of-thought reasoning for complex decisions."""
 PARAMETER temperature 0.5
 PARAMETER num_ctx 8192
+PARAMETER num_predict 2048
 "#;
 
-const MODELFILE_REVIEWER: &str = r#"FROM deepseek-coder-v2:16b
+const MODELFILE_REVIEWER: &str = r#"FROM hhao/qwen2.5-coder-tools:7b
 SYSTEM """You are PhazeAI Reviewer. Review code for bugs, security, and quality.
 Output: APPROVED, CONCERNS, or REJECTED with specific line references."""
 PARAMETER temperature 0.2
-PARAMETER num_ctx 16384
+PARAMETER num_ctx 8192
+PARAMETER num_predict 2048
 "#;

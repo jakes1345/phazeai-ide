@@ -15,29 +15,27 @@ use crate::{
 /// A thin horizontal rule used to separate sections.
 fn divider(state: IdeState) -> impl IntoView {
     let theme = state.theme;
-    container(label(|| ""))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.height(1.0)
-             .width_full()
-             .background(p.border)
-             .margin_vert(8.0)
-        })
+    container(label(|| "")).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.height(1.0)
+            .width_full()
+            .background(p.border)
+            .margin_vert(8.0)
+    })
 }
 
 /// An uppercase section header label.
 fn section_header(text: &'static str, state: IdeState) -> impl IntoView {
     let theme = state.theme;
-    label(move || text)
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.font_size(10.0)
-             .color(p.accent)
-             .font_weight(floem::text::Weight::BOLD)
-             .margin_bottom(10.0)
-        })
+    label(move || text).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(10.0)
+            .color(p.accent)
+            .font_weight(floem::text::Weight::BOLD)
+            .margin_bottom(10.0)
+    })
 }
 
 /// A small +/- stepper button.
@@ -50,22 +48,35 @@ fn stepper_btn(
     let theme = state.theme;
     let is_hovered = create_rw_signal(false);
 
-    container(
-        phaze_icon(icon, 14.0, move |p| if is_hovered.get() { p.accent } else { p.text_secondary }, theme)
-    )
+    container(phaze_icon(
+        icon,
+        14.0,
+        move |p| {
+            if is_hovered.get() {
+                p.accent
+            } else {
+                p.text_secondary
+            }
+        },
+        theme,
+    ))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
-        let bg = if is_hovered.get() { p.bg_elevated } else { p.bg_surface };
+        let bg = if is_hovered.get() {
+            p.bg_elevated
+        } else {
+            p.bg_surface
+        };
         s.width(24.0)
-         .height(24.0)
-         .border(1.0)
-         .border_color(p.border)
-         .border_radius(4.0)
-         .background(bg)
-         .items_center()
-         .justify_center()
-         .cursor(floem::style::CursorStyle::Pointer)
+            .height(24.0)
+            .border(1.0)
+            .border_color(p.border)
+            .border_radius(4.0)
+            .background(bg)
+            .items_center()
+            .justify_center()
+            .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| on_click())
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -86,80 +97,84 @@ fn stepper_row(
 ) -> impl IntoView {
     let theme = state.theme;
     let dec = stepper_btn("-", state.clone(), move || {
-        value.update(|v| { if *v > min { *v -= 1; } });
+        value.update(|v| {
+            if *v > min {
+                *v -= 1;
+            }
+        });
     });
 
     let inc = stepper_btn("+", state.clone(), move || {
-        value.update(|v| { if *v < max { *v += 1; } });
+        value.update(|v| {
+            if *v < max {
+                *v += 1;
+            }
+        });
     });
 
-    let value_display = container(
-        label(move || value.get().to_string())
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(13.0).color(p.text_primary)
-            }),
-    )
+    let value_display = container(label(move || value.get().to_string()).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(13.0).color(p.text_primary)
+    }))
     .style(|s| s.width(28.0).items_center().justify_center());
 
-    let controls = stack((dec, value_display, inc))
-        .style(|s| s.flex_row().items_center().gap(2.0));
+    let controls = stack((dec, value_display, inc)).style(|s| s.flex_row().items_center().gap(2.0));
 
     stack((
-        label(move || row_label)
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
-            }),
+        label(move || row_label).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
+        }),
         controls,
     ))
-    .style(|s| {
-        s.flex_row()
-         .items_center()
-         .width_full()
-         .padding_vert(4.0)
-    })
+    .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0))
 }
 
 // ─── theme tiles ─────────────────────────────────────────────────────────────
 
-fn theme_tile(
-    name: &'static str,
-    state: IdeState,
-) -> impl IntoView {
+fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
     let theme = state.theme;
     let is_hovered = create_rw_signal(false);
 
-    container(
-        label(move || name)
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                let active = t.variant.name() == name;
-                let color = if active { p.accent } else { p.text_secondary };
-                s.font_size(12.0).color(color)
-            }),
-    )
+    container(label(move || name).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let active = t.variant.name() == name;
+        let color = if active { p.accent } else { p.text_secondary };
+        s.font_size(12.0).color(color)
+    }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         let active = t.variant.name() == name;
         let hovered = is_hovered.get();
-        let border_color = if active { p.accent } else if hovered { p.border_focus } else { p.border };
-        let bg = if active { p.accent_dim } else if hovered { p.bg_elevated } else { p.bg_surface };
+        let border_color = if active {
+            p.accent
+        } else if hovered {
+            p.border_focus
+        } else {
+            p.border
+        };
+        let bg = if active {
+            p.accent_dim
+        } else if hovered {
+            p.bg_elevated
+        } else {
+            p.bg_surface
+        };
         s.width(100.0)
-         .padding_vert(7.0)
-         .padding_horiz(4.0)
-         .background(bg)
-         .border(if active { 2.0 } else { 1.0 })
-         .border_color(border_color)
-         .border_radius(6.0)
-         .items_center()
-         .justify_center()
-         .cursor(floem::style::CursorStyle::Pointer)
+            .padding_vert(7.0)
+            .padding_horiz(4.0)
+            .background(bg)
+            .border(if active { 2.0 } else { 1.0 })
+            .border_color(border_color)
+            .border_radius(6.0)
+            .items_center()
+            .justify_center()
+            .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| {
         theme.set(PhazeTheme::from_str(name));
@@ -192,16 +207,12 @@ fn theme_section(state: IdeState) -> impl IntoView {
     )
     .style(|s| {
         s.flex_row()
-         .flex_wrap(floem::style::FlexWrap::Wrap)
-         .gap(6.0)
-         .width_full()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(6.0)
+            .width_full()
     });
 
-    stack((
-        section_header("THEME", state.clone()),
-        tiles,
-    ))
-    .style(|s| s.flex_col().width_full())
+    stack((section_header("THEME", state.clone()), tiles)).style(|s| s.flex_col().width_full())
 }
 
 fn editor_section(state: IdeState) -> impl IntoView {
@@ -209,40 +220,52 @@ fn editor_section(state: IdeState) -> impl IntoView {
     let font_size = state.font_size;
     let tab_size = state.tab_size;
 
-    let auto_save   = state.auto_save;
-    let word_wrap   = state.word_wrap;
-    let theme_as    = state.theme;
-    let as_hov      = floem::reactive::create_rw_signal(false);
-    let ww_hov      = floem::reactive::create_rw_signal(false);
+    let auto_save = state.auto_save;
+    let word_wrap = state.word_wrap;
+    let theme_as = state.theme;
+    let as_hov = floem::reactive::create_rw_signal(false);
+    let ww_hov = floem::reactive::create_rw_signal(false);
 
-    let toggle_row = |label_text: &'static str,
-                      sig: floem::reactive::RwSignal<bool>,
-                      hov: floem::reactive::RwSignal<bool>,
-                      theme_sig: floem::reactive::RwSignal<crate::theme::PhazeTheme>| {
-        container(stack((
-            label(move || label_text)
-                .style(move |s| {
-                    let p = theme_sig.get().palette;
-                    s.font_size(12.0).color(p.text_primary).flex_grow(1.0)
-                }),
-            container(label(move || if sig.get() { "ON" } else { "OFF" }))
-                .style(move |s| {
-                    let p = theme_sig.get().palette;
-                    let on = sig.get();
-                    s.font_size(11.0).padding_horiz(8.0).padding_vert(3.0)
-                     .border_radius(4.0)
-                     .color(p.bg_base)
-                     .background(if on { p.success } else { p.bg_elevated })
-                     .border(1.0).border_color(if on { p.success } else { p.border })
-                     .cursor(floem::style::CursorStyle::Pointer)
-                     .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
-                })
-                .on_click_stop(move |_| { sig.update(|v| *v = !*v); })
-                .on_event_stop(floem::event::EventListener::PointerEnter, move |_| hov.set(true))
-                .on_event_stop(floem::event::EventListener::PointerLeave, move |_| hov.set(false)),
-        )).style(|s| s.flex_row().items_center().padding_vert(4.0)))
-        .style(|s| s.width_full().padding_horiz(4.0))
-    };
+    let toggle_row =
+        |label_text: &'static str,
+         sig: floem::reactive::RwSignal<bool>,
+         hov: floem::reactive::RwSignal<bool>,
+         theme_sig: floem::reactive::RwSignal<crate::theme::PhazeTheme>| {
+            container(
+                stack((
+                    label(move || label_text).style(move |s| {
+                        let p = theme_sig.get().palette;
+                        s.font_size(12.0).color(p.text_primary).flex_grow(1.0)
+                    }),
+                    container(label(move || if sig.get() { "ON" } else { "OFF" }))
+                        .style(move |s| {
+                            let p = theme_sig.get().palette;
+                            let on = sig.get();
+                            s.font_size(11.0)
+                                .padding_horiz(8.0)
+                                .padding_vert(3.0)
+                                .border_radius(4.0)
+                                .color(p.bg_base)
+                                .background(if on { p.success } else { p.bg_elevated })
+                                .border(1.0)
+                                .border_color(if on { p.success } else { p.border })
+                                .cursor(floem::style::CursorStyle::Pointer)
+                                .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
+                        })
+                        .on_click_stop(move |_| {
+                            sig.update(|v| *v = !*v);
+                        })
+                        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                            hov.set(true)
+                        })
+                        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                            hov.set(false)
+                        }),
+                ))
+                .style(|s| s.flex_row().items_center().padding_vert(4.0)),
+            )
+            .style(|s| s.width_full().padding_horiz(4.0))
+        };
 
     stack((
         section_header("EDITOR", state.clone()),
@@ -257,45 +280,60 @@ fn editor_section(state: IdeState) -> impl IntoView {
 /// A clickable provider option tile.
 fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
-    let theme     = state.theme;
-    let provider  = state.ai_provider;
+    let theme = state.theme;
+    let provider = state.ai_provider;
     let is_hovered = create_rw_signal(false);
 
-    container(
-        label(move || name)
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                let active = provider.get() == name;
-                let color = if active { p.accent } else { p.text_secondary };
-                s.font_size(11.0).color(color)
-            }),
-    )
+    container(label(move || name).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let active = provider.get() == name;
+        let color = if active { p.accent } else { p.text_secondary };
+        s.font_size(11.0).color(color)
+    }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
-        let active  = provider.get() == name;
+        let active = provider.get() == name;
         let hovered = is_hovered.get();
-        let border_color = if active { p.accent } else if hovered { p.border_focus } else { p.border };
-        let bg = if active { p.accent_dim } else if hovered { p.bg_elevated } else { p.bg_surface };
+        let border_color = if active {
+            p.accent
+        } else if hovered {
+            p.border_focus
+        } else {
+            p.border
+        };
+        let bg = if active {
+            p.accent_dim
+        } else if hovered {
+            p.bg_elevated
+        } else {
+            p.bg_surface
+        };
         s.padding_vert(5.0)
-         .padding_horiz(8.0)
-         .background(bg)
-         .border(if active { 2.0 } else { 1.0 })
-         .border_color(border_color)
-         .border_radius(5.0)
-         .items_center()
-         .justify_center()
-         .cursor(floem::style::CursorStyle::Pointer)
+            .padding_horiz(8.0)
+            .background(bg)
+            .border(if active { 2.0 } else { 1.0 })
+            .border_color(border_color)
+            .border_radius(5.0)
+            .items_center()
+            .justify_center()
+            .cursor(floem::style::CursorStyle::Pointer)
     })
-    .on_click_stop(move |_| { provider.set(name.to_string()); })
-    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| { is_hovered.set(true); })
-    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| { is_hovered.set(false); })
+    .on_click_stop(move |_| {
+        provider.set(name.to_string());
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+        is_hovered.set(true);
+    })
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+        is_hovered.set(false);
+    })
 }
 
 fn ai_section(state: IdeState) -> impl IntoView {
-    let theme      = state.theme;
-    let ai_model   = state.ai_model;
+    let theme = state.theme;
+    let ai_model = state.ai_model;
 
     // Provider tiles
     const PROVIDERS: &[&str] = &[
@@ -310,49 +348,58 @@ fn ai_section(state: IdeState) -> impl IntoView {
     ];
 
     let provider_tiles = dyn_stack(
-        move || PROVIDERS.iter().enumerate().map(|(i, n)| (i, *n)).collect::<Vec<_>>(),
+        move || {
+            PROVIDERS
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (i, *n))
+                .collect::<Vec<_>>()
+        },
         |(i, _)| *i,
         {
             let state = state.clone();
             move |(_i, name)| provider_tile(name, state.clone())
         },
     )
-    .style(|s| s.flex_row().flex_wrap(floem::style::FlexWrap::Wrap).gap(4.0).width_full());
+    .style(|s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(4.0)
+            .width_full()
+    });
 
     let provider_section = stack((
-        label(|| "Provider")
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(12.0).color(p.text_muted).margin_bottom(6.0)
-            }),
+        label(|| "Provider").style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.font_size(12.0).color(p.text_muted).margin_bottom(6.0)
+        }),
         provider_tiles,
     ))
     .style(|s| s.flex_col().width_full().padding_vert(4.0));
 
     // Model row — free-text input
     let model_row = stack((
-        label(|| "Model")
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
-            }),
+        label(|| "Model").style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
+        }),
         text_input(ai_model)
             .placeholder("e.g. claude-sonnet-4-6")
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
                 s.width(160.0)
-                 .background(p.bg_elevated)
-                 .border(1.0)
-                 .border_color(p.border_focus)
-                 .border_radius(4.0)
-                 .color(p.text_primary)
-                 .padding_horiz(8.0)
-                 .padding_vert(4.0)
-                 .font_size(12.0)
-                 .min_width(0.0)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border_focus)
+                    .border_radius(4.0)
+                    .color(p.text_primary)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .font_size(12.0)
+                    .min_width(0.0)
             }),
     ))
     .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0));
@@ -372,41 +419,38 @@ fn about_section(state: IdeState) -> impl IntoView {
 
     let icon_row = stack((
         phaze_icon(icons::AI, 22.0, move |p| p.accent, theme)
-            .style(move |s: floem::style::Style| {
-                s.margin_right(8.0)
-            }),
+            .style(move |s: floem::style::Style| s.margin_right(8.0)),
         stack((
-            label(|| "PhazeAI IDE")
-                .style(move |s| {
-                    let t = theme.get();
-                    let p = &t.palette;
-                    s.font_size(15.0)
-                     .color(p.text_primary)
-                     .font_weight(floem::text::Weight::BOLD)
-                }),
-            label(|| "Version 0.1.0")
-                .style(move |s| {
-                    let t = theme.get();
-                    let p = &t.palette;
-                    s.font_size(11.0).color(p.text_muted)
-                }),
+            label(|| "PhazeAI IDE").style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(15.0)
+                    .color(p.text_primary)
+                    .font_weight(floem::text::Weight::BOLD)
+            }),
+            label(|| "Version 0.1.0").style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(11.0).color(p.text_muted)
+            }),
         ))
         .style(|s| s.flex_col().gap(2.0)),
     ))
     .style(|s| s.flex_row().items_center().padding_vert(4.0));
 
-    let link = container(
-        label(|| "github.com/phazeai/ide")
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                let color = if is_link_hovered.get() { p.accent_hover } else { p.accent };
-                s.font_size(12.0).color(color)
-            }),
-    )
+    let link = container(label(|| "github.com/phazeai/ide").style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let color = if is_link_hovered.get() {
+            p.accent_hover
+        } else {
+            p.accent
+        };
+        s.font_size(12.0).color(color)
+    }))
     .style(move |s| {
         s.padding_vert(4.0)
-         .cursor(floem::style::CursorStyle::Pointer)
+            .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         is_link_hovered.set(true);
@@ -415,12 +459,95 @@ fn about_section(state: IdeState) -> impl IntoView {
         is_link_hovered.set(false);
     });
 
-    stack((
-        section_header("ABOUT", state.clone()),
-        icon_row,
-        link,
-    ))
-    .style(|s| s.flex_col().width_full())
+    stack((section_header("ABOUT", state.clone()), icon_row, link))
+        .style(|s| s.flex_col().width_full())
+}
+
+// ─── keybindings reference ───────────────────────────────────────────────────────
+
+fn keybindings_section(state: IdeState) -> impl IntoView {
+    let theme = state.theme;
+
+    const BINDINGS: &[(&str, &str)] = &[
+        // File
+        ("Ctrl+O", "Open File"),
+        ("Ctrl+S", "Save File"),
+        ("Ctrl+P", "File Picker"),
+        ("Ctrl+Shift+P", "Command Palette"),
+        // Navigation
+        ("Ctrl+G", "Go to Line"),
+        ("F12", "Go to Definition"),
+        ("Shift+F12", "Find All References"),
+        ("F2", "Rename Symbol"),
+        ("Ctrl+T", "Workspace Symbols"),
+        // Editing
+        ("Ctrl+/", "Toggle Comment"),
+        ("Ctrl+D", "Select Next Occurrence"),
+        ("Alt+Up", "Move Line Up"),
+        ("Alt+Down", "Move Line Down"),
+        ("Alt+Shift+Down", "Duplicate Line"),
+        ("Ctrl+Shift+[", "Fold Block"),
+        ("Ctrl+Shift+]", "Unfold Block"),
+        ("Ctrl+Shift+K", "Delete Line"),
+        ("Tab", "Accept Completion / Ghost Text"),
+        // Search
+        ("Ctrl+F", "Find in File"),
+        ("Ctrl+H", "Find and Replace"),
+        // View
+        ("Ctrl+B", "Toggle Explorer"),
+        ("Ctrl+J", "Toggle Terminal"),
+        ("Ctrl+\\", "Toggle AI Chat"),
+        ("Ctrl+Shift+Z", "Zen Mode"),
+        ("Alt+Z", "Word Wrap"),
+        ("Ctrl+= / Ctrl+-", "Zoom In / Out"),
+        ("Ctrl+0", "Reset Zoom"),
+        // AI
+        ("Ctrl+K", "Inline AI Edit"),
+        ("Ctrl+Space", "LSP Completions"),
+        ("Ctrl+Shift+Space", "Signature Help"),
+        ("Ctrl+.", "Code Actions"),
+    ];
+
+    let binding_rows = dyn_stack(
+        move || {
+            BINDINGS
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (i, b.0, b.1))
+                .collect::<Vec<_>>()
+        },
+        |(i, _, _)| *i,
+        move |(_i, shortcut, description)| {
+            stack((
+                container(label(move || shortcut)).style(move |s| {
+                    let p = theme.get().palette;
+                    s.width(140.0)
+                        .font_size(11.0)
+                        .color(p.accent)
+                        .font_family("JetBrains Mono, Fira Code, monospace".to_string())
+                        .padding_vert(3.0)
+                }),
+                label(move || description).style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(12.0).color(p.text_secondary).flex_grow(1.0)
+                }),
+            ))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.flex_row()
+                    .items_center()
+                    .width_full()
+                    .padding_vert(2.0)
+                    .padding_horiz(4.0)
+                    .border_bottom(1.0)
+                    .border_color(p.border.with_alpha(0.15))
+            })
+        },
+    )
+    .style(|s| s.flex_col().width_full());
+
+    stack((section_header("KEYBINDINGS", state.clone()), binding_rows))
+        .style(|s| s.flex_col().width_full())
 }
 
 // ─── public entry point ──────────────────────────────────────────────────────
@@ -446,14 +573,13 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
     let header = container(
         stack((
             phaze_icon(icons::SETTINGS, 14.0, move |p| p.accent, theme),
-            label(|| "  SETTINGS")
-                .style(move |s| {
-                    let t = theme.get();
-                    let p = &t.palette;
-                    s.font_size(11.0)
-                     .color(p.accent)
-                     .font_weight(floem::text::Weight::BOLD)
-                }),
+            label(|| "  SETTINGS").style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(11.0)
+                    .color(p.accent)
+                    .font_weight(floem::text::Weight::BOLD)
+            }),
         ))
         .style(|s| s.flex_row().items_center()),
     )
@@ -461,9 +587,9 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         let t = theme.get();
         let p = &t.palette;
         s.padding(12.0)
-         .border_bottom(1.0)
-         .border_color(p.border)
-         .width_full()
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .width_full()
     });
 
     // Scrollable body containing all sections
@@ -474,27 +600,22 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         divider(state.clone()),
         ai_section(state.clone()),
         divider(state.clone()),
+        keybindings_section(state.clone()),
+        divider(state.clone()),
         about_section(state.clone()),
         // Bottom breathing room
         container(label(|| "")).style(|s| s.height(24.0)),
     ))
-    .style(|s| {
+    .style(|s| s.flex_col().width_full().padding(16.0).gap(0.0));
+
+    let scrollable_body = scroll(body).style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+
+    stack((header, scrollable_body)).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
         s.flex_col()
-         .width_full()
-         .padding(16.0)
-         .gap(0.0)
-    });
-
-    let scrollable_body = scroll(body)
-        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
-
-    stack((header, scrollable_body))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.flex_col()
-             .width_full()
-             .height_full()
-             .background(p.bg_panel)
-        })
+            .width_full()
+            .height_full()
+            .background(p.bg_panel)
+    })
 }

@@ -11,7 +11,10 @@ use floem::{
 };
 use phazeai_core::{Agent, AgentEvent, Settings};
 
-use crate::{components::icon::{icons, phaze_icon}, theme::PhazeTheme};
+use crate::{
+    components::icon::{icons, phaze_icon},
+    theme::PhazeTheme,
+};
 
 // ── Chat Types ────────────────────────────────────────────────────────────────
 
@@ -73,7 +76,17 @@ fn send_to_ai(
                     return;
                 }
             };
-            let agent = Agent::new(client);
+            let mut agent = Agent::new(client);
+
+            // Connect to MCP servers
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let mcp_configs = phazeai_core::mcp::McpManager::load_config(&cwd);
+            if !mcp_configs.is_empty() {
+                let mut mcp_manager = phazeai_core::mcp::McpManager::new();
+                mcp_manager.connect_all(&mcp_configs);
+                agent.register_mcp_tools(std::sync::Arc::new(std::sync::Mutex::new(mcp_manager)));
+            }
+
             let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
             let run_fut = agent.run_with_events(&user_message, agent_tx);
@@ -119,7 +132,6 @@ fn send_to_ai(
 /// Settings are re-loaded from disk on each send so model/provider changes in
 /// the settings panel take effect immediately without restarting.
 pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> impl IntoView {
-
     let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(vec![ChatMessage {
         role: ChatRole::Assistant,
         content: "Welcome to PhazeAI. How can I help you?".to_string(),
@@ -232,22 +244,20 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
     // ── Header — neon strip + title ───────────────────────────────────────────
 
     // 2px accent-colored top strip (the "neon line" on top of the panel)
-    let neon_strip = container(label(|| ""))
-        .style(move |s| {
-            s.height(2.0)
-             .width_full()
-             .background(theme.get().palette.accent)
-        });
+    let neon_strip = container(label(|| "")).style(move |s| {
+        s.height(2.0)
+            .width_full()
+            .background(theme.get().palette.accent)
+    });
 
     let header_content = container(
         stack((
             phaze_icon(icons::AI, 14.0, move |p| p.accent, theme),
-            label(|| "  PHAZEAI")
-                .style(move |s| {
-                    s.font_size(11.0)
-                     .color(theme.get().palette.accent)
-                     .font_weight(floem::text::Weight::BOLD)
-                }),
+            label(|| "  PHAZEAI").style(move |s| {
+                s.font_size(11.0)
+                    .color(theme.get().palette.accent)
+                    .font_weight(floem::text::Weight::BOLD)
+            }),
         ))
         .style(|s| s.items_center()),
     )
@@ -255,26 +265,19 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
         let t = theme.get();
         let p = &t.palette;
         s.padding_horiz(14.0)
-         .padding_vert(10.0)
-         .border_bottom(1.0)
-         .border_color(p.glass_border)
-         .width_full()
-         .background(p.glass_bg)
+            .padding_vert(10.0)
+            .border_bottom(1.0)
+            .border_color(p.glass_border)
+            .width_full()
+            .background(p.glass_bg)
     });
 
-    let header = stack((neon_strip, header_content))
-        .style(|s| s.flex_col().width_full());
+    let header = stack((neon_strip, header_content)).style(|s| s.flex_col().width_full());
 
     // ── Message bubbles ───────────────────────────────────────────────────────
 
     let msg_list = dyn_stack(
-        move || {
-            messages
-                .get()
-                .into_iter()
-                .enumerate()
-                .collect::<Vec<_>>()
-        },
+        move || messages.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(i, _)| *i,
         move |(_, msg)| {
             let is_user = msg.role == ChatRole::User;
@@ -292,27 +295,28 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
             container(
                 stack((
                     // Icon/Label for Tool cards
-                    phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme)
-                    .style(move |s: floem::style::Style| {
-                        s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
-                    }),
+                    phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
+                        move |s: floem::style::Style| {
+                            s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
+                        },
+                    ),
                     label(move || text_content.clone()).style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
                         s.font_size(if is_tool { 11.0 } else { 13.0 })
-                         .color(if is_user {
-                             p.text_primary
-                         } else if is_typing || is_tool {
-                             p.accent
-                         } else {
-                             p.text_secondary
-                         })
-                         .max_width_pct(100.0)
-                         .line_height(1.5)
-                         .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
+                            .color(if is_user {
+                                p.text_primary
+                            } else if is_typing || is_tool {
+                                p.accent
+                            } else {
+                                p.text_secondary
+                            })
+                            .max_width_pct(100.0)
+                            .line_height(1.5)
+                            .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
                     }),
                 ))
-                .style(|s| s.items_center())
+                .style(|s| s.items_center()),
             )
             .style(move |s| {
                 let t = theme.get();
@@ -320,48 +324,47 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
                 if is_user {
                     // User bubble: accent tinted glass
                     s.width_full()
-                     .padding_horiz(14.0)
-                     .padding_vert(10.0)
-                     .background(p.accent_dim)
-                     .border(1.0)
-                     .border_color(p.glass_border)
-                     .border_radius(12.0)
-                     .margin_bottom(8.0)
-                     // Subtle inner glow
-                     .box_shadow_blur(12.0)
-                     .box_shadow_color(p.glow)
-                     .box_shadow_spread(0.0)
-                     .box_shadow_h_offset(0.0)
-                     .box_shadow_v_offset(0.0)
+                        .padding_horiz(14.0)
+                        .padding_vert(10.0)
+                        .background(p.accent_dim)
+                        .border(1.0)
+                        .border_color(p.glass_border)
+                        .border_radius(12.0)
+                        .margin_bottom(8.0)
+                        // Subtle inner glow
+                        .box_shadow_blur(12.0)
+                        .box_shadow_color(p.glow)
+                        .box_shadow_spread(0.0)
+                        .box_shadow_h_offset(0.0)
+                        .box_shadow_v_offset(0.0)
                 } else if is_tool {
                     // Tool card: specialized micro-bubble
                     s.width_full()
-                     .padding_horiz(10.0)
-                     .padding_vert(6.0)
-                     .background(p.bg_deep.with_alpha(0.6))
-                     .border(1.0)
-                     .border_color(p.glass_border)
-                     .border_radius(6.0)
-                     .margin_bottom(6.0)
-                     .margin_horiz(20.0) // Indent tool calls
+                        .padding_horiz(10.0)
+                        .padding_vert(6.0)
+                        .background(p.bg_deep.with_alpha(0.6))
+                        .border(1.0)
+                        .border_color(p.glass_border)
+                        .border_radius(6.0)
+                        .margin_bottom(6.0)
+                        .margin_horiz(20.0) // Indent tool calls
                 } else {
                     // Assistant bubble: darker glass for better readability
                     s.width_full()
-                     .padding_horiz(14.0)
-                     .padding_vert(10.0)
-                     .background(p.bg_panel)
-                     .border(1.0)
-                     .border_color(p.glass_border)
-                     .border_radius(10.0)
-                     .margin_bottom(8.0)
+                        .padding_horiz(14.0)
+                        .padding_vert(10.0)
+                        .background(p.bg_panel)
+                        .border(1.0)
+                        .border_color(p.glass_border)
+                        .border_radius(10.0)
+                        .margin_bottom(8.0)
                 }
             })
         },
     )
     .style(|s| s.flex_col().padding(10.0).gap(0.0).width_full());
 
-    let messages_scroll = scroll(msg_list)
-        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+    let messages_scroll = scroll(msg_list).style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
     // ── Input bar ─────────────────────────────────────────────────────────────
 
@@ -369,54 +372,52 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
     let do_send_key = do_send.clone();
     let _ = do_send;
 
-    let send_btn = container(
-        label(|| "↵").style(move |s| {
-            s.font_size(14.0).color(
-                if is_loading.get() {
-                    theme.get().palette.text_disabled
-                } else {
-                    theme.get().palette.bg_base
-                }
-            )
-        }),
-    )
+    let send_btn = container(label(|| "↵").style(move |s| {
+        s.font_size(14.0).color(if is_loading.get() {
+            theme.get().palette.text_disabled
+        } else {
+            theme.get().palette.bg_base
+        })
+    }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         let loading = is_loading.get();
         s.width(32.0)
-         .height(32.0)
-         .background(if loading { p.bg_elevated } else { p.accent })
-         .border_radius(8.0)
-         .items_center()
-         .justify_center()
-         .cursor(floem::style::CursorStyle::Pointer)
-         .margin_left(8.0)
-         // Glow on the send button when active
-         .apply_if(!loading, |s| {
-             s.box_shadow_blur(10.0)
-              .box_shadow_color(p.glow)
-              .box_shadow_spread(0.0)
-              .box_shadow_h_offset(0.0)
-              .box_shadow_v_offset(0.0)
-         })
+            .height(32.0)
+            .background(if loading { p.bg_elevated } else { p.accent })
+            .border_radius(8.0)
+            .items_center()
+            .justify_center()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .margin_left(8.0)
+            // Glow on the send button when active
+            .apply_if(!loading, |s| {
+                s.box_shadow_blur(10.0)
+                    .box_shadow_color(p.glow)
+                    .box_shadow_spread(0.0)
+                    .box_shadow_h_offset(0.0)
+                    .box_shadow_v_offset(0.0)
+            })
     })
-    .on_click_stop(move |_| { (do_send_btn)(); });
+    .on_click_stop(move |_| {
+        (do_send_btn)();
+    });
 
     let input_widget = text_input(input_text)
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
             s.flex_grow(1.0)
-             .background(p.glass_bg)
-             .border(1.0)
-             .border_color(p.border_focus)
-             .border_radius(8.0)
-             .color(p.text_primary)
-             .padding_horiz(12.0)
-             .padding_vert(8.0)
-             .font_size(13.0)
-             .min_width(0.0)
+                .background(p.glass_bg)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(8.0)
+                .color(p.text_primary)
+                .padding_horiz(12.0)
+                .padding_vert(8.0)
+                .font_size(13.0)
+                .min_width(0.0)
         })
         .on_event_stop(EventListener::KeyDown, move |event| {
             if let Event::KeyDown(e) = event {
@@ -438,23 +439,22 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
         let t = theme.get();
         let p = &t.palette;
         s.padding(10.0)
-         .border_top(1.0)
-         .border_color(p.glass_border)
-         .width_full()
-         .background(p.glass_bg)
+            .border_top(1.0)
+            .border_color(p.glass_border)
+            .width_full()
+            .background(p.glass_bg)
     });
 
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, messages_scroll, input_bar))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.flex_col()
-             .width(340.0)
-             .height_full()
-             .background(p.glass_bg)
-             .border_left(1.0)
-             .border_color(p.glass_border)
-        })
+    stack((header, messages_scroll, input_bar)).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_col()
+            .width(340.0)
+            .height_full()
+            .background(p.glass_bg)
+            .border_left(1.0)
+            .border_color(p.glass_border)
+    })
 }

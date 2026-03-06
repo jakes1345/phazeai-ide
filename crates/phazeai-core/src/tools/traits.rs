@@ -79,6 +79,10 @@ impl Default for ToolRegistry {
         registry.register(Box::new(super::NowTool));
         registry.register(Box::new(super::OpenTool));
         registry.register(Box::new(super::DiagnosticsTool));
+        registry.register(Box::new(super::MemoryTool));
+        registry.register(Box::new(super::BrowseTool));
+        registry.register(Box::new(super::DownloadTool));
+        registry.register(Box::new(super::ScreenshotTool));
         registry
     }
 }
@@ -94,6 +98,7 @@ impl ToolRegistry {
         registry.register(Box::new(super::ListFilesTool));
         registry.register(Box::new(super::FindPathTool));
         registry.register(Box::new(super::NowTool));
+        registry.register(Box::new(super::MemoryTool));
         registry
     }
 
@@ -110,7 +115,33 @@ impl ToolRegistry {
         registry.register(Box::new(super::FetchTool));
         registry.register(Box::new(super::WebSearchTool));
         registry.register(Box::new(super::DiagnosticsTool));
+        registry.register(Box::new(super::MemoryTool));
         registry.register(Box::new(super::BashTool::default()));
+        registry.register(Box::new(super::BrowseTool));
+        registry.register(Box::new(super::DownloadTool));
+        registry.register(Box::new(super::ScreenshotTool));
         registry
     }
+
+    /// Register all tools from connected MCP servers.
+    /// Each MCP tool becomes a normal tool with name `mcp__serverName__toolName`.
+    pub fn register_mcp_tools(
+        &mut self,
+        manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
+    ) {
+        let bridges = super::mcp_bridge::create_mcp_tool_bridges(manager);
+        let count = bridges.len();
+        for bridge in bridges {
+            self.register(bridge);
+        }
+        if count > 0 {
+            tracing::info!("Registered {count} MCP tools into tool registry");
+        }
+    }
+
+    /// Total number of registered tools.
+    pub fn tool_count(&self) -> usize {
+        self.tools.len()
+    }
 }
+

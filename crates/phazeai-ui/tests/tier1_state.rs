@@ -186,7 +186,11 @@ struct MockActivityBar {
 
 impl Default for MockActivityBar {
     fn default() -> Self {
-        Self { tab: MockTab::Explorer, show_panel: true, panel_width: 300.0 }
+        Self {
+            tab: MockTab::Explorer,
+            show_panel: true,
+            panel_width: 300.0,
+        }
     }
 }
 
@@ -223,7 +227,11 @@ fn activity_click_different_tab_switches() {
 
 #[test]
 fn activity_click_when_closed_opens_panel() {
-    let mut bar = MockActivityBar { show_panel: false, panel_width: 0.0, tab: MockTab::Explorer };
+    let mut bar = MockActivityBar {
+        show_panel: false,
+        panel_width: 0.0,
+        tab: MockTab::Explorer,
+    };
     bar.click(MockTab::Explorer);
     assert!(bar.show_panel);
     assert_eq!(bar.panel_width, 300.0);
@@ -250,35 +258,45 @@ fn activity_multi_switch_sequence() {
 // Theme name variants (used as documentation, not in tests directly)
 #[allow(dead_code)]
 const THEME_NAMES: &[&str] = &[
-    "midnight_blue", "midnightblue", "MIDNIGHTBLUE",
-    "cyberpunk", "CYBERPUNK",
-    "synthwave84", "synthwave",
+    "midnight_blue",
+    "midnightblue",
+    "MIDNIGHTBLUE",
+    "cyberpunk",
+    "CYBERPUNK",
+    "synthwave84",
+    "synthwave",
     "andromeda",
-    "dark", "Dark",
+    "dark",
+    "Dark",
     "dracula",
-    "tokyonight", "tokyo",
+    "tokyonight",
+    "tokyo",
     "monokai",
-    "norddark", "nord",
-    "matrixgreen", "matrix",
-    "rootshell", "root",
-    "light", "Light",
+    "norddark",
+    "nord",
+    "matrixgreen",
+    "matrix",
+    "rootshell",
+    "root",
+    "light",
+    "Light",
 ];
 
 /// Simplified version of ThemeVariant::from_str logic.
 fn parse_theme(s: &str) -> &'static str {
     match s.to_lowercase().replace([' ', '-', '_'], "").as_str() {
-        "midnightblue" | "midnight"     => "MidnightBlue",
-        "cyberpunk" | "cyber"           => "Cyberpunk",
-        "synthwave84" | "synthwave"     => "Synthwave84",
-        "andromeda"                     => "Andromeda",
-        "dracula"                       => "Dracula",
-        "tokyonight" | "tokyo"          => "TokyoNight",
-        "monokai"                       => "Monokai",
-        "norddark" | "nord"             => "NordDark",
-        "matrixgreen" | "matrix"        => "MatrixGreen",
-        "rootshell" | "root"            => "RootShell",
-        "light"                         => "Light",
-        _                               => "Dark",
+        "midnightblue" | "midnight" => "MidnightBlue",
+        "cyberpunk" | "cyber" => "Cyberpunk",
+        "synthwave84" | "synthwave" => "Synthwave84",
+        "andromeda" => "Andromeda",
+        "dracula" => "Dracula",
+        "tokyonight" | "tokyo" => "TokyoNight",
+        "monokai" => "Monokai",
+        "norddark" | "nord" => "NordDark",
+        "matrixgreen" | "matrix" => "MatrixGreen",
+        "rootshell" | "root" => "RootShell",
+        "light" => "Light",
+        _ => "Dark",
     }
 }
 
@@ -352,19 +370,19 @@ fn detect_language(path: &str) -> &'static str {
         .and_then(|e| e.to_str())
         .unwrap_or("")
     {
-        "rs"              => "Rust",
-        "py"              => "Python",
-        "js" | "ts"       => "TypeScript",
-        "jsx" | "tsx"     => "TSX",
-        "toml"            => "TOML",
-        "md"              => "Markdown",
-        "json"            => "JSON",
-        "yaml" | "yml"    => "YAML",
-        "sh" | "bash"     => "Shell",
-        "c" | "h"         => "C",
-        "cpp" | "hpp"     => "C++",
-        "go"              => "Go",
-        _                 => "Text",
+        "rs" => "Rust",
+        "py" => "Python",
+        "js" | "ts" => "TypeScript",
+        "jsx" | "tsx" => "TSX",
+        "toml" => "TOML",
+        "md" => "Markdown",
+        "json" => "JSON",
+        "yaml" | "yml" => "YAML",
+        "sh" | "bash" => "Shell",
+        "c" | "h" => "C",
+        "cpp" | "hpp" => "C++",
+        "go" => "Go",
+        _ => "Text",
     }
 }
 
@@ -422,12 +440,12 @@ fn parse_git_porcelain(output: &str) -> Vec<GitEntry> {
             let path = line[3..].trim().to_string();
 
             let status = match (staged, unstaged) {
-                ('?', '?')                  => GitStatus::Untracked,
-                ('A', _) | (_, 'A')        => GitStatus::Added,
-                ('D', _) | (_, 'D')        => GitStatus::Deleted,
-                ('R', _) | (_, 'R')        => GitStatus::Renamed,
-                ('M', _) | (_, 'M')        => GitStatus::Modified,
-                _                          => return None,
+                ('?', '?') => GitStatus::Untracked,
+                ('A', _) | (_, 'A') => GitStatus::Added,
+                ('D', _) | (_, 'D') => GitStatus::Deleted,
+                ('R', _) | (_, 'R') => GitStatus::Renamed,
+                ('M', _) | (_, 'M') => GitStatus::Modified,
+                _ => return None,
             };
             Some(GitEntry { status, path })
         })
@@ -475,7 +493,12 @@ fn git_parse_empty_output() {
 // ── Diagnostic severity ordering ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum SeverityLevel { Hint = 0, Info = 1, Warning = 2, Error = 3 }
+enum SeverityLevel {
+    Hint = 0,
+    Info = 1,
+    Warning = 2,
+    Error = 3,
+}
 
 fn severity_priority(s: SeverityLevel) -> u8 {
     s as u8
@@ -499,7 +522,10 @@ fn parse_diag_uri(uri: &str) -> std::path::PathBuf {
 #[test]
 fn diag_uri_strips_file_prefix() {
     let path = parse_diag_uri("file:///home/user/project/src/main.rs");
-    assert_eq!(path, std::path::PathBuf::from("/home/user/project/src/main.rs"));
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("/home/user/project/src/main.rs")
+    );
 }
 
 #[test]
@@ -511,19 +537,33 @@ fn diag_uri_no_prefix_passthrough() {
 // ── CompletionEntry prefix filter ────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct CompletionEntry { label: String }
+struct CompletionEntry {
+    label: String,
+}
 
-fn filter_completions<'a>(entries: &'a [CompletionEntry], prefix: &str) -> Vec<&'a CompletionEntry> {
+fn filter_completions<'a>(
+    entries: &'a [CompletionEntry],
+    prefix: &str,
+) -> Vec<&'a CompletionEntry> {
     let p = prefix.to_lowercase();
-    entries.iter().filter(|e| e.label.to_lowercase().starts_with(&p)).collect()
+    entries
+        .iter()
+        .filter(|e| e.label.to_lowercase().starts_with(&p))
+        .collect()
 }
 
 #[test]
 fn completion_filter_empty_prefix_returns_all() {
     let entries = vec![
-        CompletionEntry { label: "println".into() },
-        CompletionEntry { label: "print".into() },
-        CompletionEntry { label: "eprintln".into() },
+        CompletionEntry {
+            label: "println".into(),
+        },
+        CompletionEntry {
+            label: "print".into(),
+        },
+        CompletionEntry {
+            label: "eprintln".into(),
+        },
     ];
     assert_eq!(filter_completions(&entries, "").len(), 3);
 }
@@ -531,9 +571,15 @@ fn completion_filter_empty_prefix_returns_all() {
 #[test]
 fn completion_filter_by_prefix() {
     let entries = vec![
-        CompletionEntry { label: "println".into() },
-        CompletionEntry { label: "print".into() },
-        CompletionEntry { label: "eprintln".into() },
+        CompletionEntry {
+            label: "println".into(),
+        },
+        CompletionEntry {
+            label: "print".into(),
+        },
+        CompletionEntry {
+            label: "eprintln".into(),
+        },
     ];
     let result = filter_completions(&entries, "print");
     assert_eq!(result.len(), 2);
@@ -543,8 +589,12 @@ fn completion_filter_by_prefix() {
 #[test]
 fn completion_filter_case_insensitive() {
     let entries = vec![
-        CompletionEntry { label: "PrintLn".into() },
-        CompletionEntry { label: "eprint".into() },
+        CompletionEntry {
+            label: "PrintLn".into(),
+        },
+        CompletionEntry {
+            label: "eprint".into(),
+        },
     ];
     let result = filter_completions(&entries, "PRINT");
     assert_eq!(result.len(), 1);
@@ -553,7 +603,9 @@ fn completion_filter_case_insensitive() {
 
 #[test]
 fn completion_filter_no_match() {
-    let entries = vec![CompletionEntry { label: "foo".into() }];
+    let entries = vec![CompletionEntry {
+        label: "foo".into(),
+    }];
     assert!(filter_completions(&entries, "bar").is_empty());
 }
 
@@ -587,8 +639,14 @@ fn session_roundtrip_toml() {
     let session = Session {
         active_tab: 1,
         tabs: vec![
-            SessionTab { path: "/home/user/main.rs".into(), is_dirty: false },
-            SessionTab { path: "/home/user/lib.rs".into(),  is_dirty: true  },
+            SessionTab {
+                path: "/home/user/main.rs".into(),
+                is_dirty: false,
+            },
+            SessionTab {
+                path: "/home/user/lib.rs".into(),
+                is_dirty: true,
+            },
         ],
         left_panel_width: 280.0,
         bottom_panel_height: 200.0,
@@ -602,7 +660,10 @@ fn session_roundtrip_toml() {
 fn session_active_tab_clamped_to_valid_range() {
     let session = Session {
         active_tab: 99, // out of range
-        tabs: vec![SessionTab { path: "a.rs".into(), is_dirty: false }],
+        tabs: vec![SessionTab {
+            path: "a.rs".into(),
+            is_dirty: false,
+        }],
         left_panel_width: 260.0,
         bottom_panel_height: 160.0,
     };
@@ -634,7 +695,9 @@ fn byte_offset_to_line_col(text: &str, byte_offset: usize) -> (u32, u32) {
     let mut line = 0u32;
     let mut line_start = 0usize;
     for (i, ch) in text.char_indices() {
-        if i >= byte_offset { break; }
+        if i >= byte_offset {
+            break;
+        }
         if ch == '\n' {
             line += 1;
             line_start = i + 1;
@@ -685,11 +748,21 @@ struct MockEditorTab {
 
 impl MockEditorTab {
     fn new(path: &str, content: &str) -> Self {
-        Self { path: path.into(), content: content.into(), saved_content: content.into() }
+        Self {
+            path: path.into(),
+            content: content.into(),
+            saved_content: content.into(),
+        }
     }
-    fn is_dirty(&self) -> bool { self.content != self.saved_content }
-    fn save(&mut self) { self.saved_content = self.content.clone(); }
-    fn edit(&mut self, new_content: &str) { self.content = new_content.into(); }
+    fn is_dirty(&self) -> bool {
+        self.content != self.saved_content
+    }
+    fn save(&mut self) {
+        self.saved_content = self.content.clone();
+    }
+    fn edit(&mut self, new_content: &str) {
+        self.content = new_content.into();
+    }
 }
 
 #[test]

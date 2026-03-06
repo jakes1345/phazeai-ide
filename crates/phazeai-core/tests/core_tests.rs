@@ -792,9 +792,9 @@ fn test_trim_to_token_budget_removes_oldest_messages() {
     // Each "aaaa..." message is exactly N chars → N/4 tokens (integer division)
     // Use 400-char messages = 100 tokens each
     let long_msg = "a".repeat(400);
-    history.add_user_message(&long_msg);      // msg 1: 100 tokens
+    history.add_user_message(&long_msg); // msg 1: 100 tokens
     history.add_assistant_message(&long_msg); // msg 2: 100 tokens
-    history.add_user_message(&long_msg);      // msg 3: 100 tokens
+    history.add_user_message(&long_msg); // msg 3: 100 tokens
     history.add_assistant_message(&long_msg); // msg 4: 100 tokens
 
     assert!(history.estimate_tokens() >= 400);

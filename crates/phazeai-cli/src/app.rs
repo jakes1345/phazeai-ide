@@ -151,6 +151,11 @@ struct AppState {
     // Conversation management
     conversation_id: String,
     conversation_store: ConversationStore,
+    
+    // Session Picker UI
+    show_session_picker: bool,
+    session_picker_list: Vec<ConversationMetadata>,
+    session_picker_index: usize,
 
     // Tool approval
     approval_manager: ToolApprovalManager,
@@ -212,6 +217,10 @@ impl AppState {
 
             conversation_id: conv_id,
             conversation_store: store,
+            
+            show_session_picker: false,
+            session_picker_list: Vec::new(),
+            session_picker_index: 0,
 
             approval_manager: ToolApprovalManager::default(),
             ai_mode: "chat".into(),
@@ -547,6 +556,15 @@ pub async fn run_tui(
                 .with_system_prompt(system_prompt)
                 .with_approval(approval_fn);
 
+            // Connect to MCP servers
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let mcp_configs = phazeai_core::mcp::McpManager::load_config(&cwd);
+            if !mcp_configs.is_empty() {
+                let mut mcp_manager = phazeai_core::mcp::McpManager::new();
+                mcp_manager.connect_all(&mcp_configs);
+                agent.register_mcp_tools(std::sync::Arc::new(std::sync::Mutex::new(mcp_manager)));
+            }
+
             // Try to start the Python sidecar for semantic search
             if let Some(client) = try_start_sidecar().await {
                 let client = Arc::new(client);
@@ -664,6 +682,7 @@ fn build_system_prompt(extra_instructions: Option<&str>) -> String {
             "grep".into(),
             "glob".into(),
             "list_files".into(),
+            "memory".into(),
         ])
         .load_project_instructions();
 
@@ -817,10 +836,13 @@ fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
                         if sub_name.starts_with('.') {
                             continue;
                         }
-                        let sub_is_dir =
-                            sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let sub_is_dir = sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                         let sub_icon = if sub_is_dir { "▸ " } else { "  " };
-                        let sub_color = if sub_is_dir { theme.accent } else { theme.muted };
+                        let sub_color = if sub_is_dir {
+                            theme.accent
+                        } else {
+                            theme.muted
+                        };
                         lines.push(Line::from(Span::styled(
                             format!("   {sub_icon}{sub_name}"),
                             Style::default().fg(sub_color),
@@ -1262,6 +1284,31 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         return;
     }
 
+    // Handle session picker UI
+    if state.show_session_picker {
+        match key.code {
+            KeyCode::Esc => state.show_session_picker = false,
+            KeyCode::Up => {
+                state.session_picker_index = state.session_picker_index.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if state.session_picker_index + 1 < state.session_picker_list.len() {
+                    state.session_picker_index += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(meta) = state.session_picker_list.get(state.session_picker_index).cloned() {
+                    state.show_session_picker = false;
+                    handle_command_result(state, CommandResult::LoadConversation(meta.id), user_input_tx);
+                } else {
+                    state.show_session_picker = false;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match (key.modifiers, key.code) {
         // Quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
@@ -1289,8 +1336,26 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         }
 
         // Toggle file tree
-        (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+        (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
             state.show_files = !state.show_files;
+        }
+
+        // Show session picker
+        (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+            match state.conversation_store.list_recent(20) {
+                Ok(convs) => {
+                    if !convs.is_empty() {
+                        state.session_picker_list = convs;
+                        state.session_picker_index = 0;
+                        state.show_session_picker = true;
+                    } else {
+                        state.add_message(MessageRole::System, "No saved conversations.".into());
+                    }
+                }
+                Err(e) => {
+                    state.add_message(MessageRole::System, format!("Failed to list conversations: {e}"));
+                }
+            }
         }
 
         // Clear chat
@@ -1414,6 +1479,34 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
             state.input.drain(..state.cursor_pos);
             state.cursor_pos = 0;
+        }
+
+        // External Editor (Ctrl+E)
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+            if !state.is_processing {
+                let temp_dir = std::env::temp_dir();
+                let temp_file = temp_dir.join(format!("phazeai_input_{}.txt", std::process::id()));
+                let _ = std::fs::write(&temp_file, &state.input);
+
+                let _ = disable_raw_mode();
+                let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+                let _ = std::process::Command::new(&editor).arg(&temp_file).status();
+
+                let _ = enable_raw_mode();
+                let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+                let _ = execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                );
+
+                if let Ok(content) = std::fs::read_to_string(&temp_file) {
+                    state.input = content.trim_end().to_string();
+                    state.cursor_pos = state.input.len();
+                }
+                let _ = std::fs::remove_file(temp_file);
+            }
         }
 
         // Kill to end of line (Ctrl+K)
@@ -2108,10 +2201,7 @@ fn handle_command_result(
             state.pending_approval = None;
             state.is_processing = false;
             state.status_text = "Cancelled".into();
-            state.add_message(
-                MessageRole::System,
-                "Agent task aborted.".into(),
-            );
+            state.add_message(MessageRole::System, "Agent task aborted.".into());
         }
         CommandResult::Grep(pattern) => {
             let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2155,6 +2245,112 @@ fn handle_command_result(
                 }
                 Err(e) => {
                     state.add_message(MessageRole::System, format!("Search failed: {e}"));
+                }
+            }
+        }
+        CommandResult::RunSkill { name, args } => {
+            let mut found_path = None;
+            let pwd = std::env::current_dir().unwrap_or_default();
+
+            let mut cands = vec![pwd
+                .join(".phazeai")
+                .join("commands")
+                .join(format!("{name}.md"))];
+            if let Some(h) = dirs::home_dir() {
+                cands.push(
+                    h.join(".config")
+                        .join("phazeai")
+                        .join("commands")
+                        .join(format!("{name}.md")),
+                );
+                cands.push(
+                    h.join(".phazeai")
+                        .join("commands")
+                        .join(format!("{name}.md")),
+                );
+            }
+
+            for c in cands {
+                if c.exists() {
+                    found_path = Some(c);
+                    break;
+                }
+            }
+
+            match found_path {
+                Some(path) => {
+                    if let Ok(mut text) = std::fs::read_to_string(&path) {
+                        text = text.replace("$ARGS", &args);
+                        state.add_message(MessageRole::User, format!("Running skill: {name}"));
+                        state.is_processing = true;
+                        state.status_text = format!("Running skill {name}...");
+                        state.last_user_input = text.clone();
+                        let agent_input = apply_mode_prefix(&state.ai_mode, &text);
+                        let _ = user_input_tx.send(agent_input);
+                    } else {
+                        state.add_message(
+                            MessageRole::System,
+                            format!("Could not read skill file: {}", path.display()),
+                        );
+                    }
+                }
+                None => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Skill '{name}' not found. Searched in .phazeai/commands/ & ~/.config/phazeai/commands/")
+                    );
+                }
+            }
+        }
+        CommandResult::InstallGithubApp => {
+            let workflow_dir = std::path::Path::new(".github/workflows");
+            if !workflow_dir.exists() {
+                if let Err(e) = std::fs::create_dir_all(workflow_dir) {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to create .github/workflows directory: {e}")
+                    );
+                    return;
+                }
+            }
+            let workflow_path = workflow_dir.join("phazeai-action.yml");
+            let workflow_content = r#"name: PhazeAI Code Action
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  phazeai:
+    if: contains(github.event.comment.body, '@phazeai') || contains(github.event.comment.body, '/phazeai')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PhazeAI Action
+        uses: phazeai/phazeai-code-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          provider: "anthropic"  # Options: anthropic, openai, ollama
+          model: "claude-3-7-sonnet" # Options: any supported model by provider
+"#;
+            match std::fs::write(&workflow_path, workflow_content) {
+                Ok(_) => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Successfully created PhazeAI GitHub Action workflow at `{}`\nCommit and push this file to enable PhazeAI automation in your repository.", workflow_path.display())
+                    );
+                }
+                Err(e) => {
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to write workflow file: {e}")
+                    );
                 }
             }
         }
@@ -2244,6 +2440,9 @@ fn complete_command(input: &str) -> Option<String> {
         "/cancel",
         "/grep",
         "/yolo",
+        "/install-github-action",
+        "/install-github-app",
+        "/setup-github-action",
     ];
 
     let matches: Vec<&&str> = commands.iter().filter(|c| c.starts_with(input)).collect();

@@ -1,6 +1,6 @@
 # PhazeAI Reviewer — Code review and quality assurance model
 # Usage: ollama create phaze-reviewer -f modelfiles/Modelfile.reviewer
-FROM deepseek-coder-v2:16b
+FROM hhao/qwen2.5-coder-tools:7b
 
 SYSTEM """You are PhazeAI Reviewer, the code review agent in PhazeAI's multi-agent system.
 
@@ -27,6 +27,6 @@ RULES:
 
 PARAMETER temperature 0.2
 PARAMETER top_p 0.85
-PARAMETER num_ctx 16384
+PARAMETER num_ctx 8192
 PARAMETER repeat_penalty 1.0
 PARAMETER num_predict 2048

@@ -38,7 +38,10 @@ fn binary_path() -> PathBuf {
 
 /// Kill any stale IDE processes from previous test runs.
 fn cleanup_stale() {
-    Command::new("pkill").args(["-f", "phazeai-ui"]).status().ok();
+    Command::new("pkill")
+        .args(["-f", "phazeai-ui"])
+        .status()
+        .ok();
     Command::new("pkill").args(["-f", "fluxbox"]).status().ok();
     thread::sleep(Duration::from_millis(500));
 }
@@ -47,7 +50,8 @@ fn cleanup_stale() {
 fn start_wm() {
     let dpy = display();
     Command::new("fluxbox")
-        .arg("-display").arg(&dpy)
+        .arg("-display")
+        .arg(&dpy)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -78,7 +82,10 @@ fn launch_ide() -> (Child, u64) {
 
     // Poll until window appears (up to 15s)
     let wid = wait_for_window("PhazeAI IDE", 30);
-    assert!(wid > 0, "IDE window never appeared (xdotool search timed out)");
+    assert!(
+        wid > 0,
+        "IDE window never appeared (xdotool search timed out)"
+    );
 
     // Give the window time to fully render before interacting
     thread::sleep(Duration::from_millis(1500));
@@ -136,12 +143,12 @@ fn send_keys(wid: u64, combo: &str) {
 
     // Map our shorthand to xdotool key names
     let xkey = match combo {
-        "ctrl+j"         => "ctrl+j",
-        "ctrl+b"         => "ctrl+b",
-        "ctrl+p"         => "ctrl+p",
+        "ctrl+j" => "ctrl+j",
+        "ctrl+b" => "ctrl+b",
+        "ctrl+p" => "ctrl+p",
         "ctrl+backslash" => "ctrl+backslash",
-        "escape"         => "Escape",
-        other            => other,
+        "escape" => "Escape",
+        other => other,
     };
 
     // No --window flag: uses XTEST extension → real events received by Floem/winit
@@ -158,12 +165,7 @@ fn type_text(wid: u64, text: &str) {
     xdotool(&["click", "1"]);
     thread::sleep(Duration::from_millis(200));
     // No --window: uses XTEST for real events
-    xdotool(&[
-        "type",
-        "--clearmodifiers",
-        "--delay", "60",
-        text,
-    ]);
+    xdotool(&["type", "--clearmodifiers", "--delay", "60", text]);
     thread::sleep(Duration::from_millis(700));
 }
 
@@ -257,17 +259,26 @@ fn scenario_toggle_terminal() {
     let (mut child, wid) = launch_ide();
 
     let baseline = screenshot("s1_baseline");
-    assert!(!is_blank(&baseline), "App rendered a blank screen — software rendering may not be active");
+    assert!(
+        !is_blank(&baseline),
+        "App rendered a blank screen — software rendering may not be active"
+    );
 
     send_keys(wid, "ctrl+j");
     let open = screenshot("s1_terminal_open");
     let diff_open = diff_percent(&baseline, &open);
-    assert!(diff_open > 3.0, "Terminal open: expected >3% diff, got {diff_open:.2}%");
+    assert!(
+        diff_open > 3.0,
+        "Terminal open: expected >3% diff, got {diff_open:.2}%"
+    );
 
     send_keys(wid, "ctrl+j");
     let closed = screenshot("s1_terminal_closed");
     let diff_close = diff_percent(&baseline, &closed);
-    assert!(diff_close < 8.0, "Terminal close: expected <8% diff from baseline, got {diff_close:.2}%");
+    assert!(
+        diff_close < 8.0,
+        "Terminal close: expected <8% diff from baseline, got {diff_close:.2}%"
+    );
 
     child.kill().ok();
 }
@@ -285,12 +296,18 @@ fn scenario_command_palette_open_and_close() {
     send_keys(wid, "ctrl+p");
     let open = screenshot("s2_palette_open");
     let diff_open = diff_percent(&baseline, &open);
-    assert!(diff_open > 5.0, "Palette open: expected >5% diff, got {diff_open:.2}%");
+    assert!(
+        diff_open > 5.0,
+        "Palette open: expected >5% diff, got {diff_open:.2}%"
+    );
 
     send_keys(wid, "escape");
     let closed = screenshot("s2_palette_closed");
     let diff_close = diff_percent(&baseline, &closed);
-    assert!(diff_close < 8.0, "Palette close: expected <8% from baseline, got {diff_close:.2}%");
+    assert!(
+        diff_close < 8.0,
+        "Palette close: expected <8% from baseline, got {diff_close:.2}%"
+    );
 
     child.kill().ok();
 }
@@ -308,12 +325,18 @@ fn scenario_toggle_explorer() {
     send_keys(wid, "ctrl+b");
     let closed = screenshot("s3_explorer_closed");
     let diff = diff_percent(&open, &closed);
-    assert!(diff > 3.0, "Explorer close: expected >3% diff, got {diff:.2}%");
+    assert!(
+        diff > 3.0,
+        "Explorer close: expected >3% diff, got {diff:.2}%"
+    );
 
     send_keys(wid, "ctrl+b");
     let reopened = screenshot("s3_explorer_reopened");
     let diff2 = diff_percent(&open, &reopened);
-    assert!(diff2 < 10.0, "Explorer reopen: expected to restore, diff was {diff2:.2}%");
+    assert!(
+        diff2 < 10.0,
+        "Explorer reopen: expected to restore, diff was {diff2:.2}%"
+    );
 
     child.kill().ok();
 }
@@ -351,7 +374,10 @@ fn scenario_command_palette_type_filter() {
     type_text(wid, "toggle");
     let filtered = screenshot("s5_palette_filtered");
     let diff = diff_percent(&empty, &filtered);
-    assert!(diff > 0.5, "Palette filter: expected list to change, diff was {diff:.2}%");
+    assert!(
+        diff > 0.5,
+        "Palette filter: expected list to change, diff was {diff:.2}%"
+    );
 
     send_keys(wid, "escape");
     child.kill().ok();
@@ -367,16 +393,19 @@ fn scenario_panel_stability_sequence() {
     let initial = screenshot("s6_initial");
     assert!(!is_blank(&initial), "App rendered blank screen");
 
-    send_keys(wid, "ctrl+j");   // open terminal
-    send_keys(wid, "ctrl+j");   // close terminal
-    send_keys(wid, "ctrl+b");   // close explorer
-    send_keys(wid, "ctrl+b");   // reopen explorer
-    send_keys(wid, "ctrl+p");   // open palette
-    send_keys(wid, "escape");   // close palette
+    send_keys(wid, "ctrl+j"); // open terminal
+    send_keys(wid, "ctrl+j"); // close terminal
+    send_keys(wid, "ctrl+b"); // close explorer
+    send_keys(wid, "ctrl+b"); // reopen explorer
+    send_keys(wid, "ctrl+p"); // open palette
+    send_keys(wid, "escape"); // close palette
 
     let final_state = screenshot("s6_final");
     let diff = diff_percent(&initial, &final_state);
-    assert!(diff < 10.0, "Stability: expected <10% diff after paired toggles, got {diff:.2}%");
+    assert!(
+        diff < 10.0,
+        "Stability: expected <10% diff after paired toggles, got {diff:.2}%"
+    );
 
     child.kill().ok();
 }

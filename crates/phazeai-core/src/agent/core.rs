@@ -161,6 +161,13 @@ impl Agent {
         self.tools.register(tool);
     }
 
+    pub fn register_mcp_tools(
+        &mut self,
+        manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
+    ) {
+        self.tools.register_mcp_tools(manager);
+    }
+
     /// Run the agent loop, returning the final response.
     pub async fn run(&self, user_input: impl Into<String>) -> Result<AgentResponse, PhazeError> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

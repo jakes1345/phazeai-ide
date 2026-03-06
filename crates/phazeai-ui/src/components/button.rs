@@ -29,35 +29,51 @@ pub fn phaze_button(
             let p = &t.palette;
             let (bg, fg, border_color) = match variant {
                 ButtonVariant::Primary => (
-                    if is_hovered.get() { p.accent_hover } else { p.accent },
+                    if is_hovered.get() {
+                        p.accent_hover
+                    } else {
+                        p.accent
+                    },
                     floem::peniko::Color::WHITE,
                     p.accent,
                 ),
                 ButtonVariant::Secondary => (
-                    if is_hovered.get() { p.bg_elevated } else { p.bg_surface },
+                    if is_hovered.get() {
+                        p.bg_elevated
+                    } else {
+                        p.bg_surface
+                    },
                     p.text_primary,
                     p.border,
                 ),
                 ButtonVariant::Ghost => (
-                    if is_hovered.get() { p.accent_dim } else { floem::peniko::Color::TRANSPARENT },
+                    if is_hovered.get() {
+                        p.accent_dim
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    },
                     p.accent,
                     floem::peniko::Color::TRANSPARENT,
                 ),
                 ButtonVariant::Danger => (
-                    if is_hovered.get() { p.error.with_alpha(0.9) } else { p.error.with_alpha(0.15) },
+                    if is_hovered.get() {
+                        p.error.with_alpha(0.9)
+                    } else {
+                        p.error.with_alpha(0.15)
+                    },
                     p.error,
                     p.error.with_alpha(0.5),
                 ),
             };
             s.padding_horiz(12.0)
-             .padding_vert(6.0)
-             .border_radius(6.0)
-             .background(bg)
-             .color(fg)
-             .border(1.0)
-             .border_color(border_color)
-             .font_size(13.0)
-             .cursor(floem::style::CursorStyle::Pointer)
+                .padding_vert(6.0)
+                .border_radius(6.0)
+                .background(bg)
+                .color(fg)
+                .border(1.0)
+                .border_color(border_color)
+                .font_size(13.0)
+                .cursor(floem::style::CursorStyle::Pointer)
         })
         .on_click_stop(move |_| on_click())
         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -91,14 +107,14 @@ pub fn phaze_icon_button(
             };
             let fg = if active { p.accent } else { p.text_secondary };
             s.width(32.0)
-             .height(32.0)
-             .border_radius(6.0)
-             .background(bg)
-             .color(fg)
-             .font_size(16.0)
-             .items_center()
-             .justify_center()
-             .cursor(floem::style::CursorStyle::Pointer)
+                .height(32.0)
+                .border_radius(6.0)
+                .background(bg)
+                .color(fg)
+                .font_size(16.0)
+                .items_center()
+                .justify_center()
+                .cursor(floem::style::CursorStyle::Pointer)
         })
         .on_click_stop(move |_| on_click())
         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {

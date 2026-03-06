@@ -17,19 +17,19 @@ pub enum Tier {
 impl Tier {
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::SelfHosted  => "Self-Hosted (Free)",
-            Self::Cloud       => "PhazeAI Cloud",
-            Self::Team        => "Team",
-            Self::Enterprise  => "Enterprise",
+            Self::SelfHosted => "Self-Hosted (Free)",
+            Self::Cloud => "PhazeAI Cloud",
+            Self::Team => "Team",
+            Self::Enterprise => "Enterprise",
         }
     }
 
     pub fn monthly_price_usd(&self) -> Option<u32> {
         match self {
-            Self::SelfHosted  => None,
-            Self::Cloud       => Some(20),
-            Self::Team        => Some(50),
-            Self::Enterprise  => None, // custom
+            Self::SelfHosted => None,
+            Self::Cloud => Some(20),
+            Self::Team => Some(50),
+            Self::Enterprise => None, // custom
         }
     }
 

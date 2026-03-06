@@ -8,41 +8,59 @@ use crate::app::{IdeState, SearchResult};
 
 /// The search panel — workspace search + multi-file replace.
 pub fn search_panel(state: IdeState) -> impl IntoView {
-    let theme   = state.theme;
-    let query   = state.search_query;
+    let theme = state.theme;
+    let query = state.search_query;
     let results = state.search_results;
-    let is_searching   = create_rw_signal(false);
-    let replace_text   = create_rw_signal(String::new());
-    let replace_open   = create_rw_signal(false);
+    let is_searching = create_rw_signal(false);
+    let replace_text = create_rw_signal(String::new());
+    let replace_open = create_rw_signal(false);
     let replace_status = create_rw_signal(String::new());
-    let use_regex      = create_rw_signal(false);
+    let use_regex = create_rw_signal(false);
     let case_sensitive = create_rw_signal(false);
+    let include_glob = create_rw_signal(String::new());
+    let exclude_glob = create_rw_signal(String::new());
 
     // ── Header ───────────────────────────────────────────────────────────────
     let header = container(
         stack((
-            label(|| "SEARCH")
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.color(p.text_muted).font_size(11.0).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
-                }),
+            label(|| "SEARCH").style(move |s| {
+                let p = theme.get().palette;
+                s.color(p.text_muted)
+                    .font_size(11.0)
+                    .font_weight(floem::text::Weight::BOLD)
+                    .flex_grow(1.0)
+            }),
             // Toggle replace mode
-            container(label(move || if replace_open.get() { "▾ Replace" } else { "▸ Replace" }))
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.font_size(10.0).padding_horiz(6.0).padding_vert(2.0)
-                     .border_radius(3.0).cursor(floem::style::CursorStyle::Pointer)
-                     .color(p.text_muted)
-                     .hover(|s| s.background(theme.get().palette.bg_elevated))
-                })
-                .on_click_stop(move |_| { replace_open.update(|v| *v = !*v); }),
+            container(label(move || {
+                if replace_open.get() {
+                    "▾ Replace"
+                } else {
+                    "▸ Replace"
+                }
+            }))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(10.0)
+                    .padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(p.text_muted)
+                    .hover(|s| s.background(theme.get().palette.bg_elevated))
+            })
+            .on_click_stop(move |_| {
+                replace_open.update(|v| *v = !*v);
+            }),
         ))
         .style(|s| s.flex_row().items_center().width_full()),
     )
     .style(move |s| {
         let p = theme.get().palette;
-        s.padding_horiz(12.0).padding_vert(8.0)
-         .border_bottom(1.0).border_color(p.border).width_full()
+        s.padding_horiz(12.0)
+            .padding_vert(8.0)
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .width_full()
     });
 
     // ── Search options row ────────────────────────────────────────────────────
@@ -51,13 +69,27 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         container(label(|| ".*"))
             .style(move |s| {
                 let p = t.get().palette;
-                s.font_size(11.0).padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .color(if use_regex.get() { p.bg_base } else { p.text_muted })
-                 .background(if use_regex.get() { p.accent } else { p.bg_elevated })
-                 .border(1.0).border_color(p.border)
+                s.font_size(11.0)
+                    .padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if use_regex.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if use_regex.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
             })
-            .on_click_stop(move |_| { use_regex.update(|v| *v = !*v); })
+            .on_click_stop(move |_| {
+                use_regex.update(|v| *v = !*v);
+            })
     };
 
     let opt_case = {
@@ -65,13 +97,27 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         container(label(|| "Aa"))
             .style(move |s| {
                 let p = t.get().palette;
-                s.font_size(11.0).padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .color(if case_sensitive.get() { p.bg_base } else { p.text_muted })
-                 .background(if case_sensitive.get() { p.accent } else { p.bg_elevated })
-                 .border(1.0).border_color(p.border)
+                s.font_size(11.0)
+                    .padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if case_sensitive.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if case_sensitive.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
             })
-            .on_click_stop(move |_| { case_sensitive.update(|v| *v = !*v); })
+            .on_click_stop(move |_| {
+                case_sensitive.update(|v| *v = !*v);
+            })
     };
 
     // ── Search input ──────────────────────────────────────────────────────────
@@ -83,16 +129,32 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     .placeholder("Search in files...")
                     .style(move |s| {
                         let p = theme.get().palette;
-                        s.flex_grow(1.0).min_width(0.0)
-                         .background(p.bg_elevated).border(1.0).border_color(p.border)
-                         .border_radius(4.0).color(p.text_primary)
-                         .padding_horiz(8.0).padding_vert(6.0).font_size(13.0)
+                        s.flex_grow(1.0)
+                            .min_width(0.0)
+                            .background(p.bg_elevated)
+                            .border(1.0)
+                            .border_color(p.border)
+                            .border_radius(4.0)
+                            .color(p.text_primary)
+                            .padding_horiz(8.0)
+                            .padding_vert(6.0)
+                            .font_size(13.0)
                     })
                     .on_event_stop(floem::event::EventListener::KeyDown, move |event| {
                         if let floem::event::Event::KeyDown(ke) = event {
-                            if ke.key.logical_key == floem::keyboard::Key::Named(floem::keyboard::NamedKey::Enter) {
+                            if ke.key.logical_key
+                                == floem::keyboard::Key::Named(floem::keyboard::NamedKey::Enter)
+                            {
                                 let root = state2.workspace_root.get();
-                                perform_search(state2.clone(), is_searching, root, use_regex, case_sensitive);
+                                perform_search(
+                                    state2.clone(),
+                                    is_searching,
+                                    root,
+                                    use_regex,
+                                    case_sensitive,
+                                    include_glob,
+                                    exclude_glob,
+                                );
                             }
                         }
                     }),
@@ -104,92 +166,234 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         .style(|s| s.padding_horiz(8.0).padding_vert(4.0).width_full())
     };
 
+    // ── File glob filters ───────────────────────────────────────────────
+    let glob_bar = container(
+        stack((
+            text_input(include_glob)
+                .placeholder("Include: *.rs, src/**")
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.flex_grow(1.0)
+                        .min_width(0.0)
+                        .background(p.bg_elevated)
+                        .border(1.0)
+                        .border_color(p.border)
+                        .border_radius(4.0)
+                        .color(p.text_primary)
+                        .padding_horiz(6.0)
+                        .padding_vert(4.0)
+                        .font_size(11.0)
+                }),
+            text_input(exclude_glob)
+                .placeholder("Exclude: target/, *.lock")
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.flex_grow(1.0)
+                        .min_width(0.0)
+                        .background(p.bg_elevated)
+                        .border(1.0)
+                        .border_color(p.border)
+                        .border_radius(4.0)
+                        .color(p.text_primary)
+                        .padding_horiz(6.0)
+                        .padding_vert(4.0)
+                        .font_size(11.0)
+                }),
+        ))
+        .style(|s| s.flex_row().gap(4.0).width_full()),
+    )
+    .style(|s| s.padding_horiz(8.0).padding_bottom(4.0).width_full());
+
     // ── Replace input (shown when replace_open) ───────────────────────────────
     let replace_bar = {
         let state3 = state.clone();
-        container(stack((
-            text_input(replace_text)
-                .placeholder("Replace with...")
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.flex_grow(1.0).min_width(0.0)
-                     .background(p.bg_elevated).border(1.0).border_color(p.border)
-                     .border_radius(4.0).color(p.text_primary)
-                     .padding_horiz(8.0).padding_vert(6.0).font_size(13.0)
-                }),
-            container(label(|| "Replace All"))
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.padding_horiz(8.0).padding_vert(5.0).border_radius(4.0)
-                     .font_size(11.0).cursor(floem::style::CursorStyle::Pointer)
-                     .color(p.bg_base).background(p.accent)
-                     .hover(|s| s.background(theme.get().palette.accent_hover))
-                })
-                .on_click_stop(move |_| {
-                    perform_replace_all(
-                        state3.search_results.get(),
-                        query.get(),
-                        replace_text.get(),
-                        replace_status,
-                        use_regex.get(),
-                        case_sensitive.get(),
-                    );
-                }),
-        ))
-        .style(|s| s.flex_row().items_center().gap(4.0).width_full()))
+        container(
+            stack((
+                text_input(replace_text)
+                    .placeholder("Replace with...")
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.flex_grow(1.0)
+                            .min_width(0.0)
+                            .background(p.bg_elevated)
+                            .border(1.0)
+                            .border_color(p.border)
+                            .border_radius(4.0)
+                            .color(p.text_primary)
+                            .padding_horiz(8.0)
+                            .padding_vert(6.0)
+                            .font_size(13.0)
+                    }),
+                container(label(|| "Replace All"))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.padding_horiz(8.0)
+                            .padding_vert(5.0)
+                            .border_radius(4.0)
+                            .font_size(11.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .color(p.bg_base)
+                            .background(p.accent)
+                            .hover(|s| s.background(theme.get().palette.accent_hover))
+                    })
+                    .on_click_stop(move |_| {
+                        perform_replace_all(
+                            state3.search_results.get(),
+                            query.get(),
+                            replace_text.get(),
+                            replace_status,
+                            use_regex.get(),
+                            case_sensitive.get(),
+                        );
+                    }),
+            ))
+            .style(|s| s.flex_row().items_center().gap(4.0).width_full()),
+        )
         .style(move |s| {
-            s.padding_horiz(8.0).padding_vert(4.0).width_full()
-             .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+            s.padding_horiz(8.0)
+                .padding_vert(4.0)
+                .width_full()
+                .apply_if(!replace_open.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
         })
     };
 
     // Replace status
-    let status_label = label(move || replace_status.get())
-        .style(move |s| {
-            let p = theme.get().palette;
-            s.font_size(11.0).color(p.success).padding_horiz(12.0).padding_vert(3.0)
-             .apply_if(replace_status.get().is_empty(), |s| s.display(floem::style::Display::None))
+    let status_label = label(move || replace_status.get()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.0)
+            .color(p.success)
+            .padding_horiz(12.0)
+            .padding_vert(3.0)
+            .apply_if(replace_status.get().is_empty(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    // ── Results list (grouped by file) ─────────────────────────────────────
+    // Group results by file path, then render each file as a header + its matches.
+    let grouped_results: floem::reactive::Memo<Vec<(std::path::PathBuf, Vec<SearchResult>)>> =
+        floem::reactive::create_memo(move |_| {
+            let all = results.get();
+            let mut map: std::collections::BTreeMap<std::path::PathBuf, Vec<SearchResult>> =
+                std::collections::BTreeMap::new();
+            for r in all {
+                map.entry(r.path.clone()).or_default().push(r);
+            }
+            map.into_iter().collect()
         });
 
-    // ── Results list ──────────────────────────────────────────────────────────
     let results_view = {
         let state4 = state.clone();
         dyn_stack(
-            move || results.get(),
-            |res| format!("{}:{}:{}", res.path.display(), res.line, res.content),
+            move || {
+                // Flatten: for each file group, emit a header item then each match item.
+                let mut items: Vec<(String, Option<SearchResult>)> = Vec::new();
+                for (path, matches) in grouped_results.get() {
+                    let _fname = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    items.push((format!("__file__{}", path.display()), None));
+                    for m in matches {
+                        items.push((
+                            format!("{}:{}:{}", m.path.display(), m.line, m.content),
+                            Some(m),
+                        ));
+                    }
+                }
+                items
+            },
+            |(key, _)| key.clone(),
             {
                 let state5 = state4.clone();
-                move |res: SearchResult| {
-                    let path    = res.path.clone();
-                    let line    = res.line;
-                    let content = res.content.trim().to_string();
-                    let hovered = create_rw_signal(false);
-                    let s       = state5.clone();
-                    let filename = path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "?".to_string());
+                move |(key, result_opt): (String, Option<SearchResult>)| {
+                    if key.starts_with("__file__") {
+                        // File header row
+                        let file_path = key.strip_prefix("__file__").unwrap_or("").to_string();
+                        let display_name = std::path::Path::new(&file_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| file_path.clone());
+                        let match_count = grouped_results
+                            .get()
+                            .iter()
+                            .find(|(p, _)| p.display().to_string() == file_path)
+                            .map(|(_, v)| v.len())
+                            .unwrap_or(0);
+                        container(
+                            stack((
+                                label(move || format!("📄 {display_name}")),
+                                label(move || format!("  ({match_count})")),
+                            ))
+                            .style(|s| s.items_center()),
+                        )
+                        .style(move |s| {
+                            let p = theme.get().palette;
+                            s.width_full()
+                                .padding_horiz(8.0)
+                                .padding_vert(5.0)
+                                .font_size(12.0)
+                                .color(p.accent)
+                                .font_weight(floem::text::Weight::BOLD)
+                                .background(p.bg_elevated.with_alpha(0.3))
+                                .border_bottom(1.0)
+                                .border_color(p.border.with_alpha(0.2))
+                        })
+                        .into_any()
+                    } else if let Some(res) = result_opt {
+                        // Match result row (indented)
+                        let path = res.path.clone();
+                        let line = res.line;
+                        let content = res.content.trim().to_string();
+                        let hovered = create_rw_signal(false);
+                        let s = state5.clone();
 
-                    container(stack((
-                        label(move || format!("{}:{} ", filename, line))
-                            .style(move |s| s.font_size(12.0).color(theme.get().palette.accent).margin_right(4.0)),
-                        label(move || content.clone())
-                            .style(move |s| s.font_size(12.0).color(theme.get().palette.text_primary).flex_grow(1.0)),
-                    ))
-                    .style(|s| s.items_center()))
-                    .style(move |_s| {
-                        let p = theme.get().palette;
-                        _s.width_full().padding_horiz(12.0).padding_vert(4.0)
-                          .background(if hovered.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
-                          .cursor(floem::style::CursorStyle::Pointer)
-                    })
-                    .on_click_stop(move |_| {
-                        s.open_file.set(Some(path.clone()));
-                        s.goto_line.set(line as u32);
-                    })
-                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| { hovered.set(true); })
-                    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| { hovered.set(false); })
+                        container(
+                            stack((
+                                label(move || format!("  L{line}: ")).style(move |s| {
+                                    s.font_size(11.0)
+                                        .color(theme.get().palette.text_muted)
+                                        .min_width(50.0)
+                                }),
+                                label(move || content.clone()).style(move |s| {
+                                    s.font_size(12.0)
+                                        .color(theme.get().palette.text_primary)
+                                        .flex_grow(1.0)
+                                }),
+                            ))
+                            .style(|s| s.items_center()),
+                        )
+                        .style(move |_s| {
+                            let p = theme.get().palette;
+                            _s.width_full()
+                                .padding_left(20.0)
+                                .padding_right(8.0)
+                                .padding_vert(3.0)
+                                .background(if hovered.get() {
+                                    p.bg_elevated
+                                } else {
+                                    floem::peniko::Color::TRANSPARENT
+                                })
+                                .cursor(floem::style::CursorStyle::Pointer)
+                        })
+                        .on_click_stop(move |_| {
+                            s.open_file.set(Some(path.clone()));
+                            s.goto_line.set(line as u32);
+                        })
+                        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                            hovered.set(true);
+                        })
+                        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                            hovered.set(false);
+                        })
+                        .into_any()
+                    } else {
+                        container(label(|| "")).into_any()
+                    }
                 }
-            }
+            },
         )
         .style(|s: floem::style::Style| s.flex_col().width_full())
     };
@@ -197,20 +401,39 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let results_scroll = scroll(stack((
         results_view,
         label(move || {
-            if is_searching.get() { "Searching...".to_string() }
-            else if results.get().is_empty() && !query.get().is_empty() { "No results found.".to_string() }
-            else if !results.get().is_empty() { format!("{} results", results.get().len()) }
-            else { String::new() }
+            if is_searching.get() {
+                "Searching...".to_string()
+            } else if results.get().is_empty() && !query.get().is_empty() {
+                "No results found.".to_string()
+            } else if !results.get().is_empty() {
+                format!("{} results", results.get().len())
+            } else {
+                String::new()
+            }
         })
-        .style(move |s| s.font_size(12.0).color(theme.get().palette.text_muted).padding(12.0)),
+        .style(move |s| {
+            s.font_size(12.0)
+                .color(theme.get().palette.text_muted)
+                .padding(12.0)
+        }),
     )))
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
-    stack((header, search_bar, replace_bar, status_label, results_scroll))
-        .style(move |s| {
-            let p = theme.get().palette;
-            s.flex_col().width_full().height_full().background(p.bg_panel)
-        })
+    stack((
+        header,
+        search_bar,
+        glob_bar,
+        replace_bar,
+        status_label,
+        results_scroll,
+    ))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.flex_col()
+            .width_full()
+            .height_full()
+            .background(p.bg_panel)
+    })
 }
 
 fn perform_search(
@@ -219,16 +442,22 @@ fn perform_search(
     root: std::path::PathBuf,
     use_regex: RwSignal<bool>,
     case_sensitive: RwSignal<bool>,
+    include_glob: RwSignal<String>,
+    exclude_glob: RwSignal<String>,
 ) {
     let query = state.search_query.get();
-    if query.is_empty() { return; }
+    if query.is_empty() {
+        return;
+    }
 
     is_searching.set(true);
     state.search_results.set(vec![]);
 
-    let regex     = use_regex.get();
+    let regex = use_regex.get();
     let case_sens = case_sensitive.get();
-    let (tx, rx)  = std::sync::mpsc::channel();
+    let include = include_glob.get();
+    let exclude = exclude_glob.get();
+    let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
         let mut found = Vec::new();
@@ -238,8 +467,29 @@ fn perform_search(
             "--no-heading".to_string(),
             "--color=never".to_string(),
         ];
-        if !case_sens { rg_args.push("--ignore-case".to_string()); }
-        if !regex     { rg_args.push("--fixed-strings".to_string()); }
+        if !case_sens {
+            rg_args.push("--ignore-case".to_string());
+        }
+        if !regex {
+            rg_args.push("--fixed-strings".to_string());
+        }
+        // Apply glob filters
+        for part in include
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            rg_args.push("--glob".to_string());
+            rg_args.push(part.to_string());
+        }
+        for part in exclude
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            rg_args.push("--glob".to_string());
+            rg_args.push(format!("!{part}"));
+        }
         rg_args.push("-e".to_string());
         rg_args.push(query.clone());
 
@@ -272,7 +522,9 @@ fn perform_search(
                 })
                 .flatten()
             {
-                if !entry.file_type().is_file() { continue; }
+                if !entry.file_type().is_file() {
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(entry.path()) {
                     for (i, line_text) in content.lines().enumerate() {
                         let matches = if case_sens {
@@ -286,11 +538,15 @@ fn perform_search(
                                 line: i + 1,
                                 content: line_text.to_string(),
                             });
-                            if found.len() >= 500 { break; }
+                            if found.len() >= 500 {
+                                break;
+                            }
                         }
                     }
                 }
-                if found.len() >= 500 { break; }
+                if found.len() >= 500 {
+                    break;
+                }
             }
         }
         let _ = tx.send(found);
@@ -314,13 +570,17 @@ fn perform_replace_all(
     use_regex: bool,
     case_sensitive: bool,
 ) {
-    if find.is_empty() { return; }
+    if find.is_empty() {
+        return;
+    }
 
     // Collect unique file paths
     let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    for r in &results { files.insert(r.path.clone()); }
+    for r in &results {
+        files.insert(r.path.clone());
+    }
 
-    let find2   = find.clone();
+    let find2 = find.clone();
     let replace2 = replace.clone();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
 
@@ -329,7 +589,9 @@ fn perform_replace_all(
         let mut replaced_count = 0usize;
 
         for path in files {
-            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
 
             let new_content = if use_regex {
                 // Use regex replace via rg/sed or manual regex
@@ -341,10 +603,12 @@ fn perform_replace_all(
                         if line.contains(&find2) {
                             count += line.matches(&find2).count();
                             line.replace(&find2, &replace2)
-                        } else { line.to_string() }
+                        } else {
+                            line.to_string()
+                        }
                     } else {
-                        let lo_line  = line.to_lowercase();
-                        let lo_find  = find2.to_lowercase();
+                        let lo_line = line.to_lowercase();
+                        let lo_find = find2.to_lowercase();
                         if lo_line.contains(&lo_find) {
                             // case-insensitive replace: use rg --replace via process
                             count += 1;
@@ -358,7 +622,9 @@ fn perform_replace_all(
                             }
                             result.push_str(rest);
                             result
-                        } else { line.to_string() }
+                        } else {
+                            line.to_string()
+                        }
                     };
                     out.push_str(&new_line);
                     out.push('\n');
@@ -397,7 +663,9 @@ fn perform_replace_all(
             }
         }
 
-        let _ = tx.send(format!("Replaced {replaced_count} occurrence(s) in {replaced_files} file(s)"));
+        let _ = tx.send(format!(
+            "Replaced {replaced_count} occurrence(s) in {replaced_files} file(s)"
+        ));
     });
 
     let rx_sig = floem::ext_event::create_signal_from_channel(rx);

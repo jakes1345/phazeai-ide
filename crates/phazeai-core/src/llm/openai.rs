@@ -326,14 +326,19 @@ impl LlmClient for OpenAIClient {
                         // OpenAI stream_options: { include_usage: true } emits usage
                         // on the final chunk (choices=[]) — capture it here.
                         if let Some(usage) = event.get("usage") {
-                            let input = usage.get("prompt_tokens")
-                                .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let output = usage.get("completion_tokens")
-                                .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let input = usage
+                                .get("prompt_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32;
+                            let output = usage
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as u32;
                             if input > 0 || output > 0 {
-                                let _ = tx.unbounded_send(StreamEvent::Usage(
-                                    crate::llm::Usage { input_tokens: input, output_tokens: output }
-                                ));
+                                let _ = tx.unbounded_send(StreamEvent::Usage(crate::llm::Usage {
+                                    input_tokens: input,
+                                    output_tokens: output,
+                                }));
                             }
                         }
 

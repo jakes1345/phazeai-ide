@@ -23,7 +23,11 @@ pub enum LspCommand {
     /// File was opened / active tab changed — send textDocument/didOpen.
     OpenFile { path: PathBuf, text: String },
     /// File content changed — debounced 300 ms before forwarding did_change.
-    ChangeFile { path: PathBuf, text: String, version: i32 },
+    ChangeFile {
+        path: PathBuf,
+        text: String,
+        version: i32,
+    },
     /// Request completions at a cursor position — triggers Completions event.
     RequestCompletions { path: PathBuf, line: u32, col: u32 },
     /// Request go-to-definition at cursor position.
@@ -58,7 +62,7 @@ pub enum LspCommand {
 #[derive(Debug, Clone)]
 pub struct SymbolEntry {
     pub name: String,
-    pub kind: String,  // "fn", "struct", "impl", "trait", "mod", etc.
+    pub kind: String, // "fn", "struct", "impl", "trait", "mod", etc.
     /// 1-based line number.
     pub line: u32,
     /// Nesting depth (0 = top-level).
@@ -546,55 +550,84 @@ pub fn start_lsp_bridge(
     });
 
     // Wire all std::sync channels into Floem's reactive system.
-    let diag_chan      = create_signal_from_channel(diag_rx);
-    let comp_chan      = create_signal_from_channel(comp_rx);
-    let def_chan       = create_signal_from_channel(def_rx);
-    let hover_chan     = create_signal_from_channel(hover_rx);
-    let refs_chan      = create_signal_from_channel(refs_rx);
-    let actions_chan   = create_signal_from_channel(actions_rx);
-    let sig_chan       = create_signal_from_channel(sig_rx);
-    let syms_chan      = create_signal_from_channel(syms_rx);
-    let ws_syms_chan   = create_signal_from_channel(ws_syms_rx);
+    let diag_chan = create_signal_from_channel(diag_rx);
+    let comp_chan = create_signal_from_channel(comp_rx);
+    let def_chan = create_signal_from_channel(def_rx);
+    let hover_chan = create_signal_from_channel(hover_rx);
+    let refs_chan = create_signal_from_channel(refs_rx);
+    let actions_chan = create_signal_from_channel(actions_rx);
+    let sig_chan = create_signal_from_channel(sig_rx);
+    let syms_chan = create_signal_from_channel(syms_rx);
+    let ws_syms_chan = create_signal_from_channel(ws_syms_rx);
 
-    let diag_sig:     RwSignal<Vec<DiagEntry>>               = create_rw_signal(vec![]);
-    let comp_sig:     RwSignal<Vec<CompletionEntry>>         = create_rw_signal(vec![]);
-    let def_sig:      RwSignal<Option<DefinitionResult>>     = create_rw_signal(None);
-    let hover_sig:    RwSignal<Option<String>>               = create_rw_signal(None);
-    let refs_sig:     RwSignal<Vec<ReferenceEntry>>          = create_rw_signal(vec![]);
-    let actions_sig:  RwSignal<Vec<CodeAction>>              = create_rw_signal(vec![]);
-    let sig_help_sig: RwSignal<Option<SignatureHelpResult>>  = create_rw_signal(None);
-    let syms_sig:     RwSignal<Vec<SymbolEntry>>             = create_rw_signal(vec![]);
-    let ws_syms_sig:  RwSignal<Vec<SymbolEntry>>             = create_rw_signal(vec![]);
+    let diag_sig: RwSignal<Vec<DiagEntry>> = create_rw_signal(vec![]);
+    let comp_sig: RwSignal<Vec<CompletionEntry>> = create_rw_signal(vec![]);
+    let def_sig: RwSignal<Option<DefinitionResult>> = create_rw_signal(None);
+    let hover_sig: RwSignal<Option<String>> = create_rw_signal(None);
+    let refs_sig: RwSignal<Vec<ReferenceEntry>> = create_rw_signal(vec![]);
+    let actions_sig: RwSignal<Vec<CodeAction>> = create_rw_signal(vec![]);
+    let sig_help_sig: RwSignal<Option<SignatureHelpResult>> = create_rw_signal(None);
+    let syms_sig: RwSignal<Vec<SymbolEntry>> = create_rw_signal(vec![]);
+    let ws_syms_sig: RwSignal<Vec<SymbolEntry>> = create_rw_signal(vec![]);
 
     create_effect(move |_| {
-        if let Some(entries) = diag_chan.get() { diag_sig.set(entries); }
+        if let Some(entries) = diag_chan.get() {
+            diag_sig.set(entries);
+        }
     });
     create_effect(move |_| {
-        if let Some(entries) = comp_chan.get() { comp_sig.set(entries); }
+        if let Some(entries) = comp_chan.get() {
+            comp_sig.set(entries);
+        }
     });
     create_effect(move |_| {
-        if let Some(result) = def_chan.get() { def_sig.set(Some(result)); }
+        if let Some(result) = def_chan.get() {
+            def_sig.set(Some(result));
+        }
     });
     create_effect(move |_| {
-        if let Some(text) = hover_chan.get() { hover_sig.set(Some(text)); }
+        if let Some(text) = hover_chan.get() {
+            hover_sig.set(Some(text));
+        }
     });
     create_effect(move |_| {
-        if let Some(entries) = refs_chan.get() { refs_sig.set(entries); }
+        if let Some(entries) = refs_chan.get() {
+            refs_sig.set(entries);
+        }
     });
     create_effect(move |_| {
-        if let Some(actions) = actions_chan.get() { actions_sig.set(actions); }
+        if let Some(actions) = actions_chan.get() {
+            actions_sig.set(actions);
+        }
     });
     create_effect(move |_| {
-        if let Some(result) = sig_chan.get() { sig_help_sig.set(Some(result)); }
+        if let Some(result) = sig_chan.get() {
+            sig_help_sig.set(Some(result));
+        }
     });
     create_effect(move |_| {
-        if let Some(entries) = syms_chan.get() { syms_sig.set(entries); }
+        if let Some(entries) = syms_chan.get() {
+            syms_sig.set(entries);
+        }
     });
     create_effect(move |_| {
-        if let Some(entries) = ws_syms_chan.get() { ws_syms_sig.set(entries); }
+        if let Some(entries) = ws_syms_chan.get() {
+            ws_syms_sig.set(entries);
+        }
     });
 
-    (lsp_cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig, sig_help_sig, syms_sig, ws_syms_sig)
+    (
+        lsp_cmd_tx,
+        diag_sig,
+        comp_sig,
+        def_sig,
+        hover_sig,
+        refs_sig,
+        actions_sig,
+        sig_help_sig,
+        syms_sig,
+        ws_syms_sig,
+    )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -621,10 +654,15 @@ fn marked_string_to_text(ms: lsp_types::MarkedString) -> String {
 }
 
 fn severity_from_lsp(s: Option<lsp_types::DiagnosticSeverity>) -> DiagSeverity {
-    if      s == Some(lsp_types::DiagnosticSeverity::WARNING)     { DiagSeverity::Warning }
-    else if s == Some(lsp_types::DiagnosticSeverity::INFORMATION) { DiagSeverity::Info    }
-    else if s == Some(lsp_types::DiagnosticSeverity::HINT)        { DiagSeverity::Hint    }
-    else                                                           { DiagSeverity::Error   }
+    if s == Some(lsp_types::DiagnosticSeverity::WARNING) {
+        DiagSeverity::Warning
+    } else if s == Some(lsp_types::DiagnosticSeverity::INFORMATION) {
+        DiagSeverity::Info
+    } else if s == Some(lsp_types::DiagnosticSeverity::HINT) {
+        DiagSeverity::Hint
+    } else {
+        DiagSeverity::Error
+    }
 }
 
 // ── Fallback helpers ──────────────────────────────────────────────────────────
@@ -650,12 +688,21 @@ fn word_at_position(path: &PathBuf, line: u32, col: u32) -> Option<String> {
         .map(|(i, _)| col + i + 1)
         .unwrap_or(col);
     let word = target_line[start..end].to_string();
-    if word.is_empty() { None } else { Some(word) }
+    if word.is_empty() {
+        None
+    } else {
+        Some(word)
+    }
 }
 
 /// Ripgrep-based fallback for find-references.
 /// Runs `rg --json <word> <workspace>` and parses the output into ReferenceEntry.
-fn ripgrep_references(path: &PathBuf, line: u32, col: u32, workspace: &PathBuf) -> Vec<ReferenceEntry> {
+fn ripgrep_references(
+    path: &PathBuf,
+    line: u32,
+    col: u32,
+    workspace: &PathBuf,
+) -> Vec<ReferenceEntry> {
     let word = match word_at_position(path, line, col) {
         Some(w) if !w.is_empty() => w,
         _ => return vec![],
@@ -679,21 +726,23 @@ fn ripgrep_references(path: &PathBuf, line: u32, col: u32, workspace: &PathBuf) 
             Ok(v) => v,
             Err(_) => continue,
         };
-        if val.get("type").and_then(|t| t.as_str()) != Some("match") { continue; }
+        if val.get("type").and_then(|t| t.as_str()) != Some("match") {
+            continue;
+        }
 
         // Use a closure to allow `?`-style early returns without polluting the outer fn.
         let parsed: Option<Vec<ReferenceEntry>> = (|| {
-            let data       = val.get("data")?;
-            let file_path  = data.get("path")?.get("text")?.as_str()?;
-            let line_num   = data.get("line_number")?.as_u64()? as u32;
+            let data = val.get("data")?;
+            let file_path = data.get("path")?.get("text")?.as_str()?;
+            let line_num = data.get("line_number")?.as_u64()? as u32;
             let submatches = data.get("submatches")?.as_array()?;
-            let mut local  = Vec::new();
+            let mut local = Vec::new();
             for sm in submatches {
                 let col_start = sm.get("start")?.as_u64()? as u32 + 1;
                 local.push(ReferenceEntry {
                     path: PathBuf::from(file_path),
                     line: line_num,
-                    col:  col_start,
+                    col: col_start,
                 });
             }
             Some(local)
@@ -753,12 +802,15 @@ fn organize_rust_imports(path: &PathBuf) -> Option<Vec<(PathBuf, String)>> {
     for (i, l) in lines.iter().enumerate() {
         let trimmed = l.trim();
         if trimmed.starts_with("use ") {
-            if use_start.is_none() { use_start = Some(i); }
+            if use_start.is_none() {
+                use_start = Some(i);
+            }
             use_end = i;
-        } else if use_start.is_some() && !trimmed.is_empty()
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with("/*")
-                && !trimmed.starts_with('#')
+        } else if use_start.is_some()
+            && !trimmed.is_empty()
+            && !trimmed.starts_with("//")
+            && !trimmed.starts_with("/*")
+            && !trimmed.starts_with('#')
         {
             break;
         }
@@ -778,7 +830,11 @@ fn organize_rust_imports(path: &PathBuf) -> Option<Vec<(PathBuf, String)>> {
         return None; // already sorted
     }
 
-    let mut new_lines = lines[..start].to_vec().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut new_lines = lines[..start]
+        .to_vec()
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
     new_lines.extend(use_lines);
     new_lines.extend(lines[use_end + 1..].iter().map(|s| s.to_string()));
     let new_content = new_lines.join("\n");
@@ -789,17 +845,23 @@ fn organize_rust_imports(path: &PathBuf) -> Option<Vec<(PathBuf, String)>> {
 /// Replace all whole-word occurrences of `old` with `new_name` in `text`.
 /// Uses a simple byte-scan so we don't need a regex dependency.
 fn replace_whole_word(text: &str, old: &str, new_name: &str) -> String {
-    if old.is_empty() { return text.to_string(); }
+    if old.is_empty() {
+        return text.to_string();
+    }
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
     while let Some(pos) = remaining.find(old) {
         let before = &remaining[..pos];
         let after_start = pos + old.len();
         // Check word boundaries: char before and after must not be word chars.
-        let before_ok = before.chars().last()
+        let before_ok = before
+            .chars()
+            .last()
             .map(|c| !c.is_alphanumeric() && c != '_')
             .unwrap_or(true);
-        let after_ok = remaining[after_start..].chars().next()
+        let after_ok = remaining[after_start..]
+            .chars()
+            .next()
             .map(|c| !c.is_alphanumeric() && c != '_')
             .unwrap_or(true);
         if before_ok && after_ok {
@@ -869,24 +931,32 @@ fn apply_workspace_edit(edit: lsp_types::WorkspaceEdit, old_word: &str, new_name
 
 /// Apply a list of LSP TextEdits to a file on disk (sort descending by range so
 /// offsets stay valid after each replacement).
-fn apply_text_edits(path: &std::path::Path, edits: &[lsp_types::OneOf<lsp_types::TextEdit, lsp_types::AnnotatedTextEdit>]) {
-    let Ok(content) = std::fs::read_to_string(path) else { return };
+fn apply_text_edits(
+    path: &std::path::Path,
+    edits: &[lsp_types::OneOf<lsp_types::TextEdit, lsp_types::AnnotatedTextEdit>],
+) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
     let lines: Vec<&str> = content.lines().collect();
 
     // Flatten into (start_line, start_char, end_line, end_char, new_text)
-    let mut flat: Vec<(u32, u32, u32, u32, String)> = edits.iter().filter_map(|e| {
-        let te = match e {
-            lsp_types::OneOf::Left(t)  => t.clone(),
-            lsp_types::OneOf::Right(a) => a.text_edit.clone(),
-        };
-        Some((
-            te.range.start.line,
-            te.range.start.character,
-            te.range.end.line,
-            te.range.end.character,
-            te.new_text.clone(),
-        ))
-    }).collect();
+    let mut flat: Vec<(u32, u32, u32, u32, String)> = edits
+        .iter()
+        .filter_map(|e| {
+            let te = match e {
+                lsp_types::OneOf::Left(t) => t.clone(),
+                lsp_types::OneOf::Right(a) => a.text_edit.clone(),
+            };
+            Some((
+                te.range.start.line,
+                te.range.start.character,
+                te.range.end.line,
+                te.range.end.character,
+                te.new_text.clone(),
+            ))
+        })
+        .collect();
 
     // Apply in reverse order so earlier positions aren't shifted
     flat.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
@@ -895,7 +965,9 @@ fn apply_text_edits(path: &std::path::Path, edits: &[lsp_types::OneOf<lsp_types:
     for (sl, sc, el, ec, new_text) in flat {
         let sl = sl as usize;
         let el = el as usize;
-        if sl >= new_lines.len() { continue; }
+        if sl >= new_lines.len() {
+            continue;
+        }
         if sl == el {
             let line = &new_lines[sl];
             let sc = sc as usize;
@@ -910,7 +982,11 @@ fn apply_text_edits(path: &std::path::Path, edits: &[lsp_types::OneOf<lsp_types:
             let start_line = new_lines[sl].clone();
             let sc = (sc as usize).min(start_line.len());
             let prefix = start_line[..sc].to_string();
-            let end_line = if el < new_lines.len() { new_lines[el].clone() } else { String::new() };
+            let end_line = if el < new_lines.len() {
+                new_lines[el].clone()
+            } else {
+                String::new()
+            };
             let ec = (ec as usize).min(end_line.len());
             let suffix = end_line[ec..].to_string();
             let replacement = format!("{prefix}{new_text}{suffix}");
@@ -928,42 +1004,49 @@ fn parse_signature_help(sh: lsp_types::SignatureHelp) -> Option<SignatureHelpRes
     let active_sig = sh.active_signature.unwrap_or(0) as usize;
     let sig = sh.signatures.into_iter().nth(active_sig)?;
     let label = sig.label.clone();
-    let active_param = sh.active_parameter
+    let active_param = sh
+        .active_parameter
         .or_else(|| sig.active_parameter)
         .unwrap_or(0) as usize;
-    let params: Vec<String> = sig.parameters.unwrap_or_default().into_iter().map(|p| {
-        match p.label {
+    let params: Vec<String> = sig
+        .parameters
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| match p.label {
             lsp_types::ParameterLabel::Simple(s) => s,
             lsp_types::ParameterLabel::LabelOffsets([s, e]) => {
                 label.get(s as usize..e as usize).unwrap_or("").to_string()
             }
-        }
-    }).collect();
-    Some(SignatureHelpResult { label, active_param, params })
+        })
+        .collect();
+    Some(SignatureHelpResult {
+        label,
+        active_param,
+        params,
+    })
 }
-
 
 /// Flatten nested `lsp_types::DocumentSymbol` tree into a flat list with depth info.
 fn flatten_symbols(syms: &[lsp_types::DocumentSymbol], depth: u32) -> Vec<SymbolEntry> {
     let mut out = Vec::new();
     for sym in syms {
         let kind = match sym.kind {
-            lsp_types::SymbolKind::FUNCTION       => "fn",
-            lsp_types::SymbolKind::METHOD         => "fn",
-            lsp_types::SymbolKind::STRUCT         => "struct",
-            lsp_types::SymbolKind::ENUM           => "enum",
-            lsp_types::SymbolKind::INTERFACE      => "trait",
-            lsp_types::SymbolKind::VARIABLE       => "let",
-            lsp_types::SymbolKind::CONSTANT       => "const",
+            lsp_types::SymbolKind::FUNCTION => "fn",
+            lsp_types::SymbolKind::METHOD => "fn",
+            lsp_types::SymbolKind::STRUCT => "struct",
+            lsp_types::SymbolKind::ENUM => "enum",
+            lsp_types::SymbolKind::INTERFACE => "trait",
+            lsp_types::SymbolKind::VARIABLE => "let",
+            lsp_types::SymbolKind::CONSTANT => "const",
             lsp_types::SymbolKind::TYPE_PARAMETER => "type",
-            lsp_types::SymbolKind::MODULE         => "mod",
-            lsp_types::SymbolKind::NAMESPACE      => "mod",
-            _                                     => "item",
+            lsp_types::SymbolKind::MODULE => "mod",
+            lsp_types::SymbolKind::NAMESPACE => "mod",
+            _ => "item",
         };
         out.push(SymbolEntry {
-            name:  sym.name.clone(),
-            kind:  kind.to_string(),
-            line:  sym.selection_range.start.line + 1,
+            name: sym.name.clone(),
+            kind: kind.to_string(),
+            line: sym.selection_range.start.line + 1,
             depth,
         });
         if let Some(children) = &sym.children {
@@ -988,24 +1071,28 @@ fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
         let depth = (indent / 4) as u32;
 
         let entry = if ext == "rs" {
-            if let Some(rest) = trimmed.strip_prefix("pub async fn ")
+            if let Some(rest) = trimmed
+                .strip_prefix("pub async fn ")
                 .or_else(|| trimmed.strip_prefix("async fn "))
                 .or_else(|| trimmed.strip_prefix("pub fn "))
                 .or_else(|| trimmed.strip_prefix("fn "))
             {
                 let name = rest.split(['(', '<', ' ']).next().unwrap_or("").to_string();
                 Some(("fn", name))
-            } else if let Some(rest) = trimmed.strip_prefix("pub struct ")
+            } else if let Some(rest) = trimmed
+                .strip_prefix("pub struct ")
                 .or_else(|| trimmed.strip_prefix("struct "))
             {
                 let name = rest.split([' ', '<', '{']).next().unwrap_or("").to_string();
                 Some(("struct", name))
-            } else if let Some(rest) = trimmed.strip_prefix("pub enum ")
+            } else if let Some(rest) = trimmed
+                .strip_prefix("pub enum ")
                 .or_else(|| trimmed.strip_prefix("enum "))
             {
                 let name = rest.split([' ', '<', '{']).next().unwrap_or("").to_string();
                 Some(("enum", name))
-            } else if let Some(rest) = trimmed.strip_prefix("pub trait ")
+            } else if let Some(rest) = trimmed
+                .strip_prefix("pub trait ")
                 .or_else(|| trimmed.strip_prefix("trait "))
             {
                 let name = rest.split([' ', '<', '{']).next().unwrap_or("").to_string();
@@ -1013,7 +1100,8 @@ fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
             } else if let Some(rest) = trimmed.strip_prefix("impl ") {
                 let name = rest.split([' ', '<', '{']).next().unwrap_or("").to_string();
                 Some(("impl", name))
-            } else if let Some(rest) = trimmed.strip_prefix("pub mod ")
+            } else if let Some(rest) = trimmed
+                .strip_prefix("pub mod ")
                 .or_else(|| trimmed.strip_prefix("mod "))
             {
                 let name = rest.split([' ', '{']).next().unwrap_or("").to_string();
@@ -1063,40 +1151,43 @@ fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
 fn symbol_kind_str(kind: lsp_types::SymbolKind) -> String {
     use lsp_types::SymbolKind;
     match kind {
-        SymbolKind::FILE          => "file",
-        SymbolKind::MODULE        => "mod",
-        SymbolKind::NAMESPACE     => "ns",
-        SymbolKind::PACKAGE       => "pkg",
-        SymbolKind::CLASS         => "class",
-        SymbolKind::METHOD        => "method",
-        SymbolKind::PROPERTY      => "prop",
-        SymbolKind::FIELD         => "field",
-        SymbolKind::CONSTRUCTOR   => "ctor",
-        SymbolKind::ENUM          => "enum",
-        SymbolKind::INTERFACE     => "trait",
-        SymbolKind::FUNCTION      => "fn",
-        SymbolKind::VARIABLE      => "var",
-        SymbolKind::CONSTANT      => "const",
-        SymbolKind::STRING        => "str",
-        SymbolKind::NUMBER        => "num",
-        SymbolKind::BOOLEAN       => "bool",
-        SymbolKind::ARRAY         => "array",
-        SymbolKind::OBJECT        => "obj",
-        SymbolKind::KEY           => "key",
-        SymbolKind::NULL          => "null",
-        SymbolKind::ENUM_MEMBER   => "variant",
-        SymbolKind::STRUCT        => "struct",
-        SymbolKind::EVENT         => "event",
-        SymbolKind::OPERATOR      => "op",
+        SymbolKind::FILE => "file",
+        SymbolKind::MODULE => "mod",
+        SymbolKind::NAMESPACE => "ns",
+        SymbolKind::PACKAGE => "pkg",
+        SymbolKind::CLASS => "class",
+        SymbolKind::METHOD => "method",
+        SymbolKind::PROPERTY => "prop",
+        SymbolKind::FIELD => "field",
+        SymbolKind::CONSTRUCTOR => "ctor",
+        SymbolKind::ENUM => "enum",
+        SymbolKind::INTERFACE => "trait",
+        SymbolKind::FUNCTION => "fn",
+        SymbolKind::VARIABLE => "var",
+        SymbolKind::CONSTANT => "const",
+        SymbolKind::STRING => "str",
+        SymbolKind::NUMBER => "num",
+        SymbolKind::BOOLEAN => "bool",
+        SymbolKind::ARRAY => "array",
+        SymbolKind::OBJECT => "obj",
+        SymbolKind::KEY => "key",
+        SymbolKind::NULL => "null",
+        SymbolKind::ENUM_MEMBER => "variant",
+        SymbolKind::STRUCT => "struct",
+        SymbolKind::EVENT => "event",
+        SymbolKind::OPERATOR => "op",
         SymbolKind::TYPE_PARAMETER => "type",
-        _                         => "sym",
-    }.to_string()
+        _ => "sym",
+    }
+    .to_string()
 }
 
 /// Ripgrep-based fallback workspace symbol search.
 /// Scans for function/struct/trait/impl/class/def declarations matching `query`.
 fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<SymbolEntry> {
-    if query.is_empty() { return vec![]; }
+    if query.is_empty() {
+        return vec![];
+    }
 
     // Pattern: lines that look like declarations containing the query term.
     let pattern = format!(
@@ -1109,7 +1200,8 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
             "--max-count=100",
             "--type-add=code:*.{rs,py,js,ts,go,rb,java,cs,cpp,c,kt}",
             "--type=code",
-            "-e", &pattern,
+            "-e",
+            &pattern,
             workspace.to_string_lossy().as_ref(),
         ])
         .output();
@@ -1127,13 +1219,15 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
             Ok(v) => v,
             Err(_) => continue,
         };
-        if val.get("type").and_then(|t| t.as_str()) != Some("match") { continue; }
+        if val.get("type").and_then(|t| t.as_str()) != Some("match") {
+            continue;
+        }
 
         let parsed: Option<SymbolEntry> = (|| {
-            let data      = val.get("data")?;
+            let data = val.get("data")?;
             let _file_path = data.get("path")?.get("text")?.as_str()?;
-            let line_num   = data.get("line_number")?.as_u64()? as u32;
-            let text      = data.get("lines")?.get("text")?.as_str()?.trim();
+            let line_num = data.get("line_number")?.as_u64()? as u32;
+            let text = data.get("lines")?.get("text")?.as_str()?.trim();
 
             // Extract name from the matched line: word after the keyword
             let parts: Vec<&str> = text.split_whitespace().collect();

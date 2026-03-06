@@ -7,6 +7,7 @@ pub mod error;
 pub mod git;
 pub mod llm;
 pub mod lsp;
+pub mod mcp;
 pub mod project;
 pub mod tools;
 
@@ -15,7 +16,7 @@ pub use agent::{Agent, AgentEvent, AgentResponse, ApprovalFn};
 pub use config::Settings;
 pub use context::{
     collect_git_info, ContextBuilder, ConversationHistory, ConversationMetadata, ConversationStore,
-    ProjectType, SavedConversation, SavedMessage, SystemPromptBuilder,
+    ProjectType, RepoMapGenerator, SavedConversation, SavedMessage, SystemPromptBuilder,
 };
 pub use error::PhazeError;
 pub use llm::{

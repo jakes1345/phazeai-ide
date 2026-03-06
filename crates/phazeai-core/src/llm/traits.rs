@@ -103,9 +103,17 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { id: String, arguments_delta: String },
-    ToolCallEnd { id: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        arguments_delta: String,
+    },
+    ToolCallEnd {
+        id: String,
+    },
     /// Emitted by providers that report usage in the stream (before Done).
     Usage(Usage),
     Done,

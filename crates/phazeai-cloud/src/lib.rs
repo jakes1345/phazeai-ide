@@ -20,6 +20,5 @@ pub use subscription::Tier;
 /// Cloud API base URL. Points to our hosted backend.
 /// Override with PHAZEAI_CLOUD_URL env var for self-hosted enterprise deployments.
 pub fn cloud_api_url() -> String {
-    std::env::var("PHAZEAI_CLOUD_URL")
-        .unwrap_or_else(|_| "https://api.phazeai.com/v1".to_string())
+    std::env::var("PHAZEAI_CLOUD_URL").unwrap_or_else(|_| "https://api.phazeai.com/v1".to_string())
 }

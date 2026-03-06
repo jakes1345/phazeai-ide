@@ -151,6 +151,7 @@ impl SystemPromptBuilder {
                 root.join(".phazerules"),
                 root.join(".cursorrules"),
                 root.join("CLAUDE.md"),
+                root.join("AGENTS.md"),
                 root.join(".phazeai").join("instructions.md"),
                 root.join(".phazeai").join("config.md"),
                 root.join(".ai").join("instructions.md"),
@@ -165,7 +166,7 @@ impl SystemPromptBuilder {
                 }
             }
 
-            // Walk up parent directories for additional CLAUDE.md files
+            // Walk up parent directories for additional CLAUDE.md/AGENTS.md files
             let mut current = root.parent();
             let mut depth = 0;
             while let Some(dir) = current {
@@ -173,10 +174,12 @@ impl SystemPromptBuilder {
                     break;
                 } // Don't walk up too far
 
-                let parent_claude = dir.join("CLAUDE.md");
-                if parent_claude.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&parent_claude) {
-                        instructions.push(format!("# From {}\n{}", dir.display(), content));
+                for file in ["CLAUDE.md", "AGENTS.md"] {
+                    let parent_file = dir.join(file);
+                    if parent_file.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&parent_file) {
+                            instructions.push(format!("# From {}\n{}", dir.display(), content));
+                        }
                     }
                 }
 
@@ -329,7 +332,44 @@ You have 17 powerful tools at your disposal:
 ## Critical Tool Rules
 - **Prefer `edit_file`** over `write_file` for existing files to keep diffs tiny.
 - **Always verify** using `bash` after significant changes.
-- **Truncate large outputs**: If a tool returns too much data, summarize it.";
+- **Truncate large outputs**: If a tool returns too much data, summarize it.
+
+## Tool Call Examples
+
+### Example 1: Read → Edit → Verify workflow
+User: \"Fix the typo in main.rs on line 5\"
+
+Step 1 — Read the file first:
+Tool call: read_file({\"path\": \"src/main.rs\", \"offset\": 0, \"limit\": 50})
+
+Step 2 — Make the targeted edit:
+Tool call: edit_file({\"path\": \"src/main.rs\", \"search\": \"let messge = \", \"replace\": \"let message = \"})
+
+Step 3 — Verify the fix compiles:
+Tool call: bash({\"command\": \"cargo check 2>&1 | head -20\"})
+
+### Example 2: Multi-file investigation
+User: \"Where is the database connection handled?\"
+
+Tool call: grep({\"pattern\": \"connection|connect|pool|database\", \"path\": \"src/\", \"regex\": true})
+Then read relevant files based on results.
+
+### Example 3: Create a new module
+User: \"Add a caching module\"
+
+Step 1 — Check existing structure:
+Tool call: list_files({\"path\": \"src/\"})
+
+Step 2 — Write the new file:
+Tool call: write_file({\"path\": \"src/cache.rs\", \"content\": \"use std::collections::HashMap;\\n...\"})
+
+Step 3 — Update mod.rs:
+Tool call: edit_file({\"path\": \"src/lib.rs\", \"search\": \"mod utils;\", \"replace\": \"mod cache;\\nmod utils;\"})
+
+Step 4 — Verify:
+Tool call: bash({\"command\": \"cargo check 2>&1\"})
+
+Always follow this pattern: Read → Plan → Execute → Verify.";
 
 const SAFETY_RULES: &str = "\n\n## Safety Rules
 - **Safe Deletion**: Refuse to delete critical system paths or huge chunks of the project without confirmation.

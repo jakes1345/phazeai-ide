@@ -1,3 +1,5 @@
+use floem::ext_event::create_ext_action;
+use floem::reactive::Scope;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -9,8 +11,6 @@ use std::{
         Arc,
     },
 };
-use floem::ext_event::create_ext_action;
-use floem::reactive::Scope;
 
 use floem::{
     event::{Event, EventListener},
@@ -20,8 +20,7 @@ use floem::{
     reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     text::{Attrs, AttrsList, FamilyOwned, Stretch, Style as TextStyle, Weight},
     views::{
-        canvas,
-        container,
+        canvas, container, dyn_stack,
         editor::{
             core::{
                 buffer::rope_text::RopeText,
@@ -34,7 +33,7 @@ use floem::{
             text::{default_dark_color, Document, SimpleStylingBuilder, Styling, WrapMethod},
             EditorStyle,
         },
-        dyn_stack, label, stack, text_editor, text_input, Decorators,
+        label, scroll, stack, text_editor, text_input, Decorators,
     },
     IntoView, Renderer,
 };
@@ -93,6 +92,8 @@ struct SyntaxStyle {
     bracket_pairs: Vec<(usize, usize, usize)>,
     /// Character width in pixels (approximated from font_size) for indent guide placement.
     char_width_px: f64,
+    /// Inline git blame: `(0-based line, "author • date")` — only for the current cursor line.
+    blame_line: Option<(usize, String)>,
 }
 
 impl SyntaxStyle {
@@ -104,31 +105,31 @@ impl SyntaxStyle {
 
         // Map common extensions → syntect scope names
         let syntax = match ext {
-            "rs"                           => SYNTAX_SET.find_syntax_by_extension("rs"),
-            "py" | "pyw"                   => SYNTAX_SET.find_syntax_by_extension("py"),
-            "js" | "mjs" | "cjs"           => SYNTAX_SET.find_syntax_by_extension("js"),
-            "ts" | "tsx"                   => SYNTAX_SET.find_syntax_by_extension("ts"),
-            "jsx"                          => SYNTAX_SET.find_syntax_by_extension("jsx"),
-            "json" | "jsonc"               => SYNTAX_SET.find_syntax_by_extension("json"),
-            "toml"                         => SYNTAX_SET.find_syntax_by_extension("toml"),
-            "md" | "mdx" | "markdown"      => SYNTAX_SET.find_syntax_by_extension("md"),
-            "html" | "htm"                 => SYNTAX_SET.find_syntax_by_extension("html"),
-            "css"                          => SYNTAX_SET.find_syntax_by_extension("css"),
-            "scss" | "sass"                => SYNTAX_SET.find_syntax_by_extension("scss"),
-            "c" | "h"                      => SYNTAX_SET.find_syntax_by_extension("c"),
-            "cpp" | "cc" | "cxx" | "hpp"   => SYNTAX_SET.find_syntax_by_extension("cpp"),
-            "go"                           => SYNTAX_SET.find_syntax_by_extension("go"),
-            "sh" | "bash" | "zsh"          => SYNTAX_SET.find_syntax_by_extension("sh"),
-            "yaml" | "yml"                 => SYNTAX_SET.find_syntax_by_extension("yaml"),
-            "xml"                          => SYNTAX_SET.find_syntax_by_extension("xml"),
-            "sql"                          => SYNTAX_SET.find_syntax_by_extension("sql"),
-            "lua"                          => SYNTAX_SET.find_syntax_by_extension("lua"),
-            "rb"                           => SYNTAX_SET.find_syntax_by_extension("rb"),
-            "java"                         => SYNTAX_SET.find_syntax_by_extension("java"),
-            "kt" | "kts"                   => SYNTAX_SET.find_syntax_by_extension("kt"),
-            "swift"                        => SYNTAX_SET.find_syntax_by_extension("swift"),
-            "cs"                           => SYNTAX_SET.find_syntax_by_extension("cs"),
-            _                              => None,
+            "rs" => SYNTAX_SET.find_syntax_by_extension("rs"),
+            "py" | "pyw" => SYNTAX_SET.find_syntax_by_extension("py"),
+            "js" | "mjs" | "cjs" => SYNTAX_SET.find_syntax_by_extension("js"),
+            "ts" | "tsx" => SYNTAX_SET.find_syntax_by_extension("ts"),
+            "jsx" => SYNTAX_SET.find_syntax_by_extension("jsx"),
+            "json" | "jsonc" => SYNTAX_SET.find_syntax_by_extension("json"),
+            "toml" => SYNTAX_SET.find_syntax_by_extension("toml"),
+            "md" | "mdx" | "markdown" => SYNTAX_SET.find_syntax_by_extension("md"),
+            "html" | "htm" => SYNTAX_SET.find_syntax_by_extension("html"),
+            "css" => SYNTAX_SET.find_syntax_by_extension("css"),
+            "scss" | "sass" => SYNTAX_SET.find_syntax_by_extension("scss"),
+            "c" | "h" => SYNTAX_SET.find_syntax_by_extension("c"),
+            "cpp" | "cc" | "cxx" | "hpp" => SYNTAX_SET.find_syntax_by_extension("cpp"),
+            "go" => SYNTAX_SET.find_syntax_by_extension("go"),
+            "sh" | "bash" | "zsh" => SYNTAX_SET.find_syntax_by_extension("sh"),
+            "yaml" | "yml" => SYNTAX_SET.find_syntax_by_extension("yaml"),
+            "xml" => SYNTAX_SET.find_syntax_by_extension("xml"),
+            "sql" => SYNTAX_SET.find_syntax_by_extension("sql"),
+            "lua" => SYNTAX_SET.find_syntax_by_extension("lua"),
+            "rb" => SYNTAX_SET.find_syntax_by_extension("rb"),
+            "java" => SYNTAX_SET.find_syntax_by_extension("java"),
+            "kt" | "kts" => SYNTAX_SET.find_syntax_by_extension("kt"),
+            "swift" => SYNTAX_SET.find_syntax_by_extension("swift"),
+            "cs" => SYNTAX_SET.find_syntax_by_extension("cs"),
+            _ => None,
         }
         .or_else(|| SYNTAX_SET.find_syntax_plain_text().into())
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
@@ -151,6 +152,7 @@ impl SyntaxStyle {
             matching_bracket: None,
             bracket_pairs: Vec::new(),
             char_width_px: 8.4,
+            blame_line: None,
         }
     }
 
@@ -164,25 +166,43 @@ impl SyntaxStyle {
 /// Returns (start_byte, end_byte, word) for the identifier/word under `offset`,
 /// or `None` if the cursor is not on an identifier character.
 fn word_at_offset(text: &str, offset: usize) -> Option<(usize, usize, String)> {
-    if offset > text.len() { return None; }
+    if offset > text.len() {
+        return None;
+    }
     // Pick an offset that is a valid char boundary
-    let offset = text[..offset].char_indices().next_back().map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+    let offset = text[..offset]
+        .char_indices()
+        .next_back()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
     let ch = text[offset..].chars().next()?;
-    if !ch.is_alphanumeric() && ch != '_' { return None; }
+    if !ch.is_alphanumeric() && ch != '_' {
+        return None;
+    }
 
     // Walk backwards to word start
     let mut start = offset;
     for (i, c) in text[..offset].char_indices().rev() {
-        if c.is_alphanumeric() || c == '_' { start = i; } else { break; }
+        if c.is_alphanumeric() || c == '_' {
+            start = i;
+        } else {
+            break;
+        }
     }
 
     // Walk forwards to word end
     let mut end = offset;
     for c in text[offset..].chars() {
-        if c.is_alphanumeric() || c == '_' { end += c.len_utf8(); } else { break; }
+        if c.is_alphanumeric() || c == '_' {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
     }
 
-    if start == end { return None; }
+    if start == end {
+        return None;
+    }
     Some((start, end, text[start..end].to_string()))
 }
 
@@ -193,7 +213,7 @@ fn find_word_occurrences(text: &str, word: &str) -> Vec<(usize, usize)> {
     let mut search_from = 0usize;
     while let Some(pos) = text[search_from..].find(word) {
         let abs_start = search_from + pos;
-        let abs_end   = abs_start + word.len();
+        let abs_end = abs_start + word.len();
         // Whole-word boundary check
         let before_ok = abs_start == 0 || {
             let c = text[..abs_start].chars().last().unwrap_or(' ');
@@ -226,7 +246,9 @@ fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
         Ok(o) => o,
         Err(_) => return vec![],
     };
-    if !out.status.success() && out.stdout.is_empty() { return vec![]; }
+    if !out.status.success() && out.stdout.is_empty() {
+        return vec![];
+    }
 
     let diff = match std::str::from_utf8(&out.stdout) {
         Ok(s) => s,
@@ -241,7 +263,7 @@ fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
     for line in diff.lines() {
         if line.starts_with("@@ ") {
             // "@@ -old_start[,old_count] +new_start[,new_count] @@"
-            hunk_active  = true;
+            hunk_active = true;
             hunk_has_del = false;
             // Extract +new_start
             if let Some(plus_pos) = line.find('+') {
@@ -251,9 +273,13 @@ fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
             }
             continue;
         }
-        if !hunk_active { continue; }
+        if !hunk_active {
+            continue;
+        }
 
-        if line.starts_with("---") || line.starts_with("+++") { continue; }
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
 
         if line.starts_with('-') {
             hunk_has_del = true;
@@ -279,7 +305,9 @@ fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
 }
 
 impl Styling for SyntaxStyle {
-    fn id(&self) -> u64 { self.inner.id() }
+    fn id(&self) -> u64 {
+        self.inner.id()
+    }
 
     fn font_size(&self, edid: EditorId, line: usize) -> usize {
         self.inner.font_size(edid, line)
@@ -352,12 +380,9 @@ impl Styling for SyntaxStyle {
             let text = rope.line_content(line_no).to_string();
             if let Ok(ops) = states.0.parse_line(&text, &SYNTAX_SET) {
                 if line_no == line {
-                    for (style, _text, range) in RangedHighlightIterator::new(
-                        &mut states.1,
-                        &ops,
-                        &text,
-                        &self.highlighter,
-                    ) {
+                    for (style, _text, range) in
+                        RangedHighlightIterator::new(&mut states.1, &ops, &text, &self.highlighter)
+                    {
                         let mut attr = default.clone();
                         if style.font_style.contains(FontStyle::ITALIC) {
                             attr = attr.style(TextStyle::Italic);
@@ -394,10 +419,10 @@ impl Styling for SyntaxStyle {
             };
             // 4 distinct bracket colors cycling by depth
             const BRACKET_COLORS: [(u8, u8, u8); 4] = [
-                (255, 215,  0),   // gold
-                (150, 220, 255),  // sky blue
-                (200, 130, 255),  // violet
-                (120, 240, 160),  // mint
+                (255, 215, 0),   // gold
+                (150, 220, 255), // sky blue
+                (200, 130, 255), // violet
+                (120, 240, 160), // mint
             ];
             for &(open_b, close_b, depth) in &self.bracket_pairs {
                 let color = BRACKET_COLORS[depth % 4];
@@ -423,7 +448,8 @@ impl Styling for SyntaxStyle {
         line: usize,
         layout_line: &mut TextLayoutLine,
     ) {
-        self.inner.apply_layout_styles(edid, style, line, layout_line);
+        self.inner
+            .apply_layout_styles(edid, style, line, layout_line);
 
         // Subtle background highlight on the current (cursor) line.
         if line == self.current_line {
@@ -441,12 +467,14 @@ impl Styling for SyntaxStyle {
 
         // Draw wave_line (error) or under_line (warning/info) for diagnostic lines.
         for &(diag_line, severity) in &self.diag_lines {
-            if diag_line != line { continue; }
+            if diag_line != line {
+                continue;
+            }
             let color = match severity {
-                DiagSeverity::Error   => floem::peniko::Color::from_rgba8(255,  85,  85, 230),
-                DiagSeverity::Warning => floem::peniko::Color::from_rgba8(255, 200,  50, 200),
-                DiagSeverity::Info    => floem::peniko::Color::from_rgba8( 80, 150, 255, 180),
-                DiagSeverity::Hint    => floem::peniko::Color::from_rgba8(120, 180, 120, 160),
+                DiagSeverity::Error => floem::peniko::Color::from_rgba8(255, 85, 85, 230),
+                DiagSeverity::Warning => floem::peniko::Color::from_rgba8(255, 200, 50, 200),
+                DiagSeverity::Info => floem::peniko::Color::from_rgba8(80, 150, 255, 180),
+                DiagSeverity::Hint => floem::peniko::Color::from_rgba8(120, 180, 120, 160),
             };
             layout_line.extra_style.push(LineExtraStyle {
                 x: 0.0,
@@ -454,26 +482,38 @@ impl Styling for SyntaxStyle {
                 width: None, // full line width
                 height: 2.0,
                 bg_color: None,
-                under_line: if matches!(severity, DiagSeverity::Warning | DiagSeverity::Info | DiagSeverity::Hint) {
+                under_line: if matches!(
+                    severity,
+                    DiagSeverity::Warning | DiagSeverity::Info | DiagSeverity::Hint
+                ) {
                     Some(color)
                 } else {
                     None
                 },
-                wave_line: if severity == DiagSeverity::Error { Some(color) } else { None },
+                wave_line: if severity == DiagSeverity::Error {
+                    Some(color)
+                } else {
+                    None
+                },
             });
         }
 
         // Draw git gutter decorations: a 3 px colored bar at x=0 on each changed line.
         for &(git_line, status) in &self.git_lines {
-            if git_line != line { continue; }
+            if git_line != line {
+                continue;
+            }
             let color = match status {
-                0 => floem::peniko::Color::from_rgba8( 80, 200,  80, 220), // added   → green
-                1 => floem::peniko::Color::from_rgba8( 80, 160, 255, 220), // modified → blue
-                _ => floem::peniko::Color::from_rgba8(220,  60,  60, 220), // deleted  → red
+                0 => floem::peniko::Color::from_rgba8(80, 200, 80, 220), // added   → green
+                1 => floem::peniko::Color::from_rgba8(80, 160, 255, 220), // modified → blue
+                _ => floem::peniko::Color::from_rgba8(220, 60, 60, 220), // deleted  → red
             };
             let line_h = self.inner.line_height(edid, line) as f64;
             layout_line.extra_style.push(LineExtraStyle {
-                x: 0.0, y: 0.0, width: Some(3.0), height: line_h,
+                x: 0.0,
+                y: 0.0,
+                width: Some(3.0),
+                height: line_h,
                 bg_color: Some(color),
                 under_line: None,
                 wave_line: None,
@@ -490,9 +530,12 @@ impl Styling for SyntaxStyle {
             let line_start = rope.offset_of_line(line);
             let line_end = if line + 1 < rope.num_lines() {
                 rope.offset_of_line(line + 1)
-            } else { rope.len() };
+            } else {
+                rope.len()
+            };
             let line_text = rope.slice_to_cow(line_start..line_end).to_string();
-            let leading_spaces = line_text.chars()
+            let leading_spaces = line_text
+                .chars()
                 .take_while(|c| *c == ' ' || *c == '\t')
                 .count();
             // Draw guide at each 4-space indent level
@@ -523,22 +566,26 @@ impl Styling for SyntaxStyle {
                 let line_start = rope.offset_of_line(line);
                 let line_end = if line + 1 < rope.num_lines() {
                     rope.offset_of_line(line + 1)
-                } else { rope.len() };
+                } else {
+                    rope.len()
+                };
                 let line_h = self.inner.line_height(edid, line) as f64;
                 for &(start, end) in &self.find_match_ranges {
-                    if end <= line_start || start >= line_end { continue; }
+                    if end <= line_start || start >= line_end {
+                        continue;
+                    }
                     let local_start = start.saturating_sub(line_start);
-                    let local_end   = end.min(line_end).saturating_sub(line_start);
+                    let local_end = end.min(line_end).saturating_sub(line_start);
                     let x0 = layout_line.text.hit_position(local_start).point.x;
                     let x1 = layout_line.text.hit_position(local_end).point.x;
                     layout_line.extra_style.push(LineExtraStyle {
-                        x:        x0,
-                        y:        0.0,
-                        width:    Some((x1 - x0).max(4.0)),
-                        height:   line_h,
+                        x: x0,
+                        y: 0.0,
+                        width: Some((x1 - x0).max(4.0)),
+                        height: line_h,
                         bg_color: Some(floem::peniko::Color::from_rgba8(255, 230, 0, 55)),
                         under_line: None,
-                        wave_line:  None,
+                        wave_line: None,
                     });
                 }
             }
@@ -552,7 +599,9 @@ impl Styling for SyntaxStyle {
                 let line_start = rope.offset_of_line(line);
                 let line_end = if line + 1 < rope.num_lines() {
                     rope.offset_of_line(line + 1)
-                } else { rope.len() };
+                } else {
+                    rope.len()
+                };
                 let line_h = self.inner.line_height(edid, line) as f64;
                 let color = floem::peniko::Color::from_rgba8(255, 255, 255, 60);
                 for byte_pos in [open_b, close_b] {
@@ -561,13 +610,13 @@ impl Styling for SyntaxStyle {
                         let x0 = layout_line.text.hit_position(local).point.x;
                         let x1 = layout_line.text.hit_position(local + 1).point.x;
                         layout_line.extra_style.push(LineExtraStyle {
-                            x:        x0,
-                            y:        0.0,
-                            width:    Some((x1 - x0).max(8.0)),
-                            height:   line_h,
+                            x: x0,
+                            y: 0.0,
+                            width: Some((x1 - x0).max(8.0)),
+                            height: line_h,
                             bg_color: Some(color),
                             under_line: Some(floem::peniko::Color::from_rgba8(255, 255, 160, 200)),
-                            wave_line:  None,
+                            wave_line: None,
                         });
                     }
                 }
@@ -587,21 +636,23 @@ impl Styling for SyntaxStyle {
                 let line_h = self.inner.line_height(edid, line) as f64;
 
                 for &(hl_start, hl_end) in &self.highlight_ranges {
-                    if hl_end <= line_start || hl_start >= line_end { continue; }
+                    if hl_end <= line_start || hl_start >= line_end {
+                        continue;
+                    }
                     // Clamp to line boundaries (multi-line match safety)
                     let local_start = hl_start.saturating_sub(line_start);
-                    let local_end   = hl_end.min(line_end).saturating_sub(line_start);
+                    let local_end = hl_end.min(line_end).saturating_sub(line_start);
                     // Use layout hit_position for pixel-accurate x coords
                     let x0 = layout_line.text.hit_position(local_start).point.x;
                     let x1 = layout_line.text.hit_position(local_end).point.x;
                     layout_line.extra_style.push(LineExtraStyle {
-                        x:        x0,
-                        y:        0.0,
-                        width:    Some((x1 - x0).max(2.0)),
-                        height:   line_h,
+                        x: x0,
+                        y: 0.0,
+                        width: Some((x1 - x0).max(2.0)),
+                        height: line_h,
                         bg_color: Some(floem::peniko::Color::from_rgba8(100, 160, 255, 50)),
                         under_line: None,
-                        wave_line:  None,
+                        wave_line: None,
                     });
                 }
             }
@@ -620,7 +671,9 @@ impl SyntaxStyle {
     /// square in the gutter area indicating foldable regions.
     fn paint_fold_indicator(&self, edid: EditorId, line: usize, layout_line: &mut TextLayoutLine) {
         for &(fold_start, _fold_end) in &self.foldable_ranges {
-            if fold_start != line { continue; }
+            if fold_start != line {
+                continue;
+            }
             let is_folded = self.folded_starts.contains(&fold_start);
             // Bright when collapsed (▶), dim when expanded (▼).
             let color = if is_folded {
@@ -631,13 +684,13 @@ impl SyntaxStyle {
             let line_h = self.inner.line_height(edid, line) as f64;
             let sq = 6.0_f64;
             layout_line.extra_style.push(LineExtraStyle {
-                x:        -12.0,                    // negative x → gutter area
-                y:        (line_h - sq).max(0.0) * 0.5,
-                width:    Some(sq),
-                height:   sq,
+                x: -12.0, // negative x → gutter area
+                y: (line_h - sq).max(0.0) * 0.5,
+                width: Some(sq),
+                height: sq,
                 bg_color: Some(color),
                 under_line: None,
-                wave_line:  None,
+                wave_line: None,
             });
             break;
         }
@@ -664,7 +717,10 @@ fn detect_fold_ranges(text: &str) -> Vec<(usize, usize)> {
                 }
             } else {
                 match ch {
-                    '"' | '\'' => { in_string = true; string_char = ch; }
+                    '"' | '\'' => {
+                        in_string = true;
+                        string_char = ch;
+                    }
                     '{' => stack.push(line_idx),
                     '}' => {
                         if let Some(start) = stack.pop() {
@@ -679,7 +735,9 @@ fn detect_fold_ranges(text: &str) -> Vec<(usize, usize)> {
             prev_char = ch;
         }
         // Strings don't span lines in this simplified parser.
-        if in_string { in_string = false; }
+        if in_string {
+            in_string = false;
+        }
         prev_char = '\0';
     }
     // Sort by start line for consistent ordering.
@@ -705,13 +763,22 @@ fn compute_bracket_pairs(text: &str) -> Vec<(usize, usize, usize)> {
         let ch_len = ch.len_utf8();
 
         if in_line_comment {
-            if ch == '\n' { in_line_comment = false; }
+            if ch == '\n' {
+                in_line_comment = false;
+            }
         } else if in_string {
-            if ch == string_char && prev != '\\' { in_string = false; }
+            if ch == string_char && prev != '\\' {
+                in_string = false;
+            }
         } else {
             match ch {
-                '/' if prev == '/' => { in_line_comment = true; }
-                '"' | '\'' => { in_string = true; string_char = ch; }
+                '/' if prev == '/' => {
+                    in_line_comment = true;
+                }
+                '"' | '\'' => {
+                    in_string = true;
+                    string_char = ch;
+                }
                 '(' | '[' | '{' => {
                     stack.push((byte_pos, depth));
                     depth += 1;
@@ -734,7 +801,11 @@ fn compute_bracket_pairs(text: &str) -> Vec<(usize, usize, usize)> {
 
 /// Given text and a byte offset, return `(open_byte, close_byte)` for the bracket at
 /// that offset (or `None` if no bracket is there).
-fn find_bracket_match(_text: &str, offset: usize, pairs: &[(usize, usize, usize)]) -> Option<(usize, usize)> {
+fn find_bracket_match(
+    _text: &str,
+    offset: usize,
+    pairs: &[(usize, usize, usize)],
+) -> Option<(usize, usize)> {
     for &(open, close, _depth) in pairs {
         if open == offset || close == offset {
             return Some((open, close));
@@ -790,6 +861,11 @@ pub fn editor_panel(
     ctrl_d_nonce: RwSignal<u64>,
     fold_nonce: RwSignal<u64>,
     unfold_nonce: RwSignal<u64>,
+    move_line_up_nonce: RwSignal<u64>,
+    move_line_down_nonce: RwSignal<u64>,
+    duplicate_line_nonce: RwSignal<u64>,
+    delete_line_nonce: RwSignal<u64>,
+    active_blame: RwSignal<String>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -801,10 +877,13 @@ pub fn editor_panel(
         let init_tabs = initial_tabs;
         let batch_done = create_rw_signal(false);
         create_effect(move |_| {
-            if batch_done.get_untracked() { return; }
+            if batch_done.get_untracked() {
+                return;
+            }
             batch_done.set(true);
             for p in &init_tabs {
-                let name = p.file_name()
+                let name = p
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| p.to_string_lossy().to_string());
                 let p = p.clone();
@@ -819,7 +898,9 @@ pub fn editor_panel(
                 });
             }
             let n = tabs.get_untracked().len();
-            if n > 0 { active_idx.set(Some(n - 1)); }
+            if n > 0 {
+                active_idx.set(Some(n - 1));
+            }
         });
     }
 
@@ -849,41 +930,51 @@ pub fn editor_panel(
     let docs: Rc<RefCell<HashMap<String, Rc<dyn Document>>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let docs_for_stack = docs.clone();
-    let docs_for_save  = docs.clone();
-    let docs_for_find  = docs.clone();
+    let docs_for_save = docs.clone();
+    let docs_for_find = docs.clone();
 
     // ── Find in file (Ctrl+F) ────────────────────────────────────────────────
-    let find_open:       RwSignal<bool>   = create_rw_signal(false);
-    let find_query:      RwSignal<String> = create_rw_signal(String::new());
-    let find_case:       RwSignal<bool>   = create_rw_signal(false); // case-sensitive toggle
-    let find_regex_mode: RwSignal<bool>   = create_rw_signal(false); // regex toggle
-    // Incremented to trigger a cursor jump to `find_jump_offset`.
-    let find_jump_nonce:  RwSignal<u64>   = create_rw_signal(0u64);
+    let find_open: RwSignal<bool> = create_rw_signal(false);
+    let find_query: RwSignal<String> = create_rw_signal(String::new());
+    let find_case: RwSignal<bool> = create_rw_signal(false); // case-sensitive toggle
+    let find_regex_mode: RwSignal<bool> = create_rw_signal(false); // regex toggle
+                                                                   // Incremented to trigger a cursor jump to `find_jump_offset`.
+    let find_jump_nonce: RwSignal<u64> = create_rw_signal(0u64);
     let find_jump_offset: RwSignal<usize> = create_rw_signal(0usize);
-    let find_cur_match:   RwSignal<usize> = create_rw_signal(0usize);
+    let find_cur_match: RwSignal<usize> = create_rw_signal(0usize);
 
     // ── Replace (Ctrl+H) ─────────────────────────────────────────────────────
     let replace_query: RwSignal<String> = create_rw_signal(String::new());
-    let replace_open:  RwSignal<bool>   = create_rw_signal(false);
+    let replace_open: RwSignal<bool> = create_rw_signal(false);
     // Incremented to trigger "replace current match" in the active editor.
-    let replace_nonce:     RwSignal<u64> = create_rw_signal(0u64);
+    let replace_nonce: RwSignal<u64> = create_rw_signal(0u64);
     // Incremented to trigger "replace all matches" in the active editor.
     let replace_all_nonce: RwSignal<u64> = create_rw_signal(0u64);
+    let find_whole_word: RwSignal<bool> = create_rw_signal(false);
 
     // Compute match offsets reactively (for display + navigation)
     let find_match_offsets = create_memo({
         let docs_for_find = docs_for_find.clone();
         move |_| -> Vec<usize> {
             let q = find_query.get();
-            if q.is_empty() { return vec![]; }
+            if q.is_empty() {
+                return vec![];
+            }
             let case = find_case.get();
             let use_regex = find_regex_mode.get();
-            let Some(idx) = active_idx.get() else { return vec![]; };
+            let whole_word = find_whole_word.get();
+            let Some(idx) = active_idx.get() else {
+                return vec![];
+            };
             let list = tabs.get();
-            let Some(tab) = list.get(idx) else { return vec![]; };
+            let Some(tab) = list.get(idx) else {
+                return vec![];
+            };
             let key = tab.path.to_string_lossy().to_string();
             let reg = docs_for_find.borrow();
-            let Some(doc) = reg.get(&key) else { return vec![]; };
+            let Some(doc) = reg.get(&key) else {
+                return vec![];
+            };
             let text = doc.text().to_string();
             let mut offs = vec![];
             if use_regex {
@@ -912,16 +1003,31 @@ pub fn editor_panel(
                     start += pos + q_lo.len().max(1);
                 }
             }
+            // Apply whole-word filter: each match position must have word boundaries.
+            if whole_word && !use_regex {
+                offs.retain(|&start| {
+                    let end = start + q.len();
+                    let before_ok = start == 0 || {
+                        let c = text[..start].chars().last().unwrap_or(' ');
+                        !c.is_alphanumeric() && c != '_'
+                    };
+                    let after_ok = end >= text.len() || {
+                        let c = text[end..].chars().next().unwrap_or(' ');
+                        !c.is_alphanumeric() && c != '_'
+                    };
+                    before_ok && after_ok
+                });
+            }
             offs
         }
     });
 
     // ── Go-to line (Ctrl+G) ──────────────────────────────────────────────────
-    let goto_open:  RwSignal<bool>   = create_rw_signal(false);
+    let goto_open: RwSignal<bool> = create_rw_signal(false);
     let goto_query: RwSignal<String> = create_rw_signal(String::new());
     // Nonce — when incremented, the active editor recreates at `goto_line`.
-    let goto_nonce: RwSignal<u64>   = create_rw_signal(0u64);
-    let goto_line:  RwSignal<usize> = create_rw_signal(1usize);
+    let goto_nonce: RwSignal<u64> = create_rw_signal(0u64);
+    let goto_line: RwSignal<usize> = create_rw_signal(1usize);
 
     // Wire external goto_line (from LSP go-to-definition) into the local mechanism.
     // When IdeState.goto_line becomes nonzero we jump to that line, then reset to 0.
@@ -947,7 +1053,11 @@ pub fn editor_panel(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string());
                 tabs.update(|list| {
-                    list.push(TabState { path: p.clone(), name, dirty: create_rw_signal(false) });
+                    list.push(TabState {
+                        path: p.clone(),
+                        name,
+                        dirty: create_rw_signal(false),
+                    });
                     active_idx.set(Some(list.len() - 1));
                 });
             }
@@ -962,7 +1072,9 @@ pub fn editor_panel(
         let Some(tab) = tab_list.get(idx) else { return };
         let key = tab.path.to_string_lossy().to_string();
         let registry = docs_for_save.borrow();
-        let Some(doc) = registry.get(&key) else { return };
+        let Some(doc) = registry.get(&key) else {
+            return;
+        };
         let content = doc.text().to_string();
         if std::fs::write(&tab.path, content).is_ok() {
             tab.dirty.set(false);
@@ -979,10 +1091,7 @@ pub fn editor_panel(
                     "rs" => Some(("rustfmt", vec![path.to_string_lossy().to_string()])),
                     "js" | "ts" | "jsx" | "tsx" | "json" => Some((
                         "prettier",
-                        vec![
-                            "--write".to_string(),
-                            path.to_string_lossy().to_string(),
-                        ],
+                        vec!["--write".to_string(), path.to_string_lossy().to_string()],
                     )),
                     "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
                     _ => None,
@@ -1026,14 +1135,19 @@ pub fn editor_panel(
             floem::views::dyn_stack(
                 move || {
                     // Build crumb segments from the active tab path
-                    let Some(idx) = active_idx.get() else { return vec![] };
+                    let Some(idx) = active_idx.get() else {
+                        return vec![];
+                    };
                     let tab_list = tabs.get();
-                    let Some(tab) = tab_list.get(idx) else { return vec![] };
+                    let Some(tab) = tab_list.get(idx) else {
+                        return vec![];
+                    };
                     let path = &tab.path;
 
                     // Try to make path relative to workspace root
                     let rel = path.strip_prefix(&ws_root).unwrap_or(path);
-                    let components: Vec<String> = rel.components()
+                    let components: Vec<String> = rel
+                        .components()
                         .map(|c| c.as_os_str().to_string_lossy().to_string())
                         .collect();
 
@@ -1048,33 +1162,36 @@ pub fn editor_panel(
                 move |(name, is_last)| {
                     let n2 = name.clone();
                     stack((
-                        label(move || n2.clone())
-                            .style(move |s| {
-                                let p = crumb_theme.get().palette;
-                                s.font_size(11.0)
-                                 .color(if is_last { p.text_primary } else { p.text_muted })
-                            }),
-                        label(move || if is_last { "" } else { "  ›  " })
-                            .style(move |s| {
-                                let p = crumb_theme.get().palette;
-                                s.font_size(10.0).color(p.text_disabled)
-                                 .apply_if(is_last, |s| s.display(floem::style::Display::None))
-                            }),
+                        label(move || n2.clone()).style(move |s| {
+                            let p = crumb_theme.get().palette;
+                            s.font_size(11.0).color(if is_last {
+                                p.text_primary
+                            } else {
+                                p.text_muted
+                            })
+                        }),
+                        label(move || if is_last { "" } else { "  ›  " }).style(move |s| {
+                            let p = crumb_theme.get().palette;
+                            s.font_size(10.0)
+                                .color(p.text_disabled)
+                                .apply_if(is_last, |s| s.display(floem::style::Display::None))
+                        }),
                     ))
                     .style(|s| s.items_center())
                 },
             )
-            .style(|s| s.flex_row().items_center())
+            .style(|s| s.flex_row().items_center()),
         )
         .style(move |s| {
             let t = crumb_theme.get();
             let p = &t.palette;
-            s.height(22.0).width_full()
-             .padding_horiz(12.0)
-             .background(p.bg_deep)
-             .border_bottom(1.0)
-             .border_color(p.border)
-             .items_center()
+            s.height(22.0)
+                .width_full()
+                .padding_horiz(12.0)
+                .background(p.bg_deep)
+                .border_bottom(1.0)
+                .border_color(p.border)
+                .items_center()
         })
     };
 
@@ -1087,16 +1204,31 @@ pub fn editor_panel(
         let w = size.width;
         if ai_thinking.get() {
             for frac in [0.15, 0.50, 0.85] {
-                cx.fill(&Circle::new(Point::new(w * 0.5, h * frac), 18.0), p.accent.with_alpha(0.70), 14.0);
+                cx.fill(
+                    &Circle::new(Point::new(w * 0.5, h * frac), 18.0),
+                    p.accent.with_alpha(0.70),
+                    14.0,
+                );
             }
         } else {
-            cx.fill(&Circle::new(Point::new(w * 0.5, h * 0.08), 22.0), p.accent.with_alpha(0.39), 18.0);
-            cx.fill(&Circle::new(Point::new(w * 0.5, h * 0.30), 16.0), p.accent.with_alpha(0.16), 12.0);
+            cx.fill(
+                &Circle::new(Point::new(w * 0.5, h * 0.08), 22.0),
+                p.accent.with_alpha(0.39),
+                18.0,
+            );
+            cx.fill(
+                &Circle::new(Point::new(w * 0.5, h * 0.30), 16.0),
+                p.accent.with_alpha(0.16),
+                12.0,
+            );
         }
     })
     .style(move |s| {
         let p = theme.get().palette;
-        s.width(4.0).height_full().min_width(4.0).background(p.bg_base)
+        s.width(4.0)
+            .height_full()
+            .min_width(4.0)
+            .background(p.bg_base)
     });
 
     // ── Editor body ─────────────────────────────────────────────────────────
@@ -1105,12 +1237,7 @@ pub fn editor_panel(
     // Goto-line uses the same nonce-effect pattern as find-cursor-jump.
     // This preserves the undo/redo stack across zoom and navigation.
     let editor_body = dyn_stack(
-        move || {
-            tabs.get()
-                .into_iter()
-                .enumerate()
-                .collect::<Vec<_>>()
-        },
+        move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(_i, tab)| format!("{}", tab.path.to_string_lossy()),
         move |(i, tab)| {
             let is_active = move || active_idx.get() == Some(i);
@@ -1128,14 +1255,20 @@ pub fn editor_panel(
                     .unwrap_or_else(|| std::fs::read_to_string(&tab.path).unwrap_or_default())
             };
 
-            let tab_ext = tab.path.extension()
+            let tab_ext = tab
+                .path
+                .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_string();
 
             // `use_wrap` passed at call time so this closure doesn't capture `word_wrap`.
             let make_base_styling = |fs: usize, use_wrap: bool| -> Rc<dyn Styling> {
-                let wrap = if use_wrap { WrapMethod::EditorWidth } else { WrapMethod::None };
+                let wrap = if use_wrap {
+                    WrapMethod::EditorWidth
+                } else {
+                    WrapMethod::None
+                };
                 Rc::new(
                     SimpleStylingBuilder::default()
                         .wrap(wrap)
@@ -1152,14 +1285,14 @@ pub fn editor_panel(
 
             // Build the raw editor first so we can grab the doc and cursor.
             let raw_editor = text_editor(content);
-            let cursor_sig  = raw_editor.editor().cursor;   // RwSignal<Cursor>
-            let editor_ref  = raw_editor.editor().clone();  // Clone for reactive updates
-            let doc         = raw_editor.doc().clone();
+            let cursor_sig = raw_editor.editor().cursor; // RwSignal<Cursor>
+            let editor_ref = raw_editor.editor().clone(); // Clone for reactive updates
+            let doc = raw_editor.doc().clone();
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
-            let lsp_path    = tab.path.clone();
-            let lsp_tx      = lsp_cmd.clone();
+            let lsp_path = tab.path.clone();
+            let lsp_tx = lsp_cmd.clone();
 
             // ── Goto-line cursor jump (reactive effect, no editor recreation) ─
             {
@@ -1167,13 +1300,17 @@ pub fn editor_panel(
                 let doc_for_goto = doc.clone();
                 create_effect(move |_| {
                     let nonce = goto_nonce.get();
-                    if nonce == 0 || nonce == last_nonce.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_nonce.set(nonce);
-                    let rope     = doc_for_goto.rope_text();
-                    let line_0   = goto_line.get().saturating_sub(1);
+                    let rope = doc_for_goto.rope_text();
+                    let line_0 = goto_line.get().saturating_sub(1);
                     let max_line = rope.num_lines().saturating_sub(1);
-                    let offset   = rope.offset_of_line(line_0.min(max_line));
+                    let offset = rope.offset_of_line(line_0.min(max_line));
                     cursor_sig.set(Cursor::new(
                         CursorMode::Insert(Selection::caret(offset)),
                         None,
@@ -1189,8 +1326,12 @@ pub fn editor_panel(
                 let last_nonce = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let nonce = find_jump_nonce.get();
-                    if nonce == 0 || nonce == last_nonce.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_nonce.set(nonce);
                     let offset = find_jump_offset.get();
                     cursor_sig.set(Cursor::new(
@@ -1226,14 +1367,16 @@ pub fn editor_panel(
             // Ctrl+Space can pass the right position to the LSP.
             {
                 let track_path = tab.path.clone();
-                let track_doc  = doc.clone();
+                let track_doc = doc.clone();
                 create_effect(move |_| {
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     let cursor = cursor_sig.get();
                     let offset = cursor.offset();
-                    let rope  = track_doc.rope_text();
-                    let line  = rope.line_of_offset(offset) as u32;
-                    let col   = (offset - rope.offset_of_line(line as usize)) as u32;
+                    let rope = track_doc.rope_text();
+                    let line = rope.line_of_offset(offset) as u32;
+                    let col = (offset - rope.offset_of_line(line as usize)) as u32;
                     active_cursor.set(Some((track_path.clone(), line, col)));
                     // Keep current_line_sig in sync so the current-line highlight reacts.
                     current_line_sig.set(line as usize);
@@ -1242,20 +1385,31 @@ pub fn editor_panel(
             {
                 let doc_for_hl = doc.clone();
                 create_effect(move |_| {
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     let offset = cursor_sig.get().offset();
-                    let rope   = doc_for_hl.rope_text();
-                    let len    = rope.len();
-                    if len == 0 { word_hl.set(vec![]); return; }
+                    let rope = doc_for_hl.rope_text();
+                    let len = rope.len();
+                    if len == 0 {
+                        word_hl.set(vec![]);
+                        return;
+                    }
                     // Avoid searching huge files (> 2 MB) on every keystroke.
                     let ranges = if len < 2_000_000 {
                         let text = rope.slice_to_cow(0..len).to_string();
                         if let Some((_, _, word)) = word_at_offset(&text, offset) {
                             if word.len() >= 2 {
                                 find_word_occurrences(&text, &word)
-                            } else { vec![] }
-                        } else { vec![] }
-                    } else { vec![] };
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    };
                     word_hl.set(ranges);
                 });
             }
@@ -1268,13 +1422,19 @@ pub fn editor_panel(
                 let last_nonce_ctd = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let nonce = ctrl_d_nonce.get();
-                    if nonce == 0 || nonce == last_nonce_ctd.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_nonce_ctd.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_nonce_ctd.set(nonce);
 
                     let rope = doc_for_ctd.rope_text();
                     let len = rope.len();
-                    if len == 0 { return; }
+                    if len == 0 {
+                        return;
+                    }
                     let text = rope.slice_to_cow(0..len).to_string();
                     let cur = cursor_sig.get();
                     let cur_offset = cur.offset();
@@ -1298,18 +1458,25 @@ pub fn editor_panel(
                             return;
                         }
                     };
-                    if search_word.is_empty() { return; }
+                    if search_word.is_empty() {
+                        return;
+                    }
 
                     // Find the NEXT occurrence after search_end (wrap around).
                     let next_start = {
-                        let after = text[search_end..].find(&search_word)
+                        let after = text[search_end..]
+                            .find(&search_word)
                             .map(|p| search_end + p);
                         let before = if after.is_none() {
                             text[..search_start].find(&search_word)
-                        } else { None };
+                        } else {
+                            None
+                        };
                         after.or(before)
                     };
-                    let Some(ns) = next_start else { return; };
+                    let Some(ns) = next_start else {
+                        return;
+                    };
                     let ne = ns + search_word.len();
 
                     // Build new selection: current region + next occurrence.
@@ -1328,7 +1495,7 @@ pub fn editor_panel(
                 let fold_scope = Scope::new();
                 create_effect(move |_| {
                     let _dirty = dirty.get(); // re-runs when file is saved
-                    // Extract text on the UI thread.
+                                              // Extract text on the UI thread.
                     let rope = doc_for_fold.rope_text();
                     let len = rope.len();
                     let text = if len == 0 || len > 500_000 {
@@ -1339,7 +1506,10 @@ pub fn editor_panel(
                     let send = create_ext_action(fold_scope, move |ranges: Vec<(usize, usize)>| {
                         fold_state.update(|(r, _f)| *r = ranges);
                     });
-                    if text.is_empty() { send(vec![]); return; }
+                    if text.is_empty() {
+                        send(vec![]);
+                        return;
+                    }
                     std::thread::spawn(move || {
                         send(detect_fold_ranges(&text));
                     });
@@ -1355,7 +1525,9 @@ pub fn editor_panel(
                 create_effect(move |_| {
                     let fn_ = fold_nonce.get();
                     let ufn = unfold_nonce.get();
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
 
                     // Fold: collapse the block whose opening `{` is on the cursor line.
                     if fn_ != 0 && fn_ != last_fold_nonce.get_untracked() {
@@ -1410,7 +1582,10 @@ pub fn editor_panel(
                     let send = create_ext_action(bp_scope, move |pairs| {
                         bracket_pairs_sig.set(pairs);
                     });
-                    if text.is_empty() { send(vec![]); return; }
+                    if text.is_empty() {
+                        send(vec![]);
+                        return;
+                    }
                     std::thread::spawn(move || {
                         send(compute_bracket_pairs(&text));
                     });
@@ -1423,7 +1598,7 @@ pub fn editor_panel(
             {
                 create_effect(move |_| {
                     let offset = cursor_sig.get().offset();
-                    let pairs  = bracket_pairs_sig.get();
+                    let pairs = bracket_pairs_sig.get();
                     if active_idx.get() != Some(i) {
                         matching_bracket_sig.set(None);
                         return;
@@ -1453,10 +1628,16 @@ pub fn editor_panel(
                     let prev = ac_prev.get_untracked();
                     ac_prev.set(cur_pos);
                     // Only act when cursor advanced by exactly 1 (character typed).
-                    if active_idx.get() != Some(i) { return; }
-                    if cur_pos == 0 || cur_pos != prev + 1 { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    if cur_pos == 0 || cur_pos != prev + 1 {
+                        return;
+                    }
                     let rope = doc_for_ac.rope_text();
-                    if cur_pos > rope.len() { return; }
+                    if cur_pos > rope.len() {
+                        return;
+                    }
                     let prefix = rope.slice_to_cow(0..cur_pos);
                     if let Some(open_ch) = prefix.chars().last() {
                         let close = match open_ch {
@@ -1467,26 +1648,40 @@ pub fn editor_panel(
                             // and the char before the quote is not a backslash (escape).
                             '"' => {
                                 let prev_is_escape = cur_pos >= 2 && {
-                                    let s = rope.slice_to_cow((cur_pos-2)..(cur_pos-1));
+                                    let s = rope.slice_to_cow((cur_pos - 2)..(cur_pos - 1));
                                     s.chars().next() == Some('\\')
                                 };
-                                if prev_is_escape { None } else { Some('"') }
+                                if prev_is_escape {
+                                    None
+                                } else {
+                                    Some('"')
+                                }
                             }
                             '\'' => {
                                 // Don't close in Rust lifetime positions: `'a` at word boundary
                                 let prev_is_alpha = cur_pos >= 2 && {
-                                    let s = rope.slice_to_cow((cur_pos-2)..(cur_pos-1));
-                                    s.chars().next().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false)
+                                    let s = rope.slice_to_cow((cur_pos - 2)..(cur_pos - 1));
+                                    s.chars()
+                                        .next()
+                                        .map(|c| c.is_alphanumeric() || c == '_')
+                                        .unwrap_or(false)
                                 };
-                                if prev_is_alpha { None } else { Some('\'') }
+                                if prev_is_alpha {
+                                    None
+                                } else {
+                                    Some('\'')
+                                }
                             }
                             _ => None,
                         };
                         if let Some(close_ch) = close {
                             // Only auto-close when next char is whitespace or end-of-file.
                             let next_is_ok = cur_pos >= rope.len() || {
-                                let nc = rope.slice_to_cow(cur_pos..(cur_pos + 1).min(rope.len()))
-                                    .chars().next().unwrap_or('\0');
+                                let nc = rope
+                                    .slice_to_cow(cur_pos..(cur_pos + 1).min(rope.len()))
+                                    .chars()
+                                    .next()
+                                    .unwrap_or('\0');
                                 nc.is_whitespace()
                             };
                             if next_is_ok {
@@ -1499,7 +1694,8 @@ pub fn editor_panel(
                                 // Keep cursor between the pair (don't advance past closing bracket).
                                 cursor_sig.set(Cursor::new(
                                     CursorMode::Insert(Selection::caret(cur_pos)),
-                                    None, None,
+                                    None,
+                                    None,
                                 ));
                             }
                         }
@@ -1521,7 +1717,7 @@ pub fn editor_panel(
                     create_rw_signal(None);
 
                 create_effect(move |_| {
-                    let cur     = cursor_sig.get();
+                    let cur = cursor_sig.get();
                     let cur_pos = cur.offset();
 
                     if surr_suppress.get_untracked() {
@@ -1537,23 +1733,19 @@ pub fn editor_panel(
                     // When selection [s,e] is replaced by a bracket, cursor lands at s+1.
                     // The regular auto-close delta check (cur_pos != prev+1) guards against
                     // double-insertion because prev_offset = e and e != s+1 for len>0 selns.
-                    if let Some((sel_start, _sel_end, ref sel_text)) =
-                        surr_prev_sel.get_untracked()
+                    if let Some((sel_start, _sel_end, ref sel_text)) = surr_prev_sel.get_untracked()
                     {
                         if !sel_text.is_empty() && cur_pos == sel_start + 1 {
                             let rope = doc_for_surr.rope_text();
                             if cur_pos <= rope.len() {
-                                let typed_ch = rope
-                                    .slice_to_cow(sel_start..cur_pos)
-                                    .chars()
-                                    .next();
+                                let typed_ch = rope.slice_to_cow(sel_start..cur_pos).chars().next();
                                 let close_opt = typed_ch.and_then(|c| match c {
                                     '(' => Some(')'),
                                     '[' => Some(']'),
                                     '{' => Some('}'),
-                                    '"'  => Some('"'),
+                                    '"' => Some('"'),
                                     '\'' => Some('\''),
-                                    _    => None,
+                                    _ => None,
                                 });
                                 if let Some(close_ch) = close_opt {
                                     surr_suppress.set(true);
@@ -1566,7 +1758,8 @@ pub fn editor_panel(
                                     );
                                     cursor_sig.set(Cursor::new(
                                         CursorMode::Insert(Selection::caret(cur_pos + ins_len)),
-                                        None, None,
+                                        None,
+                                        None,
                                     ));
                                     surr_prev_sel.set(None);
                                     return;
@@ -1578,11 +1771,15 @@ pub fn editor_panel(
                     // ── Update previous selection tracking for the next run ──
                     let sel_info = if let CursorMode::Insert(sel) = &cur.mode {
                         sel.regions().first().copied().and_then(|r| {
-                            if r.start == r.end { return None; }
+                            if r.start == r.end {
+                                return None;
+                            }
                             let s_b = r.start.min(r.end);
                             let e_b = r.start.max(r.end);
                             // Skip very large selections to avoid allocation pressure.
-                            if e_b - s_b >= 50_000 { return None; }
+                            if e_b - s_b >= 50_000 {
+                                return None;
+                            }
                             let rope = doc_for_surr.rope_text();
                             let text = rope.slice_to_cow(s_b..e_b.min(rope.len())).to_string();
                             Some((s_b, e_b, text))
@@ -1609,28 +1806,42 @@ pub fn editor_panel(
                     }
                     let prev = si_prev.get_untracked();
                     si_prev.set(cur_pos);
-                    if active_idx.get() != Some(i) { return; }
-                    if cur_pos == 0 { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    if cur_pos == 0 {
+                        return;
+                    }
                     let rope = doc_for_si.rope_text();
                     let len = rope.len();
-                    if cur_pos > len { return; }
+                    if cur_pos > len {
+                        return;
+                    }
                     let cur_line = rope.line_of_offset(cur_pos.min(len.saturating_sub(1)));
-                    let cur_col  = cur_pos.saturating_sub(rope.offset_of_line(cur_line));
+                    let cur_col = cur_pos.saturating_sub(rope.offset_of_line(cur_line));
                     // Only trigger when cursor is at the very start of a new line.
-                    if cur_col != 0 || cur_line == 0 { return; }
+                    if cur_col != 0 || cur_line == 0 {
+                        return;
+                    }
                     let prev_clamped = prev.min(len.saturating_sub(1));
                     let prev_line = rope.line_of_offset(prev_clamped);
                     // Check that we moved exactly one line down (Enter was pressed).
-                    if cur_line != prev_line + 1 { return; }
+                    if cur_line != prev_line + 1 {
+                        return;
+                    }
                     // Verify the char before cursor is a newline (not a cursor jump).
-                    let before_cur = rope.slice_to_cow(cur_pos.saturating_sub(1)..cur_pos)
-                        .chars().next();
-                    if before_cur != Some('\n') { return; }
+                    let before_cur = rope
+                        .slice_to_cow(cur_pos.saturating_sub(1)..cur_pos)
+                        .chars()
+                        .next();
+                    if before_cur != Some('\n') {
+                        return;
+                    }
                     // Derive indentation from the previous line.
                     let pl_start = rope.offset_of_line(prev_line);
-                    let pl_end   = rope.offset_of_line(cur_line);
-                    let pl_text  = rope.slice_to_cow(pl_start..pl_end).to_string();
-                    let pl_trim  = pl_text.trim_end_matches(|c: char| c == '\n' || c == '\r');
+                    let pl_end = rope.offset_of_line(cur_line);
+                    let pl_text = rope.slice_to_cow(pl_start..pl_end).to_string();
+                    let pl_trim = pl_text.trim_end_matches(|c: char| c == '\n' || c == '\r');
                     let ws_len = pl_trim.len() - pl_trim.trim_start().len();
                     let indent = pl_trim[..ws_len].to_string();
                     let extra = if pl_trim.trim_end().ends_with('{')
@@ -1638,12 +1849,14 @@ pub fn editor_panel(
                         || pl_trim.trim_end().ends_with('[')
                         || pl_trim.trim_end().ends_with(':')
                     {
-                        "    "   // 4-space extra indent after block-opening tokens
+                        "    " // 4-space extra indent after block-opening tokens
                     } else {
                         ""
                     };
                     let full_indent = format!("{indent}{extra}");
-                    if full_indent.is_empty() { return; }
+                    if full_indent.is_empty() {
+                        return;
+                    }
                     si_suppress.set(true);
                     doc_for_si.edit_single(
                         Selection::caret(cur_pos),
@@ -1652,7 +1865,8 @@ pub fn editor_panel(
                     );
                     cursor_sig.set(Cursor::new(
                         CursorMode::Insert(Selection::caret(cur_pos + full_indent.len())),
-                        None, None,
+                        None,
+                        None,
                     ));
                 });
             }
@@ -1662,9 +1876,9 @@ pub fn editor_panel(
             // a line that has leading whitespace, remove one indent level so the
             // closing brace aligns with the matching opening block.
             {
-                let doc_for_di   = doc.clone();
-                let di_suppress: RwSignal<bool>  = create_rw_signal(false);
-                let di_prev:     RwSignal<usize> = create_rw_signal(0usize);
+                let doc_for_di = doc.clone();
+                let di_suppress: RwSignal<bool> = create_rw_signal(false);
+                let di_prev: RwSignal<usize> = create_rw_signal(0usize);
                 create_effect(move |_| {
                     let cur_pos = cursor_sig.get().offset();
                     if di_suppress.get_untracked() {
@@ -1673,30 +1887,47 @@ pub fn editor_panel(
                     }
                     let prev = di_prev.get_untracked();
                     di_prev.set(cur_pos);
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     // Only trigger on a single char advance (typing, not pasting).
-                    if cur_pos == 0 || cur_pos != prev + 1 { return; }
+                    if cur_pos == 0 || cur_pos != prev + 1 {
+                        return;
+                    }
                     let rope = doc_for_di.rope_text();
-                    if cur_pos > rope.len() { return; }
+                    if cur_pos > rope.len() {
+                        return;
+                    }
                     // The last typed character must be `}`.
                     let prefix = rope.slice_to_cow(cur_pos.saturating_sub(1)..cur_pos);
-                    if prefix.chars().next() != Some('}') { return; }
+                    if prefix.chars().next() != Some('}') {
+                        return;
+                    }
                     // Find the line containing the `}`.
-                    let cur_line  = rope.line_of_offset(cur_pos.saturating_sub(1));
+                    let cur_line = rope.line_of_offset(cur_pos.saturating_sub(1));
                     let line_start = rope.offset_of_line(cur_line);
-                    let line_end   = rope.offset_of_line(cur_line + 1).min(rope.len());
-                    let line_text  = rope.slice_to_cow(line_start..line_end).to_string();
+                    let line_end = rope.offset_of_line(cur_line + 1).min(rope.len());
+                    let line_text = rope.slice_to_cow(line_start..line_end).to_string();
                     // The `}` must be the first non-whitespace character.
                     let trimmed = line_text.trim_start_matches(|c: char| c == ' ' || c == '\t');
-                    if !trimmed.starts_with('}') { return; }
+                    if !trimmed.starts_with('}') {
+                        return;
+                    }
                     let ws_len = line_text.len() - trimmed.len();
-                    if ws_len == 0 { return; } // already at column 0 — nothing to do
-                    // Remove one indent level: prefer 4 spaces, then 2, then 1 tab.
+                    if ws_len == 0 {
+                        return;
+                    } // already at column 0 — nothing to do
+                      // Remove one indent level: prefer 4 spaces, then 2, then 1 tab.
                     let ws_prefix = &line_text[..ws_len];
-                    let remove = if ws_prefix.ends_with("    ") { 4 }
-                                 else if ws_prefix.ends_with("  ") { 2 }
-                                 else if ws_prefix.ends_with('\t') { 1 }
-                                 else { return };
+                    let remove = if ws_prefix.ends_with("    ") {
+                        4
+                    } else if ws_prefix.ends_with("  ") {
+                        2
+                    } else if ws_prefix.ends_with('\t') {
+                        1
+                    } else {
+                        return;
+                    };
                     di_suppress.set(true);
                     doc_for_di.edit_single(
                         Selection::region(line_start, line_start + remove),
@@ -1706,7 +1937,8 @@ pub fn editor_panel(
                     // Adjust cursor to compensate for the removed whitespace.
                     cursor_sig.set(Cursor::new(
                         CursorMode::Insert(Selection::caret(cur_pos - remove)),
-                        None, None,
+                        None,
+                        None,
                     ));
                 });
             }
@@ -1717,8 +1949,12 @@ pub fn editor_panel(
             {
                 let doc_for_comp = doc.clone();
                 create_effect(move |_| {
-                    let Some((text, prefix_byte_len)) = pending_completion.get() else { return };
-                    if active_idx.get() != Some(i) { return; }
+                    let Some((text, prefix_byte_len)) = pending_completion.get() else {
+                        return;
+                    };
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     // Consume immediately to prevent re-run.
                     pending_completion.set(None);
                     let cursor_offset = cursor_sig.get().offset();
@@ -1735,16 +1971,25 @@ pub fn editor_panel(
                 let last_repl_nonce: RwSignal<u64> = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let nonce = replace_nonce.get();
-                    if nonce == 0 || nonce == last_repl_nonce.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_repl_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_repl_nonce.set(nonce);
                     let offsets = find_match_offsets.get();
                     let cur = find_cur_match.get();
-                    let Some(&start) = offsets.get(cur) else { return };
+                    let Some(&start) = offsets.get(cur) else {
+                        return;
+                    };
                     let q = find_query.get();
                     let end = start + q.len();
                     let sel = Selection::region(start, end);
-                    let replacement = replace_query.get();
+                    let replacement = replace_query
+                        .get()
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t");
                     doc_for_repl.edit_single(sel, &replacement, EditType::InsertChars);
                 });
             }
@@ -1755,13 +2000,22 @@ pub fn editor_panel(
                 let last_repl_all_nonce: RwSignal<u64> = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let nonce = replace_all_nonce.get();
-                    if nonce == 0 || nonce == last_repl_all_nonce.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_repl_all_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_repl_all_nonce.set(nonce);
                     let offsets = find_match_offsets.get();
-                    if offsets.is_empty() { return; }
+                    if offsets.is_empty() {
+                        return;
+                    }
                     let q = find_query.get();
-                    let replacement = replace_query.get();
+                    let replacement = replace_query
+                        .get()
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t");
                     // Replace from last to first to preserve earlier offsets.
                     for &start in offsets.iter().rev() {
                         let end = start + q.len();
@@ -1780,17 +2034,20 @@ pub fn editor_panel(
                 let ext_for_comment = tab_ext.clone();
                 create_effect(move |_| {
                     let nonce = comment_toggle_nonce.get();
-                    if nonce == 0 || nonce == last_nonce.get() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if nonce == 0 || nonce == last_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_nonce.set(nonce);
 
                     let prefix = match ext_for_comment.as_str() {
-                        "rs" | "js" | "mjs" | "ts" | "tsx" | "jsx" |
-                        "c" | "cpp" | "cc" | "h" | "hpp" | "cs" | "java" |
-                        "go" | "swift" | "kt" | "scala" | "dart" | "groovy" => "// ",
-                        "py" | "pyw" | "rb" | "sh" | "bash" | "zsh" |
-                        "yaml" | "yml" | "toml" | "r" | "jl" | "tf" |
-                        "dockerfile" | "makefile" => "# ",
+                        "rs" | "js" | "mjs" | "ts" | "tsx" | "jsx" | "c" | "cpp" | "cc" | "h"
+                        | "hpp" | "cs" | "java" | "go" | "swift" | "kt" | "scala" | "dart"
+                        | "groovy" => "// ",
+                        "py" | "pyw" | "rb" | "sh" | "bash" | "zsh" | "yaml" | "yml" | "toml"
+                        | "r" | "jl" | "tf" | "dockerfile" | "makefile" => "# ",
                         "lua" => "-- ",
                         "hs" | "elm" => "-- ",
                         "sql" => "-- ",
@@ -1831,6 +2088,198 @@ pub fn editor_panel(
                 });
             }
 
+            // ── Move line up (Alt+Up) ─────────────────────────────────────
+            {
+                let doc_for_mlu = doc.clone();
+                let last_mlu_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = move_line_up_nonce.get();
+                    if nonce == 0 || nonce == last_mlu_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_mlu_nonce.set(nonce);
+
+                    let rope = doc_for_mlu.rope_text();
+                    let offset = cursor_sig.get().offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    if cur_line == 0 {
+                        return;
+                    }
+
+                    let cur_start = rope.offset_of_line(cur_line);
+                    let cur_end = if cur_line + 1 < rope.num_lines() {
+                        rope.offset_of_line(cur_line + 1)
+                    } else {
+                        rope.len()
+                    };
+                    let prev_start = rope.offset_of_line(cur_line - 1);
+                    let cur_text = rope.slice_to_cow(cur_start..cur_end).to_string();
+                    let prev_text = rope.slice_to_cow(prev_start..cur_start).to_string();
+
+                    let cur_col = offset - cur_start;
+                    // Delete both lines and rewrite swapped
+                    doc_for_mlu.edit_single(
+                        Selection::region(prev_start, cur_end),
+                        &format!("{cur_text}{prev_text}"),
+                        EditType::InsertChars,
+                    );
+                    let new_offset =
+                        prev_start + cur_col.min(cur_text.trim_end_matches('\n').len());
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::caret(new_offset)),
+                        None,
+                        None,
+                    ));
+                    dirty.set(true);
+                });
+            }
+
+            // ── Move line down (Alt+Down) ────────────────────────────────
+            {
+                let doc_for_mld = doc.clone();
+                let last_mld_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = move_line_down_nonce.get();
+                    if nonce == 0 || nonce == last_mld_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_mld_nonce.set(nonce);
+
+                    let rope = doc_for_mld.rope_text();
+                    let offset = cursor_sig.get().offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    if cur_line + 1 >= rope.num_lines() {
+                        return;
+                    }
+
+                    let cur_start = rope.offset_of_line(cur_line);
+                    let next_start = rope.offset_of_line(cur_line + 1);
+                    let next_end = if cur_line + 2 < rope.num_lines() {
+                        rope.offset_of_line(cur_line + 2)
+                    } else {
+                        rope.len()
+                    };
+                    let cur_text = rope.slice_to_cow(cur_start..next_start).to_string();
+                    let next_text = rope.slice_to_cow(next_start..next_end).to_string();
+
+                    let cur_col = offset - cur_start;
+                    doc_for_mld.edit_single(
+                        Selection::region(cur_start, next_end),
+                        &format!("{next_text}{cur_text}"),
+                        EditType::InsertChars,
+                    );
+                    let new_line_start = cur_start + next_text.len();
+                    let new_offset =
+                        new_line_start + cur_col.min(cur_text.trim_end_matches('\n').len());
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::caret(new_offset)),
+                        None,
+                        None,
+                    ));
+                    dirty.set(true);
+                });
+            }
+
+            // ── Duplicate line (Alt+Shift+Down) ──────────────────────────
+            {
+                let doc_for_dup = doc.clone();
+                let last_dup_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = duplicate_line_nonce.get();
+                    if nonce == 0 || nonce == last_dup_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_dup_nonce.set(nonce);
+
+                    let rope = doc_for_dup.rope_text();
+                    let offset = cursor_sig.get().offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    let cur_start = rope.offset_of_line(cur_line);
+                    let cur_end = if cur_line + 1 < rope.num_lines() {
+                        rope.offset_of_line(cur_line + 1)
+                    } else {
+                        rope.len()
+                    };
+                    let line_text = rope.slice_to_cow(cur_start..cur_end).to_string();
+                    let cur_col = offset - cur_start;
+
+                    // If last line has no trailing newline, prepend one
+                    let insert_text = if line_text.ends_with('\n') {
+                        line_text.clone()
+                    } else {
+                        format!("\n{line_text}")
+                    };
+                    doc_for_dup.edit_single(
+                        Selection::caret(cur_end),
+                        &insert_text,
+                        EditType::InsertChars,
+                    );
+                    // Place cursor on the duplicated (new) line at the same column
+                    let new_line_start = cur_end + if line_text.ends_with('\n') { 0 } else { 1 };
+                    let new_offset =
+                        new_line_start + cur_col.min(line_text.trim_end_matches('\n').len());
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::caret(new_offset)),
+                        None,
+                        None,
+                    ));
+                    dirty.set(true);
+                });
+            }
+            // ── Delete line (Ctrl+Shift+K) ──────────────────────────────
+            {
+                let doc_for_del = doc.clone();
+                let last_del_nonce: RwSignal<u64> = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let nonce = delete_line_nonce.get();
+                    if nonce == 0 || nonce == last_del_nonce.get() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_del_nonce.set(nonce);
+
+                    let rope = doc_for_del.rope_text();
+                    let offset = cursor_sig.get().offset();
+                    let cur_line = rope.line_of_offset(offset);
+                    let cur_start = rope.offset_of_line(cur_line);
+                    let cur_end = if cur_line + 1 < rope.num_lines() {
+                        rope.offset_of_line(cur_line + 1)
+                    } else {
+                        rope.len()
+                    };
+                    // If deleting the very last line, also eat preceding newline
+                    let del_start = if cur_line + 1 >= rope.num_lines() && cur_start > 0 {
+                        cur_start - 1
+                    } else {
+                        cur_start
+                    };
+                    doc_for_del.edit_single(
+                        Selection::region(del_start, cur_end),
+                        "",
+                        EditType::InsertChars,
+                    );
+                    let new_len = doc_for_del.rope_text().len();
+                    let new_offset = del_start.min(new_len);
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::caret(new_offset)),
+                        None,
+                        None,
+                    ));
+                    dirty.set(true);
+                });
+            }
+
             // ── Vim motion effect ─────────────────────────────────────────
             // When `vim_motion` is set and this tab is active, execute the
             // corresponding cursor movement or edit, then clear the signal.
@@ -1838,17 +2287,19 @@ pub fn editor_panel(
                 use crate::app::VimMotion;
                 let doc_for_vim = doc.clone();
                 create_effect(move |_| {
-                    let Some(motion) = vim_motion.get() else { return };
-                    if active_idx.get() != Some(i) { return; }
+                    let Some(motion) = vim_motion.get() else {
+                        return;
+                    };
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     // Consume immediately so re-run returns early.
                     vim_motion.set(None);
 
                     let cur_offset = cursor_sig.get().offset();
 
                     let new_offset: usize = match motion {
-                        VimMotion::Left => {
-                            cur_offset.saturating_sub(1)
-                        }
+                        VimMotion::Left => cur_offset.saturating_sub(1),
                         VimMotion::Right => {
                             let len = doc_for_vim.rope_text().len();
                             (cur_offset + 1).min(len)
@@ -1856,10 +2307,12 @@ pub fn editor_panel(
                         VimMotion::Up => {
                             let rope = doc_for_vim.rope_text();
                             let line = rope.line_of_offset(cur_offset);
-                            if line == 0 { cur_offset } else {
+                            if line == 0 {
+                                cur_offset
+                            } else {
                                 let col = cur_offset - rope.offset_of_line(line);
                                 let prev_start = rope.offset_of_line(line - 1);
-                                let prev_end  = rope.offset_of_line(line).saturating_sub(1);
+                                let prev_end = rope.offset_of_line(line).saturating_sub(1);
                                 prev_start + col.min(prev_end.saturating_sub(prev_start))
                             }
                         }
@@ -1867,12 +2320,16 @@ pub fn editor_panel(
                             let rope = doc_for_vim.rope_text();
                             let line = rope.line_of_offset(cur_offset);
                             let next = line + 1;
-                            if next >= rope.num_lines() { cur_offset } else {
+                            if next >= rope.num_lines() {
+                                cur_offset
+                            } else {
                                 let col = cur_offset - rope.offset_of_line(line);
                                 let next_start = rope.offset_of_line(next);
                                 let next_end = if next + 1 < rope.num_lines() {
                                     rope.offset_of_line(next + 1).saturating_sub(1)
-                                } else { rope.len() };
+                                } else {
+                                    rope.len()
+                                };
                                 next_start + col.min(next_end.saturating_sub(next_start))
                             }
                         }
@@ -1884,28 +2341,48 @@ pub fn editor_panel(
                             let mut chars = text.chars().peekable();
                             // Skip current-word chars
                             while let Some(&c) = chars.peek() {
-                                if c.is_alphanumeric() || c == '_' { skip_bytes += c.len_utf8(); chars.next(); } else { break; }
+                                if c.is_alphanumeric() || c == '_' {
+                                    skip_bytes += c.len_utf8();
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
                             }
                             // Skip whitespace
                             while let Some(&c) = chars.peek() {
-                                if c.is_whitespace() { skip_bytes += c.len_utf8(); chars.next(); } else { break; }
+                                if c.is_whitespace() {
+                                    skip_bytes += c.len_utf8();
+                                    chars.next();
+                                } else {
+                                    break;
+                                }
                             }
                             (cur_offset + skip_bytes).min(len)
                         }
                         VimMotion::WordBackward => {
-                            if cur_offset == 0 { 0 } else {
+                            if cur_offset == 0 {
+                                0
+                            } else {
                                 let rope = doc_for_vim.rope_text();
                                 let text = rope.slice_to_cow(0..cur_offset).to_string();
                                 let mut pos = text.len();
                                 // Skip whitespace
                                 while pos > 0 {
                                     let c = text[..pos].chars().last().unwrap_or(' ');
-                                    if c.is_whitespace() { pos -= c.len_utf8(); } else { break; }
+                                    if c.is_whitespace() {
+                                        pos -= c.len_utf8();
+                                    } else {
+                                        break;
+                                    }
                                 }
                                 // Skip word chars
                                 while pos > 0 {
                                     let c = text[..pos].chars().last().unwrap_or(' ');
-                                    if c.is_alphanumeric() || c == '_' { pos -= c.len_utf8(); } else { break; }
+                                    if c.is_alphanumeric() || c == '_' {
+                                        pos -= c.len_utf8();
+                                    } else {
+                                        break;
+                                    }
                                 }
                                 pos
                             }
@@ -1920,14 +2397,18 @@ pub fn editor_panel(
                             let line = rope.line_of_offset(cur_offset);
                             let next = if line + 1 < rope.num_lines() {
                                 rope.offset_of_line(line + 1)
-                            } else { rope.len() };
+                            } else {
+                                rope.len()
+                            };
                             next.saturating_sub(1)
                         }
                         VimMotion::DeleteChar => {
                             let len = doc_for_vim.rope_text().len();
                             let end = (cur_offset + 1).min(len);
                             doc_for_vim.edit_single(
-                                Selection::region(cur_offset, end), "", EditType::Delete,
+                                Selection::region(cur_offset, end),
+                                "",
+                                EditType::Delete,
                             );
                             cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
@@ -1937,9 +2418,13 @@ pub fn editor_panel(
                             let start = rope.offset_of_line(line);
                             let end = if line + 1 < rope.num_lines() {
                                 rope.offset_of_line(line + 1)
-                            } else { rope.len() };
+                            } else {
+                                rope.len()
+                            };
                             doc_for_vim.edit_single(
-                                Selection::region(start, end), "", EditType::Delete,
+                                Selection::region(start, end),
+                                "",
+                                EditType::Delete,
                             );
                             start.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
@@ -1953,9 +2438,13 @@ pub fn editor_panel(
                             let line = rope.line_of_offset(cur_offset);
                             let insert_at = if line + 1 < rope.num_lines() {
                                 rope.offset_of_line(line + 1)
-                            } else { rope.len() };
+                            } else {
+                                rope.len()
+                            };
                             doc_for_vim.edit_single(
-                                Selection::caret(insert_at), "\n", EditType::InsertNewline,
+                                Selection::caret(insert_at),
+                                "\n",
+                                EditType::InsertNewline,
                             );
                             insert_at
                         }
@@ -1966,7 +2455,9 @@ pub fn editor_panel(
                             let start = rope.offset_of_line(line);
                             let end = if line + 1 < rope.num_lines() {
                                 rope.offset_of_line(line + 1)
-                            } else { rope.len() };
+                            } else {
+                                rope.len()
+                            };
                             let yanked = rope.slice_to_cow(start..end).to_string();
                             vim_register.set(yanked);
                             cur_offset // cursor stays in place after yank
@@ -1983,15 +2474,21 @@ pub fn editor_panel(
                                     // At last line — append after a newline
                                     let end = rope.len();
                                     doc_for_vim.edit_single(
-                                        Selection::caret(end), "\n", EditType::InsertNewline,
+                                        Selection::caret(end),
+                                        "\n",
+                                        EditType::InsertNewline,
                                     );
                                     end + 1
                                 };
                                 doc_for_vim.edit_single(
-                                    Selection::caret(insert_at), &text, EditType::InsertChars,
+                                    Selection::caret(insert_at),
+                                    &text,
+                                    EditType::InsertChars,
                                 );
                                 insert_at
-                            } else { cur_offset }
+                            } else {
+                                cur_offset
+                            }
                         }
                         VimMotion::PasteBefore => {
                             // Paste yanked text BEFORE the current line.
@@ -2007,10 +2504,14 @@ pub fn editor_panel(
                                     format!("{text}\n")
                                 };
                                 doc_for_vim.edit_single(
-                                    Selection::caret(insert_at), &paste_text, EditType::InsertChars,
+                                    Selection::caret(insert_at),
+                                    &paste_text,
+                                    EditType::InsertChars,
                                 );
                                 insert_at
-                            } else { cur_offset }
+                            } else {
+                                cur_offset
+                            }
                         }
                     };
 
@@ -2027,11 +2528,13 @@ pub fn editor_panel(
             // then sends a single-turn LLM request for an inline completion.
             {
                 let doc_for_fim = doc.clone();
-                let fim_gen2    = Arc::clone(&fim_gen);
-                let fim_tx2     = fim_tx.clone();
+                let fim_gen2 = Arc::clone(&fim_gen);
+                let fim_tx2 = fim_tx.clone();
 
                 create_effect(move |_| {
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     let offset = cursor_sig.get().offset();
 
                     // Bump generation: in-flight request with old gen is silently discarded.
@@ -2041,11 +2544,15 @@ pub fn editor_panel(
 
                     // Extract prefix and suffix inside the reactive scope (UI thread).
                     let rope = doc_for_fim.rope_text();
-                    let len  = rope.len();
-                    if len == 0 || offset == 0 { return; }
+                    let len = rope.len();
+                    if len == 0 || offset == 0 {
+                        return;
+                    }
 
                     let prefix = rope.slice_to_cow(0..offset).to_string();
-                    if prefix.trim().is_empty() { return; }
+                    if prefix.trim().is_empty() {
+                        return;
+                    }
                     let suffix = rope.slice_to_cow(offset..len).to_string();
 
                     let gen_check = Arc::clone(&fim_gen2);
@@ -2054,11 +2561,14 @@ pub fn editor_panel(
                     std::thread::spawn(move || {
                         // 300 ms debounce — if cursor moved, gen will have changed.
                         std::thread::sleep(std::time::Duration::from_millis(300));
-                        if gen_check.load(Ordering::SeqCst) != my_gen { return; }
+                        if gen_check.load(Ordering::SeqCst) != my_gen {
+                            return;
+                        }
 
                         let settings = Settings::load();
                         let rt = match tokio::runtime::Builder::new_current_thread()
-                            .enable_all().build()
+                            .enable_all()
+                            .build()
                         {
                             Ok(rt) => rt,
                             Err(_) => return,
@@ -2073,10 +2583,14 @@ pub fn editor_panel(
                             // Trim to reasonable context window sizes.
                             let pre = if prefix.len() > 1500 {
                                 prefix[prefix.len() - 1500..].to_string()
-                            } else { prefix };
+                            } else {
+                                prefix
+                            };
                             let suf = if suffix.len() > 400 {
                                 suffix[..400].to_string()
-                            } else { suffix };
+                            } else {
+                                suffix
+                            };
 
                             let prompt = format!(
                                 "You are a code completion engine. \
@@ -2090,13 +2604,20 @@ pub fn editor_panel(
                             let msgs = [Message::user(prompt)];
                             match client.chat(&msgs, &[]).await {
                                 Ok(resp) => {
-                                    let text = resp.message.content.trim()
+                                    let text = resp
+                                        .message
+                                        .content
+                                        .trim()
                                         .trim_start_matches("```")
                                         .trim_end_matches("```")
                                         .trim()
                                         .to_string();
                                     // Discard if suspiciously long (hallucination)
-                                    if text.lines().count() > 6 { String::new() } else { text }
+                                    if text.lines().count() > 6 {
+                                        String::new()
+                                    } else {
+                                        text
+                                    }
                                 }
                                 Err(_) => String::new(),
                             }
@@ -2111,16 +2632,16 @@ pub fn editor_panel(
             }
 
             // Skip syntax highlighting for large files (> 2 MB) for performance.
-            let is_large_file = tab.path.metadata()
+            let is_large_file = tab
+                .path
+                .metadata()
                 .map(|m| m.len() > 2 * 1024 * 1024)
                 .unwrap_or(false);
 
             // Build initial syntect-based styling for this file's language
             let base_styling = make_base_styling(initial_fs, word_wrap.get_untracked());
-            let mut syn_style = SyntaxStyle::for_extension(
-                if is_large_file { "" } else { &tab_ext },
-                base_styling,
-            );
+            let mut syn_style =
+                SyntaxStyle::for_extension(if is_large_file { "" } else { &tab_ext }, base_styling);
             syn_style.set_doc(doc.clone());
 
             // ── Git gutter decorations ────────────────────────────────────
@@ -2143,26 +2664,80 @@ pub fn editor_panel(
                 });
             }
 
+            // ── Git blame data (per-line author/date) ────────────────────
+            // Fetched once on save; only the current cursor line's blame
+            // is shown inline (to avoid visual clutter).
+            let blame_data: RwSignal<Vec<(String, String)>> = create_rw_signal(vec![]);
+            {
+                let blame_path = tab.path.clone();
+                let scope = Scope::new();
+                create_effect(move |_| {
+                    let _dirty = dirty.get();
+                    let send = create_ext_action(scope, move |data: Vec<(String, String)>| {
+                        blame_data.set(data);
+                    });
+                    let p = blame_path.clone();
+                    std::thread::spawn(move || {
+                        let dir = p.parent().unwrap_or(&p);
+                        let out = std::process::Command::new("git")
+                            .args(["blame", "--date=short", "--porcelain"])
+                            .arg(&p)
+                            .current_dir(dir)
+                            .output();
+                        let mut entries: Vec<(String, String)> = vec![];
+                        if let Ok(output) = out {
+                            if output.status.success() {
+                                let text = String::from_utf8_lossy(&output.stdout);
+                                let mut cur_author = String::new();
+                                let mut cur_date = String::new();
+                                for line in text.lines() {
+                                    if let Some(rest) = line.strip_prefix("author ") {
+                                        cur_author = rest.to_string();
+                                    } else if let Some(rest) = line.strip_prefix("author-time ") {
+                                        // porcelain gives unix timestamp; convert to date
+                                        if let Ok(ts) = rest.parse::<i64>() {
+                                            let secs_per_day = 86400;
+                                            let days = ts / secs_per_day;
+                                            let y = 1970 + (days / 365);
+                                            cur_date = format!("{y}");
+                                        }
+                                    } else if let Some(rest) = line.strip_prefix("committer-time ")
+                                    {
+                                        // Use committer date as fallback
+                                        let _ = rest;
+                                    } else if line.starts_with('\t') {
+                                        // Content line = one blame entry complete
+                                        entries.push((cur_author.clone(), cur_date.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        send(entries);
+                    });
+                });
+            }
+
             // ── Reactive styling update: font-size + diagnostics + word highlights + folds ──
             // Rebuilds SyntaxStyle whenever any tracked signal changes.
             // Never recreates the editor view, so undo/redo history is preserved.
             {
-                let doc_for_style    = doc.clone();
-                let ext_for_style    = tab_ext.clone();
+                let doc_for_style = doc.clone();
+                let ext_for_style = tab_ext.clone();
                 let editor_for_style = editor_ref.clone();
-                let path_for_diag    = tab.path.clone();
+                let path_for_diag = tab.path.clone();
                 create_effect(move |_| {
-                    let fs        = font_size.get() as usize;
-                    let use_wrap  = word_wrap.get(); // tracked — triggers rebuild when toggled
+                    let fs = font_size.get() as usize;
+                    let use_wrap = word_wrap.get(); // tracked — triggers rebuild when toggled
                     let all_diags = diagnostics.get();
                     let hl_ranges = word_hl.get();
-                    let git_chgs  = git_changes.get();
-                    let cur_line  = current_line_sig.get();
+                    let git_chgs = git_changes.get();
+                    let cur_line = current_line_sig.get();
                     let (fold_ranges, folded) = fold_state.get();
-                    let bp_pairs    = bracket_pairs_sig.get();
-                    let match_brkt  = matching_bracket_sig.get();
-                    let find_offs   = find_match_offsets.get();
-                    let find_q      = find_query.get();
+                    let bp_pairs = bracket_pairs_sig.get();
+                    let match_brkt = matching_bracket_sig.get();
+                    let find_offs = find_match_offsets.get();
+                    let find_q = find_query.get();
+                    let blame_entries = blame_data.get();
                     let my_diags: Vec<(usize, DiagSeverity)> = all_diags
                         .iter()
                         .filter(|d| d.path == path_for_diag)
@@ -2174,15 +2749,32 @@ pub fn editor_panel(
                         new_base,
                     );
                     new_style.set_doc(doc_for_style.clone());
-                    new_style.diag_lines       = my_diags;
+                    new_style.diag_lines = my_diags;
                     new_style.highlight_ranges = hl_ranges;
-                    new_style.git_lines        = git_chgs;
-                    new_style.current_line     = cur_line;
-                    new_style.foldable_ranges  = fold_ranges;
-                    new_style.folded_starts    = folded;
-                    new_style.bracket_pairs    = bp_pairs;
+                    new_style.git_lines = git_chgs;
+                    new_style.current_line = cur_line;
+                    new_style.foldable_ranges = fold_ranges;
+                    new_style.folded_starts = folded;
+                    new_style.bracket_pairs = bp_pairs;
                     new_style.matching_bracket = match_brkt;
-                    // Convert start offsets → (start, end) ranges using query length.
+                    // Inline blame for the current cursor line
+                    new_style.blame_line = if cur_line < blame_entries.len() {
+                        let (ref author, ref date) = blame_entries[cur_line];
+                        if author.is_empty() || author == "Not Committed Yet" {
+                            None
+                        } else {
+                            Some((cur_line, format!("{author} • {date}")))
+                        }
+                    } else {
+                        None
+                    };
+                    // Push blame to IdeState for status bar display
+                    if let Some((_, ref text)) = new_style.blame_line {
+                        active_blame.set(text.clone());
+                    } else {
+                        active_blame.set(String::new());
+                    }
+                    // Convert start offsets \u2192 (start, end) ranges using query length.
                     new_style.find_match_ranges = if find_q.is_empty() {
                         vec![]
                     } else {
@@ -2209,7 +2801,7 @@ pub fn editor_panel(
                 })
                 .update({
                     let as_gen = Arc::clone(&auto_save_gen);
-                    let as_tx  = auto_save_tx.clone();
+                    let as_tx = auto_save_tx.clone();
                     move |_| {
                         dirty.set(true);
                         // Notify LSP server of content change (textDocument/didChange).
@@ -2237,49 +2829,140 @@ pub fn editor_panel(
                 })
                 .style(move |s| {
                     s.size_full()
-                     .apply_if(!is_active(), |s| s.display(floem::style::Display::None))
+                        .apply_if(!is_active(), |s| s.display(floem::style::Display::None))
                 })
         },
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).min_width(0.0).width_full());
 
-    // ── Neon scrollbar heatmap ─────────────────────────────────────────────
+    // ── Minimap — scaled-down document overview ────────────────────────────
+    // Renders each line of the active document as a 1 px tall bar whose width
+    // indicates line length.  Diagnostic lines get colored markers; the current
+    // cursor line gets a bright accent indicator.
+    let minimap_docs = docs_for_find.clone();
     let heatmap = canvas(move |cx, size| {
         let t = theme.get();
         let p = &t.palette;
         let h = size.height;
         let w = size.width;
         cx.fill(&floem::kurbo::Rect::ZERO.with_size(size), p.glass_bg, 0.0);
-        cx.fill(&Circle::new(Point::new(w * 0.5, h * 0.02 + 6.0), 5.0), p.success.with_alpha(0.86), 6.0);
-        cx.fill(&Circle::new(Point::new(w * 0.5, h * 0.5), 5.0), p.accent.with_alpha(0.86), 7.0);
+
+        // Left-edge separator
         cx.fill(&floem::kurbo::Rect::new(0.0, 0.0, 1.0, h), p.border, 0.0);
+
+        // Get the active document text
+        let active = active_idx.get();
+        let tab_list = tabs.get();
+        let doc_text = active.and_then(|idx| {
+            let tab = tab_list.get(idx)?;
+            let key = tab.path.to_string_lossy().to_string();
+            let reg = minimap_docs.borrow();
+            let doc = reg.get(&key)?;
+            Some(doc.text().to_string())
+        });
+
+        let Some(text) = doc_text else {
+            return;
+        };
+        let line_count = text.lines().count().max(1);
+        let max_line_len = text.lines().map(|l| l.len()).max().unwrap_or(1).max(1);
+        let scale_y = h / (line_count as f64);
+        let line_h = scale_y.max(1.0).min(3.0);
+
+        // Get diagnostic info for the active tab
+        let all_diags = diagnostics.get();
+        let diag_path = active
+            .and_then(|idx| tab_list.get(idx))
+            .map(|t| t.path.clone());
+
+        let _cur_line = active.map(|_| {
+            find_cur_match.get(); // just for reactivity trigger
+            0usize // placeholder — we use active_cursor below
+        });
+
+        for (i, line) in text.lines().enumerate() {
+            let y = (i as f64) * scale_y;
+            if y > h {
+                break;
+            }
+
+            // Line length as width proportion
+            let frac = (line.len() as f64) / (max_line_len as f64);
+            let bar_w = 2.0 + frac * (w - 4.0);
+
+            // Base color: slightly brighter for non-empty lines
+            let alpha = if line.trim().is_empty() { 15 } else { 45 };
+            let bar_color = floem::peniko::Color::from_rgba8(180, 190, 210, alpha);
+
+            cx.fill(
+                &floem::kurbo::Rect::new(2.0, y, 2.0 + bar_w, y + line_h),
+                bar_color,
+                0.0,
+            );
+        }
+
+        // Overlay diagnostic markers
+        if let Some(ref dp) = diag_path {
+            for diag in &all_diags {
+                if &diag.path != dp {
+                    continue;
+                }
+                let dl = diag.line.saturating_sub(1) as usize;
+                let y = (dl as f64) * scale_y;
+                let color = match diag.severity {
+                    crate::lsp_bridge::DiagSeverity::Error => p.error.with_alpha(0.9),
+                    crate::lsp_bridge::DiagSeverity::Warning => p.warning.with_alpha(0.8),
+                    _ => p.accent.with_alpha(0.5),
+                };
+                cx.fill(
+                    &floem::kurbo::Rect::new(1.0, y, w, y + line_h.max(2.0)),
+                    color,
+                    0.0,
+                );
+            }
+        }
+
+        // Draw viewport indicator using current line from active_cursor
+        if let Some((_, line_num, _)) = active_cursor.get() {
+            let y = (line_num as f64) * scale_y;
+            cx.fill(
+                &floem::kurbo::Rect::new(0.0, y - 1.0, w, y + 2.0),
+                p.accent.with_alpha(0.7),
+                0.0,
+            );
+        }
     })
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         let bg = if t.is_cosmic() { p.glass_bg } else { p.bg_deep };
-        s.width(8.0).height_full().min_width(8.0).background(bg)
+        s.width(60.0).height_full().min_width(60.0).background(bg)
     });
 
     // ── Welcome screen ─────────────────────────────────────────────────────
     let welcome = container(
         stack((
             phaze_icon(icons::FILE, 48.0, move |p| p.text_muted, theme),
-            label(|| "Open a file to start editing")
-                .style(move |s| {
-                    s.color(theme.get().palette.text_muted).font_size(13.0).margin_top(8.0)
-                }),
-            label(|| "Use the explorer panel on the left")
-                .style(move |s| {
-                    s.color(theme.get().palette.text_disabled).font_size(11.0).margin_top(4.0)
-                }),
+            label(|| "Open a file to start editing").style(move |s| {
+                s.color(theme.get().palette.text_muted)
+                    .font_size(13.0)
+                    .margin_top(8.0)
+            }),
+            label(|| "Use the explorer panel on the left").style(move |s| {
+                s.color(theme.get().palette.text_disabled)
+                    .font_size(11.0)
+                    .margin_top(4.0)
+            }),
         ))
         .style(|s| s.flex_col().items_center()),
     )
     .style(move |s| {
         let has = !tabs.get().is_empty();
-        s.flex_grow(1.0).min_height(0.0).items_center().justify_center()
-         .apply_if(has, |s| s.display(floem::style::Display::None))
+        s.flex_grow(1.0)
+            .min_height(0.0)
+            .items_center()
+            .justify_center()
+            .apply_if(has, |s| s.display(floem::style::Display::None))
     });
 
     let content_area = stack((welcome, editor_body))
@@ -2294,8 +2977,11 @@ pub fn editor_panel(
             let offsets = find_match_offsets.get();
             let cur = find_cur_match.get();
             if offsets.is_empty() {
-                if find_query.get().is_empty() { "".to_string() }
-                else { "No matches".to_string() }
+                if find_query.get().is_empty() {
+                    "".to_string()
+                } else {
+                    "No matches".to_string()
+                }
             } else {
                 format!("{}/{}", cur + 1, offsets.len())
             }
@@ -2305,23 +2991,26 @@ pub fn editor_panel(
             let p = &t.palette;
             let no_match = !find_query.get().is_empty() && find_match_offsets.get().is_empty();
             s.font_size(12.0)
-             .color(if no_match { p.error } else { p.text_muted })
-             .margin_left(8.0)
-             .min_width(80.0)
+                .color(if no_match { p.error } else { p.text_muted })
+                .margin_left(8.0)
+                .min_width(80.0)
         });
 
         let prev_btn = container(label(|| "↑"))
             .style(move |s| {
-                s.padding_horiz(8.0).padding_vert(3.0)
-                 .font_size(13.0)
-                 .color(theme.get().palette.text_secondary)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .border_radius(4.0)
-                 .hover(|s| s.background(theme.get().palette.bg_elevated))
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(13.0)
+                    .color(theme.get().palette.text_secondary)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .border_radius(4.0)
+                    .hover(|s| s.background(theme.get().palette.bg_elevated))
             })
             .on_click_stop(move |_| {
                 let offs = find_match_offsets.get();
-                if offs.is_empty() { return; }
+                if offs.is_empty() {
+                    return;
+                }
                 let cur = find_cur_match.get();
                 let prev = if cur == 0 { offs.len() - 1 } else { cur - 1 };
                 find_cur_match.set(prev);
@@ -2331,16 +3020,19 @@ pub fn editor_panel(
 
         let next_btn = container(label(|| "↓"))
             .style(move |s| {
-                s.padding_horiz(8.0).padding_vert(3.0)
-                 .font_size(13.0)
-                 .color(theme.get().palette.text_secondary)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .border_radius(4.0)
-                 .hover(|s| s.background(theme.get().palette.bg_elevated))
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(13.0)
+                    .color(theme.get().palette.text_secondary)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .border_radius(4.0)
+                    .hover(|s| s.background(theme.get().palette.bg_elevated))
             })
             .on_click_stop(move |_| {
                 let offs = find_match_offsets.get();
-                if offs.is_empty() { return; }
+                if offs.is_empty() {
+                    return;
+                }
                 let cur = find_cur_match.get();
                 let next = (cur + 1) % offs.len();
                 find_cur_match.set(next);
@@ -2350,12 +3042,13 @@ pub fn editor_panel(
 
         let close_btn = container(label(|| "✕"))
             .style(move |s| {
-                s.padding_horiz(8.0).padding_vert(3.0)
-                 .font_size(12.0)
-                 .color(theme.get().palette.text_muted)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .border_radius(4.0)
-                 .hover(|s| s.background(theme.get().palette.bg_elevated))
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(12.0)
+                    .color(theme.get().palette.text_muted)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .border_radius(4.0)
+                    .hover(|s| s.background(theme.get().palette.bg_elevated))
             })
             .on_click_stop(move |_| {
                 find_open.set(false);
@@ -2366,66 +3059,131 @@ pub fn editor_panel(
         let case_btn = container(label(|| "Aa"))
             .style(move |s| {
                 let p = theme.get().palette;
-                s.padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
-                 .font_size(11.0).cursor(floem::style::CursorStyle::Pointer)
-                 .color(if find_case.get() { p.bg_base } else { p.text_muted })
-                 .background(if find_case.get() { p.accent } else { p.bg_elevated })
-                 .border(1.0).border_color(p.border)
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .font_size(11.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if find_case.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if find_case.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
             })
-            .on_click_stop(move |_| { find_case.update(|v| *v = !*v); });
+            .on_click_stop(move |_| {
+                find_case.update(|v| *v = !*v);
+            });
 
         // Regex toggle button (.*)
+        // Whole-word toggle button (W)
+        let word_btn = container(label(|| "W"))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .font_size(11.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .font_weight(Weight::BOLD)
+                    .color(if find_whole_word.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if find_whole_word.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
+            })
+            .on_click_stop(move |_| {
+                find_whole_word.update(|v| *v = !*v);
+            });
+
         let regex_btn = container(label(|| ".*"))
             .style(move |s| {
                 let p = theme.get().palette;
-                s.padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
-                 .font_size(11.0).cursor(floem::style::CursorStyle::Pointer)
-                 .color(if find_regex_mode.get() { p.bg_base } else { p.text_muted })
-                 .background(if find_regex_mode.get() { p.accent } else { p.bg_elevated })
-                 .border(1.0).border_color(p.border)
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .font_size(11.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if find_regex_mode.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if find_regex_mode.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
             })
-            .on_click_stop(move |_| { find_regex_mode.update(|v| *v = !*v); });
-
-        let find_input = text_input(find_query)
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.width(220.0).padding_horiz(8.0).padding_vert(4.0)
-                 .font_size(13.0)
-                 .color(p.text_primary)
-                 .background(p.bg_elevated)
-                 .border(1.0)
-                 .border_color(p.border_focus)
-                 .border_radius(4.0)
+            .on_click_stop(move |_| {
+                find_regex_mode.update(|v| *v = !*v);
             });
+
+        let find_input = text_input(find_query).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.width(220.0)
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
+                .font_size(13.0)
+                .color(p.text_primary)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(4.0)
+        });
 
         let replace_input = text_input(replace_query)
             .placeholder("Replace…")
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
-                s.width(180.0).padding_horiz(8.0).padding_vert(4.0)
-                 .font_size(13.0)
-                 .color(p.text_primary)
-                 .background(p.bg_elevated)
-                 .border(1.0)
-                 .border_color(p.border)
-                 .border_radius(4.0)
-                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+                s.width(180.0)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .font_size(13.0)
+                    .color(p.text_primary)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(4.0)
+                    .apply_if(!replace_open.get(), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             });
 
         let replace_btn = container(label(|| "Replace"))
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
-                s.padding_horiz(8.0).padding_vert(3.0).font_size(12.0)
-                 .color(p.text_secondary)
-                 .background(p.bg_elevated)
-                 .border(1.0).border_color(p.border)
-                 .border_radius(4.0)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .hover(|s| s.background(p.accent_dim))
-                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(12.0)
+                    .color(p.text_secondary)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .hover(|s| s.background(p.accent_dim))
+                    .apply_if(!replace_open.get(), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 replace_nonce.update(|n| *n += 1);
@@ -2435,14 +3193,19 @@ pub fn editor_panel(
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
-                s.padding_horiz(8.0).padding_vert(3.0).font_size(12.0)
-                 .color(p.accent)
-                 .background(p.bg_elevated)
-                 .border(1.0).border_color(p.border)
-                 .border_radius(4.0)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .hover(|s| s.background(p.accent_dim))
-                 .apply_if(!replace_open.get(), |s| s.display(floem::style::Display::None))
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(12.0)
+                    .color(p.accent)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .hover(|s| s.background(p.accent_dim))
+                    .apply_if(!replace_open.get(), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 replace_all_nonce.update(|n| *n += 1);
@@ -2451,30 +3214,45 @@ pub fn editor_panel(
         let replace_toggle = container(label(move || if replace_open.get() { "▾" } else { "▸" }))
             .style(move |s| {
                 let t = theme.get();
-                s.padding_horiz(6.0).padding_vert(3.0).font_size(11.0)
-                 .color(t.palette.text_muted)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .border_radius(3.0)
-                 .hover(|s| s.background(t.palette.bg_elevated))
+                s.padding_horiz(6.0)
+                    .padding_vert(3.0)
+                    .font_size(11.0)
+                    .color(t.palette.text_muted)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .border_radius(3.0)
+                    .hover(|s| s.background(t.palette.bg_elevated))
             })
             .on_click_stop(move |_| replace_open.update(|v| *v = !*v));
 
         container(
-            stack((replace_toggle, find_input, case_btn, regex_btn, match_label,
-                   prev_btn, next_btn,
-                   replace_input, replace_btn, replace_all_btn, close_btn))
-                .style(|s| s.items_center().gap(4.0)),
+            stack((
+                replace_toggle,
+                find_input,
+                case_btn,
+                word_btn,
+                regex_btn,
+                match_label,
+                prev_btn,
+                next_btn,
+                replace_input,
+                replace_btn,
+                replace_all_btn,
+                close_btn,
+            ))
+            .style(|s| s.items_center().gap(4.0)),
         )
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
             let shown = find_open.get();
-            s.width_full().height(36.0).items_center()
-             .padding_horiz(12.0)
-             .background(p.bg_elevated)
-             .border_bottom(1.0)
-             .border_color(p.border)
-             .apply_if(!shown, |s| s.display(floem::style::Display::None))
+            s.width_full()
+                .height(36.0)
+                .items_center()
+                .padding_horiz(12.0)
+                .background(p.bg_elevated)
+                .border_bottom(1.0)
+                .border_color(p.border)
+                .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         // Escape closes the find bar
         .on_event_stop(EventListener::KeyDown, move |ev| {
@@ -2487,7 +3265,9 @@ pub fn editor_panel(
                     }
                     Key::Named(floem::keyboard::NamedKey::Enter) => {
                         let offs = find_match_offsets.get();
-                        if offs.is_empty() { return; }
+                        if offs.is_empty() {
+                            return;
+                        }
                         let cur = find_cur_match.get();
                         let next = (cur + 1) % offs.len();
                         find_cur_match.set(next);
@@ -2502,38 +3282,40 @@ pub fn editor_panel(
 
     // ── Goto-line overlay (Ctrl+G) ────────────────────────────────────────────
     let goto_overlay = {
-        let input = text_input(goto_query)
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.width(160.0).padding(8.0)
-                 .font_size(14.0)
-                 .color(p.text_primary)
-                 .background(p.bg_elevated)
-                 .border(1.0)
-                 .border_color(p.border_focus)
-                 .border_radius(6.0)
-            });
+        let input = text_input(goto_query).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.width(160.0)
+                .padding(8.0)
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(6.0)
+        });
 
-        let hint = label(|| "Go to line…")
-            .style(move |s| {
-                s.font_size(11.0).color(theme.get().palette.text_muted).margin_bottom(6.0)
-            });
+        let hint = label(|| "Go to line…").style(move |s| {
+            s.font_size(11.0)
+                .color(theme.get().palette.text_muted)
+                .margin_bottom(6.0)
+        });
 
         let box_view = stack((hint, input))
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
-                s.flex_col().padding(16.0)
-                 .background(p.bg_panel)
-                 .border(1.0)
-                 .border_color(p.glass_border)
-                 .border_radius(8.0)
-                 .box_shadow_h_offset(0.0)
-                 .box_shadow_v_offset(4.0)
-                 .box_shadow_blur(30.0)
-                 .box_shadow_color(p.glow)
-                 .box_shadow_spread(0.0)
+                s.flex_col()
+                    .padding(16.0)
+                    .background(p.bg_panel)
+                    .border(1.0)
+                    .border_color(p.glass_border)
+                    .border_radius(8.0)
+                    .box_shadow_h_offset(0.0)
+                    .box_shadow_v_offset(4.0)
+                    .box_shadow_blur(30.0)
+                    .box_shadow_color(p.glow)
+                    .box_shadow_spread(0.0)
             })
             .on_event_stop(EventListener::KeyDown, move |ev| {
                 if let Event::KeyDown(e) = ev {
@@ -2560,13 +3342,13 @@ pub fn editor_panel(
             .style(move |s| {
                 let shown = goto_open.get();
                 s.absolute()
-                 .inset(0)
-                 .items_start()
-                 .justify_center()
-                 .padding_top(60.0)
-                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 140))
-                 .z_index(50)
-                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
+                    .inset(0)
+                    .items_start()
+                    .justify_center()
+                    .padding_top(60.0)
+                    .background(floem::peniko::Color::from_rgba8(0, 0, 0, 140))
+                    .z_index(50)
+                    .apply_if(!shown, |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 goto_open.set(false);
@@ -2580,7 +3362,8 @@ pub fn editor_panel(
     let ghost_strip = container(
         stack((
             label(move || {
-                ghost_text.get()
+                ghost_text
+                    .get()
                     .as_deref()
                     .map(|t| t.lines().next().unwrap_or("").to_string())
                     .unwrap_or_default()
@@ -2588,15 +3371,14 @@ pub fn editor_panel(
             .style(move |s| {
                 let p = theme.get().palette;
                 s.font_size(12.0)
-                 .color(p.text_muted)
-                 .font_family("JetBrains Mono, Fira Code, Cascadia Code, monospace".to_string())
-                 .flex_grow(1.0)
+                    .color(p.text_muted)
+                    .font_family("JetBrains Mono, Fira Code, Cascadia Code, monospace".to_string())
+                    .flex_grow(1.0)
             }),
-            label(|| "  ↹ Tab to accept")
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.font_size(10.0).color(p.accent).padding_left(8.0)
-                }),
+            label(|| "  ↹ Tab to accept").style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(10.0).color(p.accent).padding_left(8.0)
+            }),
         ))
         .style(|s| s.flex_row().items_center().width_full()),
     )
@@ -2604,53 +3386,89 @@ pub fn editor_panel(
         let shown = ghost_text.get().is_some();
         let p = theme.get().palette;
         s.width_full()
-         .height(26.0)
-         .padding_horiz(12.0)
-         .padding_vert(4.0)
-         .background(p.bg_elevated)
-         .border_top(1.0)
-         .border_color(p.border)
-         .apply_if(!shown, |s| s.display(floem::style::Display::None))
+            .height(26.0)
+            .padding_horiz(12.0)
+            .padding_vert(4.0)
+            .background(p.bg_elevated)
+            .border_top(1.0)
+            .border_color(p.border)
+            .apply_if(!shown, |s| s.display(floem::style::Display::None))
     });
 
-    stack((tab_bar, breadcrumbs, find_bar, editor_row, ghost_strip, goto_overlay))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            let bg = if t.is_cosmic() { p.glass_bg } else { p.bg_deep };
-            s.flex_col().flex_grow(1.0).min_width(0.0).height_full().background(bg)
-        })
-        .on_event_stop(EventListener::KeyDown, move |event| {
-            if let Event::KeyDown(e) = event {
-                let ctrl  = e.modifiers.contains(Modifiers::CONTROL);
-                let shift = e.modifiers.contains(Modifiers::SHIFT);
-                if ctrl && !shift {
-                    if let Key::Character(ref ch) = e.key.logical_key {
-                        match ch.as_str() {
-                            "s" => save_fn_key(),
-                            "=" | "+" => font_size.update(|s| *s = (*s + 1).min(32)),
-                            "-"       => font_size.update(|s| { if *s > 8 { *s -= 1; } }),
-                            "0"       => font_size.set(14),
-                            "f"       => {
-                                find_open.set(true);
-                                replace_open.set(false);
-                                find_cur_match.set(0);
+    stack((
+        tab_bar,
+        breadcrumbs,
+        find_bar,
+        editor_row,
+        ghost_strip,
+        goto_overlay,
+    ))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let bg = if t.is_cosmic() { p.glass_bg } else { p.bg_deep };
+        s.flex_col()
+            .flex_grow(1.0)
+            .min_width(0.0)
+            .height_full()
+            .background(bg)
+    })
+    .on_event_stop(EventListener::KeyDown, move |event| {
+        if let Event::KeyDown(e) = event {
+            let ctrl = e.modifiers.contains(Modifiers::CONTROL);
+            let shift = e.modifiers.contains(Modifiers::SHIFT);
+            let alt = e.modifiers.contains(Modifiers::ALT);
+
+            // Alt+Up — move line up
+            if alt && !ctrl && !shift {
+                if let Key::Named(floem::keyboard::NamedKey::ArrowUp) = e.key.logical_key {
+                    move_line_up_nonce.update(|n| *n += 1);
+                    return;
+                }
+                if let Key::Named(floem::keyboard::NamedKey::ArrowDown) = e.key.logical_key {
+                    move_line_down_nonce.update(|n| *n += 1);
+                    return;
+                }
+            }
+            // Alt+Shift+Down — duplicate line
+            if alt && shift && !ctrl {
+                if let Key::Named(floem::keyboard::NamedKey::ArrowDown) = e.key.logical_key {
+                    duplicate_line_nonce.update(|n| *n += 1);
+                    return;
+                }
+            }
+
+            if ctrl && !shift {
+                if let Key::Character(ref ch) = e.key.logical_key {
+                    match ch.as_str() {
+                        "s" => save_fn_key(),
+                        "=" | "+" => font_size.update(|s| *s = (*s + 1).min(32)),
+                        "-" => font_size.update(|s| {
+                            if *s > 8 {
+                                *s -= 1;
                             }
-                            "h"       => {
-                                find_open.set(true);
-                                replace_open.set(true);
-                                find_cur_match.set(0);
-                            }
-                            "g"       => {
-                                goto_open.set(true);
-                                goto_query.set(String::new());
-                            }
-                            _ => {}
+                        }),
+                        "0" => font_size.set(14),
+                        "f" => {
+                            find_open.set(true);
+                            replace_open.set(false);
+                            find_cur_match.set(0);
                         }
+                        "h" => {
+                            find_open.set(true);
+                            replace_open.set(true);
+                            find_cur_match.set(0);
+                        }
+                        "g" => {
+                            goto_open.set(true);
+                            goto_query.set(String::new());
+                        }
+                        _ => {}
                     }
                 }
             }
-        })
+        }
+    })
 }
 
 // ── Tab bar ───────────────────────────────────────────────────────────────────
@@ -2662,96 +3480,152 @@ fn tab_bar_view(
     _save_fn: Rc<dyn Fn()>,
     diagnostics: RwSignal<Vec<crate::lsp_bridge::DiagEntry>>,
 ) -> impl IntoView {
-    dyn_stack(
+    let tab_list = dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(i, _)| *i,
         move |(i, tab)| {
             let is_active = active_idx.get() == Some(i);
             let is_hovered = create_rw_signal(false);
             let name = tab.name.clone();
+            let tab_name_for_close = tab.name.clone();
             let dirty = tab.dirty;
             let tab_path = tab.path.clone();
 
-            // Compute this tab's highest-severity diagnostic.
             let diag_color = move || -> Option<floem::peniko::Color> {
                 let p = theme.get().palette;
                 let diags = diagnostics.get();
-                let has_err = diags.iter().any(|d| d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Error);
-                let has_warn = diags.iter().any(|d| d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Warning);
-                if has_err { Some(p.error) }
-                else if has_warn { Some(p.warning) }
-                else { None }
+                let has_err = diags.iter().any(|d| {
+                    d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Error
+                });
+                let has_warn = diags.iter().any(|d| {
+                    d.path == tab_path && d.severity == crate::lsp_bridge::DiagSeverity::Warning
+                });
+                if has_err {
+                    Some(p.error)
+                } else if has_warn {
+                    Some(p.warning)
+                } else {
+                    None
+                }
             };
 
             container(
                 stack((
-                    // Dirty indicator
-                    container(label(|| "●"))
-                        .style(move |s| {
-                            s.font_size(8.0)
-                             .color(theme.get().palette.accent)
-                             .margin_right(4.0)
-                             .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
-                        }),
-                    // Diagnostic dot (error=red, warning=yellow)
-                    container(label(|| "●"))
-                        .style(move |s| {
-                            let color = diag_color();
-                            s.font_size(8.0)
-                             .margin_right(4.0)
-                             .apply_if(color.is_none(), |s| s.display(floem::style::Display::None))
-                             .apply_if(color.is_some(), move |s| s.color(color.unwrap_or(floem::peniko::Color::TRANSPARENT)))
-                        }),
-                    label(move || name.clone())
-                        .style(move |s| {
-                            let t = theme.get();
-                            s.font_size(13.0)
-                             .color(if is_active { t.palette.text_primary } else { t.palette.text_muted })
-                        }),
-                    phaze_icon(icons::CLOSE, 10.0, move |p| p.text_muted, theme)
-                    .style(move |s: floem::style::Style| {
-                        s.margin_left(8.0).width(16.0).height(16.0).items_center()
-                         .justify_center().border_radius(3.0)
-                         .cursor(floem::style::CursorStyle::Pointer)
-                         .hover(|s| s.background(theme.get().palette.bg_elevated))
-                    })
-                    .on_click_stop(move |_| {
-                        tabs.update(|list| { if i < list.len() { list.remove(i); } });
-                        active_idx.update(|cur| {
-                            let len = tabs.get().len();
-                            if len == 0 { *cur = None; }
-                            else { *cur = Some(cur.unwrap_or(0).min(len - 1)); }
-                        });
+                    container(label(|| "●")).style(move |s| {
+                        s.font_size(8.0)
+                            .color(theme.get().palette.accent)
+                            .margin_right(4.0)
+                            .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
                     }),
+                    container(label(|| "●")).style(move |s| {
+                        let color = diag_color();
+                        s.font_size(8.0)
+                            .margin_right(4.0)
+                            .apply_if(color.is_none(), |s| s.display(floem::style::Display::None))
+                            .apply_if(color.is_some(), move |s| {
+                                s.color(color.unwrap_or(floem::peniko::Color::TRANSPARENT))
+                            })
+                    }),
+                    label(move || name.clone()).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(13.0).color(if is_active {
+                            t.palette.text_primary
+                        } else {
+                            t.palette.text_muted
+                        })
+                    }),
+                    phaze_icon(icons::CLOSE, 10.0, move |p| p.text_muted, theme)
+                        .style(move |s: floem::style::Style| {
+                            s.margin_left(8.0)
+                                .width(16.0)
+                                .height(16.0)
+                                .items_center()
+                                .justify_center()
+                                .border_radius(3.0)
+                                .cursor(floem::style::CursorStyle::Pointer)
+                                .hover(|s| s.background(theme.get().palette.bg_elevated))
+                        })
+                        .on_click_stop(move |_| {
+                            // Check if the tab has unsaved changes before closing.
+                            if dirty.get_untracked() {
+                                let confirmed = rfd::MessageDialog::new()
+                                    .set_title("Unsaved Changes")
+                                    .set_description(&format!(
+                                        "\"{}\" has unsaved changes. Close without saving?",
+                                        tab_name_for_close
+                                    ))
+                                    .set_buttons(rfd::MessageButtons::YesNo)
+                                    .show();
+                                if confirmed != rfd::MessageDialogResult::Yes {
+                                    return;
+                                }
+                            }
+                            tabs.update(|list| {
+                                if i < list.len() {
+                                    list.remove(i);
+                                }
+                            });
+                            active_idx.update(|cur| {
+                                let len = tabs.get().len();
+                                if len == 0 {
+                                    *cur = None;
+                                } else {
+                                    *cur = Some(cur.unwrap_or(0).min(len - 1));
+                                }
+                            });
+                        }),
                 ))
                 .style(|s| s.items_center()),
             )
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
-                let bg = if is_active { p.bg_surface }
-                         else if is_hovered.get() { p.bg_elevated }
-                         else { p.bg_panel };
-                s.height_full().padding_horiz(16.0).background(bg)
-                 .border_right(1.0).border_color(p.border)
-                 .cursor(floem::style::CursorStyle::Pointer)
-                 .apply_if(is_active, |s| {
-                     s.border_top(1.0).border_color(p.accent)
-                      .box_shadow_v_offset(-1.0).box_shadow_blur(12.0).box_shadow_color(p.glow)
-                      .border_bottom(2.0).border_color(p.accent)
-                 })
-                 .items_center()
+                let bg = if is_active {
+                    p.bg_surface
+                } else if is_hovered.get() {
+                    p.bg_elevated
+                } else {
+                    p.bg_panel
+                };
+                s.height_full()
+                    .padding_horiz(16.0)
+                    .background(bg)
+                    .border_right(1.0)
+                    .border_color(p.border)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .min_width(0.0)
+                    .apply_if(is_active, |s| {
+                        s.border_top(1.0)
+                            .border_color(p.accent)
+                            .box_shadow_v_offset(-1.0)
+                            .box_shadow_blur(12.0)
+                            .box_shadow_color(p.glow)
+                            .border_bottom(2.0)
+                            .border_color(p.accent)
+                    })
+                    .items_center()
             })
             .on_click_stop(move |_| active_idx.set(Some(i)))
-            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| is_hovered.set(true))
-            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| is_hovered.set(false))
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                is_hovered.set(true)
+            })
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                is_hovered.set(false)
+            })
         },
     )
-    .style(move |s| {
+    .style(|s| s.flex_row().min_width(0.0));
+
+    // Wrap the tab list in scroll so overflow tabs are scrollable horizontally
+    scroll(tab_list).style(move |s: floem::style::Style| {
         let t = theme.get();
         let p = &t.palette;
         let bar_bg = if t.is_cosmic() { p.glass_bg } else { p.bg_deep };
-        s.height(35.0).width_full().background(bar_bg)
-         .border_bottom(1.0).border_color(p.border).min_width(0.0)
+        s.height(35.0)
+            .width_full()
+            .background(bar_bg)
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .min_width(0.0)
     })
 }

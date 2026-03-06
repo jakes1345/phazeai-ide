@@ -1,6 +1,6 @@
+use arboard;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use arboard;
 use std::thread;
 
 use floem::{
@@ -14,7 +14,7 @@ use floem::{
     views::{canvas, container, dyn_stack, label, scroll, stack, Decorators},
     IntoView, Renderer,
 };
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use vte::{Params, Perform};
 
 use phazeai_core::constants::terminal as term_consts;
@@ -71,7 +71,13 @@ fn indexed_to_color(idx: u8) -> Color {
         let b = i % 6;
         let g = (i / 6) % 6;
         let r = i / 36;
-        let to_val = |v: u8| if v == 0 { 0u8 } else { 55u8.saturating_add(v.saturating_mul(40)) };
+        let to_val = |v: u8| {
+            if v == 0 {
+                0u8
+            } else {
+                55u8.saturating_add(v.saturating_mul(40))
+            }
+        };
         return Color::from_rgb8(to_val(r), to_val(g), to_val(b));
     }
 
@@ -98,7 +104,9 @@ struct TermLine {
 
 impl TermLine {
     fn new() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
     fn push_char(&mut self, ch: char, fg: TermColor, bg: TermColor, bold: bool) {
@@ -186,15 +194,17 @@ impl TermState {
                         match mode.first().copied().unwrap_or(0) {
                             5 => {
                                 if let Some(idx) = iter.next() {
-                                    self.cur_fg = TermColor::Indexed(
-                                        idx.first().copied().unwrap_or(0) as u8,
-                                    );
+                                    self.cur_fg =
+                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
                                 }
                             }
                             2 => {
-                                let r = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let g = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let b = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let r =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let g =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let b =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
                                 self.cur_fg = TermColor::Rgb(r, g, b);
                             }
                             _ => {}
@@ -208,15 +218,17 @@ impl TermState {
                         match mode.first().copied().unwrap_or(0) {
                             5 => {
                                 if let Some(idx) = iter.next() {
-                                    self.cur_bg = TermColor::Indexed(
-                                        idx.first().copied().unwrap_or(0) as u8,
-                                    );
+                                    self.cur_bg =
+                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
                                 }
                             }
                             2 => {
-                                let r = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let g = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let b = iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let r =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let g =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                                let b =
+                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
                                 self.cur_bg = TermColor::Rgb(r, g, b);
                             }
                             _ => {}
@@ -261,12 +273,22 @@ impl Perform for VtePerformer {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
         if let Ok(mut state) = self.state.lock() {
             match action {
                 'm' => state.handle_sgr(params),
                 'J' => {
-                    let p = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                    let p = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
                     if p == 2 || p == 3 {
                         if !state.current_line.is_empty() {
                             let line = std::mem::replace(&mut state.current_line, TermLine::new());
@@ -275,13 +297,22 @@ impl Perform for VtePerformer {
                     }
                 }
                 'K' => {
-                    let p = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
+                    let p = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
                     if p == 0 {
                         state.current_line = TermLine::new();
                     }
                 }
                 'A' => {
-                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1).max(1) as usize;
+                    let n = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1)
+                        .max(1) as usize;
                     if !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
                         state.lines.push(line);
@@ -290,7 +321,11 @@ impl Perform for VtePerformer {
                     state.lines.truncate(len.saturating_sub(n));
                 }
                 'H' | 'f' => {
-                    let row = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1);
+                    let row = params
+                        .iter()
+                        .next()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1);
                     if row == 1 && !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
                         state.lines.push(line);
@@ -342,34 +377,58 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
             Delete => b"\x1b[3~".to_vec(),
             Insert => b"\x1b[2~".to_vec(),
             Home => {
-                if ctrl { b"\x1b[1;5H".to_vec() } else { b"\x1b[H".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5H".to_vec()
+                } else {
+                    b"\x1b[H".to_vec()
+                }
             }
             End => {
-                if ctrl { b"\x1b[1;5F".to_vec() } else { b"\x1b[F".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5F".to_vec()
+                } else {
+                    b"\x1b[F".to_vec()
+                }
             }
             ArrowUp => {
-                if ctrl { b"\x1b[1;5A".to_vec() } else { b"\x1b[A".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5A".to_vec()
+                } else {
+                    b"\x1b[A".to_vec()
+                }
             }
             ArrowDown => {
-                if ctrl { b"\x1b[1;5B".to_vec() } else { b"\x1b[B".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5B".to_vec()
+                } else {
+                    b"\x1b[B".to_vec()
+                }
             }
             ArrowRight => {
-                if ctrl { b"\x1b[1;5C".to_vec() } else { b"\x1b[C".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5C".to_vec()
+                } else {
+                    b"\x1b[C".to_vec()
+                }
             }
             ArrowLeft => {
-                if ctrl { b"\x1b[1;5D".to_vec() } else { b"\x1b[D".to_vec() }
+                if ctrl {
+                    b"\x1b[1;5D".to_vec()
+                } else {
+                    b"\x1b[D".to_vec()
+                }
             }
             PageUp => b"\x1b[5~".to_vec(),
             PageDown => b"\x1b[6~".to_vec(),
-            F1 =>  b"\x1bOP".to_vec(),
-            F2 =>  b"\x1bOQ".to_vec(),
-            F3 =>  b"\x1bOR".to_vec(),
-            F4 =>  b"\x1bOS".to_vec(),
-            F5 =>  b"\x1b[15~".to_vec(),
-            F6 =>  b"\x1b[17~".to_vec(),
-            F7 =>  b"\x1b[18~".to_vec(),
-            F8 =>  b"\x1b[19~".to_vec(),
-            F9 =>  b"\x1b[20~".to_vec(),
+            F1 => b"\x1bOP".to_vec(),
+            F2 => b"\x1bOQ".to_vec(),
+            F3 => b"\x1bOR".to_vec(),
+            F4 => b"\x1bOS".to_vec(),
+            F5 => b"\x1b[15~".to_vec(),
+            F6 => b"\x1b[17~".to_vec(),
+            F7 => b"\x1b[18~".to_vec(),
+            F8 => b"\x1b[19~".to_vec(),
+            F9 => b"\x1b[20~".to_vec(),
             F10 => b"\x1b[21~".to_vec(),
             F11 => b"\x1b[23~".to_vec(),
             F12 => b"\x1b[24~".to_vec(),
@@ -383,12 +442,14 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
                 // Ctrl+letter → control character (Ctrl+A = 0x01, Ctrl+Z = 0x1A)
                 if let Some(c) = s.chars().next() {
                     if c.is_ascii_alphabetic() {
-                        let ctrl_byte = (c.to_ascii_uppercase() as u8).wrapping_sub(b'A').wrapping_add(1);
+                        let ctrl_byte = (c.to_ascii_uppercase() as u8)
+                            .wrapping_sub(b'A')
+                            .wrapping_add(1);
                         return vec![ctrl_byte];
                     }
                     // Special Ctrl combos
                     match c {
-                        '[' => return b"\x1b".to_vec(),   // Ctrl+[ = ESC
+                        '[' => return b"\x1b".to_vec(), // Ctrl+[ = ESC
                         '\\' => return b"\x1c".to_vec(),
                         ']' => return b"\x1d".to_vec(),
                         '^' | '6' => return b"\x1e".to_vec(),
@@ -426,13 +487,18 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
         FamilyOwned::Name("Cascadia Code".to_string()),
         FamilyOwned::Monospace,
     ];
-    let default_attrs = Attrs::new().font_size(FONT_SIZE).color(default_fg).family(&fonts);
+    let default_attrs = Attrs::new()
+        .font_size(FONT_SIZE)
+        .color(default_fg)
+        .family(&fonts);
     let mut attrs_list = AttrsList::new(default_attrs);
 
     let mut byte_offset: usize = 0;
     for seg in &line.segments {
         let seg_len = seg.text.len();
-        if seg_len == 0 { continue; }
+        if seg_len == 0 {
+            continue;
+        }
         let start = byte_offset;
         let end = byte_offset + seg_len;
         byte_offset = end;
@@ -456,6 +522,8 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
     let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
+    // Keep the master PTY handle alive so we can resize it when the view dimensions change.
+    let pty_master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> = Arc::new(Mutex::new(None));
 
     // ── Update channel: reader thread → reactive signal ───────────────────
     let (update_tx, update_rx) = std::sync::mpsc::channel::<()>();
@@ -472,6 +540,7 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     {
         let term_state_t = Arc::clone(&term_state);
         let pty_writer_t = Arc::clone(&pty_writer);
+        let pty_master_t = Arc::clone(&pty_master);
 
         thread::spawn(move || {
             let pty_system = NativePtySystem::default();
@@ -526,12 +595,22 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
             let mut reader = match pair.master.try_clone_reader() {
                 Ok(r) => r,
-                Err(e) => { eprintln!("PTY clone_reader error: {e}"); return; }
+                Err(e) => {
+                    eprintln!("PTY clone_reader error: {e}");
+                    return;
+                }
             };
+
+            // Store master handle for resize calls from the UI thread.
+            if let Ok(mut guard) = pty_master_t.lock() {
+                *guard = Some(pair.master);
+            }
 
             let _child = child;
             let mut parser = vte::Parser::new();
-            let mut performer = VtePerformer { state: Arc::clone(&term_state_t) };
+            let mut performer = VtePerformer {
+                state: Arc::clone(&term_state_t),
+            };
             let mut buf = [0u8; term_consts::READ_BUFFER_SIZE];
 
             loop {
@@ -577,7 +656,9 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // ── PTY send helper ───────────────────────────────────────────────────
     let pty_writer_send = Arc::clone(&pty_writer);
     let send_to_pty = move |data: Vec<u8>| {
-        if data.is_empty() { return; }
+        if data.is_empty() {
+            return;
+        }
         if let Ok(mut guard) = pty_writer_send.lock() {
             if let Some(ref mut w) = *guard {
                 let _ = w.write_all(&data);
@@ -631,15 +712,16 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                     layout.set_text(" ", AttrsList::new(attrs), None);
                     layout
                 } else {
-                    let reconstructed = TermLine { segments: segments.clone() };
+                    let reconstructed = TermLine {
+                        segments: segments.clone(),
+                    };
                     build_line_layout(&reconstructed, p.text_primary, p.bg_base)
                 };
                 layout_signal.set(new_layout);
             });
 
             container(
-                floem::views::rich_text(move || layout_signal.get())
-                    .style(|s| s.width_full()),
+                floem::views::rich_text(move || layout_signal.get()).style(|s| s.width_full()),
             )
             .style(|s| s.padding_horiz(8.0).padding_vert(1.0).width_full())
         },
@@ -657,11 +739,11 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             p.bg_base // invisible border when unfocused
         };
         s.flex_grow(1.0)
-         .min_height(0.0)
-         .width_full()
-         .background(p.bg_base)
-         .border(1.0)
-         .border_color(border_color)
+            .min_height(0.0)
+            .width_full()
+            .background(p.bg_base)
+            .border(1.0)
+            .border_color(border_color)
     });
 
     // ── Cursor overlay ────────────────────────────────────────────────────
@@ -679,12 +761,12 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     })
     .style(|s| {
         s.absolute()
-         .width_full()
-         .height(16.0)
-         .inset_bottom(0.0)
-         .inset_left(0.0)
-         .z_index(5)
-         .pointer_events_none()
+            .width_full()
+            .height(16.0)
+            .inset_bottom(0.0)
+            .inset_left(0.0)
+            .z_index(5)
+            .pointer_events_none()
     });
 
     let terminal_with_cursor = stack((output_scroll, cursor_view))
@@ -693,6 +775,11 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // Clones for the clipboard key handler closure.
     let pty_writer_c = Arc::clone(&pty_writer);
     let term_state_c = Arc::clone(&term_state);
+    let pty_master_resize = Arc::clone(&pty_master);
+
+    // Track the last PTY size to avoid redundant resize calls.
+    let last_pty_cols: RwSignal<u16> = create_rw_signal(220u16);
+    let last_pty_rows: RwSignal<u16> = create_rw_signal(40u16);
 
     // Wrap scroll in a keyboard-navigable container so it can receive focus
     // and capture all key events to forward to the PTY.
@@ -706,7 +793,7 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         })
         .on_event_stop(EventListener::KeyDown, move |event| {
             if let Event::KeyDown(e) = event {
-                let ctrl  = e.modifiers.contains(Modifiers::CONTROL);
+                let ctrl = e.modifiers.contains(Modifiers::CONTROL);
                 let shift = e.modifiers.contains(Modifiers::SHIFT);
 
                 // Ctrl+Shift+V — paste clipboard text into terminal
@@ -729,18 +816,24 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                         // Ctrl+Shift+C — copy all visible terminal text to clipboard
                         if ch.as_str() == "c" || ch.as_str() == "C" {
                             if let Ok(state) = term_state_c.lock() {
-                                let mut parts: Vec<String> = state.lines.iter()
+                                let mut parts: Vec<String> = state
+                                    .lines
+                                    .iter()
                                     .map(|line| {
-                                        line.segments.iter()
+                                        line.segments
+                                            .iter()
                                             .map(|seg| seg.text.as_str())
                                             .collect::<String>()
                                     })
                                     .collect();
                                 if !state.current_line.is_empty() {
                                     parts.push(
-                                        state.current_line.segments.iter()
+                                        state
+                                            .current_line
+                                            .segments
+                                            .iter()
                                             .map(|seg| seg.text.as_str())
-                                            .collect::<String>()
+                                            .collect::<String>(),
                                     );
                                 }
                                 let text = parts.join("\n");
@@ -757,18 +850,39 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                 send_to_pty(bytes);
             }
         })
-        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
+        // Resize PTY when this view's layout size changes.
+        .on_resize(move |rect| {
+            let char_w = 8.4_f64;
+            let char_h = (FONT_SIZE as f64) + 3.0;
+            let cols = (rect.width() / char_w).max(1.0) as u16;
+            let rows = (rect.height() / char_h).max(1.0) as u16;
+            if cols == last_pty_cols.get_untracked() && rows == last_pty_rows.get_untracked() {
+                return;
+            }
+            last_pty_cols.set(cols);
+            last_pty_rows.set(rows);
+            if let Ok(guard) = pty_master_resize.lock() {
+                if let Some(ref master) = *guard {
+                    let _ = master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: rect.width() as u16,
+                        pixel_height: rect.height() as u16,
+                    });
+                }
+            }
+        });
 
     // ── Assemble — just the output area (no header; tabs manage the title) ──
-    output_area
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.flex_grow(1.0)
-             .min_height(0.0)
-             .width_full()
-             .background(p.bg_base)
-        })
+    output_area.style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_grow(1.0)
+            .min_height(0.0)
+            .width_full()
+            .background(p.bg_base)
+    })
 }
 
 // ── Multi-tab terminal panel ───────────────────────────────────────────────────
@@ -781,8 +895,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // Tab list: each entry is a unique numeric ID.  Stable IDs let dyn_stack
     // keep existing terminal instances alive when new tabs are added.
     let tab_ids: RwSignal<Vec<usize>> = create_rw_signal(vec![1]);
-    let active_tab: RwSignal<usize>   = create_rw_signal(1);
-    let next_id:    RwSignal<usize>   = create_rw_signal(2);
+    let active_tab: RwSignal<usize> = create_rw_signal(1);
+    let next_id: RwSignal<usize> = create_rw_signal(2);
 
     // ── Tab bar ───────────────────────────────────────────────────────────
     let tab_bar = stack((
@@ -792,21 +906,27 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             |(_, id)| *id,
             move |(_, id)| {
                 let is_active = move || active_tab.get() == id;
-                let hovered   = create_rw_signal(false);
+                let hovered = create_rw_signal(false);
 
                 let title = label(move || format!("Terminal {id}"))
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
                         let active = is_active();
-                        let hov    = hovered.get();
+                        let hov = hovered.get();
                         s.font_size(11.0)
-                         .color(if active { p.text_primary } else if hov { p.text_secondary } else { p.text_muted })
-                         .padding_horiz(10.0)
-                         .padding_vert(5.0)
-                         .border_bottom(if active { 2.0 } else { 0.0 })
-                         .border_color(p.accent)
-                         .cursor(CursorStyle::Pointer)
+                            .color(if active {
+                                p.text_primary
+                            } else if hov {
+                                p.text_secondary
+                            } else {
+                                p.text_muted
+                            })
+                            .padding_horiz(10.0)
+                            .padding_vert(5.0)
+                            .border_bottom(if active { 2.0 } else { 0.0 })
+                            .border_color(p.accent)
+                            .cursor(CursorStyle::Pointer)
                     })
                     .on_click_stop(move |_| active_tab.set(id));
 
@@ -817,13 +937,13 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                         let p = &t.palette;
                         let show = hovered.get() && tab_ids.get().len() > 1;
                         s.font_size(11.0)
-                         .color(p.text_muted)
-                         .padding_horiz(4.0)
-                         .padding_vert(4.0)
-                         .border_radius(3.0)
-                         .cursor(CursorStyle::Pointer)
-                         .hover(|s| s.background(p.error.with_alpha(0.25)))
-                         .apply_if(!show, |s| s.display(Display::None))
+                            .color(p.text_muted)
+                            .padding_horiz(4.0)
+                            .padding_vert(4.0)
+                            .border_radius(3.0)
+                            .cursor(CursorStyle::Pointer)
+                            .hover(|s| s.background(p.error.with_alpha(0.25)))
+                            .apply_if(!show, |s| s.display(Display::None))
                     })
                     .on_click_stop(move |_| {
                         tab_ids.update(|ids| ids.retain(|&x| x != id));
@@ -842,25 +962,24 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                         let t = theme.get();
                         let p = &t.palette;
                         s.items_center()
-                         .border_right(1.0)
-                         .border_color(p.border)
-                         .apply_if(is_active(), |s| s.background(p.bg_elevated))
+                            .border_right(1.0)
+                            .border_color(p.border)
+                            .apply_if(is_active(), |s| s.background(p.bg_elevated))
                     })
             },
         )
         .style(|s| s.flex_row()),
-
         // "+" new terminal button
         container(label(|| "+"))
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
                 s.padding_horiz(10.0)
-                 .padding_vert(6.0)
-                 .font_size(16.0)
-                 .color(p.text_muted)
-                 .cursor(CursorStyle::Pointer)
-                 .hover(|s| s.background(p.bg_elevated).color(p.accent))
+                    .padding_vert(6.0)
+                    .font_size(16.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .hover(|s| s.background(p.bg_elevated).color(p.accent))
             })
             .on_click_stop(move |_| {
                 let id = next_id.get();
@@ -873,12 +992,12 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         let t = theme.get();
         let p = &t.palette;
         s.flex_row()
-         .items_stretch()
-         .border_bottom(1.0)
-         .border_color(p.border)
-         .background(p.bg_panel)
-         .width_full()
-         .min_height(30.0)
+            .items_stretch()
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .background(p.bg_panel)
+            .width_full()
+            .min_height(30.0)
     });
 
     // ── Terminal instances (one per tab, hidden when not active) ──────────
@@ -886,24 +1005,22 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         move || tab_ids.get().into_iter().collect::<Vec<_>>(),
         |id| *id,
         move |id| {
-            single_terminal(theme)
-                .style(move |s| {
-                    s.size_full()
-                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
-                })
+            single_terminal(theme).style(move |s| {
+                s.size_full()
+                    .apply_if(active_tab.get() != id, |s| s.display(Display::None))
+            })
         },
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
-    stack((tab_bar, instances))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.flex_col()
-             .width_full()
-             .height_full()
-             .background(p.bg_base)
-             .border_top(1.0)
-             .border_color(p.border)
-        })
+    stack((tab_bar, instances)).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_col()
+            .width_full()
+            .height_full()
+            .background(p.bg_base)
+            .border_top(1.0)
+            .border_color(p.border)
+    })
 }

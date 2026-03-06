@@ -89,22 +89,22 @@ pub mod terminal {
 
     /// ANSI 16 base colors as (r, g, b)
     pub const ANSI_COLORS: [(u8, u8, u8); 16] = [
-        (30, 30, 30),   // 0  Black
-        (205, 49, 49),  // 1  Red
-        (13, 188, 121), // 2  Green
-        (229, 229, 16), // 3  Yellow
-        (36, 114, 200), // 4  Blue
-        (188, 63, 188), // 5  Magenta
-        (17, 168, 205), // 6  Cyan
-        (229, 229, 229),// 7  White
-        (102, 102, 102),// 8  Bright Black
-        (241, 76, 76),  // 9  Bright Red
-        (35, 209, 139), // 10 Bright Green
-        (245, 245, 67), // 11 Bright Yellow
-        (59, 142, 234), // 12 Bright Blue
-        (214, 112, 214),// 13 Bright Magenta
-        (41, 184, 219), // 14 Bright Cyan
-        (229, 229, 229),// 15 Bright White
+        (30, 30, 30),    // 0  Black
+        (205, 49, 49),   // 1  Red
+        (13, 188, 121),  // 2  Green
+        (229, 229, 16),  // 3  Yellow
+        (36, 114, 200),  // 4  Blue
+        (188, 63, 188),  // 5  Magenta
+        (17, 168, 205),  // 6  Cyan
+        (229, 229, 229), // 7  White
+        (102, 102, 102), // 8  Bright Black
+        (241, 76, 76),   // 9  Bright Red
+        (35, 209, 139),  // 10 Bright Green
+        (245, 245, 67),  // 11 Bright Yellow
+        (59, 142, 234),  // 12 Bright Blue
+        (214, 112, 214), // 13 Bright Magenta
+        (41, 184, 219),  // 14 Bright Cyan
+        (229, 229, 229), // 15 Bright White
     ];
 }
 

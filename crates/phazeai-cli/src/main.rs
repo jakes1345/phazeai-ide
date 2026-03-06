@@ -94,8 +94,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    use std::io::{IsTerminal, Read};
+    let mut stdin_data = String::new();
+    if !std::io::stdin().is_terminal() {
+        if let Err(e) = std::io::stdin().read_to_string(&mut stdin_data) {
+            tracing::warn!("Failed to read stdin: {e}");
+        }
+    }
+
     if let Some(prompt) = cli.prompt {
-        app::run_single_prompt(&settings, &prompt, extra_instructions.as_deref()).await?;
+        let final_prompt = if stdin_data.is_empty() {
+            prompt
+        } else {
+            format!("{}\n\n<stdin>\n{}\n</stdin>", prompt, stdin_data)
+        };
+        app::run_single_prompt(&settings, &final_prompt, extra_instructions.as_deref()).await?;
+    } else if !stdin_data.is_empty() {
+        // Run single prompt implicitly if stdin is provided but no prompt string
+        app::run_single_prompt(&settings, &stdin_data, extra_instructions.as_deref()).await?;
     } else {
         app::run_tui(
             settings,
