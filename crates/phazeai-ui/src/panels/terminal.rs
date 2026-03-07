@@ -8,10 +8,10 @@ use floem::{
     ext_event::create_signal_from_channel,
     keyboard::{Key, Modifiers},
     peniko::Color,
-    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     style::{CursorStyle, Display},
     text::{Attrs, AttrsList, FamilyOwned, TextLayout, Weight},
-    views::{canvas, container, dyn_stack, label, scroll, stack, Decorators},
+    views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
     IntoView, Renderer,
 };
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
@@ -503,11 +503,12 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
-const FONT_SIZE: f32 = 13.0;
+#[allow(dead_code)]
+const DEFAULT_TERM_FONT_SIZE: f32 = 13.0;
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
 
-fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> TextLayout {
+fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color, font_size: f32) -> TextLayout {
     let plain = line.plain_text();
     let fonts = [
         FamilyOwned::Name("JetBrains Mono".to_string()),
@@ -516,7 +517,7 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
         FamilyOwned::Monospace,
     ];
     let default_attrs = Attrs::new()
-        .font_size(FONT_SIZE)
+        .font_size(font_size)
         .color(default_fg)
         .family(&fonts);
     let mut attrs_list = AttrsList::new(default_attrs);
@@ -532,7 +533,7 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
         byte_offset = end;
 
         let fg = seg.fg.to_floem_color(default_fg);
-        let mut span_attrs = Attrs::new().font_size(FONT_SIZE).color(fg).family(&fonts);
+        let mut span_attrs = Attrs::new().font_size(font_size).color(fg).family(&fonts);
         if seg.bold {
             span_attrs = span_attrs.weight(Weight::BOLD);
         }
@@ -549,11 +550,17 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
 /// `clear_nonce`: when incremented, sends Ctrl+L to the PTY to clear the screen.
 /// `shell`: the shell binary name or path to launch (e.g. "bash", "zsh").
 /// `cwd_out`: signal that receives the current working directory via OSC 7.
+/// `term_font_size`: reactive font size (8..32).
+/// `find_open`: whether the find bar is visible.
+/// `find_query`: current find query string.
 fn single_terminal(
     theme: RwSignal<PhazeTheme>,
     clear_nonce: RwSignal<u64>,
     shell: String,
     cwd_out: RwSignal<String>,
+    term_font_size: RwSignal<u32>,
+    find_open: RwSignal<bool>,
+    find_query: RwSignal<String>,
 ) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
@@ -767,18 +774,19 @@ fn single_terminal(
             let segments = line.segments.clone();
 
             let initial_layout = {
-                let t = theme.get();
+                let t = theme.get_untracked();
                 let p = &t.palette;
+                let fs = term_font_size.get_untracked() as f32;
                 if segments.is_empty() {
                     let mut layout = TextLayout::new();
                     let attrs = Attrs::new()
-                        .font_size(FONT_SIZE)
+                        .font_size(fs)
                         .color(p.text_primary)
                         .family(&[FamilyOwned::Monospace]);
                     layout.set_text(" ", AttrsList::new(attrs), None);
                     layout
                 } else {
-                    build_line_layout(&line, p.text_primary, p.bg_base)
+                    build_line_layout(&line, p.text_primary, p.bg_base, fs)
                 }
             };
 
@@ -787,10 +795,11 @@ fn single_terminal(
             create_effect(move |_| {
                 let t = theme.get();
                 let p = &t.palette;
+                let fs = term_font_size.get() as f32;
                 let new_layout = if segments.is_empty() {
                     let mut layout = TextLayout::new();
                     let attrs = Attrs::new()
-                        .font_size(FONT_SIZE)
+                        .font_size(fs)
                         .color(p.text_primary)
                         .family(&[FamilyOwned::Monospace]);
                     layout.set_text(" ", AttrsList::new(attrs), None);
@@ -799,7 +808,7 @@ fn single_terminal(
                     let reconstructed = TermLine {
                         segments: segments.clone(),
                     };
-                    build_line_layout(&reconstructed, p.text_primary, p.bg_base)
+                    build_line_layout(&reconstructed, p.text_primary, p.bg_base, fs)
                 };
                 layout_signal.set(new_layout);
             });
@@ -880,6 +889,16 @@ fn single_terminal(
                 let ctrl = e.modifiers.contains(Modifiers::CONTROL);
                 let shift = e.modifiers.contains(Modifiers::SHIFT);
 
+                // Ctrl+F — toggle find bar
+                if ctrl && !shift {
+                    if let Key::Character(ref ch) = e.key.logical_key {
+                        if ch.as_str() == "f" || ch.as_str() == "F" {
+                            find_open.update(|v| *v = !*v);
+                            return;
+                        }
+                    }
+                }
+
                 // Ctrl+Shift+V — paste clipboard text into terminal
                 if ctrl && shift {
                     if let Key::Character(ref ch) = e.key.logical_key {
@@ -938,7 +957,7 @@ fn single_terminal(
         // Resize PTY when this view's layout size changes.
         .on_resize(move |rect| {
             let char_w = 8.4_f64;
-            let char_h = (FONT_SIZE as f64) + 3.0;
+            let char_h = (term_font_size.get_untracked() as f64) + 3.0;
             let cols = (rect.width() / char_w).max(1.0) as u16;
             let rows = (rect.height() / char_h).max(1.0) as u16;
             if cols == last_pty_cols.get_untracked() && rows == last_pty_rows.get_untracked() {
@@ -958,15 +977,79 @@ fn single_terminal(
             }
         });
 
-    // ── Assemble — just the output area (no header; tabs manage the title) ──
-    output_area.style(move |s| {
+    // ── Find bar (shown when find_open is true) ───────────────────────────
+    let find_results_count = create_memo(move |_| {
+        let query = find_query.get();
+        if query.is_empty() {
+            return 0usize;
+        }
+        let query_lower = query.to_lowercase();
+        lines
+            .get()
+            .iter()
+            .filter(|l| l.plain_text().to_lowercase().contains(&query_lower))
+            .count()
+    });
+
+    let find_bar = container(
+        stack((
+            text_input(find_query).style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(12.0)
+                    .width(200.0)
+                    .padding(4.0)
+                    .background(p.bg_elevated)
+                    .color(p.text_primary)
+                    .border(1.0)
+                    .border_color(p.accent)
+                    .border_radius(3.0)
+            }),
+            label(move || {
+                let count = find_results_count.get();
+                format!("  {} result{}", count, if count == 1 { "" } else { "s" })
+            })
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(11.0).color(p.text_muted).padding_horiz(8.0)
+            }),
+            container(label(|| "✕"))
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    s.font_size(13.0)
+                        .color(p.text_muted)
+                        .padding_horiz(8.0)
+                        .padding_vert(4.0)
+                        .cursor(CursorStyle::Pointer)
+                        .hover(|s| s.background(p.bg_elevated).color(p.text_primary))
+                })
+                .on_click_stop(move |_| find_open.set(false)),
+        ))
+        .style(|s| s.flex_row().items_center().padding_horiz(8.0).padding_vert(4.0)),
+    )
+    .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
-        s.flex_grow(1.0)
-            .min_height(0.0)
-            .width_full()
-            .background(p.bg_base)
-    })
+        s.width_full()
+            .background(p.bg_panel)
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .apply_if(!find_open.get(), |s| s.display(Display::None))
+    });
+
+    // ── Assemble — find bar + output area ────────────────────────────────
+    stack((find_bar, output_area))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.flex_col()
+                .flex_grow(1.0)
+                .min_height(0.0)
+                .width_full()
+                .background(p.bg_base)
+        })
 }
 
 // ── Multi-tab terminal panel ───────────────────────────────────────────────────
@@ -979,6 +1062,16 @@ fn single_terminal(
 pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // Shell selector index (cycles through SHELLS)
     let shell_idx: RwSignal<usize> = create_rw_signal(0usize);
+
+    // Terminal zoom — independent font size, clamped 8..32
+    let term_font_size: RwSignal<u32> = create_rw_signal(13u32);
+
+    // Terminal split — show two PTY panes side by side
+    let term_split: RwSignal<bool> = create_rw_signal(false);
+
+    // Terminal find — find bar state
+    let term_find_open: RwSignal<bool> = create_rw_signal(false);
+    let term_find_query: RwSignal<String> = create_rw_signal(String::new());
 
     // Each entry: (id, name_signal, clear_nonce_signal, shell_str, cwd_signal)
     let tab_data: RwSignal<Vec<(usize, RwSignal<String>, RwSignal<u64>, String, RwSignal<String>)>> =
@@ -1129,6 +1222,81 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             },
         )
         .style(|s| s.flex_row().flex_grow(1.0)),
+        // "A-" zoom out button
+        container(label(|| "A-"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(6.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(2.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                term_font_size.update(|v| *v = (*v).saturating_sub(1).max(8));
+            }),
+        // "A0" reset zoom button
+        container(label(|| "A0"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(6.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(2.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                term_font_size.set(13u32);
+            }),
+        // "A+" zoom in button
+        container(label(|| "A+"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(6.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(4.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                term_font_size.update(|v| *v = (*v + 1).min(32));
+            }),
+        // "⊟" split button — toggle side-by-side split
+        container(label(|| "⊟"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let active = term_split.get();
+                s.padding_horiz(8.0)
+                    .padding_vert(5.0)
+                    .font_size(13.0)
+                    .color(if active { p.accent } else { p.text_muted })
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(if active { p.accent } else { p.border })
+                    .border_radius(3.0)
+                    .margin_right(4.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| term_split.update(|v| *v = !*v)),
         // "Clear" button — sends Ctrl+L to active terminal
         container(label(|| "⌫"))
             .style(move |s| {
@@ -1205,6 +1373,21 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             .min_height(30.0)
     });
 
+    // ── Split pane: independent PTY with fixed ID 999 ────────────────────
+    let split_clear: RwSignal<u64> = create_rw_signal(0u64);
+    let split_cwd: RwSignal<String> = create_rw_signal(String::new());
+    // split_term_view is created once and hidden/shown based on term_split
+    // We use a stable shell (bash) for the split pane
+    let split_term_view = single_terminal(
+        theme,
+        split_clear,
+        "bash".to_string(),
+        split_cwd,
+        term_font_size,
+        term_find_open,
+        term_find_query,
+    );
+
     // ── Terminal instances (one per tab, hidden when not active) ──────────
     let instances = dyn_stack(
         move || {
@@ -1216,7 +1399,7 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         },
         |(id, _, _, _)| *id,
         move |(id, clear_sig, shell, cwd_sig)| {
-            single_terminal(theme, clear_sig, shell, cwd_sig).style(move |s| {
+            single_terminal(theme, clear_sig, shell, cwd_sig, term_font_size, term_find_open, term_find_query).style(move |s| {
                 s.size_full()
                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
             })
@@ -1224,7 +1407,33 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
-    stack((tab_bar, instances)).style(move |s| {
+    // ── Content area: normal or split ─────────────────────────────────────
+    // When split is active we show instances + divider + split_term side by side.
+    let content_area = stack((
+        // Normal terminal instances (always present, manages visibility per tab)
+        container(instances).style(move |s| {
+            s.flex_grow(1.0).min_width(0.0).min_height(0.0)
+        }),
+        // Vertical divider (only shown when split)
+        container(empty()).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.width(3.0)
+                .height_full()
+                .background(p.border)
+                .apply_if(!term_split.get(), |s| s.display(Display::None))
+        }),
+        // Split pane terminal (only shown when split)
+        container(split_term_view).style(move |s| {
+            s.flex_grow(1.0)
+                .min_width(0.0)
+                .min_height(0.0)
+                .apply_if(!term_split.get(), |s| s.display(Display::None))
+        }),
+    ))
+    .style(|s| s.flex_row().flex_grow(1.0).min_height(0.0).width_full());
+
+    stack((tab_bar, content_area)).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.flex_col()

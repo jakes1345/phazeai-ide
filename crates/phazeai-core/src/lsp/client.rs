@@ -610,6 +610,32 @@ impl LspClient {
                             let _ = event_tx.send(LspEvent::Log(msg_str.to_string()));
                         }
                     }
+                    "$/progress" => {
+                        if let Some(params) = msg.get("params") {
+                            let value = &params["value"];
+                            let kind = value["kind"].as_str().unwrap_or("").to_string();
+                            let message = value["message"].as_str().map(|s| s.to_string());
+                            let percentage = value["percentage"].as_u64().map(|p| p as u32);
+                            // Encode as a special log message that lsp_bridge can detect
+                            let log_msg = if kind == "end" {
+                                "__progress_end__".to_string()
+                            } else {
+                                let pct = percentage.map(|p| format!(" {p}%")).unwrap_or_default();
+                                format!("__progress__{}{}", message.unwrap_or_default(), pct)
+                            };
+                            let _ = event_tx.send(LspEvent::Log(log_msg));
+                        }
+                    }
+                    "window/workDoneProgress/create" => {
+                        // Acknowledge the server request to create a progress token.
+                        // Full bidirectional ack would require writing back through the
+                        // writer Arc; for now log the token so lsp_bridge can see it.
+                        if msg.get("id").is_some() {
+                            let _ = event_tx.send(LspEvent::Log(
+                                "__progress_create__".to_string(),
+                            ));
+                        }
+                    }
                     _ => {
                         tracing::debug!("Unhandled LSP notification: {}", method);
                     }

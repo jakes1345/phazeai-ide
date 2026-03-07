@@ -17,8 +17,8 @@ use phazeai_core::config::LlmProvider;
 use phazeai_core::{Agent, AgentEvent, Settings};
 
 use crate::lsp_bridge::{
-    start_lsp_bridge, CodeAction, CompletionEntry, DefinitionResult, DiagEntry, DiagSeverity,
-    LspCommand, ReferenceEntry, SymbolEntry,
+    start_lsp_bridge, CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry,
+    DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry,
 };
 
 use crate::{
@@ -308,6 +308,32 @@ pub struct IdeState {
     pub split_down_tabs: RwSignal<Vec<std::path::PathBuf>>,
     /// Cursor in horizontal split pane.
     pub split_down_cursor: RwSignal<Option<(std::path::PathBuf, u32, u32)>>,
+    /// Relative line numbers: show distance-from-cursor in gutter instead of absolute.
+    pub relative_line_numbers: RwSignal<bool>,
+    /// Scratch file counter — each Ctrl+N increments for unique untitled name.
+    pub scratch_counter: RwSignal<u32>,
+    /// Scratch file paths — virtual paths not backed by disk.
+    pub scratch_paths: RwSignal<Vec<std::path::PathBuf>>,
+    /// Yank ring: last 5 yanked strings (vim yy / Ctrl+C).
+    pub yank_ring: RwSignal<Vec<String>>,
+    /// Index into yank ring for Ctrl+Shift+V cycle.
+    pub yank_ring_idx: RwSignal<usize>,
+    /// Active file is read-only (permissions check on open).
+    pub active_readonly: RwSignal<bool>,
+    /// Goto line/col overlay open.
+    pub goto_overlay_open: RwSignal<bool>,
+    /// Goto overlay input text.
+    pub goto_overlay_input: RwSignal<String>,
+    /// Bottom panel maximized (double-click header to toggle).
+    pub bottom_panel_maximized: RwSignal<bool>,
+    /// LSP progress message (e.g. "indexing 45%") — None when idle.
+    pub lsp_progress: RwSignal<Option<String>>,
+    /// Peek definition source lines (Alt+F12) — set when a peek result arrives.
+    pub peek_def_lines: RwSignal<Vec<String>>,
+    /// Whether the peek definition popup is visible.
+    pub peek_def_open: RwSignal<bool>,
+    /// Code lens entries for the active file.
+    pub code_lens: RwSignal<Vec<CodeLensEntry>>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -555,7 +581,22 @@ impl IdeState {
             sig_help,
             doc_symbols,
             workspace_symbols,
+            lsp_progress,
+            peek_def_lines,
+            code_lens,
         ) = start_lsp_bridge(workspace.clone());
+
+        // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
+        let peek_def_open_sig: RwSignal<bool> = create_rw_signal(false);
+        {
+            let peek_lines = peek_def_lines;
+            let peek_open = peek_def_open_sig;
+            create_effect(move |_| {
+                if !peek_lines.get().is_empty() {
+                    peek_open.set(true);
+                }
+            });
+        }
 
         // When a definition result arrives, navigate to the target file + line.
         let goto_line_sig: RwSignal<u32> = create_rw_signal(0u32);
@@ -774,6 +815,19 @@ impl IdeState {
             split_down_file: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             split_down_cursor: create_rw_signal(None),
+            relative_line_numbers: create_rw_signal(false),
+            scratch_counter: create_rw_signal(0u32),
+            scratch_paths: create_rw_signal(Vec::new()),
+            yank_ring: create_rw_signal(Vec::new()),
+            yank_ring_idx: create_rw_signal(0usize),
+            active_readonly: create_rw_signal(false),
+            goto_overlay_open: create_rw_signal(false),
+            goto_overlay_input: create_rw_signal(String::new()),
+            bottom_panel_maximized: create_rw_signal(false),
+            lsp_progress,
+            peek_def_lines,
+            peek_def_open: peek_def_open_sig,
+            code_lens,
         }
     }
 }
@@ -935,6 +989,27 @@ fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Sort Lines (Ascending)",
             action: |s| s.sort_lines_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Toggle Relative Line Numbers",
+            action: |s| s.relative_line_numbers.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "New Scratch File",
+            action: |s| {
+                let n = s.scratch_counter.get() + 1;
+                s.scratch_counter.set(n);
+                let p = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
+                s.scratch_paths.update(|v| v.push(p.clone()));
+                s.open_file.set(Some(p));
+            },
+        },
+        PaletteCommand {
+            label: "Go to Line/Column",
+            action: |s| {
+                s.goto_overlay_open.set(true);
+                s.goto_overlay_input.set(String::new());
+            },
         },
     ]
 }
@@ -1948,6 +2023,27 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.font_size(10.0)
                 .color(if has_err { p.error } else { p.warning })
         }),
+        // LSP progress indicator — shown while indexing, hidden when idle.
+        label(move || {
+            state
+                .lsp_progress
+                .get()
+                .map(|msg| {
+                    if msg.len() > 40 {
+                        format!("{}…  ", &msg[..40])
+                    } else {
+                        format!("{msg}  ")
+                    }
+                })
+                .unwrap_or_default()
+        })
+        .style(move |s| {
+            s.color(state.theme.get().palette.text_muted)
+                .font_size(10.0)
+                .apply_if(state.lsp_progress.get().is_none(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }),
         label(|| "AI Ready  ")
             .style(move |s| s.color(state.theme.get().palette.success).font_size(11.0)),
         // Git blame for current cursor line
@@ -1967,11 +2063,55 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     s.display(floem::style::Display::None)
                 })
         }),
-        // Dynamic encoding + line ending indicator (e.g. "UTF-8 CRLF  ")
-        label(move || format!("UTF-8 {}  ", state.line_ending.get())).style(move |s| {
-            s.color(state.theme.get().palette.text_muted)
-                .font_size(11.0)
-        }),
+        // Dynamic encoding + line ending indicator — clickable to toggle CRLF/LF
+        {
+            let le_state = state.clone();
+            let le_theme = state.theme;
+            let le_hov = create_rw_signal(false);
+            container(
+                label(move || format!("UTF-8 {}  ", le_state.line_ending.get()))
+                    .style(move |s| {
+                        let p = le_theme.get().palette;
+                        s.color(if le_hov.get() { p.accent } else { p.text_muted })
+                            .font_size(11.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                    }),
+            )
+            .on_click_stop(move |_| {
+                // Toggle line ending and convert file bytes
+                let current = state.line_ending.get();
+                let new_le: &'static str = if current == "CRLF" { "LF" } else { "CRLF" };
+                state.line_ending.set(new_le);
+                // Convert open file bytes
+                if let Some(path) = state.open_file.get_untracked() {
+                    if path.exists() {
+                        let toast = state.status_toast;
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            let converted = if new_le == "LF" {
+                                // Remove all \r
+                                bytes.into_iter().filter(|&b| b != b'\r').collect::<Vec<_>>()
+                            } else {
+                                // Add \r before each \n that isn't already preceded by \r
+                                let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 20);
+                                let mut prev = 0u8;
+                                for b in bytes {
+                                    if b == b'\n' && prev != b'\r' {
+                                        out.push(b'\r');
+                                    }
+                                    out.push(b);
+                                    prev = b;
+                                }
+                                out
+                            };
+                            let _ = std::fs::write(&path, &converted);
+                            show_toast(toast, format!("Converted to {new_le}"));
+                        }
+                    }
+                }
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| le_hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| le_hov.set(false))
+        },
         label(move || {
             state
                 .open_file
@@ -2682,10 +2822,11 @@ fn parse_diff_output(text: &str) -> Vec<(String, u8)> {
 
 fn bottom_panel(state: IdeState) -> impl IntoView {
     let current_tab = state.bottom_panel_tab;
+    let maximized = state.bottom_panel_maximized;
 
     container(
         stack((
-            // Tab bar
+            // Tab bar — double-click to maximize/restore
             stack((
                 bottom_panel_tab("TERMINAL", Tab::Terminal, state.clone()),
                 bottom_panel_tab("PROBLEMS", Tab::Problems, state.clone()),
@@ -2715,6 +2856,14 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
                     .items_center()
                     .padding_horiz(12.0)
                     .gap(16.0)
+            })
+            .on_event_stop(EventListener::PointerDown, move |e| {
+                // Double-click on tab bar → maximize/restore
+                if let Event::PointerDown(pe) = e {
+                    if pe.count == 2 {
+                        maximized.update(|v| *v = !*v);
+                    }
+                }
             }),
             // Content
             stack((
@@ -3950,6 +4099,185 @@ fn vim_ex_overlay(state: IdeState) -> impl IntoView {
         })
 }
 
+// ── Goto line/col overlay (Ctrl+G) ────────────────────────────────────────────
+fn goto_overlay(state: IdeState) -> impl IntoView {
+    let open = state.goto_overlay_open;
+    let input_sig = state.goto_overlay_input;
+    let goto_line = state.goto_line;
+    let theme = state.theme;
+    let toast = state.status_toast;
+
+    let input_view = text_input(input_sig)
+        .placeholder("Line or line:col")
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.width(220.0)
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_panel)
+                .border(0.0)
+                .padding_horiz(4.0)
+        })
+        .on_event_stop(EventListener::KeyDown, move |e| {
+            use floem::keyboard::{Key, NamedKey};
+            if let Event::KeyDown(ke) = e {
+                match &ke.key.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        open.set(false);
+                        input_sig.set(String::new());
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        let text = input_sig.get_untracked();
+                        open.set(false);
+                        input_sig.set(String::new());
+                        // Parse "line" or "line:col"
+                        let parts: Vec<&str> = text.trim().splitn(2, ':').collect();
+                        if let Ok(line) = parts[0].parse::<u32>() {
+                            goto_line.set(line.saturating_sub(1));
+                        } else {
+                            show_toast(toast, format!("Invalid: {text}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+    let dialog = stack((
+        label(|| "Go to Line  ").style(move |s| {
+            s.font_size(11.0).color(theme.get().palette.text_muted).font_weight(floem::text::Weight::BOLD)
+        }),
+        input_view,
+    ))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.flex_row()
+            .items_center()
+            .padding_horiz(16.0)
+            .padding_vert(10.0)
+            .border_radius(8.0)
+            .background(p.bg_panel)
+            .border(1.5)
+            .border_color(p.glass_border)
+            .box_shadow_h_offset(0.0)
+            .box_shadow_v_offset(8.0)
+            .box_shadow_blur(24.0)
+            .box_shadow_color(p.glow)
+            .box_shadow_spread(0.0)
+    });
+
+    container(dialog)
+        .style(move |s| {
+            s.absolute()
+                .inset(0)
+                .items_start()
+                .justify_center()
+                .padding_top(80.0)
+                .z_index(495)
+                .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| open.set(false))
+}
+
+// ── Peek Definition overlay (Alt+F12) ────────────────────────────────────────
+
+fn peek_def_overlay(state: IdeState) -> impl IntoView {
+    let open = state.peek_def_open;
+    let lines = state.peek_def_lines;
+    let theme = state.theme;
+
+    let close_btn = container(label(|| "  Close  "))
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.padding_horiz(10.0)
+                .padding_vert(4.0)
+                .border_radius(4.0)
+                .background(p.bg_elevated)
+                .color(p.text_secondary)
+                .font_size(11.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .border(1.0)
+                .border_color(p.glass_border)
+        })
+        .on_click_stop(move |_| {
+            open.set(false);
+            lines.set(vec![]);
+        });
+
+    let header = stack((
+        label(|| "Peek Definition").style(move |s| {
+            s.font_size(12.0)
+                .color(theme.get().palette.text_primary)
+                .flex_grow(1.0)
+        }),
+        close_btn,
+    ))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.flex_row()
+            .items_center()
+            .padding_horiz(12.0)
+            .padding_vert(6.0)
+            .border_bottom(1.0)
+            .border_color(p.glass_border)
+    });
+
+    let content = scroll(
+        dyn_stack(
+            move || lines.get().into_iter().enumerate().collect::<Vec<_>>(),
+            |(i, _)| *i,
+            move |(_, line_text)| {
+                let is_highlight = line_text.starts_with('>');
+                let text_val = line_text.clone();
+                container(label(move || text_val.clone())).style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_family("monospace".to_string())
+                        .font_size(12.0)
+                        .color(if is_highlight {
+                            p.text_primary
+                        } else {
+                            p.text_secondary
+                        })
+                        .background(if is_highlight {
+                            p.accent_dim
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                        .padding_horiz(12.0)
+                        .padding_vert(1.0)
+                        .width_full()
+                })
+            },
+        )
+        .style(|s| s.flex_col().width_full()),
+    )
+    .style(|s| s.max_height(280.0).width_full());
+
+    let popup = stack((header, content))
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.flex_col()
+                .width(560.0)
+                .background(p.bg_panel)
+                .border(1.5)
+                .border_color(p.glass_border)
+                .border_radius(8.0)
+        });
+
+    container(popup)
+        .style(move |s| {
+            let shown = open.get() && !lines.get().is_empty();
+            s.absolute()
+                .inset(0)
+                .items_center()
+                .justify_center()
+                .z_index(485)
+                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 120))
+                .apply_if(!shown, |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| open.set(false))
+}
+
 fn ide_root(state: IdeState) -> impl IntoView {
     let raw_editor = editor_panel(
         state.open_file,
@@ -3989,6 +4317,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.vim_last_motion,
         state.expand_selection_nonce,
         state.shrink_selection_nonce,
+        state.relative_line_numbers,
+        state.yank_ring,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4030,6 +4360,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.vim_last_motion,
         create_rw_signal(0u64), // expand_selection
         create_rw_signal(0u64), // shrink_selection
+        create_rw_signal(false), // relative_line_numbers
+        create_rw_signal(Vec::<String>::new()), // yank_ring
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4277,6 +4609,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.vim_last_motion,
         create_rw_signal(0u64),
         create_rw_signal(0u64),
+        create_rw_signal(false), // relative_line_numbers
+        create_rw_signal(Vec::<String>::new()), // yank_ring
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4314,8 +4648,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
 
     // Bottom panel (terminal etc.)
     let bottom_raw = bottom_panel(state.clone());
-    let bottom = container(bottom_raw)
-        .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
+    let bottom_panel_max = state.bottom_panel_maximized;
+    let bottom = container(bottom_raw).style(move |s| {
+        let s = s.apply_if(zen.get(), |s| s.display(floem::style::Display::None));
+        if bottom_panel_max.get() { s.flex_grow(10.0).min_height(0.0) } else { s }
+    });
 
     let state_for_status = state.clone();
     let status_raw = status_bar(state_for_status);
@@ -4676,6 +5013,8 @@ pub fn launch_phaze_ide() {
                 let ws_syms_popup = workspace_symbols_overlay(state.clone());
                 let branch_picker_popup = branch_picker_overlay(state.clone());
                 let vim_ex_popup = vim_ex_overlay(state.clone());
+                let goto_popup = goto_overlay(state.clone());
+                let peek_def_popup = peek_def_overlay(state.clone());
 
                 // Full-window drag capture overlay — only visible while a panel
                 // resize is in progress (panel_drag_active == true).  By covering
@@ -4713,6 +5052,15 @@ pub fn launch_phaze_ide() {
                 let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
                     .style(|s| s.flex_col().width_full().height_full());
 
+                // Floem stack() supports up to 16 children; nest into two groups.
+                let overlays_b = stack((
+                    peek_def_popup,      // z_index(485) — peek definition (Alt+F12)
+                    vim_ex_popup,        // z_index(490) — vim ex command bar
+                    goto_popup,          // z_index(495) — goto line/col (Ctrl+G)
+                    drag_overlay,        // z_index(50)  — only shown during resize
+                ))
+                .style(|s| s.absolute().width_full().height_full());
+
                 stack((
                     cosmic_bg_canvas(state.theme),
                     ide_with_menu,
@@ -4727,8 +5075,7 @@ pub fn launch_phaze_ide() {
                     toast_popup,         // z_index(450) — toast notifications
                     ws_syms_popup,       // z_index(460) — workspace symbols (Ctrl+T)
                     branch_picker_popup, // z_index(470) — branch switcher
-                    vim_ex_popup,        // z_index(490) — vim ex command bar
-                    drag_overlay,        // z_index(50)  — only shown during resize
+                    overlays_b,
                 ))
                 .style(move |s| {
                     let t = state.theme.get();
@@ -4747,6 +5094,11 @@ pub fn launch_phaze_ide() {
                             if let Key::Named(ref named) = key_event.key.logical_key {
                                 match named {
                                     floem::keyboard::NamedKey::Escape => {
+                                        if state.peek_def_open.get() {
+                                            state.peek_def_open.set(false);
+                                            state.peek_def_lines.set(vec![]);
+                                            return;
+                                        }
                                         if state.branch_picker_open.get() {
                                             state.branch_picker_open.set(false);
                                             return;
@@ -4845,7 +5197,7 @@ pub fn launch_phaze_ide() {
                                             return;
                                         }
                                     }
-                                    // F12 — go to definition; Shift+F12 — find all references
+                                    // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition
                                     floem::keyboard::NamedKey::F12 => {
                                         if let Some((path, line, col)) = state.active_cursor.get() {
                                             if shift {
@@ -4860,6 +5212,17 @@ pub fn launch_phaze_ide() {
                                                 state.references_visible.set(true);
                                                 state.show_bottom_panel.set(true);
                                                 state.bottom_panel_tab.set(Tab::References);
+                                            } else if alt {
+                                                // Alt+F12: peek definition
+                                                state.peek_def_lines.set(vec![]);
+                                                state.peek_def_open.set(false);
+                                                let _ = state.lsp_cmd.send(
+                                                    LspCommand::RequestPeekDefinition {
+                                                        path,
+                                                        line,
+                                                        col,
+                                                    },
+                                                );
                                             } else {
                                                 // F12: go to definition
                                                 let _ = state.lsp_cmd.send(
@@ -4993,6 +5356,23 @@ pub fn launch_phaze_ide() {
                                 }
                                 state.completion_selected.set(0);
                                 state.completion_open.set(true);
+                                return;
+                            }
+
+                            // Ctrl+G → goto line/col overlay
+                            if ctrl && !shift && !alt && key_event.key.logical_key == Key::Character("g".into()) {
+                                state.goto_overlay_open.set(true);
+                                state.goto_overlay_input.set(String::new());
+                                return;
+                            }
+
+                            // Ctrl+N → new scratch file (untitled buffer)
+                            if ctrl && !shift && !alt && key_event.key.logical_key == Key::Character("n".into()) {
+                                let n = state.scratch_counter.get() + 1;
+                                state.scratch_counter.set(n);
+                                let scratch_path = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
+                                state.scratch_paths.update(|v| v.push(scratch_path.clone()));
+                                state.open_file.set(Some(scratch_path));
                                 return;
                             }
 

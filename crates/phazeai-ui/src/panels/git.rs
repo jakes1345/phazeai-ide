@@ -409,6 +409,124 @@ fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
     }
 }
 
+/// Write a hunk patch to a temp file and apply it in reverse.
+fn run_git_revert_hunk(root: &std::path::Path, diff_patch: &str) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join("phaze_revert_hunk.patch");
+    std::fs::write(&tmp, diff_patch).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("git")
+        .args(["apply", "--reverse", tmp.to_str().unwrap_or("")])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok("Hunk reverted".to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Run `git diff HEAD` to get the full working-tree diff.
+fn run_git_diff_head(root: &std::path::Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["diff", "HEAD", "--no-color"])
+        .current_dir(root)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// A single rendered line from a diff, carrying enough context to extract a hunk patch.
+#[derive(Clone, Debug)]
+struct DiffDisplayLine {
+    /// Raw text of this line (without trailing newline).
+    text: String,
+    /// The character that classifies the line: '+', '-', '@', 'd' (diff/---/+++ header), ' '
+    kind: char,
+    /// Index into the hunk list: Some(n) means this is hunk header n, None otherwise.
+    hunk_index: Option<usize>,
+}
+
+/// Parse a raw `git diff` string into display lines.
+/// Also returns a parallel `hunks` vec where each entry is the patch text for that hunk
+/// (file header lines + hunk body) ready to pass to `run_git_revert_hunk`.
+fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
+    let mut lines: Vec<DiffDisplayLine> = Vec::new();
+    let mut hunks: Vec<String> = Vec::new();
+
+    // Collect file-level header lines (diff/index/---/+++) so we can prepend them per hunk.
+    let mut file_header: Vec<String> = Vec::new();
+    // Accumulate lines for the current hunk body (the @@ line + context/add/del lines).
+    let mut current_hunk_body: Vec<String> = Vec::new();
+    let mut in_hunk = false;
+
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let n = raw_lines.len();
+
+    for i in 0..n {
+        let line = raw_lines[i];
+
+        if line.starts_with("diff ") || line.starts_with("index ") {
+            // Flush pending hunk first.
+            if in_hunk && !current_hunk_body.is_empty() {
+                let patch = format!("{}{}", file_header.join("\n"), current_hunk_body.join("\n"));
+                // Replace the placeholder with the real patch now that we know the body.
+                if let Some(last) = hunks.last_mut() {
+                    *last = patch;
+                }
+                current_hunk_body.clear();
+                in_hunk = false;
+            }
+            // Start new file header.
+            file_header.clear();
+            file_header.push(line.to_string());
+            lines.push(DiffDisplayLine { text: line.to_string(), kind: 'd', hunk_index: None });
+        } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+            file_header.push(line.to_string());
+            let kind = if line.starts_with("--- ") { '-' } else { '+' };
+            lines.push(DiffDisplayLine { text: line.to_string(), kind, hunk_index: None });
+        } else if line.starts_with("@@ ") {
+            // Flush previous hunk body.
+            if in_hunk && !current_hunk_body.is_empty() {
+                let patch = format!("{}\n{}", file_header.join("\n"), current_hunk_body.join("\n"));
+                if let Some(last) = hunks.last_mut() {
+                    *last = patch;
+                }
+                current_hunk_body.clear();
+            }
+            in_hunk = true;
+            current_hunk_body.push(line.to_string());
+            let hunk_idx = hunks.len();
+            // Push a placeholder; we'll replace it when we know the full body.
+            hunks.push(String::new());
+            lines.push(DiffDisplayLine {
+                text: line.to_string(),
+                kind: '@',
+                hunk_index: Some(hunk_idx),
+            });
+        } else if in_hunk {
+            current_hunk_body.push(line.to_string());
+            let kind = line.chars().next().unwrap_or(' ');
+            lines.push(DiffDisplayLine { text: line.to_string(), kind, hunk_index: None });
+        } else {
+            lines.push(DiffDisplayLine { text: line.to_string(), kind: ' ', hunk_index: None });
+        }
+    }
+
+    // Flush final hunk.
+    if in_hunk && !current_hunk_body.is_empty() {
+        let patch = format!("{}\n{}", file_header.join("\n"), current_hunk_body.join("\n"));
+        if let Some(last) = hunks.last_mut() {
+            *last = patch;
+        }
+    }
+
+    (lines, hunks)
+}
+
 fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
     let out = std::process::Command::new("git")
         .args(["fetch", "--all", "--prune"])
@@ -2513,9 +2631,244 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let tag_section = stack((tag_list_header, tag_body)).style(|s| s.flex_col().width_full());
 
+    // ── Working-Tree Diff section (git diff HEAD with per-hunk Revert) ────────
+    let diff_expanded: RwSignal<bool> = create_rw_signal(false);
+    let diff_hdr_hov: RwSignal<bool> = create_rw_signal(false);
+    let diff_refresh_hov: RwSignal<bool> = create_rw_signal(false);
+    // Full raw diff text (populated on expand / refresh).
+    let diff_raw: RwSignal<String> = create_rw_signal(String::new());
+    // Parsed display lines derived from diff_raw.
+    let diff_display: RwSignal<Vec<DiffDisplayLine>> = create_rw_signal(Vec::new());
+    // Extracted per-hunk patches.
+    let diff_hunks: RwSignal<Vec<String>> = create_rw_signal(Vec::new());
+
+    let state_diff_load = state.clone();
+    let state_diff_revert = state.clone();
+
+    // Helper closure: reload the diff and parse it.
+    let load_diff = {
+        let root = state_diff_load.workspace_root;
+        move || {
+            let r = root.get();
+            let scope = Scope::new();
+            let send = create_ext_action(scope, move |raw: String| {
+                let (dl, dh) = parse_diff_display(&raw);
+                diff_display.set(dl);
+                diff_hunks.set(dh);
+                diff_raw.set(raw);
+            });
+            std::thread::spawn(move || send(run_git_diff_head(&r)));
+        }
+    };
+
+    // Refresh button for diff section.
+    let diff_refresh_btn = container(label(|| "↻").style(move |s| {
+        let t = theme.get();
+        s.font_size(12.0).color(if diff_refresh_hov.get() {
+            t.palette.accent_hover
+        } else {
+            t.palette.text_muted
+        })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0).padding_vert(2.0).border_radius(3.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if diff_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop({
+        let load_diff2 = load_diff.clone();
+        move |_| load_diff2()
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| diff_refresh_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| diff_refresh_hov.set(false));
+
+    let diff_header = container(
+        stack((
+            label(move || if diff_expanded.get() { "▾ " } else { "▸ " }).style(move |s| {
+                s.font_size(10.0).color(theme.get().palette.text_muted).margin_right(2.0)
+            }),
+            label(move || {
+                let n = diff_hunks.get().len();
+                if n == 0 {
+                    "WORKING TREE DIFF".to_string()
+                } else {
+                    format!("WORKING TREE DIFF ({n} hunks)")
+                }
+            })
+            .style(move |s| {
+                let t = theme.get();
+                s.font_size(11.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
+            }),
+            diff_refresh_btn,
+        ))
+        .style(|s| s.items_center().width_full()),
+    )
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(10.0).padding_vert(5.0).width_full()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border_top(1.0).border_color(p.border)
+            .background(if diff_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop({
+        let load_diff3 = load_diff.clone();
+        move |_| {
+            let was_expanded = diff_expanded.get();
+            diff_expanded.set(!was_expanded);
+            if !was_expanded {
+                load_diff3();
+            }
+        }
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| diff_hdr_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| diff_hdr_hov.set(false));
+
+    let diff_rows = dyn_stack(
+        move || {
+            if !diff_expanded.get() {
+                return vec![];
+            }
+            diff_display.get()
+        },
+        |dl| dl.text.clone(),
+        move |dl: DiffDisplayLine| {
+            let is_hunk_header = dl.hunk_index.is_some();
+            let hunk_idx = dl.hunk_index.unwrap_or(0);
+            let kind = dl.kind;
+
+            let text_display = if dl.text.len() > 200 {
+                format!("{}…", &dl.text[..200])
+            } else {
+                dl.text.clone()
+            };
+
+            let text_lbl = label(move || text_display.clone()).style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let col = match kind {
+                    '+' => floem::peniko::Color::from_rgb8(72, 230, 150),
+                    '-' => floem::peniko::Color::from_rgb8(255, 80, 100),
+                    '@' => floem::peniko::Color::from_rgb8(140, 160, 235),
+                    'd' => p.text_muted,
+                    _ => p.text_primary,
+                };
+                s.font_size(10.0)
+                    .color(col)
+                    .font_family("monospace".to_string())
+                    .flex_grow(1.0)
+                    .min_width(0.0)
+                    .padding_horiz(12.0)
+                    .padding_vert(1.0)
+            });
+
+            // Revert button — always rendered but hidden for non-hunk-header lines.
+            let revert_hov = create_rw_signal(false);
+            let root_rev = state_diff_revert.workspace_root.clone();
+            let load_after = load_diff.clone();
+            let revert_btn = container(label(|| "Revert").style(move |s| {
+                let t = theme.get();
+                s.font_size(9.0)
+                    .font_weight(floem::text::Weight::BOLD)
+                    .color(if revert_hov.get() {
+                        floem::peniko::Color::from_rgb8(255, 80, 100)
+                    } else {
+                        t.palette.text_muted
+                    })
+            }))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(5.0).padding_vert(1.0).border_radius(3.0).margin_right(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(if revert_hov.get() {
+                        floem::peniko::Color::from_rgb8(255, 80, 100)
+                    } else {
+                        p.border
+                    })
+                    .background(if revert_hov.get() {
+                        p.bg_elevated
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    })
+                    // Hide when not a hunk header line.
+                    .apply_if(!is_hunk_header, |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                if !is_hunk_header {
+                    return;
+                }
+                let patch = diff_hunks.get().get(hunk_idx).cloned().unwrap_or_default();
+                if patch.is_empty() {
+                    status_msg.set("Hunk patch not available".to_string());
+                    return;
+                }
+                let root = root_rev.get();
+                let scope = Scope::new();
+                let root2 = root.clone();
+                let load_after2 = load_after.clone();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(msg) => {
+                            status_msg.set(msg);
+                            refresh_git_status(root2.clone(), git_data, is_loading);
+                            load_after2();
+                        }
+                        Err(e) => {
+                            status_msg.set(format!(
+                                "Revert error: {}",
+                                e.lines().next().unwrap_or("?")
+                            ));
+                        }
+                    }
+                });
+                std::thread::spawn(move || send(run_git_revert_hunk(&root, &patch)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                if is_hunk_header { revert_hov.set(true); }
+            })
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                revert_hov.set(false)
+            });
+
+            stack((text_lbl, revert_btn))
+                .style(|s| s.flex_row().items_center().width_full())
+        },
+    )
+    .style(|s: floem::style::Style| s.flex_col().width_full());
+
+    let diff_empty_msg = label(move || {
+        if diff_expanded.get() && diff_display.get().is_empty() {
+            "No changes vs HEAD".to_string()
+        } else {
+            String::new()
+        }
+    })
+    .style(move |s| {
+        let t = theme.get();
+        s.font_size(11.0).color(t.palette.text_muted).padding_horiz(14.0).padding_vert(6.0).width_full()
+            .apply_if(
+                !diff_expanded.get() || !diff_display.get().is_empty(),
+                |s| s.display(floem::style::Display::None),
+            )
+    });
+
+    let diff_scroll = scroll(
+        stack((diff_rows, diff_empty_msg)).style(|s| s.flex_col().width_full()),
+    )
+    .style(move |s| {
+        s.max_height(400.0).width_full()
+            .apply_if(!diff_expanded.get(), |s| s.display(floem::style::Display::None))
+    });
+
+    let diff_section = stack((diff_header, diff_scroll)).style(|s| s.flex_col().width_full());
+
     // ── Full scrollable body ──────────────────────────────────────────────────
     let body = scroll(
-        stack((file_sections, commit_history, blame_section, stash_list_section, merge_section, tag_section))
+        stack((file_sections, commit_history, blame_section, stash_list_section, merge_section, tag_section, diff_section))
             .style(|s| s.flex_col().width_full()),
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());

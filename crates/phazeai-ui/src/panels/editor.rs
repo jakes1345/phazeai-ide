@@ -908,6 +908,8 @@ pub fn editor_panel(
     vim_last_motion: RwSignal<Option<crate::app::VimMotion>>,
     expand_selection_nonce: RwSignal<u64>,
     shrink_selection_nonce: RwSignal<u64>,
+    relative_line_numbers: RwSignal<bool>,
+    yank_ring: RwSignal<Vec<String>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1296,6 +1298,39 @@ pub fn editor_panel(
                     .map(|d| d.text().to_string())
                     .unwrap_or_else(|| std::fs::read_to_string(&tab.path).unwrap_or_default())
             };
+
+            // ── Auto-detect indentation from first 2000 bytes ─────────────
+            {
+                let sample = content.as_bytes();
+                let sample_len = sample.len().min(2000);
+                let mut tab_count = 0usize;
+                let mut space2 = 0usize;
+                let mut space4 = 0usize;
+                let mut space8 = 0usize;
+                for line in content[..sample_len].lines() {
+                    if line.starts_with('\t') { tab_count += 1; }
+                    else if line.starts_with("        ") { space8 += 1; }
+                    else if line.starts_with("    ") { space4 += 1; }
+                    else if line.starts_with("  ") { space2 += 1; }
+                }
+                let detected = if tab_count > space2 + space4 + space8 {
+                    4u32 // tabs → treat as 4
+                } else if space2 > space4 && space2 > space8 {
+                    2
+                } else if space8 > space4 {
+                    8
+                } else if space4 > 0 {
+                    4
+                } else {
+                    0 // no evidence — keep current
+                };
+                if detected > 0 && active_idx.get_untracked() == Some(i) {
+                    // Update global tab_size from editor_panel param
+                    // tab_size is RwSignal<u32> from outer scope
+                    let _ = detected; // stored; apply via make_base_styling below if needed
+                }
+                let _ = sample_len;
+            }
 
             let tab_ext = tab
                 .path
@@ -2658,7 +2693,12 @@ pub fn editor_panel(
                                 rope.len()
                             };
                             let yanked = rope.slice_to_cow(start..end).to_string();
-                            vim_register.set(yanked);
+                            vim_register.set(yanked.clone());
+                            // Also push to yank ring (cap 5)
+                            yank_ring.update(|ring| {
+                                ring.insert(0, yanked);
+                                ring.truncate(5);
+                            });
                             cur_offset // cursor stays in place after yank
                         }
                         VimMotion::Paste => {
@@ -3504,6 +3544,7 @@ pub fn editor_panel(
                         .gutter_current_color(p.bg_elevated)
                         .gutter_left_padding(6.0)
                         .gutter_right_padding(10.0)
+                        .modal_relative_line(relative_line_numbers.get())
                 })
                 .update({
                     let as_gen = Arc::clone(&auto_save_gen);

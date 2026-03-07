@@ -54,8 +54,21 @@ pub enum LspCommand {
     SaveFile { path: PathBuf },
     /// Request workspace-wide symbol search (Ctrl+T). Query is the filter string.
     RequestWorkspaceSymbols { query: String },
+    /// Request peek definition (Alt+F12) — like go-to-def but returns source lines.
+    RequestPeekDefinition { path: PathBuf, line: u32, col: u32 },
+    /// Request code lens for the current file (textDocument/codeLens).
+    RequestCodeLens { path: PathBuf },
     /// Graceful shutdown.
     Shutdown,
+}
+
+/// A code lens entry attached to a specific line.
+#[derive(Debug, Clone)]
+pub struct CodeLensEntry {
+    /// 1-based line number the lens appears on.
+    pub line: u32,
+    /// Display label (e.g. "2 references", "Run test").
+    pub label: String,
 }
 
 /// A symbol entry from the document symbol outline.
@@ -146,7 +159,8 @@ pub struct CompletionEntry {
 
 /// Start the LSP bridge.
 ///
-/// Returns a 10-tuple: `(cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig, sig_help_sig, doc_syms_sig, ws_syms_sig)`.
+/// Returns a 13-tuple: `(cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig,
+/// sig_help_sig, doc_syms_sig, ws_syms_sig, lsp_progress_sig, peek_def_lines_sig, code_lens_sig)`.
 ///
 /// **Call from within a Floem reactive scope.**
 pub fn start_lsp_bridge(
@@ -162,6 +176,9 @@ pub fn start_lsp_bridge(
     RwSignal<Option<SignatureHelpResult>>,
     RwSignal<Vec<SymbolEntry>>,
     RwSignal<Vec<SymbolEntry>>,
+    RwSignal<Option<String>>,
+    RwSignal<Vec<String>>,
+    RwSignal<Vec<CodeLensEntry>>,
 ) {
     let (lsp_cmd_tx, mut lsp_cmd_rx) = mpsc::unbounded_channel::<LspCommand>();
 
@@ -183,6 +200,12 @@ pub fn start_lsp_bridge(
     let (syms_tx, syms_rx) = std::sync::mpsc::sync_channel::<Vec<SymbolEntry>>(4);
     // Workspace symbols: bridge → Floem
     let (ws_syms_tx, ws_syms_rx) = std::sync::mpsc::sync_channel::<Vec<SymbolEntry>>(4);
+    // LSP progress: bridge → Floem (None = idle, Some("msg") = in progress)
+    let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel::<Option<String>>(8);
+    // Peek definition lines: bridge → Floem
+    let (peek_tx, peek_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(4);
+    // Code lens entries: bridge → Floem
+    let (code_lens_tx, code_lens_rx) = std::sync::mpsc::sync_channel::<Vec<CodeLensEntry>>(4);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -404,6 +427,67 @@ pub fn start_lsp_bridge(
                             Some(LspCommand::SaveFile { path }) => {
                                 manager.did_save(&path);
                             }
+                            Some(LspCommand::RequestPeekDefinition { path, line, col }) => {
+                                if let Some(client) = manager.client_for_file(&path).cloned() {
+                                    let path2  = path.clone();
+                                    let evt_tx = event_tx.clone();
+                                    let peek_tx2 = peek_tx.clone();
+                                    tokio::spawn(async move {
+                                        match client.goto_definition(&path2, line, col).await {
+                                            Ok(locs) => {
+                                                if let Some(loc) = locs.into_iter().next() {
+                                                    let uri_str = loc.uri.to_string();
+                                                    let target_path = uri_str
+                                                        .strip_prefix("file://")
+                                                        .map(std::path::PathBuf::from)
+                                                        .unwrap_or_else(|| std::path::PathBuf::from(&uri_str));
+                                                    let target_line = loc.range.start.line as usize; // 0-based
+                                                    // Read 15 lines centered on the target
+                                                    let lines_snapshot: Vec<String> =
+                                                        std::fs::read_to_string(&target_path)
+                                                            .map(|content| {
+                                                                let all: Vec<&str> = content.lines().collect();
+                                                                let total = all.len();
+                                                                let start = target_line.saturating_sub(7);
+                                                                let end = (target_line + 8).min(total);
+                                                                all[start..end]
+                                                                    .iter()
+                                                                    .enumerate()
+                                                                    .map(|(i, l)| {
+                                                                        let ln = start + i + 1; // 1-based
+                                                                        let marker = if start + i == target_line { ">" } else { " " };
+                                                                        format!("{marker}{ln:>4}  {l}")
+                                                                    })
+                                                                    .collect()
+                                                            })
+                                                            .unwrap_or_default();
+                                                    if !lines_snapshot.is_empty() {
+                                                        let _ = peek_tx2.try_send(lines_snapshot);
+                                                    }
+                                                    // Also fire a Definition event so goto_definition signal updates
+                                                    let _ = evt_tx.send(LspEvent::Definition(vec![loc]));
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[LSP] peek definition error: {e}"),
+                                        }
+                                    });
+                                }
+                            }
+                            Some(LspCommand::RequestCodeLens { path }) => {
+                                let code_lens_tx2 = code_lens_tx.clone();
+                                let path2 = path.clone();
+                                let client_opt = manager.client_for_file(&path).cloned();
+                                tokio::spawn(async move {
+                                    let entries = {
+                                        // LspClient doesn't yet expose textDocument/codeLens,
+                                        // so we use the file-scan fallback in all cases.
+                                        // client_opt is available for future extension.
+                                        let _client_opt = client_opt;
+                                        code_lens_from_file(&path2)
+                                    };
+                                    let _ = code_lens_tx2.try_send(entries);
+                                });
+                            }
                             Some(LspCommand::RequestWorkspaceSymbols { query }) => {
                                 // Try each active LSP client for workspace symbols.
                                 // Fall back to a ripgrep-based symbol scan if no LSP client handles it.
@@ -540,6 +624,19 @@ pub fn start_lsp_bridge(
                                 }).collect();
                                 let _ = refs_tx.try_send(entries);
                             }
+                            Some(LspEvent::Log(msg)) => {
+                                if msg == "__progress_end__" {
+                                    let _ = progress_tx.try_send(None);
+                                } else if let Some(text) = msg.strip_prefix("__progress__") {
+                                    let label = if text.len() > 40 {
+                                        format!("{}…", &text[..40])
+                                    } else {
+                                        text.to_string()
+                                    };
+                                    let _ = progress_tx.try_send(Some(label));
+                                }
+                                // __progress_create__ and other Log messages are silently ignored.
+                            }
                             Some(_) => {} // other events ignored
                             None => break, // event channel closed
                         }
@@ -559,6 +656,9 @@ pub fn start_lsp_bridge(
     let sig_chan = create_signal_from_channel(sig_rx);
     let syms_chan = create_signal_from_channel(syms_rx);
     let ws_syms_chan = create_signal_from_channel(ws_syms_rx);
+    let progress_chan = create_signal_from_channel(progress_rx);
+    let peek_chan = create_signal_from_channel(peek_rx);
+    let code_lens_chan = create_signal_from_channel(code_lens_rx);
 
     let diag_sig: RwSignal<Vec<DiagEntry>> = create_rw_signal(vec![]);
     let comp_sig: RwSignal<Vec<CompletionEntry>> = create_rw_signal(vec![]);
@@ -569,6 +669,9 @@ pub fn start_lsp_bridge(
     let sig_help_sig: RwSignal<Option<SignatureHelpResult>> = create_rw_signal(None);
     let syms_sig: RwSignal<Vec<SymbolEntry>> = create_rw_signal(vec![]);
     let ws_syms_sig: RwSignal<Vec<SymbolEntry>> = create_rw_signal(vec![]);
+    let lsp_progress_sig: RwSignal<Option<String>> = create_rw_signal(None);
+    let peek_def_lines_sig: RwSignal<Vec<String>> = create_rw_signal(vec![]);
+    let code_lens_sig: RwSignal<Vec<CodeLensEntry>> = create_rw_signal(vec![]);
 
     create_effect(move |_| {
         if let Some(entries) = diag_chan.get() {
@@ -615,6 +718,21 @@ pub fn start_lsp_bridge(
             ws_syms_sig.set(entries);
         }
     });
+    create_effect(move |_| {
+        if let Some(val) = progress_chan.get() {
+            lsp_progress_sig.set(val);
+        }
+    });
+    create_effect(move |_| {
+        if let Some(lines) = peek_chan.get() {
+            peek_def_lines_sig.set(lines);
+        }
+    });
+    create_effect(move |_| {
+        if let Some(entries) = code_lens_chan.get() {
+            code_lens_sig.set(entries);
+        }
+    });
 
     (
         lsp_cmd_tx,
@@ -627,6 +745,9 @@ pub fn start_lsp_bridge(
         sig_help_sig,
         syms_sig,
         ws_syms_sig,
+        lsp_progress_sig,
+        peek_def_lines_sig,
+        code_lens_sig,
     )
 }
 
@@ -1253,4 +1374,69 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
     }
 
     entries
+}
+
+/// Fallback code lens generation from a source file.
+/// Scans for function/method definitions and attaches a "Run" or "Test" label.
+fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mut lenses = Vec::new();
+
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        let line_num = (i as u32) + 1; // 1-based
+
+        let label = if ext == "rs" {
+            if trimmed.starts_with("#[test]") || trimmed.starts_with("#[tokio::test]") {
+                Some("Run Test".to_string())
+            } else if trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("async fn ")
+            {
+                let rest = trimmed
+                    .trim_start_matches("pub async fn ")
+                    .trim_start_matches("async fn ")
+                    .trim_start_matches("pub fn ")
+                    .trim_start_matches("fn ");
+                let name = rest.split(['(', '<', ' ']).next().unwrap_or("").to_string();
+                if !name.is_empty() {
+                    Some(format!("fn {name}"))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if matches!(ext, "js" | "ts" | "jsx" | "tsx") {
+            if trimmed.starts_with("function ") || trimmed.starts_with("export function ") {
+                Some("Run".to_string())
+            } else {
+                None
+            }
+        } else if ext == "py" {
+            if trimmed.starts_with("def test_") {
+                Some("Run Test".to_string())
+            } else if trimmed.starts_with("def ") {
+                Some("Run".to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(lbl) = label {
+            lenses.push(CodeLensEntry {
+                line: line_num,
+                label: lbl,
+            });
+        }
+    }
+
+    lenses
 }
