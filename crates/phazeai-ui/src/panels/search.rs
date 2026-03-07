@@ -1,5 +1,5 @@
 use floem::{
-    reactive::{create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    reactive::{create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -20,6 +20,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let include_glob = create_rw_signal(String::new());
     let exclude_glob = create_rw_signal(String::new());
 
+    // Tree view toggle and keyboard selection state
+    let tree_view: RwSignal<bool> = create_rw_signal(false);
+    let selected_idx: RwSignal<Option<usize>> = create_rw_signal(None);
+
     // ── Header ───────────────────────────────────────────────────────────────
     let header = container(
         stack((
@@ -30,6 +34,26 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     .font_weight(floem::text::Weight::BOLD)
                     .flex_grow(1.0)
             }),
+            // Tree view toggle button
+            container(label(move || if tree_view.get() { "⊟" } else { "⊞" }))
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(12.0)
+                        .padding_horiz(6.0)
+                        .padding_vert(2.0)
+                        .border_radius(3.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .color(if tree_view.get() {
+                            p.accent
+                        } else {
+                            p.text_muted
+                        })
+                        .hover(|s| s.background(p.bg_elevated))
+                })
+                .on_click_stop(move |_| {
+                    tree_view.update(|v| *v = !*v);
+                    selected_idx.set(None);
+                }),
             // Toggle replace mode
             container(label(move || {
                 if replace_open.get() {
@@ -52,7 +76,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                 replace_open.update(|v| *v = !*v);
             }),
         ))
-        .style(|s| s.flex_row().items_center().width_full()),
+        .style(|s| s.flex_row().items_center().width_full().gap(4.0)),
     )
     .style(move |s| {
         let p = theme.get().palette;
@@ -61,6 +85,27 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             .border_bottom(1.0)
             .border_color(p.border)
             .width_full()
+    });
+
+    // ── Match count label ─────────────────────────────────────────────────────
+    let match_count = create_memo(move |_| {
+        let r = results.get();
+        if r.is_empty() {
+            String::new()
+        } else {
+            let files: std::collections::HashSet<_> = r.iter().map(|x| &x.path).collect();
+            format!("{} results in {} files", r.len(), files.len())
+        }
+    });
+    let count_label = label(move || match_count.get()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(10.0)
+            .color(p.text_muted)
+            .padding_horiz(8.0)
+            .padding_vert(2.0)
+            .apply_if(match_count.get().is_empty(), |s| {
+                s.display(floem::style::Display::None)
+            })
     });
 
     // ── Search options row ────────────────────────────────────────────────────
@@ -271,10 +316,66 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             })
     });
 
-    // ── Results list (grouped by file) ─────────────────────────────────────
-    // Group results by file path, then render each file as a header + its matches.
+    // ── Flat results list (with keyboard selection highlighting) ──────────────
+    let flat_results_view = {
+        let state_flat = state.clone();
+        dyn_stack(
+            move || {
+                results
+                    .get()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
+            |(i, _)| *i,
+            move |(i, r)| {
+                let path_str = r
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let is_selected = move || selected_idx.get() == Some(i);
+                let path = r.path.clone();
+                let line = r.line;
+                let content_text = r.content.trim().to_string();
+                let s = state_flat.clone();
+                container(
+                    stack((
+                        label(move || format!("{}:{}", path_str, r.line + 1)).style(
+                            move |s| {
+                                let p = theme.get().palette;
+                                s.font_size(10.0).color(p.accent).padding_right(6.0)
+                            },
+                        ),
+                        label(move || content_text.clone()).style(move |s| {
+                            let p = theme.get().palette;
+                            s.font_size(11.0).color(p.text_primary).flex_grow(1.0)
+                        }),
+                    ))
+                    .style(|s| s.flex_row().items_center()),
+                )
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.padding_horiz(8.0)
+                        .padding_vert(3.0)
+                        .width_full()
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .apply_if(is_selected(), |s| s.background(p.bg_elevated))
+                        .hover(|s| s.background(p.bg_elevated))
+                })
+                .on_click_stop(move |_| {
+                    selected_idx.set(Some(i));
+                    s.open_file.set(Some(path.clone()));
+                    s.goto_line.set(line as u32 + 1);
+                })
+            },
+        )
+        .style(|s: floem::style::Style| s.flex_col().width_full())
+    };
+
+    // ── Tree results list (grouped by file) ───────────────────────────────────
     let grouped_results: floem::reactive::Memo<Vec<(std::path::PathBuf, Vec<SearchResult>)>> =
-        floem::reactive::create_memo(move |_| {
+        create_memo(move |_| {
             let all = results.get();
             let mut map: std::collections::BTreeMap<std::path::PathBuf, Vec<SearchResult>> =
                 std::collections::BTreeMap::new();
@@ -284,7 +385,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             map.into_iter().collect()
         });
 
-    let results_view = {
+    let tree_results_view = {
         let state4 = state.clone();
         dyn_stack(
             move || {
@@ -316,7 +417,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| file_path.clone());
-                        let match_count = grouped_results
+                        let match_count_for_file = grouped_results
                             .get()
                             .iter()
                             .find(|(p, _)| p.display().to_string() == file_path)
@@ -325,7 +426,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         container(
                             stack((
                                 label(move || format!("📄 {display_name}")),
-                                label(move || format!("  ({match_count})")),
+                                label(move || format!("  ({match_count_for_file})")),
                             ))
                             .style(|s| s.items_center()),
                         )
@@ -398,34 +499,105 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         .style(|s: floem::style::Style| s.flex_col().width_full())
     };
 
-    let results_scroll = scroll(stack((
-        results_view,
-        label(move || {
-            if is_searching.get() {
-                "Searching...".to_string()
-            } else if results.get().is_empty() && !query.get().is_empty() {
-                "No results found.".to_string()
-            } else if !results.get().is_empty() {
-                format!("{} results", results.get().len())
-            } else {
-                String::new()
-            }
-        })
-        .style(move |s| {
-            s.font_size(12.0)
-                .color(theme.get().palette.text_muted)
-                .padding(12.0)
-        }),
-    )))
-    .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+    // ── Status / searching label ──────────────────────────────────────────────
+    let searching_label = label(move || {
+        if is_searching.get() {
+            "Searching...".to_string()
+        } else if results.get().is_empty() && !query.get().is_empty() {
+            "No results found.".to_string()
+        } else {
+            String::new()
+        }
+    })
+    .style(move |s| {
+        s.font_size(12.0)
+            .color(theme.get().palette.text_muted)
+            .padding(12.0)
+            .apply_if(
+                !is_searching.get()
+                    && (results.get().is_empty() && query.get().is_empty()
+                        || !results.get().is_empty()),
+                |s| s.display(floem::style::Display::None),
+            )
+    });
+
+    // ── Combine flat + tree into a conditional container ─────────────────────
+    // We wrap both in a container and show/hide based on tree_view signal.
+    let flat_container = container(
+        stack((flat_results_view, searching_label))
+            .style(|s| s.flex_col().width_full()),
+    )
+    .style(move |s| {
+        s.flex_col()
+            .width_full()
+            .apply_if(tree_view.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    let tree_container = container(tree_results_view).style(move |s| {
+        s.flex_col()
+            .width_full()
+            .apply_if(!tree_view.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    let results_inner = scroll(
+        stack((flat_container, tree_container)).style(|s| s.flex_col().width_full()),
+    )
+    .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
+    .keyboard_navigable();
+
+    // ── Keyboard navigation wrapper ───────────────────────────────────────────
+    let results_area = container(results_inner)
+        .on_event_stop(
+            floem::event::EventListener::KeyDown,
+            move |event| {
+                if let floem::event::Event::KeyDown(e) = event {
+                    use floem::keyboard::NamedKey;
+                    let total = results.get().len();
+                    match e.key.logical_key {
+                        floem::keyboard::Key::Named(NamedKey::ArrowDown) => {
+                            selected_idx.update(|i| {
+                                *i = Some(match *i {
+                                    None => 0,
+                                    Some(n) => (n + 1).min(total.saturating_sub(1)),
+                                });
+                            });
+                        }
+                        floem::keyboard::Key::Named(NamedKey::ArrowUp) => {
+                            selected_idx.update(|i| {
+                                *i = Some(match *i {
+                                    None => 0,
+                                    Some(n) => n.saturating_sub(1),
+                                });
+                            });
+                        }
+                        floem::keyboard::Key::Named(NamedKey::Enter) => {
+                            if let Some(idx) = selected_idx.get() {
+                                if let Some(r) = results.get().get(idx).cloned() {
+                                    state.open_file.set(Some(r.path.clone()));
+                                    state.goto_line.set(r.line as u32 + 1);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            },
+        )
+        .keyboard_navigable()
+        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
     stack((
         header,
+        count_label,
         search_bar,
         glob_bar,
         replace_bar,
         status_label,
-        results_scroll,
+        results_area,
     ))
     .style(move |s| {
         let p = theme.get().palette;

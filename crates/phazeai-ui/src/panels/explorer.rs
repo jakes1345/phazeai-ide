@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::mpsc::channel};
 use floem::{
     action::show_context_menu,
     event::{Event, EventListener},
-    ext_event::create_ext_action,
+    ext_event::{create_ext_action, create_signal_from_channel},
     keyboard::{Key, NamedKey},
     menu::{Menu, MenuItem},
     reactive::{create_effect, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
@@ -185,7 +185,6 @@ pub fn explorer_panel(
         let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
 
         // UI-thread side: react when the background watcher fires.
-        use floem::ext_event::create_signal_from_channel;
         let refresh_sig = create_signal_from_channel(refresh_rx);
         create_effect(move |_| {
             if refresh_sig.get().is_some() {
@@ -232,6 +231,83 @@ pub fn explorer_panel(
                 // try_send: skip if the previous refresh hasn't been consumed yet.
                 let _ = refresh_tx.try_send(());
             }
+        });
+    }
+
+    // ── Periodic git status refresh (every 5 seconds) ─────────────────────
+    {
+        // sync_channel of size 1 — coalesces rapid ticks if UI is busy.
+        let (tick_tx, tick_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                // try_send: skip if previous tick not yet consumed.
+                // Disconnected error means channel is gone — exit thread.
+                match tick_tx.try_send(()) {
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                }
+            }
+        });
+        let tick_sig = create_signal_from_channel(tick_rx);
+        let root_for_tick = workspace_root;
+        create_effect(move |_| {
+            tick_sig.get(); // re-run every 5s tick
+            let root = root_for_tick.get_untracked();
+            let scope = Scope::new();
+            let send = create_ext_action(scope, move |map: HashMap<String, char>| {
+                git_status.set(map);
+            });
+            std::thread::spawn(move || {
+                send(fetch_git_status(&root));
+            });
+        });
+    }
+
+    // ── Reveal active file nonce — bumped to trigger the expand effect ─────
+    let reveal_nonce: RwSignal<u32> = create_rw_signal(0u32);
+
+    // ── Reveal-active-file: expand parent dirs when open_file changes ──────
+    {
+        let entries_for_reveal = entries;
+        let root_for_reveal = workspace_root;
+        create_effect(move |_| {
+            let _nonce = reveal_nonce.get(); // also triggered by Locate button
+            let Some(active_path) = open_file.get() else {
+                return;
+            };
+            let workspace = root_for_reveal.get_untracked();
+
+            // Collect all ancestor dirs between active_path and workspace root.
+            let mut ancestors: Vec<PathBuf> = Vec::new();
+            let mut cur = active_path.parent().map(|p| p.to_path_buf());
+            while let Some(dir) = cur {
+                if dir == workspace {
+                    break;
+                }
+                ancestors.push(dir.clone());
+                cur = dir.parent().map(|p| p.to_path_buf());
+            }
+
+            if ancestors.is_empty() {
+                return;
+            }
+
+            // Mark each ancestor as expanded and rebuild the tree.
+            entries_for_reveal.update(|list| {
+                let mut changed = false;
+                for entry in list.iter_mut() {
+                    if entry.is_dir && ancestors.contains(&entry.path) && !entry.expanded {
+                        entry.expanded = true;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let root = root_for_reveal.get_untracked();
+                    *list = rebuild_tree(&root, list);
+                }
+            });
         });
     }
 
@@ -331,7 +407,9 @@ pub fn explorer_panel(
                 } else {
                     floem::peniko::Color::TRANSPARENT
                 };
-                s.width_full()
+                // min_width(0) + no width_full() lets rows extend beyond scroll
+                // viewport width, enabling horizontal scrolling.
+                s.min_width(0.0)
                     .height(22.0)
                     .background(bg)
                     .border_radius(3.0)
@@ -440,26 +518,73 @@ pub fn explorer_panel(
     )
     .style(|s| s.flex_col().padding(4.0).gap(1.0));
 
-    // Panel header
-    let header = container(label(|| "EXPLORER").style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        s.color(p.text_muted)
-            .font_size(11.0)
-            .font_weight(floem::text::Weight::BOLD)
-    }))
-    .style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        s.padding_horiz(12.0)
-            .padding_vert(8.0)
-            .border_bottom(1.0)
-            .border_color(p.border)
-            .width_full()
-    });
+    // Panel header — EXPLORER label + action buttons (Collapse All, Locate)
+    let header = {
+        let title = label(|| "EXPLORER").style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.color(p.text_muted)
+                .font_size(11.0)
+                .font_weight(floem::text::Weight::BOLD)
+                .flex_grow(1.0)
+        });
 
-    // Scrollable tree wrapped in a container that captures keyboard events
-    let tree_scroll = scroll(tree).style(|s| s.flex_grow(1.0).min_height(0.0));
+        // Collapse All button — collapses all expanded directories
+        let collapse_btn = container(label(|| "\u{229F}")) // ⊟
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(13.0)
+                    .padding_horiz(5.0)
+                    .padding_vert(3.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(p.text_muted)
+                    .hover(|s| s.background(p.bg_elevated))
+            })
+            .on_click_stop(move |_| {
+                entries.update(|list| {
+                    for e in list.iter_mut() {
+                        e.expanded = false;
+                    }
+                    let root = root_sig.get();
+                    *list = rebuild_tree(&root, list);
+                });
+            });
+
+        // Locate (reveal active file) button
+        let locate_btn = container(label(|| "\u{2299}")) // ⊙
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.font_size(13.0)
+                    .padding_horiz(5.0)
+                    .padding_vert(3.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(p.text_muted)
+                    .hover(|s| s.background(p.bg_elevated))
+            })
+            .on_click_stop(move |_| {
+                reveal_nonce.update(|v| *v += 1);
+            });
+
+        container(stack((title, collapse_btn, locate_btn)).style(|s| s.items_center()))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(8.0)
+                    .padding_vert(6.0)
+                    .border_bottom(1.0)
+                    .border_color(p.border)
+                    .width_full()
+            })
+    };
+
+    // Scrollable tree wrapped in a container that captures keyboard events.
+    // The scroll view allows both vertical and horizontal scrolling — rows are
+    // sized by content width (not clamped to viewport) so deep paths scroll.
+    let tree_scroll = scroll(tree).style(|s| s.flex_grow(1.0).min_height(0.0).min_width(0.0));
 
     // Outer container handles keyboard navigation for the whole panel
     let panel_body = container(tree_scroll)

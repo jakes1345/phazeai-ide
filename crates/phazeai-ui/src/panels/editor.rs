@@ -903,6 +903,11 @@ pub fn editor_panel(
     transform_lower_nonce: RwSignal<u64>,
     join_line_nonce: RwSignal<u64>,
     sort_lines_nonce: RwSignal<u64>,
+    vim_visual_mode: RwSignal<bool>,
+    vim_marks: RwSignal<std::collections::HashMap<char, (std::path::PathBuf, usize)>>,
+    vim_last_motion: RwSignal<Option<crate::app::VimMotion>>,
+    expand_selection_nonce: RwSignal<u64>,
+    shrink_selection_nonce: RwSignal<u64>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -2475,6 +2480,8 @@ pub fn editor_panel(
             // ── Vim motion effect ─────────────────────────────────────────
             // When `vim_motion` is set and this tab is active, execute the
             // corresponding cursor movement or edit, then clear the signal.
+            // Visual anchor: the offset where a visual selection started.
+            let vim_visual_anchor: RwSignal<Option<usize>> = create_rw_signal(None);
             {
                 use crate::app::VimMotion;
                 let doc_for_vim = doc.clone();
@@ -2804,13 +2811,229 @@ pub fn editor_panel(
                             }
                             start.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
+                        // ── Replace char under cursor ─────────────────
+                        VimMotion::ReplaceChar(ch) => {
+                            let rope = doc_for_vim.rope_text();
+                            let len = rope.len();
+                            if cur_offset < len {
+                                let ch_end = rope
+                                    .slice_to_cow(cur_offset..len)
+                                    .chars()
+                                    .next()
+                                    .map(|c| cur_offset + c.len_utf8())
+                                    .unwrap_or(cur_offset + 1)
+                                    .min(len);
+                                doc_for_vim.edit_single(
+                                    Selection::region(cur_offset, ch_end),
+                                    &ch.to_string(),
+                                    EditType::InsertChars,
+                                );
+                                dirty.set(true);
+                            }
+                            cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
+                        }
+                        // ── Jump to matching bracket ───────────────────
+                        VimMotion::JumpMatchingBracket => {
+                            let rope = doc_for_vim.rope_text();
+                            let text = rope.slice_to_cow(0..rope.len()).to_string();
+                            let bytes = text.as_bytes();
+                            let len = bytes.len();
+                            if cur_offset < len {
+                                let ch = bytes[cur_offset] as char;
+                                let (search, fwd) = match ch {
+                                    '(' => (')', true), ')' => ('(', false),
+                                    '[' => (']', true), ']' => ('[', false),
+                                    '{' => ('}', true), '}' => ('{', false),
+                                    _ => (ch, true),
+                                };
+                                if search != ch || fwd {
+                                    let open = if fwd { ch } else { search };
+                                    let close = if fwd { search } else { ch };
+                                    let mut depth = 0i32;
+                                    if fwd {
+                                        for (idx, &b) in bytes.iter().enumerate().skip(cur_offset) {
+                                            let c = b as char;
+                                            if c == open { depth += 1; }
+                                            else if c == close {
+                                                depth -= 1;
+                                                if depth == 0 { break; }
+                                                // continue
+                                            }
+                                            if depth == 0 { break; }
+                                            let _ = idx;
+                                        }
+                                        // find forward
+                                        let mut d = 0i32;
+                                        let mut found = cur_offset;
+                                        for idx in cur_offset..len {
+                                            let c = bytes[idx] as char;
+                                            if c == open { d += 1; }
+                                            else if c == close {
+                                                d -= 1;
+                                                if d == 0 { found = idx; break; }
+                                            }
+                                        }
+                                        found
+                                    } else {
+                                        let mut d = 0i32;
+                                        let mut found = cur_offset;
+                                        for idx in (0..=cur_offset).rev() {
+                                            let c = bytes[idx] as char;
+                                            if c == close { d += 1; }
+                                            else if c == open {
+                                                d -= 1;
+                                                if d == 0 { found = idx; break; }
+                                            }
+                                        }
+                                        found
+                                    }
+                                } else {
+                                    cur_offset
+                                }
+                            } else {
+                                cur_offset
+                            }
+                        }
+                        // ── Change word (delete to next word boundary, enter insert) ──
+                        VimMotion::ChangeWord => {
+                            let rope = doc_for_vim.rope_text();
+                            let len = rope.len();
+                            let text = rope.slice_to_cow(0..rope.len()).to_string();
+                            let bytes = text.as_bytes();
+                            // Skip current word chars, then leading whitespace
+                            let mut end = cur_offset;
+                            // skip non-whitespace
+                            while end < len && bytes[end] != b' ' && bytes[end] != b'\t' && bytes[end] != b'\n' {
+                                end += 1;
+                            }
+                            // skip trailing spaces/tabs (but not newline)
+                            while end < len && (bytes[end] == b' ' || bytes[end] == b'\t') {
+                                end += 1;
+                            }
+                            if end > cur_offset {
+                                doc_for_vim.edit_single(
+                                    Selection::region(cur_offset, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                                dirty.set(true);
+                            }
+                            cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
+                        }
+                        // ── Visual mode start — anchor position ────────
+                        VimMotion::VisualCharStart => {
+                            vim_visual_anchor.set(Some(cur_offset));
+                            cur_offset
+                        }
+                        VimMotion::VisualLineStart => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let line_start = rope.offset_of_line(line);
+                            vim_visual_anchor.set(Some(line_start));
+                            // extend to end of line
+                            if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            }
+                        }
+                        // ── Set / goto vim mark ────────────────────────
+                        VimMotion::SetMark(ch) => {
+                            let path = tabs
+                                .get_untracked()
+                                .get(i)
+                                .map(|t| t.path.clone())
+                                .unwrap_or_default();
+                            vim_marks.update(|m| { m.insert(ch, (path, cur_offset)); });
+                            cur_offset
+                        }
+                        VimMotion::GotoMark(ch) => {
+                            if let Some(off) = vim_marks.get_untracked().get(&ch).map(|(_p, o)| *o) {
+                                off.min(doc_for_vim.rope_text().len())
+                            } else {
+                                cur_offset
+                            }
+                        }
+                        // ── Repeat last edit ──────────────────────────
+                        VimMotion::RepeatLastEdit => {
+                            if let Some(last) = vim_last_motion.get_untracked() {
+                                // Re-enqueue the last motion for next effect run.
+                                vim_motion.set(Some(last));
+                            }
+                            cur_offset
+                        }
+                        // ── Ex mode — handled in app.rs key handler ───
+                        VimMotion::EnterExMode => cur_offset,
+                        // ── Expand / Shrink selection ─────────────────
+                        // These are triggered via nonces, handled in separate effects below.
+                        VimMotion::ExpandSelection | VimMotion::ShrinkSelection => cur_offset,
                     };
 
-                    cursor_sig.set(Cursor::new(
-                        CursorMode::Insert(Selection::caret(new_offset)),
-                        None,
-                        None,
-                    ));
+                    // Apply visual mode selection if active
+                    let sel = if vim_visual_mode.get_untracked() {
+                        let anchor = vim_visual_anchor.get_untracked().unwrap_or(new_offset);
+                        Selection::region(anchor.min(new_offset), anchor.max(new_offset))
+                    } else {
+                        vim_visual_anchor.set(None);
+                        Selection::caret(new_offset)
+                    };
+                    cursor_sig.set(Cursor::new(CursorMode::Insert(sel), None, None));
+                });
+            }
+
+            // ── Expand / Shrink selection ─────────────────────────────────
+            {
+                let doc_for_es = doc.clone();
+                let last_exp = create_rw_signal(0u64);
+                let last_shr = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let exp_n = expand_selection_nonce.get();
+                    let shr_n = shrink_selection_nonce.get();
+                    if active_idx.get() != Some(i) { return; }
+                    if exp_n > 0 && exp_n != last_exp.get_untracked() {
+                        last_exp.set(exp_n);
+                        let rope = doc_for_es.rope_text();
+                        let cur = cursor_sig.get_untracked();
+                        let offset = cur.offset();
+                        let len = rope.len();
+                        // Expand: if at caret, select word; if word selected, select line
+                        let (sel_start, sel_end) =
+                            if let CursorMode::Insert(ref s) = cur.mode {
+                                if let Some(r) = s.regions().first().copied() {
+                                    (r.start.min(r.end), r.start.max(r.end))
+                                } else { (offset, offset) }
+                            } else { (offset, offset) };
+                        let text = rope.slice_to_cow(0..rope.len()).to_string();
+                        let bytes = text.as_bytes();
+                        let new_sel = if sel_start == sel_end {
+                            // Expand to word
+                            let mut start = offset;
+                            let mut end = offset;
+                            while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') { start -= 1; }
+                            while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') { end += 1; }
+                            Selection::region(start, end)
+                        } else {
+                            // Expand to enclosing line
+                            let line = rope.line_of_offset(sel_start);
+                            let line_start = rope.offset_of_line(line);
+                            let line_end = if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else { len };
+                            Selection::region(line_start, line_end)
+                        };
+                        cursor_sig.set(Cursor::new(CursorMode::Insert(new_sel), None, None));
+                    }
+                    if shr_n > 0 && shr_n != last_shr.get_untracked() {
+                        last_shr.set(shr_n);
+                        // Shrink to caret at start of selection
+                        let cur = cursor_sig.get_untracked();
+                        let offset = cur.offset();
+                        cursor_sig.set(Cursor::new(
+                            CursorMode::Insert(Selection::caret(offset)),
+                            None,
+                            None,
+                        ));
+                    }
                 });
             }
 

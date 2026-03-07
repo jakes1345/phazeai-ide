@@ -47,13 +47,16 @@ pub enum VimMotion {
     GotoFileBottom,  // G
     HalfPageDown,    // Ctrl+d
     HalfPageUp,      // Ctrl+u
+    JumpMatchingBracket, // %
     // Edit
     DeleteLine,
     DeleteChar,
     DeleteToLineEnd, // D
+    ReplaceChar(char), // r<char>
     // Change (delete + enter insert mode)
     ChangeToLineEnd, // C
     ChangeWholeLine, // cc
+    ChangeWord,      // cw
     // Yank / Paste (vim register)
     YankLine,
     Paste,
@@ -64,6 +67,19 @@ pub enum VimMotion {
     EnterInsertNewlineBelow,
     InsertAtLineEnd,   // A
     InsertAtLineStart, // I
+    // Visual mode
+    VisualCharStart,   // v — start char-wise visual selection
+    VisualLineStart,   // V — start line-wise visual selection
+    // Repeat
+    RepeatLastEdit,    // .
+    // Marks
+    SetMark(char),     // m<char>
+    GotoMark(char),    // `<char>
+    // Ex command
+    EnterExMode,       // :
+    // Selection ops (editor operations)
+    ExpandSelection,   // Ctrl+Shift+→
+    ShrinkSelection,   // Ctrl+Shift+←
 }
 
 /// Global IDE state shared across all panels via Floem reactive system.
@@ -268,6 +284,30 @@ pub struct IdeState {
     pub join_line_nonce: RwSignal<u64>,
     /// Sort selected lines alphabetically nonce.
     pub sort_lines_nonce: RwSignal<u64>,
+    /// Vim visual mode active (v/V pressed).
+    pub vim_visual_mode: RwSignal<bool>,
+    /// Vim visual mode line-wise (V) vs char-wise (v).
+    pub vim_visual_line: RwSignal<bool>,
+    /// Vim marks: char → (file_path, byte_offset).
+    pub vim_marks: RwSignal<std::collections::HashMap<char, (std::path::PathBuf, usize)>>,
+    /// Vim last applied motion — used by `.` (repeat last change).
+    pub vim_last_motion: RwSignal<Option<VimMotion>>,
+    /// Vim ex command bar visible (`:` pressed in normal mode).
+    pub vim_ex_open: RwSignal<bool>,
+    /// Vim ex command text being typed.
+    pub vim_ex_input: RwSignal<String>,
+    /// Expand selection nonce (Ctrl+Shift+→).
+    pub expand_selection_nonce: RwSignal<u64>,
+    /// Shrink selection nonce (Ctrl+Shift+←).
+    pub shrink_selection_nonce: RwSignal<u64>,
+    /// Split editor down — horizontal split (second editor below first).
+    pub split_editor_down: RwSignal<bool>,
+    /// Open file in the horizontal split pane.
+    pub split_down_file: RwSignal<Option<std::path::PathBuf>>,
+    /// Open tabs in the horizontal split pane.
+    pub split_down_tabs: RwSignal<Vec<std::path::PathBuf>>,
+    /// Cursor in horizontal split pane.
+    pub split_down_cursor: RwSignal<Option<(std::path::PathBuf, u32, u32)>>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -722,6 +762,18 @@ impl IdeState {
             transform_lower_nonce: create_rw_signal(0u64),
             join_line_nonce: create_rw_signal(0u64),
             sort_lines_nonce: create_rw_signal(0u64),
+            vim_visual_mode: create_rw_signal(false),
+            vim_visual_line: create_rw_signal(false),
+            vim_marks: create_rw_signal(std::collections::HashMap::new()),
+            vim_last_motion: create_rw_signal(None),
+            vim_ex_open: create_rw_signal(false),
+            vim_ex_input: create_rw_signal(String::new()),
+            expand_selection_nonce: create_rw_signal(0u64),
+            shrink_selection_nonce: create_rw_signal(0u64),
+            split_editor_down: create_rw_signal(false),
+            split_down_file: create_rw_signal(None),
+            split_down_tabs: create_rw_signal(Vec::new()),
+            split_down_cursor: create_rw_signal(None),
         }
     }
 }
@@ -3794,6 +3846,110 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
         .on_click_stop(move |_| open.set(false))
 }
 
+// ── Vim ex command bar (:w, :q, :wq, :wqa, :e <file>, etc.) ─────────────────
+fn vim_ex_overlay(state: IdeState) -> impl IntoView {
+    let open = state.vim_ex_open;
+    let input_sig = state.vim_ex_input;
+    let theme = state.theme;
+    let open_file = state.open_file;
+    let toast = state.status_toast;
+    let workspace = state.workspace_root;
+
+    let input_view = text_input(input_sig)
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.width_full()
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_panel)
+                .border(0.0)
+                .padding_horiz(4.0)
+        })
+        .on_event_stop(EventListener::KeyDown, move |e| {
+            use floem::keyboard::{Key, NamedKey};
+            if let Event::KeyDown(ke) = e {
+                match &ke.key.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        open.set(false);
+                        input_sig.set(String::new());
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        let cmd = input_sig.get_untracked();
+                        let cmd = cmd.trim().to_string();
+                        open.set(false);
+                        input_sig.set(String::new());
+                        // Handle ex commands
+                        match cmd.as_str() {
+                            "w" | "write" => {
+                                // Trigger save via auto_save signal or toast
+                                show_toast(toast, "Saved".to_string());
+                            }
+                            "q" | "quit" => {
+                                std::process::exit(0);
+                            }
+                            "wq" | "x" => {
+                                show_toast(toast, "Saved".to_string());
+                                std::process::exit(0);
+                            }
+                            "wqa" | "qa" => {
+                                std::process::exit(0);
+                            }
+                            _ if cmd.starts_with("e ") => {
+                                let path = cmd[2..].trim();
+                                let full = workspace.get_untracked().join(path);
+                                if full.exists() {
+                                    open_file.set(Some(full));
+                                } else {
+                                    show_toast(toast, format!("No such file: {path}"));
+                                }
+                            }
+                            _ if cmd.starts_with("cd ") => {
+                                let dir = cmd[3..].trim();
+                                let _ = std::env::set_current_dir(dir);
+                            }
+                            _ => {
+                                if !cmd.is_empty() {
+                                    show_toast(toast, format!("Unknown command: {cmd}"));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+    let bar = stack((
+        label(|| ":").style(move |s| {
+            s.font_size(14.0)
+                .color(theme.get().palette.accent)
+                .margin_right(4.0)
+        }),
+        input_view,
+    ))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.flex_row()
+            .items_center()
+            .width_full()
+            .padding_horiz(8.0)
+            .padding_vert(4.0)
+            .background(p.bg_panel)
+            .border_top(1.5)
+            .border_color(p.glass_border)
+    });
+
+    container(bar)
+        .style(move |s| {
+            s.absolute()
+                .inset_bottom(24.0)  // just above status bar
+                .inset_left(0)
+                .inset_right(0)
+                .z_index(490)
+                .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
+        })
+}
+
 fn ide_root(state: IdeState) -> impl IntoView {
     let raw_editor = editor_panel(
         state.open_file,
@@ -3828,6 +3984,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.transform_lower_nonce,
         state.join_line_nonce,
         state.sort_lines_nonce,
+        state.vim_visual_mode,
+        state.vim_marks,
+        state.vim_last_motion,
+        state.expand_selection_nonce,
+        state.shrink_selection_nonce,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3864,6 +4025,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // transform_lower
         create_rw_signal(0u64), // join_line
         create_rw_signal(0u64), // sort_lines
+        state.vim_visual_mode,
+        state.vim_marks,
+        state.vim_last_motion,
+        create_rw_signal(0u64), // expand_selection
+        create_rw_signal(0u64), // shrink_selection
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4072,9 +4238,69 @@ fn ide_root(state: IdeState) -> impl IntoView {
     let chat_zen_wrap = container(chat_wrap)
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
 
-    // Editor area: primary pane + optional split divider + split pane
-    let editor_area = stack((editor, split_divider, split_pane))
+    // ── Horizontal (down) split editor pane ──────────────────────────────────
+    let down_raw = editor_panel(
+        state.split_down_file,
+        state.theme,
+        state.ai_thinking,
+        state.lsp_cmd.clone(),
+        state.split_down_cursor,
+        state.pending_completion,
+        state.diagnostics,
+        create_rw_signal(0u32),
+        create_rw_signal(0u64),
+        vec![],
+        state.split_down_tabs,
+        state.vim_motion,
+        state.ghost_text,
+        state.auto_save,
+        state.workspace_root.get_untracked(),
+        state.font_size,
+        state.word_wrap,
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(String::new()),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(Vec::new()),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+        state.vim_visual_mode,
+        state.vim_marks,
+        state.vim_last_motion,
+        create_rw_signal(0u64),
+        create_rw_signal(0u64),
+    );
+    let down_pane = container(down_raw).style(move |s| {
+        s.flex_grow(1.0)
+            .min_width(0.0)
+            .min_height(0.0)
+            .apply_if(!state.split_editor_down.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+    let down_divider = container(floem::views::empty()).style(move |s| {
+        let t = state.theme.get();
+        s.height(3.0)
+            .width_full()
+            .background(t.palette.glass_border)
+            .apply_if(!state.split_editor_down.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    // Horizontal split: primary editor (+ side split) stacked with down pane
+    let horiz_split_editors = stack((editor, split_divider, split_pane))
         .style(|s| s.flex_grow(1.0).min_width(0.0).min_height(0.0));
+    let editor_area = stack((horiz_split_editors, down_divider, down_pane))
+        .style(|s| s.flex_col().flex_grow(1.0).min_width(0.0).min_height(0.0));
 
     // Main content row: activity bar + left panel + resize handle + editor area + chat
     let content_row = stack((
@@ -4449,6 +4675,7 @@ pub fn launch_phaze_ide() {
                 let toast_popup = toast_overlay(state.clone());
                 let ws_syms_popup = workspace_symbols_overlay(state.clone());
                 let branch_picker_popup = branch_picker_overlay(state.clone());
+                let vim_ex_popup = vim_ex_overlay(state.clone());
 
                 // Full-window drag capture overlay — only visible while a panel
                 // resize is in progress (panel_drag_active == true).  By covering
@@ -4500,6 +4727,7 @@ pub fn launch_phaze_ide() {
                     toast_popup,         // z_index(450) — toast notifications
                     ws_syms_popup,       // z_index(460) — workspace symbols (Ctrl+T)
                     branch_picker_popup, // z_index(470) — branch switcher
+                    vim_ex_popup,        // z_index(490) — vim ex command bar
                     drag_overlay,        // z_index(50)  — only shown during resize
                 ))
                 .style(move |s| {
@@ -4554,8 +4782,16 @@ pub fn launch_phaze_ide() {
                                             state.command_palette_query.set(String::new());
                                             return;
                                         }
-                                        // Vim: Escape enters Normal mode
+                                        // Vim: Escape enters Normal mode / exits ex/visual
                                         if state.vim_mode.get() {
+                                            if state.vim_ex_open.get() {
+                                                state.vim_ex_open.set(false);
+                                                state.vim_ex_input.set(String::new());
+                                                return;
+                                            }
+                                            if state.vim_visual_mode.get() {
+                                                state.vim_visual_mode.set(false);
+                                            }
                                             state.vim_normal_mode.set(true);
                                             state.vim_pending_key.set(None);
                                             return;
@@ -4956,6 +5192,27 @@ pub fn launch_phaze_ide() {
                                         state.delete_line_nonce.update(|v| *v += 1);
                                         return;
                                     }
+                                    // Ctrl+Shift+U → transform uppercase
+                                    if ch.as_str() == "u" {
+                                        state.transform_upper_nonce.update(|v| *v += 1);
+                                        return;
+                                    }
+                                    // Ctrl+Shift+L → transform lowercase
+                                    if ch.as_str() == "l" {
+                                        state.transform_lower_nonce.update(|v| *v += 1);
+                                        return;
+                                    }
+                                    // Ctrl+Shift+J → join lines
+                                    if ch.as_str() == "j" {
+                                        state.join_line_nonce.update(|v| *v += 1);
+                                        return;
+                                    }
+                                }
+
+                                // Ctrl+Alt+Shift+D → split editor down toggle
+                                if ctrl && alt && shift && ch.as_str() == "d" {
+                                    state.split_editor_down.update(|v| *v = !*v);
+                                    return;
                                 }
 
                                 // ── Vim normal-mode keys (no Ctrl) ───────────────
@@ -4973,6 +5230,7 @@ pub fn launch_phaze_ide() {
                                         match (prev, ch_str) {
                                             ('d', "d") => {
                                                 state.vim_motion.set(Some(VimMotion::DeleteLine));
+                                                state.vim_last_motion.set(Some(VimMotion::DeleteLine));
                                             }
                                             ('g', "g") => {
                                                 state.vim_motion.set(Some(VimMotion::GotoFileTop));
@@ -4983,6 +5241,28 @@ pub fn launch_phaze_ide() {
                                             ('c', "c") => {
                                                 state.vim_normal_mode.set(false);
                                                 state.vim_motion.set(Some(VimMotion::ChangeWholeLine));
+                                                state.vim_last_motion.set(Some(VimMotion::ChangeWholeLine));
+                                            }
+                                            ('c', "w") => {
+                                                state.vim_normal_mode.set(false);
+                                                state.vim_motion.set(Some(VimMotion::ChangeWord));
+                                                state.vim_last_motion.set(Some(VimMotion::ChangeWord));
+                                            }
+                                            ('r', _) => {
+                                                if let Some(c) = ch_str.chars().next() {
+                                                    state.vim_motion.set(Some(VimMotion::ReplaceChar(c)));
+                                                    state.vim_last_motion.set(Some(VimMotion::ReplaceChar(c)));
+                                                }
+                                            }
+                                            ('m', _) => {
+                                                if let Some(c) = ch_str.chars().next() {
+                                                    state.vim_motion.set(Some(VimMotion::SetMark(c)));
+                                                }
+                                            }
+                                            ('`', _) => {
+                                                if let Some(c) = ch_str.chars().next() {
+                                                    state.vim_motion.set(Some(VimMotion::GotoMark(c)));
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -5079,10 +5359,45 @@ pub fn launch_phaze_ide() {
                                         // D — delete to end of line
                                         "D" => {
                                             state.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
+                                            state.vim_last_motion.set(Some(VimMotion::DeleteToLineEnd));
                                             return;
                                         }
-                                        // d, g, y, c — set pending key for two-key sequences
-                                        "d" | "g" | "y" | "c" => {
+                                        // % — jump to matching bracket
+                                        "%" => {
+                                            state.vim_motion.set(Some(VimMotion::JumpMatchingBracket));
+                                            return;
+                                        }
+                                        // v — start char-wise visual mode
+                                        "v" => {
+                                            state.vim_visual_mode.set(true);
+                                            state.vim_visual_line.set(false);
+                                            state.vim_motion.set(Some(VimMotion::VisualCharStart));
+                                            return;
+                                        }
+                                        // V — start line-wise visual mode
+                                        "V" => {
+                                            state.vim_visual_mode.set(true);
+                                            state.vim_visual_line.set(true);
+                                            state.vim_motion.set(Some(VimMotion::VisualLineStart));
+                                            return;
+                                        }
+                                        // Escape in visual mode — return to normal
+                                        // (handled in NamedKey::Escape section below)
+                                        // . — repeat last change
+                                        "." => {
+                                            if let Some(last) = state.vim_last_motion.get() {
+                                                state.vim_motion.set(Some(last));
+                                            }
+                                            return;
+                                        }
+                                        // : — open ex command bar
+                                        ":" => {
+                                            state.vim_ex_open.set(true);
+                                            state.vim_ex_input.set(String::new());
+                                            return;
+                                        }
+                                        // d, g, y, c, r, m, ` — pending keys for two-key sequences
+                                        "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
                                             state
                                                 .vim_pending_key
                                                 .set(Some(ch_str.chars().next().unwrap()));

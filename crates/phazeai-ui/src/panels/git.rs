@@ -299,6 +299,116 @@ fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
     }
 }
 
+fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
+    let out = std::process::Command::new("git")
+        .args(["stash", "list"])
+        .current_dir(root)
+        .output()
+        .ok();
+    out.map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .enumerate()
+            .map(|(i, l)| (i, l.to_string()))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["stash", "apply", &format!("stash@{{{idx}}}")])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok(String::from_utf8_lossy(&r.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
+fn run_git_stash_drop(root: &std::path::Path, idx: usize) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["stash", "drop", &format!("stash@{{{idx}}}")])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok(String::from_utf8_lossy(&r.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
+fn run_git_merge(root: &std::path::Path, branch: &str) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["merge", branch])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok(format!("Merged {branch}"))
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
+fn run_git_cherry_pick(root: &std::path::Path, hash: &str) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["cherry-pick", hash])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok(format!("Cherry-picked {}", &hash[..7.min(hash.len())]))
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
+fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
+    std::process::Command::new("git")
+        .args(["tag", "--sort=-version:refname"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["tag", name])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok(format!("Created tag {name}"))
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
+fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
+    let r = std::process::Command::new("git")
+        .args(["push", "--tags"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if r.status.success() {
+        Ok("Tags pushed".to_string())
+    } else {
+        Err(String::from_utf8_lossy(&r.stderr).to_string())
+    }
+}
+
 fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
     let out = std::process::Command::new("git")
         .args(["fetch", "--all", "--prune"])
@@ -483,6 +593,21 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let blame_expanded: RwSignal<bool> = create_rw_signal(false);
     let blame_file: RwSignal<String> = create_rw_signal(String::new());
 
+    // Stash list
+    let stash_list: RwSignal<Vec<(usize, String)>> = create_rw_signal(vec![]);
+    let stash_list_expanded = create_rw_signal(false);
+    let stash_list_status = create_rw_signal(String::new());
+
+    // Merge
+    let merge_picker_open: RwSignal<bool> = create_rw_signal(false);
+    let merge_status: RwSignal<String> = create_rw_signal(String::new());
+
+    // Tags
+    let tag_list: RwSignal<Vec<String>> = create_rw_signal(vec![]);
+    let tag_list_expanded = create_rw_signal(false);
+    let new_tag_name: RwSignal<String> = create_rw_signal(String::new());
+    let tag_status: RwSignal<String> = create_rw_signal(String::new());
+
     // Helper: full refresh (status + branch + log)
     let full_refresh = {
         let root = state.workspace_root;
@@ -496,6 +621,20 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Initial load
     full_refresh();
+
+    // Load stash list on startup
+    {
+        let root = state.workspace_root.get_untracked();
+        let send = create_ext_action(Scope::new(), move |list| stash_list.set(list));
+        std::thread::spawn(move || send(run_git_stash_list(&root)));
+    }
+
+    // Load tag list on startup
+    {
+        let root = state.workspace_root.get_untracked();
+        let send = create_ext_action(Scope::new(), move |list| tag_list.set(list));
+        std::thread::spawn(move || send(run_git_tag_list(&root)));
+    }
 
     // ── Row 1: branch button + pull + push ────────────────────────────────────
     let branch_hov = create_rw_signal(false);
@@ -651,6 +790,38 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
         branch_hov.set(false)
     });
+
+    // ── Merge button ──────────────────────────────────────────────────────────
+    let merge_hov = create_rw_signal(false);
+    let state_merge = state.clone();
+    let merge_btn = container(label(|| "⇢ Merge").style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0).color(if merge_hov.get() {
+            p.accent_hover
+        } else {
+            p.text_muted
+        })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0)
+            .padding_vert(3.0)
+            .border_radius(4.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if merge_hov.get() {
+                p.bg_elevated
+            } else {
+                floem::peniko::Color::TRANSPARENT
+            })
+    })
+    .on_click_stop(move |_| {
+        refresh_branches(state_merge.workspace_root.get(), current_branch, branches);
+        merge_picker_open.update(|v| *v = !*v);
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| merge_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| merge_hov.set(false));
 
     // ── Stash buttons ─────────────────────────────────────────────────────────
     let stash_hov = create_rw_signal(false);
@@ -896,6 +1067,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         branch_btn,
         pull_btn,
         push_btn,
+        merge_btn,
         stash_btn,
         stash_pop_btn,
         fetch_btn,
@@ -1590,6 +1762,42 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             });
 
             let root_for_diff = state_for_diff.workspace_root.clone();
+            let root_for_cp = state_for_diff.workspace_root.clone();
+            let cp_hov = create_rw_signal(false);
+            let hash_cp = hash.clone();
+            let cherry_pick_btn = container(label(|| "🍒").style(move |s| {
+                let t = theme.get();
+                s.font_size(11.0).color(if cp_hov.get() {
+                    t.palette.accent_hover
+                } else {
+                    t.palette.text_muted
+                })
+            }))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(5.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if cp_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                let h = hash_cp.clone();
+                let root = root_for_cp.get();
+                let scope = Scope::new();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(msg) => status_msg.set(msg),
+                        Err(e) => status_msg.set(format!("Cherry-pick error: {}", e.lines().next().unwrap_or("?"))),
+                    }
+                });
+                std::thread::spawn(move || send(run_git_cherry_pick(&root, &h)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| cp_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| cp_hov.set(false));
+
             stack((
                 container(
                     stack((
@@ -1615,6 +1823,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                             let t = theme.get();
                             s.font_size(10.0).color(t.palette.text_muted)
                         }),
+                        cherry_pick_btn,
                     ))
                     .style(|s| s.items_center().width_full().min_width(0.0)),
                 )
@@ -1880,9 +2089,434 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let blame_section = stack((blame_header, blame_scroll)).style(|s| s.flex_col().width_full());
 
+    // ── Stash List section ────────────────────────────────────────────────────
+    let stash_hdr_hov = create_rw_signal(false);
+    let stash_refresh_hov = create_rw_signal(false);
+    let state_stash_list = state.clone();
+    let state_stash_apply = state.clone();
+    let state_stash_drop = state.clone();
+
+    let stash_refresh_btn = container(label(|| "↻").style(move |s| {
+        let t = theme.get();
+        s.font_size(12.0).color(if stash_refresh_hov.get() {
+            t.palette.accent_hover
+        } else {
+            t.palette.text_muted
+        })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0)
+            .padding_vert(2.0)
+            .border_radius(3.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if stash_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| {
+        let root = state_stash_list.workspace_root.get();
+        let send = create_ext_action(Scope::new(), move |list| stash_list.set(list));
+        std::thread::spawn(move || send(run_git_stash_list(&root)));
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| stash_refresh_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| stash_refresh_hov.set(false));
+
+    let stash_list_header = container(
+        stack((
+            label(move || if stash_list_expanded.get() { "▾ " } else { "▸ " }).style(move |s| {
+                s.font_size(10.0).color(theme.get().palette.text_muted).margin_right(2.0)
+            }),
+            label(move || {
+                let n = stash_list.get().len();
+                format!("STASHES ({n})")
+            })
+            .style(move |s| {
+                let t = theme.get();
+                s.font_size(11.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
+            }),
+            stash_refresh_btn,
+        ))
+        .style(|s| s.items_center().width_full()),
+    )
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(10.0)
+            .padding_vert(5.0)
+            .width_full()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border_top(1.0)
+            .border_color(p.border)
+            .background(if stash_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| stash_list_expanded.update(|v| *v = !*v))
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| stash_hdr_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| stash_hdr_hov.set(false));
+
+    let stash_status_label = label(move || stash_list_status.get()).style(move |s| {
+        let t = theme.get();
+        s.font_size(10.0).color(t.palette.text_muted).padding_horiz(12.0).padding_vert(2.0).width_full()
+            .apply_if(stash_list_status.get().is_empty(), |s| s.display(floem::style::Display::None))
+    });
+
+    let stash_entries = dyn_stack(
+        move || {
+            if !stash_list_expanded.get() { return vec![]; }
+            stash_list.get()
+        },
+        |(idx, _)| *idx,
+        move |(idx, label_text): (usize, String)| {
+            let row_hov = create_rw_signal(false);
+            let apply_hov = create_rw_signal(false);
+            let drop_hov = create_rw_signal(false);
+            let root_apply = state_stash_apply.workspace_root.clone();
+            let root_drop = state_stash_drop.workspace_root.clone();
+            let display_text = if label_text.len() > 60 {
+                format!("{}…", &label_text[..60])
+            } else {
+                label_text.clone()
+            };
+
+            let apply_btn = container(label(|| "Apply").style(move |s| {
+                let t = theme.get();
+                s.font_size(10.0).color(if apply_hov.get() { t.palette.accent_hover } else { t.palette.accent })
+            }))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if apply_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                let root = root_apply.get();
+                let scope = Scope::new();
+                let root2 = root.clone();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(_) => stash_list_status.set(format!("Applied stash@{{{idx}}}")),
+                        Err(e) => stash_list_status.set(format!("Apply error: {}", e.lines().next().unwrap_or("?"))),
+                    }
+                    let s2 = create_ext_action(Scope::new(), move |list| stash_list.set(list));
+                    std::thread::spawn(move || s2(run_git_stash_list(&root2)));
+                });
+                std::thread::spawn(move || send(run_git_stash_apply(&root, idx)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| apply_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| apply_hov.set(false));
+
+            let drop_btn = container(label(|| "Drop").style(move |s| {
+                let t = theme.get();
+                s.font_size(10.0).color(if drop_hov.get() {
+                    floem::peniko::Color::from_rgb8(255, 100, 100)
+                } else {
+                    t.palette.error
+                })
+            }))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(6.0).padding_vert(2.0).border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if drop_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                let root = root_drop.get();
+                let scope = Scope::new();
+                let root2 = root.clone();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(_) => stash_list_status.set(format!("Dropped stash@{{{idx}}}")),
+                        Err(e) => stash_list_status.set(format!("Drop error: {}", e.lines().next().unwrap_or("?"))),
+                    }
+                    let s2 = create_ext_action(Scope::new(), move |list| stash_list.set(list));
+                    std::thread::spawn(move || s2(run_git_stash_list(&root2)));
+                });
+                std::thread::spawn(move || send(run_git_stash_drop(&root, idx)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| drop_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| drop_hov.set(false));
+
+            container(
+                stack((
+                    label(move || display_text.clone()).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(11.0).color(t.palette.text_primary).flex_grow(1.0).min_width(0.0)
+                    }),
+                    apply_btn,
+                    drop_btn,
+                ))
+                .style(|s| s.items_center().width_full().min_width(0.0)),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width_full().padding_horiz(14.0).padding_vert(3.0).border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if row_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| row_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| row_hov.set(false))
+        },
+    )
+    .style(|s: floem::style::Style| s.flex_col().width_full());
+
+    let stash_list_scroll = scroll(stack((stash_entries, stash_status_label)).style(|s| s.flex_col().width_full()))
+        .style(move |s| {
+            s.max_height(150.0).width_full()
+                .apply_if(!stash_list_expanded.get(), |s| s.display(floem::style::Display::None))
+        });
+
+    let stash_list_section = stack((stash_list_header, stash_list_scroll)).style(|s| s.flex_col().width_full());
+
+    // ── Merge picker section ──────────────────────────────────────────────────
+    let state_merge_do = state.clone();
+
+    let merge_branch_rows = dyn_stack(
+        move || {
+            if !merge_picker_open.get() { return vec![]; }
+            branches.get()
+        },
+        |b| b.clone(),
+        move |branch_name: String| {
+            let row_hov = create_rw_signal(false);
+            let bn = branch_name.clone();
+            let root = state_merge_do.workspace_root.clone();
+            container(
+                label(move || bn.clone()).style(move |s| {
+                    let t = theme.get();
+                    s.font_size(12.0).color(t.palette.text_primary).flex_grow(1.0)
+                }),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width_full().padding_horiz(14.0).padding_vert(5.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if row_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+            })
+            .on_click_stop(move |_| {
+                let b = branch_name.clone();
+                let r = root.get();
+                let scope = Scope::new();
+                let send = create_ext_action(scope, move |result: Result<String, String>| {
+                    match result {
+                        Ok(msg) => merge_status.set(msg),
+                        Err(e) => merge_status.set(format!("Merge error: {}", e.lines().next().unwrap_or("?"))),
+                    }
+                    merge_picker_open.set(false);
+                });
+                std::thread::spawn(move || send(run_git_merge(&r, &b)));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| row_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| row_hov.set(false))
+        },
+    )
+    .style(|s: floem::style::Style| s.flex_col().width_full());
+
+    let merge_status_label = label(move || merge_status.get()).style(move |s| {
+        let t = theme.get();
+        s.font_size(10.0).color(t.palette.text_muted).padding_horiz(12.0).padding_vert(2.0).width_full()
+            .apply_if(merge_status.get().is_empty(), |s| s.display(floem::style::Display::None))
+    });
+
+    let merge_section = container(
+        stack((
+            label(|| "Merge into current branch:").style(move |s| {
+                let t = theme.get();
+                s.font_size(10.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD)
+                    .padding_horiz(10.0).padding_vert(4.0).width_full()
+            }),
+            scroll(merge_branch_rows).style(|s| s.max_height(150.0).width_full()),
+            merge_status_label,
+        ))
+        .style(|s| s.flex_col().width_full()),
+    )
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.width_full().background(p.bg_elevated).border(1.0).border_color(p.border).border_radius(4.0)
+            .apply_if(!merge_picker_open.get(), |s| s.display(floem::style::Display::None))
+    });
+
+    // ── Tag Management section ────────────────────────────────────────────────
+    let tag_hdr_hov = create_rw_signal(false);
+    let tag_refresh_hov = create_rw_signal(false);
+    let state_tag_refresh = state.clone();
+    let state_tag_create = state.clone();
+    let state_tag_push = state.clone();
+    let create_tag_hov = create_rw_signal(false);
+    let push_tags_hov = create_rw_signal(false);
+
+    let tag_refresh_btn = container(label(|| "↻").style(move |s| {
+        let t = theme.get();
+        s.font_size(12.0).color(if tag_refresh_hov.get() { t.palette.accent_hover } else { t.palette.text_muted })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0).padding_vert(2.0).border_radius(3.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if tag_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| {
+        let root = state_tag_refresh.workspace_root.get();
+        let send = create_ext_action(Scope::new(), move |list| tag_list.set(list));
+        std::thread::spawn(move || send(run_git_tag_list(&root)));
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| tag_refresh_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| tag_refresh_hov.set(false));
+
+    let tag_list_header = container(
+        stack((
+            label(move || if tag_list_expanded.get() { "▾ " } else { "▸ " }).style(move |s| {
+                s.font_size(10.0).color(theme.get().palette.text_muted).margin_right(2.0)
+            }),
+            label(move || {
+                let n = tag_list.get().len();
+                format!("TAGS ({n})")
+            })
+            .style(move |s| {
+                let t = theme.get();
+                s.font_size(11.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
+            }),
+            tag_refresh_btn,
+        ))
+        .style(|s| s.items_center().width_full()),
+    )
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(10.0).padding_vert(5.0).width_full()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border_top(1.0).border_color(p.border)
+            .background(if tag_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| tag_list_expanded.update(|v| *v = !*v))
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| tag_hdr_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| tag_hdr_hov.set(false));
+
+    let tag_entries = dyn_stack(
+        move || {
+            if !tag_list_expanded.get() { return vec![]; }
+            tag_list.get()
+        },
+        |t| t.clone(),
+        move |tag_name: String| {
+            let row_hov = create_rw_signal(false);
+            container(
+                label(move || tag_name.clone()).style(move |s| {
+                    let t = theme.get();
+                    s.font_size(11.0).color(t.palette.text_primary).flex_grow(1.0)
+                }),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width_full().padding_horiz(14.0).padding_vert(3.0).border_radius(3.0)
+                    .background(if row_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| row_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| row_hov.set(false))
+        },
+    )
+    .style(|s: floem::style::Style| s.flex_col().width_full());
+
+    let tag_input = text_input(new_tag_name).placeholder("New tag name").style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_grow(1.0).background(p.bg_elevated).border(1.0).border_color(p.border)
+            .border_radius(4.0).color(p.text_primary).padding_horiz(8.0).padding_vert(4.0).font_size(11.0)
+    });
+
+    let create_tag_btn = container(label(|| "Create").style(move |s| {
+        let t = theme.get();
+        s.font_size(11.0).color(t.palette.bg_base).font_weight(floem::text::Weight::BOLD)
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(8.0).padding_vert(4.0).border_radius(4.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if create_tag_hov.get() { p.accent_hover } else { p.accent })
+    })
+    .on_click_stop(move |_| {
+        let name = new_tag_name.get();
+        let name = name.trim().to_string();
+        if name.is_empty() { return; }
+        let root = state_tag_create.workspace_root.get();
+        let name2 = name.clone();
+        let scope = Scope::new();
+        let root2 = root.clone();
+        let send = create_ext_action(scope, move |result: Result<String, String>| {
+            match result {
+                Ok(msg) => {
+                    tag_status.set(msg);
+                    new_tag_name.set(String::new());
+                    let s2 = create_ext_action(Scope::new(), move |list| tag_list.set(list));
+                    std::thread::spawn(move || s2(run_git_tag_list(&root2)));
+                }
+                Err(e) => tag_status.set(format!("Tag error: {}", e.lines().next().unwrap_or("?"))),
+            }
+        });
+        std::thread::spawn(move || send(run_git_tag_create(&root, &name2)));
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| create_tag_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| create_tag_hov.set(false));
+
+    let push_tags_btn = container(label(|| "Push All").style(move |s| {
+        let t = theme.get();
+        s.font_size(11.0).color(if push_tags_hov.get() { t.palette.accent_hover } else { t.palette.text_muted })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(8.0).padding_vert(4.0).border_radius(4.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if push_tags_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| {
+        let root = state_tag_push.workspace_root.get();
+        let scope = Scope::new();
+        let send = create_ext_action(scope, move |result: Result<String, String>| {
+            match result {
+                Ok(msg) => tag_status.set(msg),
+                Err(e) => tag_status.set(format!("Push tags error: {}", e.lines().next().unwrap_or("?"))),
+            }
+        });
+        std::thread::spawn(move || send(run_git_tag_push(&root)));
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| push_tags_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| push_tags_hov.set(false));
+
+    let tag_status_label = label(move || tag_status.get()).style(move |s| {
+        let t = theme.get();
+        s.font_size(10.0).color(t.palette.text_muted).padding_horiz(14.0).padding_vert(2.0).width_full()
+            .apply_if(tag_status.get().is_empty(), |s| s.display(floem::style::Display::None))
+    });
+
+    let tag_create_row = container(
+        stack((tag_input, create_tag_btn, push_tags_btn))
+            .style(|s| s.gap(6.0).items_center().padding_horiz(10.0).padding_vert(6.0).width_full()),
+    )
+    .style(move |s| {
+        s.width_full()
+            .apply_if(!tag_list_expanded.get(), |s| s.display(floem::style::Display::None))
+    });
+
+    let tag_body = stack((tag_entries, tag_create_row, tag_status_label)).style(move |s| {
+        s.flex_col().width_full()
+            .apply_if(!tag_list_expanded.get(), |s| s.display(floem::style::Display::None))
+    });
+
+    let tag_section = stack((tag_list_header, tag_body)).style(|s| s.flex_col().width_full());
+
     // ── Full scrollable body ──────────────────────────────────────────────────
     let body = scroll(
-        stack((file_sections, commit_history, blame_section)).style(|s| s.flex_col().width_full()),
+        stack((file_sections, commit_history, blame_section, stash_list_section, merge_section, tag_section))
+            .style(|s| s.flex_col().width_full()),
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 

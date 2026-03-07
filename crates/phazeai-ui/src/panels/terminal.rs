@@ -142,6 +142,7 @@ struct TermState {
     cur_bg: TermColor,
     cur_bold: bool,
     cursor_col: usize,
+    pub cwd: String,
 }
 
 impl TermState {
@@ -153,6 +154,7 @@ impl TermState {
             cur_bg: TermColor::Default,
             cur_bold: false,
             cursor_col: 0,
+            cwd: String::new(),
         }
     }
 
@@ -339,7 +341,26 @@ impl Perform for VtePerformer {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.is_empty() {
+            return;
+        }
+        // OSC 7: working directory notification
+        // Format: \e]7;file://hostname/path\a
+        if params[0] == b"7" && params.len() > 1 {
+            let url = String::from_utf8_lossy(params[1]);
+            if let Some(path) = url.strip_prefix("file://") {
+                let path = if let Some(p) = path.splitn(2, '/').nth(1) {
+                    format!("/{}", p)
+                } else {
+                    path.to_string()
+                };
+                if let Ok(mut s) = self.state.lock() {
+                    s.cwd = path;
+                }
+            }
+        }
+    }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         if byte == b'c' {
             if let Ok(mut state) = self.state.lock() {
@@ -365,7 +386,13 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
         // ── Named keys ────────────────────────────────────────────────────────
         Key::Named(named) => match named {
             Enter => b"\r".to_vec(),
-            Backspace => b"\x7f".to_vec(),
+            Backspace => {
+                if alt {
+                    vec![0x1b, 0x7f] // ESC + DEL = word backward delete
+                } else {
+                    vec![0x7f] // normal backspace
+                }
+            }
             Tab => {
                 if shift {
                     b"\x1b[Z".to_vec() // Shift+Tab (reverse tab)
@@ -475,6 +502,7 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
+const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
 const FONT_SIZE: f32 = 13.0;
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
@@ -519,7 +547,14 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
 /// One independent PTY terminal session rendered into a Floem view.
 /// Each terminal tab gets its own call to `single_terminal()`.
 /// `clear_nonce`: when incremented, sends Ctrl+L to the PTY to clear the screen.
-fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> impl IntoView {
+/// `shell`: the shell binary name or path to launch (e.g. "bash", "zsh").
+/// `cwd_out`: signal that receives the current working directory via OSC 7.
+fn single_terminal(
+    theme: RwSignal<PhazeTheme>,
+    clear_nonce: RwSignal<u64>,
+    shell: String,
+    cwd_out: RwSignal<String>,
+) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
     let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
@@ -565,7 +600,6 @@ fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> i
                 }
             };
 
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut cmd = CommandBuilder::new(&shell);
             cmd.env("TERM", term_consts::TERM_TYPE);
             cmd.env("COLORTERM", term_consts::COLOR_TERM);
@@ -592,6 +626,21 @@ fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> i
                     }
                 }
                 Err(e) => eprintln!("PTY take_writer error: {e}"),
+            }
+
+            // Inject PROMPT_COMMAND for OSC 7 working directory tracking
+            {
+                let pty_w2 = Arc::clone(&pty_writer_t);
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_millis(300));
+                    if let Ok(mut guard) = pty_w2.lock() {
+                        if let Some(ref mut w) = *guard {
+                            let cmd = "export PROMPT_COMMAND='printf \"\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
+                            let _ = w.write_all(cmd.as_bytes());
+                            let _ = w.flush();
+                        }
+                    }
+                });
             }
 
             let mut reader = match pair.master.try_clone_reader() {
@@ -650,6 +699,20 @@ fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> i
                 lines.set(all_lines);
                 line_version.update(|v| *v += 1);
                 cursor_col_sig.set(state.cursor_col);
+            }
+        });
+    }
+
+    // ── Sync cwd from OSC 7 → cwd_out signal ─────────────────────────────
+    {
+        let term_state_cwd = Arc::clone(&term_state);
+        create_effect(move |_| {
+            update_signal.get();
+            if let Ok(s) = term_state_cwd.lock() {
+                let cwd = s.cwd.clone();
+                if !cwd.is_empty() {
+                    cwd_out.set(cwd);
+                }
             }
         });
     }
@@ -914,12 +977,17 @@ fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> i
 /// closing a tab kills that PTY (the OS will reap it) and removes the tab.
 /// Tab names can be edited by double-clicking the tab label.
 pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
-    // Each entry: (id, name_signal, clear_nonce_signal)
-    let tab_data: RwSignal<Vec<(usize, RwSignal<String>, RwSignal<u64>)>> =
+    // Shell selector index (cycles through SHELLS)
+    let shell_idx: RwSignal<usize> = create_rw_signal(0usize);
+
+    // Each entry: (id, name_signal, clear_nonce_signal, shell_str, cwd_signal)
+    let tab_data: RwSignal<Vec<(usize, RwSignal<String>, RwSignal<u64>, String, RwSignal<String>)>> =
         create_rw_signal(vec![(
-            1,
+            1usize,
             create_rw_signal("bash".to_string()),
             create_rw_signal(0u64),
+            "bash".to_string(),
+            create_rw_signal(String::new()),
         )]);
     let active_tab: RwSignal<usize> = create_rw_signal(1);
     let next_id: RwSignal<usize> = create_rw_signal(2);
@@ -931,14 +999,23 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     let tab_bar = stack((
         // Scrollable row of tabs
         dyn_stack(
-            move || tab_data.get().into_iter().map(|(id, ns, cs)| (id, ns, cs)).collect::<Vec<_>>(),
-            |(id, _, _)| *id,
-            move |(id, name_sig, _clear_sig)| {
+            move || tab_data.get().into_iter().map(|(id, ns, cs, _sh, cwd)| (id, ns, cs, cwd)).collect::<Vec<_>>(),
+            |(id, _, _, _)| *id,
+            move |(id, name_sig, _clear_sig, cwd_sig)| {
                 let is_active = move || active_tab.get() == id;
                 let hovered = create_rw_signal(false);
 
-                // Label shown when not renaming
-                let title = label(move || name_sig.get())
+                // Label shown when not renaming (shows cwd basename when available)
+                let title = label(move || {
+                    let name = name_sig.get();
+                    let cwd = cwd_sig.get();
+                    if cwd.is_empty() {
+                        name
+                    } else {
+                        let basename = cwd.rsplit('/').next().unwrap_or(&cwd).to_string();
+                        format!("{} [{}]", name, basename)
+                    }
+                })
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
@@ -1027,9 +1104,9 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                             .apply_if(!show, |s| s.display(Display::None))
                     })
                     .on_click_stop(move |_| {
-                        tab_data.update(|data| data.retain(|(tid, _, _)| *tid != id));
+                        tab_data.update(|data| data.retain(|(tid, _, _, _, _)| *tid != id));
                         if active_tab.get_untracked() == id {
-                            if let Some((last, _, _)) = tab_data.get_untracked().last() {
+                            if let Some((last, _, _, _, _)) = tab_data.get_untracked().last() {
                                 active_tab.set(*last);
                             }
                         }
@@ -1066,12 +1143,28 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 let id = active_tab.get_untracked();
-                if let Some((_, _, clear_sig)) =
-                    tab_data.get_untracked().into_iter().find(|(tid, _, _)| *tid == id)
+                if let Some((_, _, clear_sig, _, _)) =
+                    tab_data.get_untracked().into_iter().find(|(tid, _, _, _, _)| *tid == id)
                 {
                     clear_sig.update(|v| *v += 1);
                 }
             }),
+        // Shell selector button (cycles through SHELLS)
+        container(label(move || SHELLS[shell_idx.get() % SHELLS.len()].to_string()))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.padding_horiz(8.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(4.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| shell_idx.update(|i| *i = (*i + 1) % SHELLS.len())),
         // "+" new terminal button
         container(label(|| "+"))
             .style(move |s| {
@@ -1087,11 +1180,14 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             .on_click_stop(move |_| {
                 let id = next_id.get_untracked();
                 next_id.set(id + 1);
+                let shell_name = SHELLS[shell_idx.get_untracked() % SHELLS.len()].to_string();
                 tab_data.update(|data| {
                     data.push((
                         id,
-                        create_rw_signal(format!("bash")),
+                        create_rw_signal(shell_name.clone()),
                         create_rw_signal(0u64),
+                        shell_name,
+                        create_rw_signal(String::new()),
                     ))
                 });
                 active_tab.set(id);
@@ -1115,12 +1211,12 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             tab_data
                 .get()
                 .into_iter()
-                .map(|(id, _, cs)| (id, cs))
+                .map(|(id, _, cs, shell, cwd)| (id, cs, shell, cwd))
                 .collect::<Vec<_>>()
         },
-        |(id, _)| *id,
-        move |(id, clear_sig)| {
-            single_terminal(theme, clear_sig).style(move |s| {
+        |(id, _, _, _)| *id,
+        move |(id, clear_sig, shell, cwd_sig)| {
+            single_terminal(theme, clear_sig, shell, cwd_sig).style(move |s| {
                 s.size_full()
                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
             })
