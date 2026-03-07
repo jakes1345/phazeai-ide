@@ -43,9 +43,17 @@ pub enum VimMotion {
     WordBackward,
     LineStart,
     LineEnd,
+    GotoFileTop,     // gg
+    GotoFileBottom,  // G
+    HalfPageDown,    // Ctrl+d
+    HalfPageUp,      // Ctrl+u
     // Edit
     DeleteLine,
     DeleteChar,
+    DeleteToLineEnd, // D
+    // Change (delete + enter insert mode)
+    ChangeToLineEnd, // C
+    ChangeWholeLine, // cc
     // Yank / Paste (vim register)
     YankLine,
     Paste,
@@ -54,6 +62,8 @@ pub enum VimMotion {
     EnterInsert,
     EnterInsertAfter,
     EnterInsertNewlineBelow,
+    InsertAtLineEnd,   // A
+    InsertAtLineStart, // I
 }
 
 /// Global IDE state shared across all panels via Floem reactive system.
@@ -250,6 +260,14 @@ pub struct IdeState {
     pub col_cursor_down_nonce: RwSignal<u64>,
     /// Sticky scroll lines for the active tab — enclosing scope headers pinned above editor.
     pub sticky_lines: RwSignal<Vec<String>>,
+    /// Transform to uppercase nonce — editor transforms current selection or word to UPPER CASE.
+    pub transform_upper_nonce: RwSignal<u64>,
+    /// Transform to lowercase nonce — editor transforms current selection or word to lower case.
+    pub transform_lower_nonce: RwSignal<u64>,
+    /// Join current line with the next line nonce.
+    pub join_line_nonce: RwSignal<u64>,
+    /// Sort selected lines alphabetically nonce.
+    pub sort_lines_nonce: RwSignal<u64>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -700,6 +718,10 @@ impl IdeState {
             col_cursor_up_nonce: create_rw_signal(0u64),
             col_cursor_down_nonce: create_rw_signal(0u64),
             sticky_lines: create_rw_signal(Vec::new()),
+            transform_upper_nonce: create_rw_signal(0u64),
+            transform_lower_nonce: create_rw_signal(0u64),
+            join_line_nonce: create_rw_signal(0u64),
+            sort_lines_nonce: create_rw_signal(0u64),
         }
     }
 }
@@ -845,6 +867,22 @@ fn all_commands() -> Vec<PaletteCommand> {
             action: |s| {
                 s.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
             },
+        },
+        PaletteCommand {
+            label: "Transform: To Uppercase",
+            action: |s| s.transform_upper_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Transform: To Lowercase",
+            action: |s| s.transform_lower_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Join Lines",
+            action: |s| s.join_line_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Sort Lines (Ascending)",
+            action: |s| s.sort_lines_nonce.update(|v| *v += 1),
         },
     ]
 }
@@ -3786,6 +3824,10 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.col_cursor_up_nonce,
         state.col_cursor_down_nonce,
         state.sticky_lines,
+        state.transform_upper_nonce,
+        state.transform_lower_nonce,
+        state.join_line_nonce,
+        state.sort_lines_nonce,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3818,6 +3860,10 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // col_cursor_up
         create_rw_signal(0u64), // col_cursor_down
         create_rw_signal(Vec::new()), // sticky_lines
+        create_rw_signal(0u64), // transform_upper
+        create_rw_signal(0u64), // transform_lower
+        create_rw_signal(0u64), // join_line
+        create_rw_signal(0u64), // sort_lines
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4823,10 +4869,21 @@ pub fn launch_phaze_ide() {
                                             state.font_size.set(14);
                                             return;
                                         }
-                                        // Ctrl+D — select next occurrence (multi-cursor)
+                                        // Ctrl+D — vim half-page down OR multi-cursor
                                         "d" => {
-                                            state.ctrl_d_nonce.update(|v| *v += 1);
+                                            if state.vim_mode.get() && state.vim_normal_mode.get() {
+                                                state.vim_motion.set(Some(VimMotion::HalfPageDown));
+                                            } else {
+                                                state.ctrl_d_nonce.update(|v| *v += 1);
+                                            }
                                             return;
+                                        }
+                                        // Ctrl+U — vim half-page up
+                                        "u" => {
+                                            if state.vim_mode.get() && state.vim_normal_mode.get() {
+                                                state.vim_motion.set(Some(VimMotion::HalfPageUp));
+                                                return;
+                                            }
                                         }
                                         // Ctrl+B — toggle left sidebar
                                         "b" => {
@@ -4918,10 +4975,14 @@ pub fn launch_phaze_ide() {
                                                 state.vim_motion.set(Some(VimMotion::DeleteLine));
                                             }
                                             ('g', "g") => {
-                                                state.vim_motion.set(Some(VimMotion::LineStart));
+                                                state.vim_motion.set(Some(VimMotion::GotoFileTop));
                                             }
                                             ('y', "y") => {
                                                 state.vim_motion.set(Some(VimMotion::YankLine));
+                                            }
+                                            ('c', "c") => {
+                                                state.vim_normal_mode.set(false);
+                                                state.vim_motion.set(Some(VimMotion::ChangeWholeLine));
                                             }
                                             _ => {}
                                         }
@@ -4992,8 +5053,36 @@ pub fn launch_phaze_ide() {
                                             state.vim_motion.set(Some(VimMotion::PasteBefore));
                                             return;
                                         }
-                                        // d, g, y — set pending key for two-key sequences
-                                        "d" | "g" | "y" => {
+                                        // G — go to end of file
+                                        "G" => {
+                                            state.vim_motion.set(Some(VimMotion::GotoFileBottom));
+                                            return;
+                                        }
+                                        // A — insert at end of line
+                                        "A" => {
+                                            state.vim_normal_mode.set(false);
+                                            state.vim_motion.set(Some(VimMotion::InsertAtLineEnd));
+                                            return;
+                                        }
+                                        // I — insert at start of line
+                                        "I" => {
+                                            state.vim_normal_mode.set(false);
+                                            state.vim_motion.set(Some(VimMotion::InsertAtLineStart));
+                                            return;
+                                        }
+                                        // C — change to end of line (delete + insert)
+                                        "C" => {
+                                            state.vim_normal_mode.set(false);
+                                            state.vim_motion.set(Some(VimMotion::ChangeToLineEnd));
+                                            return;
+                                        }
+                                        // D — delete to end of line
+                                        "D" => {
+                                            state.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
+                                            return;
+                                        }
+                                        // d, g, y, c — set pending key for two-key sequences
+                                        "d" | "g" | "y" | "c" => {
                                             state
                                                 .vim_pending_key
                                                 .set(Some(ch_str.chars().next().unwrap()));

@@ -518,7 +518,8 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color) -> 
 
 /// One independent PTY terminal session rendered into a Floem view.
 /// Each terminal tab gets its own call to `single_terminal()`.
-fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
+/// `clear_nonce`: when incremented, sends Ctrl+L to the PTY to clear the screen.
+fn single_terminal(theme: RwSignal<PhazeTheme>, clear_nonce: RwSignal<u64>) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
     let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
@@ -666,6 +667,26 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             }
         }
     };
+
+    // ── Clear terminal effect (Ctrl+L → clears screen) ───────────────────
+    {
+        let pty_w = Arc::clone(&pty_writer);
+        let last_clear = create_rw_signal(0u64);
+        create_effect(move |_| {
+            let n = clear_nonce.get();
+            if n == 0 || n == last_clear.get_untracked() {
+                return;
+            }
+            last_clear.set(n);
+            if let Ok(mut guard) = pty_w.lock() {
+                if let Some(ref mut w) = *guard {
+                    // Ctrl+L (form feed) — clears terminal in bash/zsh/fish/pwsh
+                    let _ = w.write_all(b"\x0c");
+                    let _ = w.flush();
+                }
+            }
+        });
+    }
 
     // ── Focus state ───────────────────────────────────────────────────────
     let is_focused = create_rw_signal(false);
@@ -891,29 +912,39 @@ fn single_terminal(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 ///
 /// A "+" button spawns a new shell session. Each session is independent —
 /// closing a tab kills that PTY (the OS will reap it) and removes the tab.
+/// Tab names can be edited by double-clicking the tab label.
 pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
-    // Tab list: each entry is a unique numeric ID.  Stable IDs let dyn_stack
-    // keep existing terminal instances alive when new tabs are added.
-    let tab_ids: RwSignal<Vec<usize>> = create_rw_signal(vec![1]);
+    // Each entry: (id, name_signal, clear_nonce_signal)
+    let tab_data: RwSignal<Vec<(usize, RwSignal<String>, RwSignal<u64>)>> =
+        create_rw_signal(vec![(
+            1,
+            create_rw_signal("bash".to_string()),
+            create_rw_signal(0u64),
+        )]);
     let active_tab: RwSignal<usize> = create_rw_signal(1);
     let next_id: RwSignal<usize> = create_rw_signal(2);
+    // Which tab is currently being renamed (None = none)
+    let editing_tab: RwSignal<Option<usize>> = create_rw_signal(None);
+    let rename_text: RwSignal<String> = create_rw_signal(String::new());
 
     // ── Tab bar ───────────────────────────────────────────────────────────
     let tab_bar = stack((
         // Scrollable row of tabs
         dyn_stack(
-            move || tab_ids.get().into_iter().enumerate().collect::<Vec<_>>(),
-            |(_, id)| *id,
-            move |(_, id)| {
+            move || tab_data.get().into_iter().map(|(id, ns, cs)| (id, ns, cs)).collect::<Vec<_>>(),
+            |(id, _, _)| *id,
+            move |(id, name_sig, _clear_sig)| {
                 let is_active = move || active_tab.get() == id;
                 let hovered = create_rw_signal(false);
 
-                let title = label(move || format!("Terminal {id}"))
+                // Label shown when not renaming
+                let title = label(move || name_sig.get())
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
                         let active = is_active();
                         let hov = hovered.get();
+                        let editing = editing_tab.get() == Some(id);
                         s.font_size(11.0)
                             .color(if active {
                                 p.text_primary
@@ -927,15 +958,65 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                             .border_bottom(if active { 2.0 } else { 0.0 })
                             .border_color(p.accent)
                             .cursor(CursorStyle::Pointer)
+                            .apply_if(editing, |s| s.display(Display::None))
                     })
-                    .on_click_stop(move |_| active_tab.set(id));
+                    .on_click_stop(move |_| {
+                        if active_tab.get_untracked() == id {
+                            // Second click on already-active tab → start rename
+                            editing_tab.set(Some(id));
+                            rename_text.set(name_sig.get_untracked());
+                        } else {
+                            active_tab.set(id);
+                        }
+                    });
+
+                // Inline rename input — shown when editing_tab == Some(id)
+                let rename_input = container(
+                    floem::views::text_input(rename_text)
+                        .style(move |s| {
+                            let t = theme.get();
+                            let p = &t.palette;
+                            s.font_size(11.0)
+                                .width(80.0)
+                                .padding(2.0)
+                                .background(p.bg_elevated)
+                                .color(p.text_primary)
+                                .border(1.0)
+                                .border_color(p.accent)
+                                .border_radius(3.0)
+                        })
+                        .on_event_stop(EventListener::KeyDown, move |event| {
+                            if let floem::event::Event::KeyDown(e) = event {
+                                use floem::keyboard::NamedKey;
+                                match e.key.logical_key {
+                                    Key::Named(NamedKey::Enter) => {
+                                        // Commit rename
+                                        let new_name = rename_text.get_untracked();
+                                        if !new_name.is_empty() {
+                                            name_sig.set(new_name);
+                                        }
+                                        editing_tab.set(None);
+                                    }
+                                    Key::Named(NamedKey::Escape) => {
+                                        editing_tab.set(None);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }),
+                )
+                .style(move |s| {
+                    let visible = editing_tab.get() == Some(id);
+                    s.apply_if(!visible, |s| s.display(Display::None))
+                });
 
                 // × close button — only show when hovered and there is more than 1 tab
                 let close_btn = container(label(|| "×"))
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
-                        let show = hovered.get() && tab_ids.get().len() > 1;
+                        let show = hovered.get() && tab_data.get().len() > 1
+                            && editing_tab.get() != Some(id);
                         s.font_size(11.0)
                             .color(p.text_muted)
                             .padding_horiz(4.0)
@@ -946,16 +1027,18 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                             .apply_if(!show, |s| s.display(Display::None))
                     })
                     .on_click_stop(move |_| {
-                        tab_ids.update(|ids| ids.retain(|&x| x != id));
-                        // Switch to last remaining tab if we closed the active one
+                        tab_data.update(|data| data.retain(|(tid, _, _)| *tid != id));
                         if active_tab.get_untracked() == id {
-                            if let Some(&last) = tab_ids.get_untracked().last() {
-                                active_tab.set(last);
+                            if let Some((last, _, _)) = tab_data.get_untracked().last() {
+                                active_tab.set(*last);
                             }
+                        }
+                        if editing_tab.get_untracked() == Some(id) {
+                            editing_tab.set(None);
                         }
                     });
 
-                container(stack((title, close_btn)).style(|s| s.items_center()))
+                container(stack((title, rename_input, close_btn)).style(|s| s.items_center()))
                     .on_event_stop(EventListener::PointerEnter, move |_| hovered.set(true))
                     .on_event_stop(EventListener::PointerLeave, move |_| hovered.set(false))
                     .style(move |s| {
@@ -968,7 +1051,27 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                     })
             },
         )
-        .style(|s| s.flex_row()),
+        .style(|s| s.flex_row().flex_grow(1.0)),
+        // "Clear" button — sends Ctrl+L to active terminal
+        container(label(|| "⌫"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(8.0)
+                    .padding_vert(5.0)
+                    .font_size(13.0)
+                    .color(p.text_muted)
+                    .cursor(CursorStyle::Pointer)
+                    .hover(|s| s.background(p.bg_elevated).color(p.text_primary))
+            })
+            .on_click_stop(move |_| {
+                let id = active_tab.get_untracked();
+                if let Some((_, _, clear_sig)) =
+                    tab_data.get_untracked().into_iter().find(|(tid, _, _)| *tid == id)
+                {
+                    clear_sig.update(|v| *v += 1);
+                }
+            }),
         // "+" new terminal button
         container(label(|| "+"))
             .style(move |s| {
@@ -982,9 +1085,15 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                     .hover(|s| s.background(p.bg_elevated).color(p.accent))
             })
             .on_click_stop(move |_| {
-                let id = next_id.get();
+                let id = next_id.get_untracked();
                 next_id.set(id + 1);
-                tab_ids.update(|ids| ids.push(id));
+                tab_data.update(|data| {
+                    data.push((
+                        id,
+                        create_rw_signal(format!("bash")),
+                        create_rw_signal(0u64),
+                    ))
+                });
                 active_tab.set(id);
             }),
     ))
@@ -992,7 +1101,7 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         let t = theme.get();
         let p = &t.palette;
         s.flex_row()
-            .items_stretch()
+            .items_center()
             .border_bottom(1.0)
             .border_color(p.border)
             .background(p.bg_panel)
@@ -1002,10 +1111,16 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
     // ── Terminal instances (one per tab, hidden when not active) ──────────
     let instances = dyn_stack(
-        move || tab_ids.get().into_iter().collect::<Vec<_>>(),
-        |id| *id,
-        move |id| {
-            single_terminal(theme).style(move |s| {
+        move || {
+            tab_data
+                .get()
+                .into_iter()
+                .map(|(id, _, cs)| (id, cs))
+                .collect::<Vec<_>>()
+        },
+        |(id, _)| *id,
+        move |(id, clear_sig)| {
+            single_terminal(theme, clear_sig).style(move |s| {
                 s.size_full()
                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
             })

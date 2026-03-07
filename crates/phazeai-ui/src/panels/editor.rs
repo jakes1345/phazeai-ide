@@ -899,6 +899,10 @@ pub fn editor_panel(
     col_cursor_up_nonce: RwSignal<u64>,
     col_cursor_down_nonce: RwSignal<u64>,
     sticky_lines_out: RwSignal<Vec<String>>,
+    transform_upper_nonce: RwSignal<u64>,
+    transform_lower_nonce: RwSignal<u64>,
+    join_line_nonce: RwSignal<u64>,
+    sort_lines_nonce: RwSignal<u64>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -2701,6 +2705,105 @@ pub fn editor_panel(
                                 cur_offset
                             }
                         }
+                        VimMotion::GotoFileTop => 0,
+                        VimMotion::GotoFileBottom => {
+                            doc_for_vim.rope_text().len().saturating_sub(1)
+                        }
+                        VimMotion::HalfPageDown => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let col = cur_offset - rope.offset_of_line(line);
+                            let target = (line + 20).min(rope.num_lines().saturating_sub(1));
+                            let start = rope.offset_of_line(target);
+                            let end = if target + 1 < rope.num_lines() {
+                                rope.offset_of_line(target + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            };
+                            start + col.min(end.saturating_sub(start))
+                        }
+                        VimMotion::HalfPageUp => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let col = cur_offset - rope.offset_of_line(line);
+                            let target = line.saturating_sub(20);
+                            let start = rope.offset_of_line(target);
+                            let end = if target + 1 < rope.num_lines() {
+                                rope.offset_of_line(target + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            };
+                            start + col.min(end.saturating_sub(start))
+                        }
+                        VimMotion::InsertAtLineEnd => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            }
+                        }
+                        VimMotion::InsertAtLineStart => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            rope.offset_of_line(line)
+                        }
+                        VimMotion::DeleteToLineEnd => {
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let end = if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            };
+                            if end > cur_offset {
+                                doc_for_vim.edit_single(
+                                    Selection::region(cur_offset, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                            }
+                            cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
+                        }
+                        VimMotion::ChangeToLineEnd => {
+                            // Enter insert mode set in app.rs key handler.
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let end = if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            };
+                            if end > cur_offset {
+                                doc_for_vim.edit_single(
+                                    Selection::region(cur_offset, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                            }
+                            cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
+                        }
+                        VimMotion::ChangeWholeLine => {
+                            // Delete line content (keep newline), position at line start.
+                            // Enter insert mode set in app.rs key handler.
+                            let rope = doc_for_vim.rope_text();
+                            let line = rope.line_of_offset(cur_offset);
+                            let start = rope.offset_of_line(line);
+                            let end = if line + 1 < rope.num_lines() {
+                                rope.offset_of_line(line + 1).saturating_sub(1)
+                            } else {
+                                rope.len()
+                            };
+                            if end > start {
+                                doc_for_vim.edit_single(
+                                    Selection::region(start, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                            }
+                            start.min(doc_for_vim.rope_text().len().saturating_sub(1))
+                        }
                     };
 
                     cursor_sig.set(Cursor::new(
@@ -2708,6 +2811,180 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
+                });
+            }
+
+            // ── Transform case (uppercase / lowercase) ───────────────────
+            {
+                let doc_for_tc = doc.clone();
+                let last_upper = create_rw_signal(0u64);
+                let last_lower = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let upper_n = transform_upper_nonce.get();
+                    let lower_n = transform_lower_nonce.get();
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    if upper_n > 0 && upper_n != last_upper.get_untracked() {
+                        last_upper.set(upper_n);
+                        let cur = cursor_sig.get_untracked();
+                        let offset = cur.offset();
+                        let (sel_start, sel_end) =
+                            if let CursorMode::Insert(ref s) = cur.mode {
+                                if let Some(r) = s.regions().first().copied() {
+                                    (r.start.min(r.end), r.start.max(r.end))
+                                } else {
+                                    (offset, offset)
+                                }
+                            } else {
+                                (offset, offset)
+                            };
+                        if sel_start < sel_end {
+                            let text = doc_for_tc
+                                .rope_text()
+                                .slice_to_cow(sel_start..sel_end)
+                                .to_uppercase();
+                            doc_for_tc.edit_single(
+                                Selection::region(sel_start, sel_end),
+                                &text,
+                                EditType::InsertChars,
+                            );
+                            dirty.set(true);
+                        }
+                    }
+                    if lower_n > 0 && lower_n != last_lower.get_untracked() {
+                        last_lower.set(lower_n);
+                        let cur = cursor_sig.get_untracked();
+                        let offset = cur.offset();
+                        let (sel_start, sel_end) =
+                            if let CursorMode::Insert(ref s) = cur.mode {
+                                if let Some(r) = s.regions().first().copied() {
+                                    (r.start.min(r.end), r.start.max(r.end))
+                                } else {
+                                    (offset, offset)
+                                }
+                            } else {
+                                (offset, offset)
+                            };
+                        if sel_start < sel_end {
+                            let text = doc_for_tc
+                                .rope_text()
+                                .slice_to_cow(sel_start..sel_end)
+                                .to_lowercase();
+                            doc_for_tc.edit_single(
+                                Selection::region(sel_start, sel_end),
+                                &text,
+                                EditType::InsertChars,
+                            );
+                            dirty.set(true);
+                        }
+                    }
+                });
+            }
+
+            // ── Join lines ────────────────────────────────────────────────
+            {
+                let doc_for_jl = doc.clone();
+                let last_jl = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let n = join_line_nonce.get();
+                    if n == 0 || n == last_jl.get_untracked() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_jl.set(n);
+                    let rope = doc_for_jl.rope_text();
+                    let offset = cursor_sig.get_untracked().offset();
+                    let line = rope.line_of_offset(offset);
+                    if line + 1 >= rope.num_lines() {
+                        return;
+                    }
+                    let cur_end = rope.offset_of_line(line + 1);
+                    // Delete the newline and any leading whitespace on the next line
+                    let next_content_start = {
+                        let next_line_text = rope
+                            .slice_to_cow(cur_end..rope.len())
+                            .to_string();
+                        let ws_len: usize = next_line_text
+                            .chars()
+                            .take_while(|c| *c == ' ' || *c == '\t')
+                            .map(|c| c.len_utf8())
+                            .sum();
+                        // cur_end already points past the newline
+                        // Actually cur_end = start of next line (past \n)
+                        // We want to delete from (cur_end - 1) to (cur_end + ws_len)
+                        ws_len
+                    };
+                    // Delete: newline char + leading whitespace on next line, replace with space
+                    let del_start = cur_end.saturating_sub(1); // the '\n'
+                    let del_end = cur_end + next_content_start;
+                    doc_for_jl.edit_single(
+                        Selection::region(del_start, del_end),
+                        " ",
+                        EditType::Delete,
+                    );
+                    dirty.set(true);
+                });
+            }
+
+            // ── Sort lines (selected or whole file) ───────────────────────
+            {
+                let doc_for_sl = doc.clone();
+                let last_sl = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let n = sort_lines_nonce.get();
+                    if n == 0 || n == last_sl.get_untracked() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    last_sl.set(n);
+                    let rope = doc_for_sl.rope_text();
+                    let cur = cursor_sig.get_untracked();
+                    let offset = cur.offset();
+                    let (sel_start, sel_end) =
+                        if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
+                            } else {
+                                (offset, offset)
+                            }
+                        } else {
+                            (offset, offset)
+                        };
+                    // Determine line range to sort
+                    let (range_start, range_end) = if sel_start < sel_end {
+                        let first_line = rope.line_of_offset(sel_start);
+                        let last_line = rope.line_of_offset(sel_end.saturating_sub(1));
+                        let rs = rope.offset_of_line(first_line);
+                        let re = if last_line + 1 < rope.num_lines() {
+                            rope.offset_of_line(last_line + 1)
+                        } else {
+                            rope.len()
+                        };
+                        (rs, re)
+                    } else {
+                        // No selection: sort entire file
+                        (0, rope.len())
+                    };
+                    let text = rope.slice_to_cow(range_start..range_end).to_string();
+                    let mut lines: Vec<&str> = text.lines().collect();
+                    lines.sort_unstable();
+                    let sorted = lines.join("\n");
+                    let sorted = if text.ends_with('\n') {
+                        format!("{sorted}\n")
+                    } else {
+                        sorted
+                    };
+                    doc_for_sl.edit_single(
+                        Selection::region(range_start, range_end),
+                        &sorted,
+                        EditType::InsertChars,
+                    );
+                    dirty.set(true);
                 });
             }
 

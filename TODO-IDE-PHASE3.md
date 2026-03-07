@@ -21,7 +21,7 @@
 - [x] **Minimap** — right-side pixel-art overview of full file; click to scroll; highlight viewport region
 - [x] **Column/box selection** (Ctrl+Alt+Up/Down) — Alt+Shift+drag or Alt+Shift+Arrow for rectangular multi-line selection
 - [ ] **Multi-line find** — allow `\n` in search pattern for cross-line matching
-- [ ] **Whole word toggle** — `\b` boundary toggle in find bar (already done in workspace search; add to editor find)
+- [x] **Whole word toggle** — `\b` boundary toggle in find bar (already done in workspace search; add to editor find)
 - [x] **Find: highlight all** — all matches softly highlighted in editor body simultaneously
 
 ### LSP
@@ -70,16 +70,16 @@
 
 ### Editor Features
 - [ ] **Relative line numbers** — toggle between absolute and relative (vim users need this)
-- [ ] **Whitespace rendering** — show spaces as `·` and tabs as `→` (toggle in settings)
+- [x] **Whitespace rendering** — show spaces as `·` and tabs as `→` (toggle Ctrl+Shift+W)
 - [ ] **Cursor surrounding lines** — configurable min lines above/below cursor when scrolling
-- [ ] **Sort lines** — sort selected lines alphabetically (ascending/descending)
-- [ ] **Join lines** — merge current line with next (remove newline + trim whitespace)
+- [x] **Sort lines** — sort selected lines alphabetically (ascending/descending) — command palette "Sort Lines (Ascending)"
+- [x] **Join lines** — merge current line with next (remove newline + trim whitespace) — command palette "Join Lines"
 - [x] **Duplicate line up** — copy current line above cursor
 - [x] **Duplicate line down** — copy current line below cursor
 - [x] **Move line up** (Alt+Up) — swap current line with line above (Alt+Up)
 - [x] **Move line down** (Alt+Down) — swap current line with line below (Alt+Down)
-- [ ] **Transform to uppercase** — selected text → UPPER CASE
-- [ ] **Transform to lowercase** — selected text → lower case
+- [x] **Transform to uppercase** — selected text → UPPER CASE — command palette "Transform: To Uppercase"
+- [x] **Transform to lowercase** — selected text → lower case — command palette "Transform: To Lowercase"
 - [ ] **Transform to title case** — selected text → Title Case
 - [ ] **Selection expand** — Ctrl+Shift+→ grow selection to next syntactic boundary
 - [ ] **Selection shrink** — Ctrl+Shift+← shrink selection back one syntactic boundary
@@ -97,7 +97,7 @@
 - [ ] **Non-US keyboard layouts** — ensure all shortcuts work on AZERTY, QWERTZ, etc.
 
 ### Terminal
-- [ ] **Named terminals** — rename terminal tab (double-click tab label)
+- [x] **Named terminals** — click active tab to rename; inline text_input; Enter to confirm, Esc to cancel
 - [ ] **Shell profile selection** — choose bash/zsh/fish/pwsh per new terminal
 - [ ] **Terminal split horizontal** — split current terminal pane left/right
 - [ ] **Terminal split vertical** — split current terminal pane top/bottom
@@ -107,7 +107,7 @@
 - [ ] **Working directory tracking** — show cwd in terminal tab title
 - [ ] **Terminal zoom** — independent font size for terminal (separate from editor font)
 - [ ] **Configurable scrollback limit** — settings field for scrollback buffer size
-- [ ] **Clear terminal** — Ctrl+K (or toolbar button) clears terminal output
+- [x] **Clear terminal** — ⌫ button in tab bar sends Ctrl+L to PTY (clears terminal + redraws prompt)
 - [ ] **Run in terminal** — right-click in editor → "Run in Terminal" sends selected code
 - [ ] **Run file** — toolbar button or right-click → run current file with detected runtime
 - [ ] **Alt+Backspace** — delete word backwards in terminal
@@ -144,9 +144,11 @@
 ### Vim Mode
 - [ ] **Vim marks** — `ma` set mark, `` `a `` jump to mark
 - [ ] **Multi-line motions** — `3dd`, `2yy`, `5j` etc. work correctly with repeat count
-- [ ] **`cw`, `ce`, `cc`, `S`** — change-word, change-end, change-line motions
+- [x] **`cc`, `C`** — `cc` change whole line, `C` change to end of line (both enter insert mode)
+- [ ] **`cw`, `ce`, `S`** — change-word, change-end motions
 - [ ] **`gf`** — go to file under cursor
-- [ ] **`Shift+C`** — delete rest of line and enter insert mode
+- [x] **`D`** — delete to end of line (without entering insert mode)
+- [x] **`A` / `I`** — insert at line end / line start
 - [ ] **Visual line mode** — `V` for line-wise visual selection
 - [ ] **Visual block mode** — `Ctrl+V` for block selection
 - [ ] **`:w`, `:q`, `:wq`, `:e`** — ex commands in command line
@@ -156,8 +158,8 @@
 - [ ] **Vim `.` repeat** — repeat last change action
 - [ ] **Macros** (`q` to record, `@` to replay)
 - [ ] **`za` fold toggle** — already done; add `zM` (fold all) / `zR` (unfold all)
-- [ ] **`gg` / `G`** — go to top / bottom of file
-- [ ] **`Ctrl+d` / `Ctrl+u`** — half-page scroll down/up in normal mode
+- [x] **`gg` / `G`** — `gg` goto file top (was broken, now fixed), `G` goto file bottom
+- [x] **`Ctrl+d` / `Ctrl+u`** — half-page scroll down/up in normal mode (20 lines)
 
 ---
 
