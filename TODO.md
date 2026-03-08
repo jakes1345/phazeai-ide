@@ -57,33 +57,33 @@
 - [x] **Multi-cursor (Ctrl+D)** — Ctrl+D selects next occurrence of word/selection and adds as second cursor region via Selection::add_region(SelRegion)
 - [ ] **Column/box selection** — Alt+Shift+drag or Alt+Shift+Arrow
 - [x] **Code folding** — Ctrl+Shift+[ fold / Ctrl+Shift+] unfold, fold icon in gutter; brace-matching-based ranges; line_height=0 for collapsed lines
-- [ ] **Bracket pair colorization** — highlight matching brackets with distinct colors
-- [ ] **Bracket pair guides** — vertical indent guides connecting bracket pairs
+- [x] **Bracket pair colorization** — highlight matching brackets with distinct colors (cycling 4 colors by depth in apply_attr_styles)
+- [x] **Bracket pair guides** — vertical indent guides connecting bracket pairs (LineExtraStyle at open_col from open_line+1 to close_line)
 - [x] **Auto-close brackets** — type `(` → inserts `()` with cursor inside (cursor-watching effect)
 - [x] **Auto-close quotes** — type `"` → inserts `""` with cursor inside (escape-aware, lifetime-aware for `'`)
-- [ ] **Auto-surround** — select text, type `(` → wraps selection in parens
+- [x] **Auto-surround** — select text, type `(` → wraps selection in parens (editor.rs:1846)
 - [x] **Smart indent on Enter** — auto-indent to same or deeper level after `{`, `:`, etc.
 - [x] **De-indent on `}`** — type `}` and it un-indents the current line (4-space / 2-space / 1-tab)
 - [x] **Word wrap toggle** — Alt+Z toggles, WrapMethod::EditorWidth via settings + reactive styling rebuild
 - [ ] **Sticky scroll** — function/class headers stay pinned at top of viewport while scrolling
 - [ ] **Minimap** — optional right-side miniature overview of the whole file, click to scroll
 - [x] **Breadcrumbs** — file path segments in toolbar bar above editor (path relative to workspace root)
-- [ ] **Indentation guides** — vertical lines showing indent depth
-- [ ] **Whitespace rendering** — show/hide spaces and tabs as dots/arrows
-- [ ] **Line numbers** — already have them; add relative line numbers toggle for vim users
+- [x] **Indentation guides** — vertical lines showing indent depth (1px LineExtraStyle per 4-space indent level)
+- [x] **Whitespace rendering** — show/hide spaces as dots and tabs as arrows via show_whitespace toggle (Alt+W)
+- [x] **Line numbers** — relative line numbers toggle via command palette / Alt+R (relative_line_numbers signal)
 - [x] **Highlight current line** — rgba(255,255,255,12) background via LineExtraStyle on current_line
-- [ ] **Match bracket highlight** — when cursor is on bracket, highlight matching bracket
+- [x] **Match bracket highlight** — when cursor is on bracket, highlight matching bracket (matching_bracket field)
 - [x] **Find: regex mode** — .* toggle in Ctrl+F find bar (uses regex crate)
 - [x] **Find: case-sensitive toggle** — Aa toggle in Ctrl+F find bar
-- [ ] **Find: whole word toggle** — toggle `\b` matching in find bar
+- [x] **Find: whole word toggle** — toggle `\b` matching in find bar (find_whole_word signal + W button)
 - [ ] **Find: match count** — already done; add result index display in status bar
 - [ ] **Multi-line find** — allow newlines in search pattern
-- [ ] **Split editor** — Ctrl+\ split right, support side-by-side editing of different files
+- [x] **Split editor** — Ctrl+Alt+\ splits horizontally; Ctrl+Alt+↓ splits vertically (split_editor / split_editor_down)
 - [ ] **Diff view** — show inline git diff (before/after) in a special diff editor tab
 - [x] **Large file handling** — files > 2MB skip syntect highlighting (fall back to plain-text styling)
 - [x] **Line ending indicator** — show CRLF/LF/Mixed in status bar (auto-detected per file)
-- [ ] **Encoding indicator** — show UTF-8/etc in status bar, click to re-open with encoding
-- [ ] **Read-only mode** — lock a tab when file is not writable (show indicator)
+- [x] **Encoding indicator** — UTF-8/etc shown in status bar (app.rs:2176, dynamic encoding detection)
+- [x] **Read-only mode** — lock a tab when file is not writable; 🔒 indicator in status bar (active_readonly signal)
 
 ### Editor — LSP / Language Intelligence
 - [x] **Find all references** (Shift+F12) — results in References bottom tab (LSP + ripgrep fallback)
@@ -92,52 +92,52 @@
 - [x] **Signature help** (Ctrl+Shift+Space) — shows function signature + active param at bottom of editor
 - [x] **Document symbols** (Ctrl+Shift+O) — Symbols left-panel tab, click to jump, LSP + regex fallback
 - [x] **Workspace symbols** (Ctrl+T) — search symbols across all files (LSP + ripgrep fallback)
-- [ ] **Peek definition** (Alt+F12) — show definition inline without navigating away
+- [x] **Peek definition** (Alt+F12) — shows definition source lines in popup overlay (peek_def_overlay in app.rs)
 - [ ] **Call hierarchy** — who calls this function / what does it call
-- [ ] **Semantic token highlighting** — LSP semantic tokens override syntect colors
-- [ ] **Inlay hints** — show type hints inline after variable names (`let x/*: i32*/`)
-- [ ] **Code lens** — clickable annotations above functions (reference count, run test, etc.)
+- [x] **Semantic token highlighting** — LSP semantic tokens override syntect colors (semantic_tokens signal + apply_attr_styles)
+- [x] **Inlay hints** — show type hints inline after variable names; toggled via Ctrl+Alt+I (inlay_hints_sig signal)
+- [x] **Code lens** — clickable annotations above functions; run test / N references (code_lens signal, gutter labels)
 - [x] **Inline diagnostics** — diagnostic message for current cursor line shown in status bar
 
 ### Git
 - [x] **Git gutter decorations** — green bar (added), yellow bar (modified), red triangle (deleted) via canvas in editor.rs
 - [x] **Inline diff hunk preview** — GitDiff bottom tab shows colorized diff output per file (git diff HEAD)
-- [ ] **Revert hunk** — button in hunk popup to undo that specific change
-- [ ] **Git blame** — show last commit info per line on hover or in gutter
+- [x] **Revert hunk** — "↩" button per hunk in GitDiff tab, runs git apply --reverse (run_git_revert_hunk)
+- [x] **Git blame** — inline blame for cursor line in gutter; full blame panel via git panel Blame tab (run_git_blame)
 - [x] **Branch display** — current branch name in status bar (git rev-parse --abbrev-ref HEAD)
 - [x] **Branch switching** — click branch in status bar → branch picker overlay → checkout selected
-- [ ] **Create branch** — from status bar branch menu, prompt for name and create
-- [ ] **Branch merge** — merge another branch into current (with conflict indicator)
-- [ ] **Stash** — git stash push / stash pop from the git panel
-- [ ] **Pull/push buttons** — pull and push in the git panel header
-- [ ] **Commit history log** — scrollable log of recent commits (hash, message, author, date)
-- [ ] **Diff between commits** — click commit in log → show what changed
+- [x] **Create branch** — "New Branch" button in git panel → input overlay → git checkout -b (run_git_checkout_new)
+- [x] **Branch merge** — "Merge" button in branch picker → select branch → git merge (run_git_merge)
+- [x] **Stash** — stash push / pop / apply / drop in git panel Stash section (run_git_stash*)
+- [x] **Pull/push buttons** — Pull and Push buttons in git panel header row (run_git_pull / run_git_push)
+- [x] **Commit history log** — scrollable log of recent commits in git panel Commits tab (run_git_log_full)
+- [x] **Diff between commits** — click commit in log → shows git show --stat --patch in diff tab (run_git_show_diff)
 - [ ] **Multi-repo support** — detect and show multiple git repos in one workspace
 
 ### Terminal
 - [x] **Multiple terminal instances** — "+" button, tab bar to switch, × to close tabs
-- [ ] **Named terminals** — rename terminals (e.g. "server", "tests", "build")
-- [ ] **Shell profile selection** — choose between bash/zsh/fish/pwsh when creating new terminal
-- [ ] **Terminal split** — split terminal pane horizontally or vertically
+- [x] **Named terminals** — double-click tab label → inline text_input rename (editing_tab signal, terminal.rs:1278)
+- [x] **Shell profile selection** — shell selector button cycles bash/zsh/fish/pwsh/nu (SHELLS array + shell_idx)
+- [x] **Terminal split** — "⊟" button toggles side-by-side split view (term_split signal)
 - [ ] **Terminal find** (Ctrl+Shift+F in terminal) — search through terminal output
-- [ ] **Hyperlink detection** — detect URLs and file paths in terminal output, make them clickable
-- [ ] **Command navigation** — Shell Integration: track commands with markers, jump between them
-- [ ] **Working directory tracking** — show current directory in terminal tab title
-- [ ] **Terminal zoom** — independent font size for terminal panel
-- [ ] **Scrollback limit** — configurable scrollback buffer size (default 10k lines)
-- [ ] **Clear terminal** — Ctrl+K or "Clear" button in terminal toolbar
-- [ ] **Run in terminal** — right-click in editor → "Run in Terminal" sends selected code
+- [x] **Hyperlink detection** — URLs (http/https) in terminal output are clickable; opens via xdg-open/open/start
+- [x] **Command navigation** — OSC 133;A shell integration markers; ⬆/⬇ buttons jump between prompts
+- [x] **Working directory tracking** — OSC 7 tracks cwd; shown in terminal tab title (cwd_signal)
+- [x] **Terminal zoom** — A- / A+ buttons; independent per-terminal font size (term_font_size)
+- [x] **Scrollback limit** — 10 000 line ring buffer (MAX_SCROLLBACK constant)
+- [x] **Clear terminal** — ⌫ toolbar button sends Ctrl+L to PTY (clear_nonce); Ctrl+Shift+K also clears
+- [x] **Run in terminal** — right-click in editor → "Run in Terminal" / "Run File"; run_in_terminal_text signal
 
 ### Search
 - [x] **Regex search** — .* toggle button in workspace search panel
 - [x] **Case-sensitive toggle** — Aa toggle button in workspace search panel
-- [ ] **Whole word toggle** — in workspace search panel
-- [ ] **Include/exclude globs** — filter by `*.rs` or exclude `target/`, `node_modules/`
+- [x] **Whole word toggle** — W button in workspace search panel (whole_word + --word-regexp rg flag)
+- [x] **Include/exclude globs** — two text inputs below search bar: Include (*.rs) and Exclude (target/) — passed as --glob to rg
 - [x] **Replace in files** — replace input + "Replace All" button with regex/case-sensitive support
-- [ ] **Show only open editors** — search only currently-open tabs
-- [ ] **Search history** — up/down arrows to cycle through previous search queries
-- [ ] **Symbol search** — search for symbols (functions, classes) across workspace
-- [ ] **Search result tree view** — toggle between flat list and grouped-by-file tree
+- [x] **Show only open editors** — ⊞ toggle button filters results to currently-open tabs only
+- [x] **Search history** — up/down arrows in search input cycle through past 50 queries (search_history signal)
+- [x] **Symbol search** — Ctrl+T workspace symbols via LSP + ripgrep fallback (RequestWorkspaceSymbols)
+- [x] **Search result tree view** — ⊟/⊞ toggle button switches between flat and grouped-by-file tree views
 
 ### File Explorer
 - [x] **Create new file** — right-click context menu in explorer, prompts for filename

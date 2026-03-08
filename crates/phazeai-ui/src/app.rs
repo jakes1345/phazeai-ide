@@ -363,6 +363,10 @@ pub struct IdeState {
     pub inlay_hints_toggle: RwSignal<bool>,
     /// Inlay hint entries from LSP or regex fallback for the active file.
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
+    /// When true, render space chars as center dots and tabs as arrows in the editor.
+    pub show_whitespace: RwSignal<bool>,
+    /// Semantic token entries from LSP for the active file (override syntect colors).
+    pub semantic_tokens: RwSignal<Vec<crate::lsp_bridge::SemanticTokenEntry>>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -615,6 +619,7 @@ impl IdeState {
             code_lens,
             folding_ranges,
             inlay_hints_lsp,
+            semantic_tokens_lsp,
         ) = start_lsp_bridge(workspace.clone());
 
         // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
@@ -700,6 +705,12 @@ impl IdeState {
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
                     let _ = lsp_tx3.send(LspCommand::RequestInlayHints { path, start_line: 0, end_line: 2000 });
+                }
+            });
+            let lsp_tx4 = lsp_cmd.clone();
+            create_effect(move |_| {
+                if let Some(path) = open_file.get() {
+                    let _ = lsp_tx4.send(LspCommand::RequestSemanticTokens { path });
                 }
             });
         }
@@ -909,6 +920,8 @@ impl IdeState {
             code_lens_visible: create_rw_signal(true),
             inlay_hints_toggle: create_rw_signal(true),
             inlay_hints_sig: inlay_hints_lsp,
+            show_whitespace: create_rw_signal(false),
+            semantic_tokens: semantic_tokens_lsp,
         }
     }
 }
@@ -1074,6 +1087,10 @@ fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Toggle Relative Line Numbers",
             action: |s| s.relative_line_numbers.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Toggle Whitespace Rendering",
+            action: |s| s.show_whitespace.update(|v| *v = !*v),
         },
         PaletteCommand {
             label: "New Scratch File",
@@ -4453,6 +4470,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.organize_imports_on_save,
         state.inlay_hints_sig,
         state.inlay_hints_toggle,
+        state.show_whitespace,
+        state.semantic_tokens,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4509,6 +4528,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false), // organize_imports_on_save
         create_rw_signal(vec![]), // inlay_hints_sig
         create_rw_signal(false), // inlay_hints_toggle
+        state.show_whitespace,   // show_whitespace
+        create_rw_signal(vec![]), // semantic_tokens (split pane)
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4813,6 +4834,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false), // organize_imports_on_save
         create_rw_signal(vec![]), // inlay_hints_sig
         create_rw_signal(false), // inlay_hints_toggle
+        state.show_whitespace,   // show_whitespace
+        create_rw_signal(vec![]), // semantic_tokens (down pane)
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -5166,7 +5189,20 @@ fn menu_bar(state: IdeState) -> impl IntoView {
                 )
                 .separator()
                 .entry(MenuItem::new("About PhazeAI IDE").action(|| {
-                    // TODO: about dialog
+                    std::thread::spawn(|| {
+                        let _ = rfd::MessageDialog::new()
+                            .set_title("About PhazeAI IDE")
+                            .set_description(
+                                "PhazeAI IDE\n\
+                                 Version 0.1.0\n\n\
+                                 GPU-accelerated, AI-native code editor.\n\
+                                 Built with Rust · Floem · Vello/wgpu\n\n\
+                                 Open-source core (MIT) + PhazeAI Cloud\n\
+                                 https://github.com/phazeai/phazeai-ide"
+                            )
+                            .set_level(rfd::MessageLevel::Info)
+                            .show();
+                    });
                 }));
             show_context_menu(menu, None);
         })
@@ -5675,6 +5711,18 @@ pub fn launch_phaze_ide() {
                                         "Word wrap on"
                                     } else {
                                         "Word wrap off"
+                                    };
+                                    show_toast(state.status_toast, msg);
+                                    return;
+                                }
+
+                                // Alt+W — toggle whitespace rendering (dots/arrows)
+                                if alt && !ctrl && !shift && ch.as_str() == "w" {
+                                    state.show_whitespace.update(|v| *v = !*v);
+                                    let msg = if state.show_whitespace.get() {
+                                        "Whitespace: visible"
+                                    } else {
+                                        "Whitespace: hidden"
                                     };
                                     show_toast(state.status_toast, msg);
                                     return;

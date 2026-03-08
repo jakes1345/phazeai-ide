@@ -600,6 +600,29 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color, fon
     layout
 }
 
+/// Extract the first http/https URL found in `text`, if any.
+fn find_url_in_line(text: &str) -> Option<String> {
+    for prefix in &["https://", "http://"] {
+        if let Some(pos) = text.find(prefix) {
+            let url: String = text[pos..]
+                .chars()
+                .take_while(|c| {
+                    !c.is_whitespace()
+                        && *c != '\''
+                        && *c != '"'
+                        && *c != ')'
+                        && *c != ']'
+                        && *c != '>'
+                })
+                .collect();
+            if url.len() > prefix.len() {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
 /// One independent PTY terminal session rendered into a Floem view.
 /// Each terminal tab gets its own call to `single_terminal()`.
 /// `clear_nonce`: when incremented, sends Ctrl+L to the PTY to clear the screen.
@@ -852,6 +875,11 @@ fn single_terminal(
         move |(_, line)| {
             let segments = line.segments.clone();
 
+            // Extract URL from this line (for hyperlink detection).
+            let line_text: String = segments.iter().map(|s| s.text.as_str()).collect();
+            let url_in_line: Option<String> = find_url_in_line(&line_text);
+            let has_url = url_in_line.is_some();
+
             let initial_layout = {
                 let t = theme.get_untracked();
                 let p = &t.palette;
@@ -892,10 +920,31 @@ fn single_terminal(
                 layout_signal.set(new_layout);
             });
 
-            container(
+            let row = container(
                 floem::views::rich_text(move || layout_signal.get()).style(|s| s.width_full()),
             )
-            .style(|s| s.padding_horiz(8.0).padding_vert(1.0).width_full())
+            .style(move |s| {
+                s.padding_horiz(8.0).padding_vert(1.0).width_full()
+                    .apply_if(has_url, |s| s.cursor(CursorStyle::Pointer))
+            });
+
+            if let Some(url) = url_in_line {
+                row.on_click_stop(move |_| {
+                    let u = url.clone();
+                    std::thread::spawn(move || {
+                        #[cfg(target_os = "linux")]
+                        let _ = std::process::Command::new("xdg-open").arg(&u).spawn();
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&u).spawn();
+                        #[cfg(target_os = "windows")]
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", "", &u])
+                            .spawn();
+                    });
+                }).into_any()
+            } else {
+                row.into_any()
+            }
         },
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0));

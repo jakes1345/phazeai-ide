@@ -66,8 +66,23 @@ pub enum LspCommand {
     OrganizeImports { path: PathBuf },
     /// Request inlay hints for a visible range of a file (textDocument/inlayHint).
     RequestInlayHints { path: PathBuf, start_line: u32, end_line: u32 },
+    /// Request full semantic tokens for a file (textDocument/semanticTokens/full).
+    RequestSemanticTokens { path: PathBuf },
     /// Graceful shutdown.
     Shutdown,
+}
+
+/// A decoded semantic token entry: (line, start_char, length, token_type_str).
+#[derive(Debug, Clone)]
+pub struct SemanticTokenEntry {
+    /// 0-based line number.
+    pub line: u32,
+    /// 0-based character offset within the line.
+    pub start: u32,
+    /// Length in characters.
+    pub length: u32,
+    /// Token type string (e.g. "function", "variable", "type", "keyword").
+    pub token_type: String,
 }
 
 /// An inlay hint (type annotation, parameter name, etc.) for inline display.
@@ -202,6 +217,7 @@ pub fn start_lsp_bridge(
     RwSignal<Vec<CodeLensEntry>>,
     RwSignal<Vec<(u32, u32)>>,
     RwSignal<Vec<InlayHintEntry>>,
+    RwSignal<Vec<SemanticTokenEntry>>,
 ) {
     let (lsp_cmd_tx, mut lsp_cmd_rx) = mpsc::unbounded_channel::<LspCommand>();
 
@@ -233,6 +249,8 @@ pub fn start_lsp_bridge(
     let (fold_ranges_tx, fold_ranges_rx) = std::sync::mpsc::sync_channel::<Vec<(u32, u32)>>(4);
     // Inlay hints: bridge → Floem
     let (inlay_tx, inlay_rx) = std::sync::mpsc::sync_channel::<Vec<InlayHintEntry>>(4);
+    // Semantic tokens: bridge → Floem
+    let (sem_tx, sem_rx) = std::sync::mpsc::sync_channel::<Vec<SemanticTokenEntry>>(4);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -660,6 +678,20 @@ pub fn start_lsp_bridge(
                                     let _ = inlay_tx2.try_send(hints);
                                 });
                             }
+                            Some(LspCommand::RequestSemanticTokens { path }) => {
+                                let sem_tx2 = sem_tx.clone();
+                                let client_opt = manager.client_for_file(&path).cloned();
+                                tokio::spawn(async move {
+                                    let Some(client) = client_opt else { return };
+                                    match client.semantic_tokens_full(&path).await {
+                                        Ok((_, data)) if !data.is_empty() => {
+                                            let entries = decode_semantic_tokens(&data);
+                                            let _ = sem_tx2.try_send(entries);
+                                        }
+                                        _ => {}
+                                    }
+                                });
+                            }
                             Some(LspCommand::Shutdown) | None => break,
                         }
                     }
@@ -797,6 +829,7 @@ pub fn start_lsp_bridge(
     let code_lens_chan = create_signal_from_channel(code_lens_rx);
     let fold_ranges_chan = create_signal_from_channel(fold_ranges_rx);
     let inlay_chan = create_signal_from_channel(inlay_rx);
+    let sem_chan = create_signal_from_channel(sem_rx);
 
     let diag_sig: RwSignal<Vec<DiagEntry>> = create_rw_signal(vec![]);
     let comp_sig: RwSignal<Vec<CompletionEntry>> = create_rw_signal(vec![]);
@@ -812,6 +845,7 @@ pub fn start_lsp_bridge(
     let code_lens_sig: RwSignal<Vec<CodeLensEntry>> = create_rw_signal(vec![]);
     let folding_ranges_sig: RwSignal<Vec<(u32, u32)>> = create_rw_signal(vec![]);
     let inlay_hints_sig: RwSignal<Vec<InlayHintEntry>> = create_rw_signal(vec![]);
+    let semantic_tokens_sig: RwSignal<Vec<SemanticTokenEntry>> = create_rw_signal(vec![]);
 
     create_effect(move |_| {
         if let Some(entries) = diag_chan.get() {
@@ -883,6 +917,11 @@ pub fn start_lsp_bridge(
             inlay_hints_sig.set(hints);
         }
     });
+    create_effect(move |_| {
+        if let Some(entries) = sem_chan.get() {
+            semantic_tokens_sig.set(entries);
+        }
+    });
 
     (
         lsp_cmd_tx,
@@ -900,10 +939,54 @@ pub fn start_lsp_bridge(
         code_lens_sig,
         folding_ranges_sig,
         inlay_hints_sig,
+        semantic_tokens_sig,
     )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Decode the delta-encoded LSP semantic token data into `SemanticTokenEntry` list.
+/// The `data` array is groups of 5 u32: (delta_line, delta_start, length, token_type, modifiers).
+/// Standard token type indices (LSP spec / rust-analyzer): 0=namespace, 1=type, 2=class,
+/// 3=enum, 4=interface, 5=struct, 6=typeParameter, 7=parameter, 8=variable, 9=property,
+/// 10=enumMember, 11=event, 12=function, 13=method, 14=macro, 15=keyword,
+/// 16=modifier, 17=comment, 18=string, 19=number, 20=regexp, 21=operator.
+fn decode_semantic_tokens(data: &[u32]) -> Vec<SemanticTokenEntry> {
+    const TOKEN_TYPE_NAMES: &[&str] = &[
+        "namespace", "type", "class", "enum", "interface", "struct",
+        "typeParameter", "parameter", "variable", "property", "enumMember",
+        "event", "function", "method", "macro", "keyword", "modifier",
+        "comment", "string", "number", "regexp", "operator",
+    ];
+    let mut entries = Vec::new();
+    let mut cur_line: u32 = 0;
+    let mut cur_start: u32 = 0;
+    let chunks = data.chunks_exact(5);
+    for chunk in chunks {
+        let delta_line = chunk[0];
+        let delta_start = chunk[1];
+        let length = chunk[2];
+        let token_type = chunk[3] as usize;
+        if delta_line > 0 {
+            cur_line += delta_line;
+            cur_start = delta_start;
+        } else {
+            cur_start += delta_start;
+        }
+        let type_name = TOKEN_TYPE_NAMES
+            .get(token_type)
+            .copied()
+            .unwrap_or("variable")
+            .to_string();
+        entries.push(SemanticTokenEntry {
+            line: cur_line,
+            start: cur_start,
+            length,
+            token_type: type_name,
+        });
+    }
+    entries
+}
 
 /// Extract plain text from an `lsp_types::Hover` value.
 fn hover_to_string(hover: lsp_types::Hover) -> String {

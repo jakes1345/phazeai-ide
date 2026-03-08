@@ -99,6 +99,10 @@ struct SyntaxStyle {
     /// Last known rope length for cache invalidation. If rope length changes,
     /// the entire states cache is cleared to prevent stale highlighting.
     last_rope_len: std::cell::Cell<usize>,
+    /// When true, render spaces as center dots (·) and tabs as arrows (→) in light gray.
+    show_whitespace: bool,
+    /// Semantic tokens from LSP for this file. Applied in apply_attr_styles to override syntect colors.
+    semantic_tokens: Vec<crate::lsp_bridge::SemanticTokenEntry>,
 }
 
 impl SyntaxStyle {
@@ -160,6 +164,8 @@ impl SyntaxStyle {
             blame_line: None,
             bracket_pair_guides: Vec::new(),
             last_rope_len: std::cell::Cell::new(0),
+            show_whitespace: false,
+            semantic_tokens: Vec::new(),
         }
     }
 
@@ -169,6 +175,27 @@ impl SyntaxStyle {
 }
 
 // ── Word-highlight helpers ─────────────────────────────────────────────────
+
+/// Map LSP semantic token type name to a highlight color.
+fn semantic_token_color(token_type: &str) -> floem::peniko::Color {
+    use floem::peniko::Color;
+    match token_type {
+        "namespace" | "module"   => Color::from_rgba8(200, 180, 255, 220),
+        "type" | "class" | "struct" | "interface" | "enum" | "typeParameter"
+                                 => Color::from_rgba8(86, 210, 190, 220),
+        "function" | "method"    => Color::from_rgba8(100, 180, 255, 220),
+        "macro"                  => Color::from_rgba8(220, 150, 100, 220),
+        "variable" | "property"  => Color::from_rgba8(200, 210, 220, 210),
+        "parameter"              => Color::from_rgba8(180, 220, 180, 210),
+        "enumMember"             => Color::from_rgba8(150, 220, 150, 220),
+        "keyword" | "modifier"   => Color::from_rgba8(200, 100, 160, 220),
+        "comment"                => Color::from_rgba8(120, 140, 120, 200),
+        "string"                 => Color::from_rgba8(200, 220, 130, 220),
+        "number"                 => Color::from_rgba8(180, 220, 160, 220),
+        "operator"               => Color::from_rgba8(220, 220, 220, 210),
+        _                        => Color::from_rgba8(200, 200, 200, 200),
+    }
+}
 
 /// Returns (start_byte, end_byte, word) for the identifier/word under `offset`,
 /// or `None` if the cursor is not on an identifier character.
@@ -455,6 +482,34 @@ impl Styling for SyntaxStyle {
                 }
             }
         }
+
+        // ── Semantic token highlighting ────────────────────────────────────
+        // Override syntect colors with LSP semantic token colors for this line.
+        if !self.semantic_tokens.is_empty() {
+            if let Some(doc) = &self.doc {
+                let rope = doc.rope_text();
+                let line_start = rope.offset_of_line(line);
+                let line_end = if line + 1 < rope.num_lines() {
+                    rope.offset_of_line(line + 1)
+                } else {
+                    rope.len()
+                };
+                for tok in &self.semantic_tokens {
+                    if tok.line as usize != line {
+                        continue;
+                    }
+                    let tok_start = line_start + tok.start as usize;
+                    let tok_end = (tok_start + tok.length as usize).min(line_end);
+                    if tok_start >= line_end || tok_end <= line_start {
+                        continue;
+                    }
+                    let color = semantic_token_color(&tok.token_type);
+                    let local_start = tok_start.saturating_sub(line_start);
+                    let local_end = tok_end.saturating_sub(line_start);
+                    attrs.add_span(local_start..local_end, default.clone().color(color));
+                }
+            }
+        }
     }
 
     fn apply_layout_styles(
@@ -700,6 +755,56 @@ impl Styling for SyntaxStyle {
                 }
             }
         }
+
+        // ── Whitespace rendering ───────────────────────────────────────────────
+        // When show_whitespace is enabled, draw a tiny dot at the center of each
+        // space and a short tick at the start of each tab character.
+        if self.show_whitespace {
+            if let Some(doc) = &self.doc {
+                let rope = doc.rope_text();
+                let line_start = rope.offset_of_line(line);
+                let line_end = if line + 1 < rope.num_lines() {
+                    rope.offset_of_line(line + 1)
+                } else {
+                    rope.len()
+                };
+                let line_text = rope.slice_to_cow(line_start..line_end).to_string();
+                let line_h = self.inner.line_height(edid, line) as f64;
+                let dot_color = floem::peniko::Color::from_rgba8(130, 130, 150, 100);
+                let tab_color = floem::peniko::Color::from_rgba8(130, 130, 150, 70);
+                let mut byte_offset = 0usize;
+                for ch in line_text.chars() {
+                    if ch == ' ' {
+                        let x = layout_line.text.hit_position(byte_offset).point.x
+                            + self.char_width_px * 0.5 - 0.5;
+                        let y = line_h * 0.5 - 0.5;
+                        layout_line.extra_style.push(LineExtraStyle {
+                            x,
+                            y,
+                            width: Some(1.0),
+                            height: 1.0,
+                            bg_color: Some(dot_color),
+                            under_line: None,
+                            wave_line: None,
+                        });
+                    } else if ch == '\t' {
+                        let x = layout_line.text.hit_position(byte_offset).point.x + 1.0;
+                        let y = line_h * 0.5 - 0.5;
+                        // Draw a small horizontal tick (arrow-like) for tabs
+                        layout_line.extra_style.push(LineExtraStyle {
+                            x,
+                            y,
+                            width: Some(6.0),
+                            height: 1.0,
+                            bg_color: Some(tab_color),
+                            under_line: None,
+                            wave_line: None,
+                        });
+                    }
+                    byte_offset += ch.len_utf8();
+                }
+            }
+        }
     }
 
     fn paint_caret(&self, edid: EditorId, line: usize) -> bool {
@@ -937,6 +1042,8 @@ pub fn editor_panel(
     organize_imports_on_save: RwSignal<bool>,
     inlay_hints: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     inlay_hints_toggle: RwSignal<bool>,
+    show_whitespace: RwSignal<bool>,
+    semantic_tokens: RwSignal<Vec<crate::lsp_bridge::SemanticTokenEntry>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -3781,12 +3888,16 @@ pub fn editor_panel(
                     } else {
                         active_blame.set(String::new());
                     }
-                    // Convert start offsets \u2192 (start, end) ranges using query length.
+                    // Convert start offsets → (start, end) ranges using query length.
                     new_style.find_match_ranges = if find_q.is_empty() {
                         vec![]
                     } else {
                         find_offs.iter().map(|&s| (s, s + find_q.len())).collect()
                     };
+                    new_style.show_whitespace = show_whitespace.get();
+                    // Apply semantic tokens for this file path
+                    let sem_toks = semantic_tokens.get();
+                    new_style.semantic_tokens = sem_toks;
                     editor_for_style.update_styling(Rc::new(new_style));
                 });
             }

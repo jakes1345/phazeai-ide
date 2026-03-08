@@ -429,6 +429,42 @@ impl LspClient {
         Ok(result.unwrap_or_default())
     }
 
+    /// Request full semantic tokens for a document (textDocument/semanticTokens/full).
+    /// Returns `(token_types, data)` where `data` is the raw delta-encoded u32 array.
+    /// Returns empty if the server does not support semantic tokens.
+    pub async fn semantic_tokens_full(
+        &self,
+        path: &Path,
+    ) -> Result<(Vec<String>, Vec<u32>), String> {
+        let uri = path_to_uri(path)?;
+        let params = SemanticTokensParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        match self
+            .send_request::<request::SemanticTokensFullRequest>(params)
+            .await
+        {
+            Ok(Some(SemanticTokensResult::Tokens(tokens))) => {
+                let data: Vec<u32> = tokens.data.iter().flat_map(|t| {
+                    [t.delta_line, t.delta_start, t.length, t.token_type, t.token_modifiers_bitset]
+                }).collect();
+                // Try to get token type legend from server capabilities if cached.
+                // For now return empty legend; bridge will decode with fallback.
+                Ok((vec![], data))
+            }
+            Ok(Some(SemanticTokensResult::Partial(partial))) => {
+                let data: Vec<u32> = partial.data.iter().flat_map(|t| {
+                    [t.delta_line, t.delta_start, t.length, t.token_type, t.token_modifiers_bitset]
+                }).collect();
+                Ok((vec![], data))
+            }
+            Ok(None) => Ok((vec![], vec![])),
+            Err(_) => Ok((vec![], vec![])), // Server doesn't support semantic tokens
+        }
+    }
+
     pub async fn folding_range(&self, path: &Path) -> Result<Vec<FoldingRange>, String> {
         let uri = path_to_uri(path)?;
         let params = FoldingRangeParams {
