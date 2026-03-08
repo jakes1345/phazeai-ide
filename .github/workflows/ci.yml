@@ -11,59 +11,301 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build:
-    name: Build & Test
+  # ─────────────────────────────────────────────
+  # 1. FORMAT CHECK (fast fail)
+  # ─────────────────────────────────────────────
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt
+      - run: cargo fmt --all --check
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+  # ─────────────────────────────────────────────
+  # 2. CLIPPY LINTS
+  # ─────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Install system dependencies
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-
+      - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libxkbcommon-dev \
-            libwayland-dev \
-            libxcb-xfixes0-dev \
-            libxcb-shape0-dev \
-            libxcb-render0-dev \
-            libxcb-randr0-dev \
-            libxcb-composite0-dev \
-            libxcb-icccm4-dev \
-            libxcb-image0-dev \
-            libxcb-keysyms1-dev \
-            libxcb-util0-dev \
-            libxcb-xrm-dev \
-            libxkbcommon-x11-dev \
-            libudev-dev \
-            libinput-dev \
-            libdbus-1-dev \
-            python3
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
+            libudev-dev libinput-dev libdbus-1-dev python3
+      - run: cargo clippy --workspace -- -D warnings
 
-      - name: Build workspace
+  # ─────────────────────────────────────────────
+  # 3. SECURITY AUDIT
+  # ─────────────────────────────────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --quiet
+      - run: cargo audit
+
+  # ─────────────────────────────────────────────
+  # 4. CORE ENGINE TESTS
+  # ─────────────────────────────────────────────
+  test-core:
+    name: Test / phazeai-core
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-core-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-core-
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3
+      - name: Test phazeai-core
+        run: cargo test -p phazeai-core --all-features
+      - name: Test ollama-rs
+        run: cargo test -p ollama-rs
+
+  # ─────────────────────────────────────────────
+  # 5. CLI TESTS
+  # ─────────────────────────────────────────────
+  test-cli:
+    name: Test / phazeai-cli
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cli-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cli-
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3
+      - name: Test phazeai-cli
+        run: cargo test -p phazeai-cli
+      - name: Build CLI binary
+        run: cargo build -p phazeai-cli
+      - name: Smoke test CLI
+        run: |
+          ./target/debug/phazeai --help
+          ./target/debug/phazeai --version
+
+  # ─────────────────────────────────────────────
+  # 6. UI STATE TESTS (headless — no GPU needed)
+  # ─────────────────────────────────────────────
+  test-ui:
+    name: Test / phazeai-ui
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ui-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-ui-
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
+            libudev-dev libinput-dev libdbus-1-dev python3
+      - name: Test phazeai-ui (state + integration)
+        run: cargo test -p phazeai-ui
+      - name: Build UI binary
+        run: cargo build -p phazeai-ui
+
+  # ─────────────────────────────────────────────
+  # 7. AGENT / LLM MOCK TESTS
+  # ─────────────────────────────────────────────
+  test-agent:
+    name: Test / Agent Loop (mock)
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-agent-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-agent-
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3
+      - name: Run agent + tool tests
+        env:
+          # No real API key — only mock/unit tests run
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: |
+          cargo test -p phazeai-core -- \
+            approval \
+            tool \
+            command \
+            agent \
+            mcp \
+            repo_map \
+            context \
+            persistence \
+            workspace \
+            outline \
+            linter \
+            --test-threads=4
+
+  # ─────────────────────────────────────────────
+  # 8. GIT INTEGRATION TESTS
+  # ─────────────────────────────────────────────
+  test-git:
+    name: Test / Git Integration
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-git-
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@phazeai.dev"
+          git config --global user.name "PhazeAI CI"
+      - name: Run git tests
+        run: cargo test -p phazeai-core --test git_tests
+
+  # ─────────────────────────────────────────────
+  # 9. MCP SERVER CONNECTIVITY TEST
+  # ─────────────────────────────────────────────
+  test-mcp:
+    name: Test / MCP Bridge
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-mcp-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-mcp-
+      - name: Install Node.js (for MCP server)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3
+      - name: Run MCP bridge tests
+        run: cargo test -p phazeai-core -- mcp --test-threads=1
+
+  # ─────────────────────────────────────────────
+  # 10. SIDECAR TESTS
+  # ─────────────────────────────────────────────
+  test-sidecar:
+    name: Test / phazeai-sidecar
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-sidecar-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-sidecar-
+      - name: Install Python + deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3 python3-pip
+          pip3 install --quiet sentence-transformers numpy 2>/dev/null || true
+      - name: Test sidecar
+        run: cargo test -p phazeai-sidecar
+
+  # ─────────────────────────────────────────────
+  # 11. FULL WORKSPACE BUILD GATE
+  # ─────────────────────────────────────────────
+  build-gate:
+    name: Build Gate (all crates)
+    runs-on: ubuntu-latest
+    needs: [ test-core, test-cli, test-ui, test-agent, test-git, test-mcp, test-sidecar, clippy ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-full-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-full-
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
+            libudev-dev libinput-dev libdbus-1-dev python3
+      - name: Build all crates
         run: cargo build --workspace
-
-      - name: Run tests
+      - name: Verify binaries exist
+        run: |
+          ls -lh target/debug/phazeai
+          ls -lh target/debug/phazeai-ui
+      - name: Run full test suite
         run: cargo test --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
-      - name: Check formatting
-        run: cargo fmt --all --check
