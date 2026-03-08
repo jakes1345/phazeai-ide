@@ -68,3 +68,7 @@ final_ui_v*.png
 
 # Sisyphus internal state
 .sisyphus/
+
+# Training datasets (too large for git)
+training/datasets/*.jsonl
+training/datasets/**/*.jsonl
