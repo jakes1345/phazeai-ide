@@ -133,6 +133,13 @@ impl TermLine {
     }
 }
 
+// ── Scrollback limit ──────────────────────────────────────────────────────────
+
+/// Maximum number of scrollback lines kept in TermState.
+/// Oldest lines are trimmed when exceeded.
+/// // configurable via settings TODO
+const MAX_SCROLLBACK: usize = 10_000;
+
 // ── Terminal State ────────────────────────────────────────────────────────────
 
 struct TermState {
@@ -143,6 +150,8 @@ struct TermState {
     cur_bold: bool,
     cursor_col: usize,
     pub cwd: String,
+    /// Line indices (into `lines`) where OSC 133;A (prompt start) was seen.
+    pub prompt_line_positions: Vec<usize>,
 }
 
 impl TermState {
@@ -155,14 +164,27 @@ impl TermState {
             cur_bold: false,
             cursor_col: 0,
             cwd: String::new(),
+            prompt_line_positions: Vec::new(),
         }
     }
 
     fn commit_line(&mut self) {
         let line = std::mem::replace(&mut self.current_line, TermLine::new());
         self.lines.push(line);
-        if self.lines.len() > term_consts::SCROLLBACK_LIMIT {
-            self.lines.drain(0..term_consts::SCROLLBACK_DRAIN);
+        // Enforce scrollback cap — trim oldest lines when exceeded.
+        // MAX_SCROLLBACK is the configurable limit (see const above).
+        if self.lines.len() > MAX_SCROLLBACK {
+            let drain_count = self.lines.len() - MAX_SCROLLBACK;
+            self.lines.drain(0..drain_count);
+            // Shift all prompt positions down; discard any that fell out.
+            self.prompt_line_positions.retain_mut(|pos| {
+                if *pos < drain_count {
+                    false
+                } else {
+                    *pos -= drain_count;
+                    true
+                }
+            });
         }
         self.cursor_col = 0;
     }
@@ -360,6 +382,40 @@ impl Perform for VtePerformer {
                 }
             }
         }
+
+        // OSC 133: shell integration markers (FinalTerm / VSCode shell integration protocol)
+        // \e]133;A\a = prompt start  — record current line position
+        // \e]133;B\a = prompt end
+        // \e]133;C\a = command start (after Enter)
+        // \e]133;D\a = command end / exit code
+        if params[0] == b"133" && params.len() > 1 {
+            let marker = String::from_utf8_lossy(params[1]);
+            // Only track prompt-start (A) for jump navigation
+            if marker.starts_with('A') {
+                if let Ok(mut s) = self.state.lock() {
+                    // Commit current line so the position is accurate
+                    if !s.current_line.is_empty() {
+                        let line = std::mem::replace(&mut s.current_line, TermLine::new());
+                        s.lines.push(line);
+                        if s.lines.len() > MAX_SCROLLBACK {
+                            let drain_count = s.lines.len() - MAX_SCROLLBACK;
+                            s.lines.drain(0..drain_count);
+                            s.prompt_line_positions.retain_mut(|pos| {
+                                if *pos < drain_count {
+                                    false
+                                } else {
+                                    *pos -= drain_count;
+                                    true
+                                }
+                            });
+                        }
+                        s.cursor_col = 0;
+                    }
+                    let pos = s.lines.len();
+                    s.prompt_line_positions.push(pos);
+                }
+            }
+        }
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         if byte == b'c' {
@@ -553,6 +609,15 @@ fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color, fon
 /// `term_font_size`: reactive font size (8..32).
 /// `find_open`: whether the find bar is visible.
 /// `find_query`: current find query string.
+/// Shared PTY writer type — Arc so it can be cloned and shared with callers.
+type SharedPtyWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
+/// One independent PTY terminal session.
+/// `pty_writer_out`: if `Some`, will be set to `Arc::clone` of this terminal's PTY
+/// writer once the PTY is ready — callers can then write bytes directly to the shell
+/// (Feature 3 — Run in Terminal).
+/// `prompt_positions_out`: if `Some`, receives live-updated prompt line positions from
+/// OSC 133;A markers so the caller can implement prev/next command navigation (Feature 2).
 fn single_terminal(
     theme: RwSignal<PhazeTheme>,
     clear_nonce: RwSignal<u64>,
@@ -561,12 +626,21 @@ fn single_terminal(
     term_font_size: RwSignal<u32>,
     find_open: RwSignal<bool>,
     find_query: RwSignal<String>,
+    pty_writer_out: Option<RwSignal<Option<SharedPtyWriter>>>,
+    prompt_positions_out: Option<RwSignal<Vec<usize>>>,
 ) -> impl IntoView {
     // ── Shared VTE state ──────────────────────────────────────────────────
     let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
-    let pty_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> = Arc::new(Mutex::new(None));
+    let pty_writer: SharedPtyWriter = Arc::new(Mutex::new(None));
     // Keep the master PTY handle alive so we can resize it when the view dimensions change.
     let pty_master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> = Arc::new(Mutex::new(None));
+
+    // Expose pty_writer Arc to caller (Feature 3: Run in Terminal).
+    // The Arc is shared — the background PTY thread fills Option<Box<dyn Write+Send>> inside it.
+    // The caller just clones the Arc and writes to it after the PTY is ready.
+    if let Some(out_sig) = pty_writer_out {
+        out_sig.set(Some(Arc::clone(&pty_writer)));
+    }
 
     // ── Update channel: reader thread → reactive signal ───────────────────
     let (update_tx, update_rx) = std::sync::mpsc::channel::<()>();
@@ -635,14 +709,15 @@ fn single_terminal(
                 Err(e) => eprintln!("PTY take_writer error: {e}"),
             }
 
-            // Inject PROMPT_COMMAND for OSC 7 working directory tracking
+            // Inject PROMPT_COMMAND for OSC 7 (cwd) and OSC 133;A (shell integration) tracking
             {
                 let pty_w2 = Arc::clone(&pty_writer_t);
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_millis(300));
                     if let Ok(mut guard) = pty_w2.lock() {
                         if let Some(ref mut w) = *guard {
-                            let cmd = "export PROMPT_COMMAND='printf \"\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
+                            // OSC 7 reports cwd; OSC 133;A marks prompt start for jump navigation
+                            let cmd = "export PROMPT_COMMAND='printf \"\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
                             let _ = w.write_all(cmd.as_bytes());
                             let _ = w.flush();
                         }
@@ -706,6 +781,10 @@ fn single_terminal(
                 lines.set(all_lines);
                 line_version.update(|v| *v += 1);
                 cursor_col_sig.set(state.cursor_col);
+                // Feature 2: propagate prompt positions to caller if requested
+                if let Some(pp_sig) = prompt_positions_out {
+                    pp_sig.set(state.prompt_line_positions.clone());
+                }
             }
         });
     }
@@ -1059,7 +1138,14 @@ fn single_terminal(
 /// A "+" button spawns a new shell session. Each session is independent —
 /// closing a tab kills that PTY (the OS will reap it) and removes the tab.
 /// Tab names can be edited by double-clicking the tab label.
-pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
+///
+/// `run_in_terminal_text`: when set to `Some(text)` from outside (e.g. editor
+/// right-click → "Run in Terminal"), writes `text\n` to the active PTY and
+/// resets the signal to `None`.
+pub fn terminal_panel(
+    theme: RwSignal<PhazeTheme>,
+    run_in_terminal_text: RwSignal<Option<String>>,
+) -> impl IntoView {
     // Shell selector index (cycles through SHELLS)
     let shell_idx: RwSignal<usize> = create_rw_signal(0usize);
 
@@ -1073,17 +1159,75 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     let term_find_open: RwSignal<bool> = create_rw_signal(false);
     let term_find_query: RwSignal<String> = create_rw_signal(String::new());
 
-    // Each entry: (id, name_signal, clear_nonce_signal, shell_str, cwd_signal)
-    let tab_data: RwSignal<Vec<(usize, RwSignal<String>, RwSignal<u64>, String, RwSignal<String>)>> =
-        create_rw_signal(vec![(
-            1usize,
-            create_rw_signal("bash".to_string()),
-            create_rw_signal(0u64),
-            "bash".to_string(),
-            create_rw_signal(String::new()),
-        )]);
+    // Feature 3: active terminal's PTY writer — set by single_terminal once PTY is ready.
+    // Writing bytes to this sends them directly to the active shell.
+    let active_pty_writer: RwSignal<Option<SharedPtyWriter>> = create_rw_signal(None);
+
+    // Feature 2: command marker positions from OSC 133;A in the active terminal.
+    // Each entry is a line index where a new prompt started.
+    let prompt_positions: RwSignal<Vec<usize>> = create_rw_signal(Vec::new());
+    // Current position in the command-marker navigation list (for prev/next jumps).
+    let cmd_marker_idx: RwSignal<usize> = create_rw_signal(0usize);
+    // Target line to scroll to (None = no pending scroll).
+    // TODO: wire to actual scroll-to-line once Floem exposes stable scroll API.
+    let _cmd_scroll_target: RwSignal<Option<usize>> = create_rw_signal(None);
+
+    // Feature 3: watch run_in_terminal_text — write to active PTY when set.
+    {
+        let writer_sig = active_pty_writer;
+        create_effect(move |_| {
+            if let Some(text) = run_in_terminal_text.get() {
+                if let Some(ref writer_arc) = writer_sig.get_untracked() {
+                    if let Ok(mut guard) = writer_arc.lock() {
+                        if let Some(ref mut w) = *guard {
+                            let mut payload = text.into_bytes();
+                            payload.push(b'\n');
+                            let _ = w.write_all(&payload);
+                            let _ = w.flush();
+                        }
+                    }
+                }
+                run_in_terminal_text.set(None);
+            }
+        });
+    }
+
+    // Each entry: (id, name_signal, clear_nonce_signal, shell_str, cwd_signal,
+    //              pty_writer_signal, prompt_positions_signal)
+    // pty_writer_signal: receives the PTY writer Arc once single_terminal initialises
+    // prompt_positions_signal: receives OSC 133;A positions from that terminal
+    type TabEntry = (
+        usize,
+        RwSignal<String>,
+        RwSignal<u64>,
+        String,
+        RwSignal<String>,
+        RwSignal<Option<SharedPtyWriter>>,
+        RwSignal<Vec<usize>>,
+    );
+    let tab_data: RwSignal<Vec<TabEntry>> = create_rw_signal(vec![(
+        1usize,
+        create_rw_signal("bash".to_string()),
+        create_rw_signal(0u64),
+        "bash".to_string(),
+        create_rw_signal(String::new()),
+        create_rw_signal(None::<SharedPtyWriter>),
+        create_rw_signal(Vec::<usize>::new()),
+    )]);
     let active_tab: RwSignal<usize> = create_rw_signal(1);
     let next_id: RwSignal<usize> = create_rw_signal(2);
+
+    // Keep active_pty_writer and prompt_positions in sync with the active tab's signals.
+    {
+        create_effect(move |_| {
+            let id = active_tab.get();
+            let data = tab_data.get();
+            if let Some((_, _, _, _, _, pw_sig, pp_sig)) = data.iter().find(|(tid, ..)| *tid == id) {
+                active_pty_writer.set(pw_sig.get());
+                prompt_positions.set(pp_sig.get());
+            }
+        });
+    }
     // Which tab is currently being renamed (None = none)
     let editing_tab: RwSignal<Option<usize>> = create_rw_signal(None);
     let rename_text: RwSignal<String> = create_rw_signal(String::new());
@@ -1092,7 +1236,7 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     let tab_bar = stack((
         // Scrollable row of tabs
         dyn_stack(
-            move || tab_data.get().into_iter().map(|(id, ns, cs, _sh, cwd)| (id, ns, cs, cwd)).collect::<Vec<_>>(),
+            move || tab_data.get().into_iter().map(|(id, ns, cs, _sh, cwd, _pw, _pp)| (id, ns, cs, cwd)).collect::<Vec<_>>(),
             |(id, _, _, _)| *id,
             move |(id, name_sig, _clear_sig, cwd_sig)| {
                 let is_active = move || active_tab.get() == id;
@@ -1197,9 +1341,9 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                             .apply_if(!show, |s| s.display(Display::None))
                     })
                     .on_click_stop(move |_| {
-                        tab_data.update(|data| data.retain(|(tid, _, _, _, _)| *tid != id));
+                        tab_data.update(|data| data.retain(|(tid, _, _, _, _, _, _)| *tid != id));
                         if active_tab.get_untracked() == id {
-                            if let Some((last, _, _, _, _)) = tab_data.get_untracked().last() {
+                            if let Some((last, _, _, _, _, _, _)) = tab_data.get_untracked().last() {
                                 active_tab.set(*last);
                             }
                         }
@@ -1222,6 +1366,62 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             },
         )
         .style(|s| s.flex_row().flex_grow(1.0)),
+        // Feature 2: "⬆" prev command button — jump to previous OSC 133;A prompt marker
+        container(label(|| "\u{2B06}"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let has_markers = !prompt_positions.get().is_empty();
+                s.padding_horiz(6.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(if has_markers { p.text_muted } else { p.text_muted.with_alpha(0.35) })
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(2.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                let positions = prompt_positions.get_untracked();
+                if positions.is_empty() {
+                    return;
+                }
+                let cur = cmd_marker_idx.get_untracked();
+                let new_idx = cur.saturating_sub(1);
+                cmd_marker_idx.set(new_idx);
+                // TODO: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
+                let _target_line = positions.get(new_idx).copied();
+            }),
+        // Feature 2: "⬇" next command button — jump to next OSC 133;A prompt marker
+        container(label(|| "\u{2B07}"))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let has_markers = !prompt_positions.get().is_empty();
+                s.padding_horiz(6.0)
+                    .padding_vert(5.0)
+                    .font_size(11.0)
+                    .color(if has_markers { p.text_muted } else { p.text_muted.with_alpha(0.35) })
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(p.border)
+                    .border_radius(3.0)
+                    .margin_right(4.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                let positions = prompt_positions.get_untracked();
+                if positions.is_empty() {
+                    return;
+                }
+                let cur = cmd_marker_idx.get_untracked();
+                let new_idx = (cur + 1).min(positions.len().saturating_sub(1));
+                cmd_marker_idx.set(new_idx);
+                // TODO: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
+                let _target_line = positions.get(new_idx).copied();
+            }),
         // "A-" zoom out button
         container(label(|| "A-"))
             .style(move |s| {
@@ -1311,8 +1511,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 let id = active_tab.get_untracked();
-                if let Some((_, _, clear_sig, _, _)) =
-                    tab_data.get_untracked().into_iter().find(|(tid, _, _, _, _)| *tid == id)
+                if let Some((_, _, clear_sig, _, _, _, _)) =
+                    tab_data.get_untracked().into_iter().find(|(tid, ..)| *tid == id)
                 {
                     clear_sig.update(|v| *v += 1);
                 }
@@ -1356,6 +1556,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                         create_rw_signal(0u64),
                         shell_name,
                         create_rw_signal(String::new()),
+                        create_rw_signal(None::<SharedPtyWriter>),
+                        create_rw_signal(Vec::<usize>::new()),
                     ))
                 });
                 active_tab.set(id);
@@ -1376,8 +1578,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     // ── Split pane: independent PTY with fixed ID 999 ────────────────────
     let split_clear: RwSignal<u64> = create_rw_signal(0u64);
     let split_cwd: RwSignal<String> = create_rw_signal(String::new());
-    // split_term_view is created once and hidden/shown based on term_split
-    // We use a stable shell (bash) for the split pane
+    // split_term_view is created once and hidden/shown based on term_split.
+    // Split pane doesn't participate in run-in-terminal or command marker tracking.
     let split_term_view = single_terminal(
         theme,
         split_clear,
@@ -1386,6 +1588,8 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         term_font_size,
         term_find_open,
         term_find_query,
+        None,
+        None,
     );
 
     // ── Terminal instances (one per tab, hidden when not active) ──────────
@@ -1394,12 +1598,23 @@ pub fn terminal_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             tab_data
                 .get()
                 .into_iter()
-                .map(|(id, _, cs, shell, cwd)| (id, cs, shell, cwd))
+                .map(|(id, _, cs, shell, cwd, pw_sig, pp_sig)| (id, cs, shell, cwd, pw_sig, pp_sig))
                 .collect::<Vec<_>>()
         },
-        |(id, _, _, _)| *id,
-        move |(id, clear_sig, shell, cwd_sig)| {
-            single_terminal(theme, clear_sig, shell, cwd_sig, term_font_size, term_find_open, term_find_query).style(move |s| {
+        |(id, _, _, _, _, _)| *id,
+        move |(id, clear_sig, shell, cwd_sig, pw_sig, pp_sig)| {
+            single_terminal(
+                theme,
+                clear_sig,
+                shell,
+                cwd_sig,
+                term_font_size,
+                term_find_open,
+                term_find_query,
+                Some(pw_sig),
+                Some(pp_sig),
+            )
+            .style(move |s| {
                 s.size_full()
                     .apply_if(active_tab.get() != id, |s| s.display(Display::None))
             })

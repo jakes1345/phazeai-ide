@@ -910,6 +910,17 @@ pub fn editor_panel(
     shrink_selection_nonce: RwSignal<u64>,
     relative_line_numbers: RwSignal<bool>,
     yank_ring: RwSignal<Vec<String>>,
+    tab_size: RwSignal<u32>,
+    line_ending_out: RwSignal<&'static str>,
+    lsp_folding_ranges: RwSignal<Vec<(u32, u32)>>,
+    transform_title_nonce: RwSignal<u64>,
+    format_selection_nonce: RwSignal<u64>,
+    save_no_format_nonce: RwSignal<u64>,
+    fold_all_nonce: RwSignal<u64>,
+    unfold_all_nonce: RwSignal<u64>,
+    code_lens_sig: RwSignal<Vec<crate::lsp_bridge::CodeLensEntry>>,
+    code_lens_visible: RwSignal<bool>,
+    organize_imports_on_save: RwSignal<bool>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -941,6 +952,7 @@ pub fn editor_panel(
                     }
                 });
             }
+            tabs.update(|list| disambiguate_tab_names(list));
             let n = tabs.get_untracked().len();
             if n > 0 {
                 active_idx.set(Some(n - 1));
@@ -1102,6 +1114,7 @@ pub fn editor_panel(
                         name,
                         dirty: create_rw_signal(false),
                     });
+                    disambiguate_tab_names(list);
                     active_idx.set(Some(list.len() - 1));
                 });
             }
@@ -1127,6 +1140,12 @@ pub fn editor_panel(
             let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::SaveFile {
                 path: tab.path.clone(),
             });
+            // Organize imports if enabled
+            if organize_imports_on_save.get_untracked() {
+                let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::OrganizeImports {
+                    path: tab.path.clone(),
+                });
+            }
             // Run formatter in background — file is already saved to disk
             let path = tab.path.clone();
             std::thread::spawn(move || {
@@ -1299,6 +1318,19 @@ pub fn editor_panel(
                     .unwrap_or_else(|| std::fs::read_to_string(&tab.path).unwrap_or_default())
             };
 
+            // ── .editorconfig: read and apply for this tab ────────────────
+            {
+                let ec = read_editorconfig(&tab.path, &workspace_root);
+                if active_idx.get_untracked() == Some(i) {
+                    if let Some(size) = ec.indent_size {
+                        tab_size.set(size);
+                    }
+                    if let Some(eol) = ec.end_of_line {
+                        line_ending_out.set(eol);
+                    }
+                }
+            }
+
             // ── Auto-detect indentation from first 2000 bytes ─────────────
             {
                 let sample = content.as_bytes();
@@ -1324,11 +1356,7 @@ pub fn editor_panel(
                 } else {
                     0 // no evidence — keep current
                 };
-                if detected > 0 && active_idx.get_untracked() == Some(i) {
-                    // Update global tab_size from editor_panel param
-                    // tab_size is RwSignal<u32> from outer scope
-                    let _ = detected; // stored; apply via make_base_styling below if needed
-                }
+                let _ = detected;
                 let _ = sample_len;
             }
 
@@ -1580,8 +1608,22 @@ pub fn editor_panel(
                     } else {
                         rope.slice_to_cow(0..len).to_string()
                     };
-                    let send = create_ext_action(fold_scope, move |ranges: Vec<(usize, usize)>| {
-                        fold_state.update(|(r, _f)| *r = ranges);
+                    // Snapshot LSP folding ranges on the UI thread before spawning.
+                    let lsp_ranges: Vec<(usize, usize)> = lsp_folding_ranges
+                        .get_untracked()
+                        .into_iter()
+                        .map(|(s, e)| (s as usize, e as usize))
+                        .collect();
+                    let send = create_ext_action(fold_scope, move |brace_ranges: Vec<(usize, usize)>| {
+                        // Merge brace-based and LSP ranges, dedup by start line.
+                        let mut merged = brace_ranges;
+                        for lsp_r in &lsp_ranges {
+                            if !merged.iter().any(|b| b.0 == lsp_r.0) {
+                                merged.push(*lsp_r);
+                            }
+                        }
+                        merged.sort_by_key(|r| r.0);
+                        fold_state.update(|(r, _f)| *r = merged);
                     });
                     if text.is_empty() {
                         send(vec![]);
@@ -3251,6 +3293,157 @@ pub fn editor_panel(
                 });
             }
 
+            // ── Title case transform ──────────────────────────────────────
+            {
+                let doc_tt = doc.clone();
+                let last_tt = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let n = transform_title_nonce.get();
+                    if n == 0 || n == last_tt.get_untracked() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_tt.set(n);
+                    let cur = cursor_sig.get_untracked();
+                    let offset = cur.offset();
+                    let (sel_start, sel_end) =
+                        if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
+                            } else { (offset, offset) }
+                        } else { (offset, offset) };
+                    if sel_start >= sel_end { return; }
+                    let raw = doc_tt.rope_text().slice_to_cow(sel_start..sel_end).to_string();
+                    // Title-case: capitalize first letter of each word
+                    let titled: String = raw
+                        .split_inclusive(|c: char| c.is_whitespace() || c == '-' || c == '_')
+                        .map(|word| {
+                            let mut chars = word.chars();
+                            match chars.next() {
+                                None => String::new(),
+                                Some(first) => {
+                                    let upper: String = first.to_uppercase().collect();
+                                    upper + chars.as_str()
+                                }
+                            }
+                        })
+                        .collect();
+                    doc_tt.edit_single(
+                        Selection::region(sel_start, sel_end),
+                        &titled,
+                        EditType::InsertChars,
+                    );
+                    dirty.set(true);
+                });
+            }
+
+            // ── Format selection ──────────────────────────────────────────
+            {
+                let doc_fs = doc.clone();
+                let last_fs = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let n = format_selection_nonce.get();
+                    if n == 0 || n == last_fs.get_untracked() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_fs.set(n);
+                    let cur = cursor_sig.get_untracked();
+                    let offset = cur.offset();
+                    let (sel_start, sel_end) =
+                        if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
+                            } else { (offset, offset) }
+                        } else { (offset, offset) };
+                    if sel_start >= sel_end { return; }
+                    let rope = doc_fs.rope_text();
+                    let sel_text = rope.slice_to_cow(sel_start..sel_end).to_string();
+                    let ext = tabs.get_untracked()
+                        .get(i)
+                        .and_then(|t| t.path.extension().and_then(|e| e.to_str()).map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    // Async: format on bg thread, apply on UI thread via create_ext_action
+                    let scope = Scope::new();
+                    let doc_apply = doc_fs.clone();
+                    let send = create_ext_action(scope, move |result: Option<String>| {
+                        if let Some(text) = result {
+                            doc_apply.edit_single(
+                                Selection::region(sel_start, sel_end),
+                                &text,
+                                EditType::InsertChars,
+                            );
+                            dirty.set(true);
+                        }
+                    });
+                    std::thread::spawn(move || {
+                        let result: Option<String> = (|| {
+                            let tmp = std::env::temp_dir().join(format!(
+                                "phaze_fmt_{}.{}",
+                                std::process::id(),
+                                if ext.is_empty() { "txt".to_string() } else { ext.clone() }
+                            ));
+                            std::fs::write(&tmp, &sel_text).ok()?;
+                            let (cmd, args): (&str, Vec<String>) = match ext.as_str() {
+                                "rs" => ("rustfmt", vec![tmp.to_string_lossy().to_string()]),
+                                "js" | "ts" | "jsx" | "tsx" => ("prettier", vec!["--write".to_string(), tmp.to_string_lossy().to_string()]),
+                                "py" => ("black", vec![tmp.to_string_lossy().to_string()]),
+                                _ => return None,
+                            };
+                            let ok = std::process::Command::new(cmd).args(&args).status().ok()?.success();
+                            if !ok { return None; }
+                            let result = std::fs::read_to_string(&tmp).ok()?;
+                            let _ = std::fs::remove_file(&tmp);
+                            Some(result)
+                        })();
+                        send(result);
+                    });
+                });
+            }
+
+            // ── Save without formatting ───────────────────────────────────
+            {
+                let doc_snf = doc.clone();
+                let tab_path_snf = tab.path.clone();
+                let tab_dirty_snf = tab.dirty;
+                let lsp_cmd_snf = lsp_cmd.clone();
+                let last_snf = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let n = save_no_format_nonce.get();
+                    if n == 0 || n == last_snf.get_untracked() { return; }
+                    if active_idx.get() != Some(i) { return; }
+                    last_snf.set(n);
+                    let content = doc_snf.text().to_string();
+                    if std::fs::write(&tab_path_snf, content).is_ok() {
+                        tab_dirty_snf.set(false);
+                        let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
+                            path: tab_path_snf.clone(),
+                        });
+                    }
+                });
+            }
+
+            // ── Fold all / Unfold all ─────────────────────────────────────
+            {
+                let last_fa = create_rw_signal(0u64);
+                let last_ua = create_rw_signal(0u64);
+                create_effect(move |_| {
+                    let fa = fold_all_nonce.get();
+                    let ua = unfold_all_nonce.get();
+                    if active_idx.get() != Some(i) { return; }
+                    if fa > 0 && fa != last_fa.get_untracked() {
+                        last_fa.set(fa);
+                        fold_state.update(|(ranges, folded)| {
+                            for (start, _end) in ranges.iter() {
+                                folded.insert(*start);
+                            }
+                        });
+                    }
+                    if ua > 0 && ua != last_ua.get_untracked() {
+                        last_ua.set(ua);
+                        fold_state.update(|(_ranges, folded)| {
+                            folded.clear();
+                        });
+                    }
+                });
+            }
+
             // ── Ghost text / FIM debounce ─────────────────────────────────
             // Fires on every cursor move for the active tab. Waits 300 ms
             // then sends a single-turn LLM request for an inline completion.
@@ -4176,10 +4369,50 @@ pub fn editor_panel(
         })
     };
 
+    // ── Code lens bar (shown above editor when there are entries) ────────────
+    let code_lens_bar = {
+        let cl_theme = theme;
+        dyn_stack(
+            move || {
+                if !code_lens_visible.get() { return vec![]; }
+                code_lens_sig.get()
+            },
+            |entry| entry.line,
+            move |entry| {
+                let t = cl_theme.get();
+                let p = &t.palette;
+                label(move || format!("● {} ─ line {}", entry.label, entry.line + 1))
+                    .style(move |s| {
+                        let t2 = cl_theme.get();
+                        s.padding_horiz(10.0)
+                            .padding_vert(2.0)
+                            .font_size(11.0)
+                            .color(t2.palette.accent)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .hover(|s| s.color(t2.palette.text_primary))
+                    })
+                    .on_click_stop(move |_| {
+                        // Jump to the line containing this lens entry
+                        ext_goto_line.set(entry.line + 1);
+                    })
+            },
+        )
+        .style(move |s| {
+            let visible = code_lens_visible.get() && !code_lens_sig.get().is_empty();
+            s.flex_row()
+                .flex_wrap(floem::style::FlexWrap::Wrap)
+                .width_full()
+                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 40))
+                .border_bottom(1.0)
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     stack((
         tab_bar,
         breadcrumbs,
         sticky_bar,
+        code_lens_bar,
         find_bar,
         editor_row,
         ghost_strip,
@@ -4410,4 +4643,149 @@ fn tab_bar_view(
             .border_color(p.border)
             .min_width(0.0)
     })
+}
+
+// ── Tab name disambiguation ───────────────────────────────────────────────────
+
+/// For any tabs that share the same filename, update their `name` field to include
+/// one parent directory segment: e.g. `"src/main.rs"` instead of `"main.rs"`.
+/// Tabs with unique filenames keep their plain filename.
+fn disambiguate_tab_names(list: &mut Vec<TabState>) {
+    // Count how many tabs share each base filename.
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for tab in list.iter() {
+        let base = tab
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        *counts.entry(base).or_insert(0) += 1;
+    }
+
+    for tab in list.iter_mut() {
+        let base = tab
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if counts.get(&base).copied().unwrap_or(0) > 1 {
+            // Include one parent directory segment.
+            let parent = tab
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string());
+            tab.name = if let Some(parent_name) = parent {
+                format!("{}/{}", parent_name, base)
+            } else {
+                base
+            };
+        } else {
+            tab.name = base;
+        }
+    }
+}
+
+// ── .editorconfig support ─────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct EditorConfigSettings {
+    pub indent_size: Option<u32>,
+    pub use_tabs: Option<bool>,
+    pub end_of_line: Option<&'static str>,
+}
+
+/// Walk up from `file_path`'s parent toward `workspace_root`, reading `.editorconfig`
+/// files (innermost wins for each key).  Parses `[*]` and extension-specific sections.
+pub fn read_editorconfig(file_path: &std::path::Path, workspace_root: &std::path::Path) -> EditorConfigSettings {
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut indent_size: Option<u32> = None;
+    let mut use_tabs: Option<bool> = None;
+    let mut end_of_line: Option<&'static str> = None;
+
+    // Collect directories from file's parent up to workspace_root (inclusive).
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut cur = file_path.parent().map(|p| p.to_path_buf());
+    loop {
+        let Some(dir) = cur else { break };
+        dirs.push(dir.clone());
+        if dir == workspace_root {
+            break;
+        }
+        // Stop at filesystem root
+        let parent = dir.parent().map(|p| p.to_path_buf());
+        if parent.as_deref() == Some(&dir) {
+            break;
+        }
+        cur = parent;
+    }
+
+    // Process from outermost (workspace_root) to innermost (file's dir) so inner wins.
+    dirs.reverse();
+
+    for dir in &dirs {
+        let ec_path = dir.join(".editorconfig");
+        let Ok(content) = std::fs::read_to_string(&ec_path) else {
+            continue;
+        };
+
+        let mut in_matching_section = false;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.starts_with(';') || line.is_empty() {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                let glob = &line[1..line.len() - 1];
+                // Match [*], [*.ext], [*.{ext1,ext2}], or [**]
+                in_matching_section = glob == "*"
+                    || glob == "**"
+                    || glob == &format!("*.{ext}")
+                    || glob.starts_with("*.{")
+                        && glob.ends_with('}')
+                        && glob[3..glob.len() - 1]
+                            .split(',')
+                            .any(|e| e.trim() == ext);
+                continue;
+            }
+            if !in_matching_section {
+                continue;
+            }
+            // Parse key = value
+            if let Some(eq) = line.find('=') {
+                let key = line[..eq].trim().to_lowercase();
+                let val = line[eq + 1..].trim().to_lowercase();
+                match key.as_str() {
+                    "indent_style" => {
+                        use_tabs = Some(val == "tab");
+                    }
+                    "indent_size" | "tab_width" => {
+                        if let Ok(n) = val.parse::<u32>() {
+                            indent_size = Some(n);
+                        }
+                    }
+                    "end_of_line" => {
+                        end_of_line = match val.as_str() {
+                            "crlf" => Some("CRLF"),
+                            "lf" => Some("LF"),
+                            "cr" => Some("LF"), // treat CR as LF for display
+                            _ => None,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    EditorConfigSettings {
+        indent_size,
+        use_tabs,
+        end_of_line,
+    }
 }

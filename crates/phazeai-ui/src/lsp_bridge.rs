@@ -58,6 +58,12 @@ pub enum LspCommand {
     RequestPeekDefinition { path: PathBuf, line: u32, col: u32 },
     /// Request code lens for the current file (textDocument/codeLens).
     RequestCodeLens { path: PathBuf },
+    /// Request go-to-implementation at cursor position (Ctrl+F12).
+    RequestImplementation { path: PathBuf, line: u32, col: u32 },
+    /// Request LSP folding ranges for the current file (textDocument/foldingRange).
+    RequestFoldingRanges { path: PathBuf },
+    /// Organize imports on save using LSP textDocument/codeAction source.organizeImports.
+    OrganizeImports { path: PathBuf },
     /// Graceful shutdown.
     Shutdown,
 }
@@ -159,8 +165,9 @@ pub struct CompletionEntry {
 
 /// Start the LSP bridge.
 ///
-/// Returns a 13-tuple: `(cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig,
-/// sig_help_sig, doc_syms_sig, ws_syms_sig, lsp_progress_sig, peek_def_lines_sig, code_lens_sig)`.
+/// Returns a 14-tuple: `(cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig,
+/// sig_help_sig, doc_syms_sig, ws_syms_sig, lsp_progress_sig, peek_def_lines_sig, code_lens_sig,
+/// folding_ranges_sig)`.
 ///
 /// **Call from within a Floem reactive scope.**
 pub fn start_lsp_bridge(
@@ -179,6 +186,7 @@ pub fn start_lsp_bridge(
     RwSignal<Option<String>>,
     RwSignal<Vec<String>>,
     RwSignal<Vec<CodeLensEntry>>,
+    RwSignal<Vec<(u32, u32)>>,
 ) {
     let (lsp_cmd_tx, mut lsp_cmd_rx) = mpsc::unbounded_channel::<LspCommand>();
 
@@ -206,6 +214,8 @@ pub fn start_lsp_bridge(
     let (peek_tx, peek_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(4);
     // Code lens entries: bridge → Floem
     let (code_lens_tx, code_lens_rx) = std::sync::mpsc::sync_channel::<Vec<CodeLensEntry>>(4);
+    // Folding ranges: bridge → Floem (start_line, end_line pairs, 0-based)
+    let (fold_ranges_tx, fold_ranges_rx) = std::sync::mpsc::sync_channel::<Vec<(u32, u32)>>(4);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -524,6 +534,86 @@ pub fn start_lsp_bridge(
                                     let _ = ws_syms_tx2.try_send(entries);
                                 });
                             }
+                            Some(LspCommand::RequestImplementation { path, line, col }) => {
+                                if let Some(client) = manager.client_for_file(&path).cloned() {
+                                    let path2  = path.clone();
+                                    let evt_tx = event_tx.clone();
+                                    tokio::spawn(async move {
+                                        match client.goto_implementation(&path2, line, col).await {
+                                            Ok(locs) => {
+                                                let _ = evt_tx.send(LspEvent::Definition(locs));
+                                            }
+                                            Err(e) => eprintln!("[LSP] implementation error: {e}"),
+                                        }
+                                    });
+                                }
+                            }
+                            Some(LspCommand::RequestFoldingRanges { path }) => {
+                                let fold_tx2 = fold_ranges_tx.clone();
+                                let path2 = path.clone();
+                                let client_opt = manager.client_for_file(&path).cloned();
+                                tokio::spawn(async move {
+                                    if let Some(client) = client_opt {
+                                        match client.folding_range(&path2).await {
+                                            Ok(ranges) => {
+                                                let pairs: Vec<(u32, u32)> = ranges
+                                                    .into_iter()
+                                                    .filter(|r| r.start_line != r.end_line)
+                                                    .map(|r| (r.start_line, r.end_line))
+                                                    .collect();
+                                                let _ = fold_tx2.try_send(pairs);
+                                            }
+                                            Err(e) => eprintln!("[LSP] folding_range error: {e}"),
+                                        }
+                                    }
+                                });
+                            }
+                            Some(LspCommand::OrganizeImports { path }) => {
+                                if let Some(client) = manager.client_for_file(&path).cloned() {
+                                    let path2 = path.clone();
+                                    tokio::spawn(async move {
+                                        // Build a codeAction request with only source.organizeImports
+                                        let uri_str = format!("file://{}", path2.display());
+                                        let uri: lsp_types::Uri = match uri_str.parse() {
+                                            Ok(u) => u,
+                                            Err(_) => return,
+                                        };
+                                        let params = lsp_types::CodeActionParams {
+                                            text_document: lsp_types::TextDocumentIdentifier {
+                                                uri: uri.clone(),
+                                            },
+                                            range: lsp_types::Range {
+                                                start: lsp_types::Position { line: 0, character: 0 },
+                                                end:   lsp_types::Position { line: 0, character: 0 },
+                                            },
+                                            context: lsp_types::CodeActionContext {
+                                                diagnostics: vec![],
+                                                only: Some(vec![
+                                                    lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                                                ]),
+                                                trigger_kind: None,
+                                            },
+                                            work_done_progress_params: Default::default(),
+                                            partial_result_params: Default::default(),
+                                        };
+                                        match client.code_action(params).await {
+                                            Ok(actions) => {
+                                                for action in actions {
+                                                    if let lsp_types::CodeActionOrCommand::CodeAction(ca) = action {
+                                                        if let Some(edit) = ca.edit {
+                                                            apply_workspace_edit(edit, "", "");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[LSP] organize imports error: {e}"),
+                                        }
+                                    });
+                                } else {
+                                    // Fallback: sort Rust imports locally
+                                    let _ = organize_rust_imports(&path);
+                                }
+                            }
                             Some(LspCommand::Shutdown) | None => break,
                         }
                     }
@@ -659,6 +749,7 @@ pub fn start_lsp_bridge(
     let progress_chan = create_signal_from_channel(progress_rx);
     let peek_chan = create_signal_from_channel(peek_rx);
     let code_lens_chan = create_signal_from_channel(code_lens_rx);
+    let fold_ranges_chan = create_signal_from_channel(fold_ranges_rx);
 
     let diag_sig: RwSignal<Vec<DiagEntry>> = create_rw_signal(vec![]);
     let comp_sig: RwSignal<Vec<CompletionEntry>> = create_rw_signal(vec![]);
@@ -672,6 +763,7 @@ pub fn start_lsp_bridge(
     let lsp_progress_sig: RwSignal<Option<String>> = create_rw_signal(None);
     let peek_def_lines_sig: RwSignal<Vec<String>> = create_rw_signal(vec![]);
     let code_lens_sig: RwSignal<Vec<CodeLensEntry>> = create_rw_signal(vec![]);
+    let folding_ranges_sig: RwSignal<Vec<(u32, u32)>> = create_rw_signal(vec![]);
 
     create_effect(move |_| {
         if let Some(entries) = diag_chan.get() {
@@ -733,6 +825,11 @@ pub fn start_lsp_bridge(
             code_lens_sig.set(entries);
         }
     });
+    create_effect(move |_| {
+        if let Some(pairs) = fold_ranges_chan.get() {
+            folding_ranges_sig.set(pairs);
+        }
+    });
 
     (
         lsp_cmd_tx,
@@ -748,6 +845,7 @@ pub fn start_lsp_bridge(
         lsp_progress_sig,
         peek_def_lines_sig,
         code_lens_sig,
+        folding_ranges_sig,
     )
 }
 

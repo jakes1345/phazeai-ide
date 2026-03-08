@@ -150,7 +150,10 @@ pub fn explorer_panel(
     workspace_root: RwSignal<PathBuf>,
     open_file: RwSignal<Option<PathBuf>>,
     theme: RwSignal<PhazeTheme>,
+    open_tabs: RwSignal<Vec<PathBuf>>,
 ) -> impl IntoView {
+    // ── Open Editors section state ─────────────────────────────────────────
+    let open_editors_expanded: RwSignal<bool> = create_rw_signal(true);
     let entries: RwSignal<Vec<FileEntry>> = create_rw_signal(vec![]);
     let root_sig = workspace_root;
 
@@ -503,6 +506,93 @@ pub fn explorer_panel(
                                 }
                             }));
 
+                            // ── Copy Absolute Path ────────────────────────────
+                            let abs_path = entry_path3.clone();
+                            let menu =
+                                menu.entry(MenuItem::new("Copy Absolute Path").action(move || {
+                                    let path_str = if let Ok(abs) = abs_path.canonicalize() {
+                                        abs.to_string_lossy().to_string()
+                                    } else {
+                                        abs_path.to_string_lossy().to_string()
+                                    };
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(path_str);
+                                    }
+                                }));
+
+                            // ── Copy Relative Path ────────────────────────────
+                            let rel_path_entry = entry_path3.clone();
+                            let menu =
+                                menu.entry(MenuItem::new("Copy Relative Path").action(move || {
+                                    let root = root_ref.get();
+                                    let rel = rel_path_entry
+                                        .strip_prefix(&root)
+                                        .map(|r| r.to_string_lossy().to_string())
+                                        .unwrap_or_else(|_| {
+                                            rel_path_entry.to_string_lossy().to_string()
+                                        });
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(rel);
+                                    }
+                                }));
+
+                            let menu = menu.separator();
+
+                            // ── Duplicate (files only) ────────────────────────
+                            let menu = if !is_dir3 {
+                                let dup_path = entry_path3.clone();
+                                let stem = dup_path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "file".to_string());
+                                let ext_str = dup_path
+                                    .extension()
+                                    .map(|e| e.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                let dup_dir = dup_path
+                                    .parent()
+                                    .map(|p| p.to_path_buf())
+                                    .unwrap_or_else(|| root_ref.get());
+                                menu.entry(MenuItem::new("Duplicate").action(move || {
+                                    let new_path =
+                                        find_unique_path(&dup_dir, &format!("{}_copy", stem), &ext_str);
+                                    let _ = std::fs::copy(&dup_path, &new_path);
+                                    entries_ref.update(|list| {
+                                        let root = root_ref.get();
+                                        *list = rebuild_tree(&root, list);
+                                    });
+                                }))
+                            } else {
+                                menu
+                            };
+
+                            // ── Reveal in File Manager ────────────────────────
+                            let reveal_path = entry_path3.clone();
+                            let menu =
+                                menu.entry(MenuItem::new("Reveal in File Manager").action(
+                                    move || {
+                                        let dir = if reveal_path.is_dir() {
+                                            reveal_path.clone()
+                                        } else {
+                                            reveal_path
+                                                .parent()
+                                                .map(|p| p.to_path_buf())
+                                                .unwrap_or_else(|| reveal_path.clone())
+                                        };
+                                        #[cfg(target_os = "linux")]
+                                        let _ = std::process::Command::new("xdg-open")
+                                            .arg(&dir)
+                                            .spawn();
+                                        #[cfg(target_os = "macos")]
+                                        let _ =
+                                            std::process::Command::new("open").arg(&dir).spawn();
+                                        #[cfg(target_os = "windows")]
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg(&dir)
+                                            .spawn();
+                                    },
+                                ));
+
                             show_context_menu(menu, None);
                         }
                     }
@@ -692,7 +782,141 @@ pub fn explorer_panel(
             }
         });
 
-    stack((header, panel_body)).style(move |s| {
+    // ── Open Editors section ───────────────────────────────────────────────
+    let open_editors_section = {
+        // Section header row
+        let oe_header = container(
+            stack((
+                // Toggle arrow
+                label(move || if open_editors_expanded.get() { "▾" } else { "▸" }).style(
+                    move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        s.font_size(10.0).color(p.text_muted).margin_right(4.0)
+                    },
+                ),
+                // Title with count
+                label(move || {
+                    let n = open_tabs.get().len();
+                    format!("OPEN EDITORS ({})", n)
+                })
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    s.font_size(11.0)
+                        .color(p.text_muted)
+                        .font_weight(floem::text::Weight::BOLD)
+                        .flex_grow(1.0)
+                }),
+            ))
+            .style(|s| s.items_center()),
+        )
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.padding_horiz(8.0)
+                .padding_vert(4.0)
+                .width_full()
+                .cursor(floem::style::CursorStyle::Pointer)
+                .hover(|s| s.background(p.bg_elevated))
+        })
+        .on_click_stop(move |_| {
+            open_editors_expanded.update(|v| *v = !*v);
+        });
+
+        // Rows for each open tab
+        let oe_rows = dyn_stack(
+            move || open_tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
+            |(i, _)| *i,
+            move |(_, tab_path)| {
+                let filename = tab_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| tab_path.to_string_lossy().to_string());
+                let tab_path_click = tab_path.clone();
+                let tab_path_close = tab_path.clone();
+                let tab_path_active = tab_path.clone();
+                let is_row_hovered = create_rw_signal(false);
+
+                container(
+                    stack((
+                        // Indent spacer
+                        container(label(|| "")).style(|s| s.width(20.0)),
+                        // Filename label
+                        label(move || filename.clone()).style(move |s| {
+                            let t = theme.get();
+                            let p = &t.palette;
+                            let is_active = open_file.get().as_ref() == Some(&tab_path_active);
+                            s.font_size(13.0)
+                                .color(if is_active { p.accent } else { p.text_primary })
+                                .flex_grow(1.0)
+                        }),
+                        // Close button (×) — only visible on hover
+                        container(label(|| "\u{00D7}"))
+                            .style(move |s| {
+                                let t = theme.get();
+                                let p = &t.palette;
+                                s.font_size(12.0)
+                                    .color(p.text_muted)
+                                    .padding_horiz(4.0)
+                                    .border_radius(3.0)
+                                    .cursor(floem::style::CursorStyle::Pointer)
+                                    .apply_if(!is_row_hovered.get(), |s| {
+                                        s.display(floem::style::Display::None)
+                                    })
+                                    .hover(|s| s.background(p.bg_elevated))
+                            })
+                            .on_click_stop(move |_| {
+                                open_tabs.update(|list| {
+                                    list.retain(|p| p != &tab_path_close);
+                                });
+                            }),
+                    ))
+                    .style(|s| s.items_center()),
+                )
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    s.height(22.0)
+                        .padding_horiz(4.0)
+                        .border_radius(3.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .apply_if(is_row_hovered.get(), |s| s.background(p.bg_elevated))
+                })
+                .on_click_stop(move |_| {
+                    open_file.set(Some(tab_path_click.clone()));
+                })
+                .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                    is_row_hovered.set(true);
+                })
+                .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                    is_row_hovered.set(false);
+                })
+            },
+        )
+        .style(move |s| {
+            s.flex_col()
+                .padding_horiz(4.0)
+                .gap(1.0)
+                .apply_if(!open_editors_expanded.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        });
+
+        // Border separator below the section
+        container(
+            stack((oe_header, oe_rows)).style(|s| s.flex_col()),
+        )
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.width_full()
+                .border_bottom(1.0)
+                .border_color(p.border)
+        })
+    };
+
+    stack((header, open_editors_section, panel_body)).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.flex_col()

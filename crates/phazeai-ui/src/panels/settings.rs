@@ -222,9 +222,17 @@ fn editor_section(state: IdeState) -> impl IntoView {
 
     let auto_save = state.auto_save;
     let word_wrap = state.word_wrap;
+    let organize_imports = state.organize_imports_on_save;
+    let code_lens_vis = state.code_lens_visible;
+    let inlay_hints = state.inlay_hints_toggle;
+    let relative_ln = state.relative_line_numbers;
     let theme_as = state.theme;
     let as_hov = floem::reactive::create_rw_signal(false);
     let ww_hov = floem::reactive::create_rw_signal(false);
+    let oi_hov = floem::reactive::create_rw_signal(false);
+    let cl_hov = floem::reactive::create_rw_signal(false);
+    let ih_hov = floem::reactive::create_rw_signal(false);
+    let rln_hov = floem::reactive::create_rw_signal(false);
 
     let toggle_row =
         |label_text: &'static str,
@@ -273,6 +281,10 @@ fn editor_section(state: IdeState) -> impl IntoView {
         stepper_row("Tab Size", tab_size, 1, 16, state.clone()),
         toggle_row("Auto Save (1.5 s delay)", auto_save, as_hov, theme_as),
         toggle_row("Word Wrap  (Alt+Z)", word_wrap, ww_hov, theme_as),
+        toggle_row("Organize Imports on Save", organize_imports, oi_hov, theme_as),
+        toggle_row("Show Code Lens", code_lens_vis, cl_hov, theme_as),
+        toggle_row("Inlay Hints  (Ctrl+Alt+I)", inlay_hints, ih_hov, theme_as),
+        toggle_row("Relative Line Numbers", relative_ln, rln_hov, theme_as),
     ))
     .style(|s| s.flex_col().width_full())
 }

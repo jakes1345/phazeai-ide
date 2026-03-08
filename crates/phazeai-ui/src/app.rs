@@ -334,6 +334,27 @@ pub struct IdeState {
     pub peek_def_open: RwSignal<bool>,
     /// Code lens entries for the active file.
     pub code_lens: RwSignal<Vec<CodeLensEntry>>,
+    /// LSP folding ranges for the active file: (start_line, end_line) pairs (0-based).
+    pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
+    /// When true, automatically send OrganizeImports after saving the active file.
+    pub organize_imports_on_save: RwSignal<bool>,
+    /// Text to send to the active terminal PTY (Run in Terminal / Run File).
+    /// Set by editor context menu; terminal_panel watches and resets to None after writing.
+    pub run_in_terminal_text: RwSignal<Option<String>>,
+    /// Incremented to title-case the current selection in the active editor.
+    pub transform_title_nonce: RwSignal<u64>,
+    /// Incremented to format only the current selection (rustfmt/prettier on selection).
+    pub format_selection_nonce: RwSignal<u64>,
+    /// Incremented to save the active file without running format-on-save.
+    pub save_no_format_nonce: RwSignal<u64>,
+    /// Incremented to fold all detected ranges in the active editor.
+    pub fold_all_nonce: RwSignal<u64>,
+    /// Incremented to unfold all ranges in the active editor.
+    pub unfold_all_nonce: RwSignal<u64>,
+    /// Code-lens entries for the active file (shown as inline gutter labels).
+    pub code_lens_visible: RwSignal<bool>,
+    /// Whether LSP inlay hints are shown in the editor.
+    pub inlay_hints_toggle: RwSignal<bool>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -584,6 +605,7 @@ impl IdeState {
             lsp_progress,
             peek_def_lines,
             code_lens,
+            folding_ranges,
         ) = start_lsp_bridge(workspace.clone());
 
         // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
@@ -647,6 +669,22 @@ impl IdeState {
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
                     let _ = lsp_tx.send(LspCommand::RequestDocumentSymbols { path });
+                }
+            });
+        }
+
+        // Request LSP folding ranges + code lens whenever the active file changes.
+        {
+            let lsp_tx = lsp_cmd.clone();
+            let lsp_tx2 = lsp_cmd.clone();
+            create_effect(move |_| {
+                if let Some(path) = open_file.get() {
+                    let _ = lsp_tx.send(LspCommand::RequestFoldingRanges { path });
+                }
+            });
+            create_effect(move |_| {
+                if let Some(path) = open_file.get() {
+                    let _ = lsp_tx2.send(LspCommand::RequestCodeLens { path });
                 }
             });
         }
@@ -828,6 +866,16 @@ impl IdeState {
             peek_def_lines,
             peek_def_open: peek_def_open_sig,
             code_lens,
+            folding_ranges,
+            organize_imports_on_save: create_rw_signal(false),
+            run_in_terminal_text: create_rw_signal(None),
+            transform_title_nonce: create_rw_signal(0u64),
+            format_selection_nonce: create_rw_signal(0u64),
+            save_no_format_nonce: create_rw_signal(0u64),
+            fold_all_nonce: create_rw_signal(0u64),
+            unfold_all_nonce: create_rw_signal(0u64),
+            code_lens_visible: create_rw_signal(true),
+            inlay_hints_toggle: create_rw_signal(true),
         }
     }
 }
@@ -1010,6 +1058,34 @@ fn all_commands() -> Vec<PaletteCommand> {
                 s.goto_overlay_open.set(true);
                 s.goto_overlay_input.set(String::new());
             },
+        },
+        PaletteCommand {
+            label: "Toggle Organize Imports on Save",
+            action: |s| s.organize_imports_on_save.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Transform: To Title Case",
+            action: |s| s.transform_title_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Format Selection",
+            action: |s| s.format_selection_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Save Without Formatting",
+            action: |s| s.save_no_format_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Fold All",
+            action: |s| s.fold_all_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Unfold All",
+            action: |s| s.unfold_all_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "Toggle Code Lens",
+            action: |s| s.code_lens_visible.update(|v| *v = !*v),
         },
     ]
 }
@@ -1571,7 +1647,7 @@ fn placeholder_tab(tab_name: &'static str, state: IdeState) -> impl IntoView {
 }
 
 fn left_panel(state: IdeState) -> impl IntoView {
-    let explorer = explorer_panel(state.workspace_root, state.open_file, state.theme);
+    let explorer = explorer_panel(state.workspace_root, state.open_file, state.theme, state.open_tabs);
 
     let explorer_wrap = container(explorer).style({
         let state = state.clone();
@@ -2867,7 +2943,7 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             }),
             // Content
             stack((
-                container(terminal_panel(state.theme)).style(move |s| {
+                container(terminal_panel(state.theme, state.run_in_terminal_text)).style(move |s| {
                     s.width_full()
                         .height_full()
                         .apply_if(current_tab.get() != Tab::Terminal, |s| {
@@ -4319,6 +4395,17 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.shrink_selection_nonce,
         state.relative_line_numbers,
         state.yank_ring,
+        state.tab_size,
+        state.line_ending,
+        state.folding_ranges,
+        state.transform_title_nonce,
+        state.format_selection_nonce,
+        state.save_no_format_nonce,
+        state.fold_all_nonce,
+        state.unfold_all_nonce,
+        state.code_lens,
+        state.code_lens_visible,
+        state.organize_imports_on_save,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4362,6 +4449,17 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // shrink_selection
         create_rw_signal(false), // relative_line_numbers
         create_rw_signal(Vec::<String>::new()), // yank_ring
+        state.tab_size,          // tab_size
+        state.line_ending,       // line_ending_out
+        create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (split pane)
+        create_rw_signal(0u64),  // transform_title_nonce
+        create_rw_signal(0u64),  // format_selection_nonce
+        create_rw_signal(0u64),  // save_no_format_nonce
+        create_rw_signal(0u64),  // fold_all_nonce
+        create_rw_signal(0u64),  // unfold_all_nonce
+        create_rw_signal(vec![]), // code_lens_sig
+        create_rw_signal(true),  // code_lens_visible
+        create_rw_signal(false), // organize_imports_on_save
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4453,6 +4551,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         let s_explain = s.clone();
                         let s_tests = s.clone();
                         let s_fix = s.clone();
+                        let s_run = s.clone();
+                        let s_run_file = s.clone();
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
@@ -4500,6 +4600,46 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                             "No diagnostic on this line",
                                         );
                                     }
+                                }
+                            }));
+                        // Run in Terminal / Run File entries
+                        let menu = menu
+                            .separator()
+                            .entry(MenuItem::new("Run in Terminal").action(move || {
+                                // Send selected text (from clipboard) to the active terminal.
+                                // If nothing is in the clipboard, send a placeholder.
+                                let text = if let Ok(mut cb) = arboard::Clipboard::new() {
+                                    cb.get_text().unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                                if !text.trim().is_empty() {
+                                    s_run.run_in_terminal_text.set(Some(text.trim().to_string()));
+                                    s_run.show_bottom_panel.set(true);
+                                    s_run.bottom_panel_tab.set(Tab::Terminal);
+                                }
+                            }))
+                            .entry(MenuItem::new("Run File").action(move || {
+                                // Build a shell command based on the active file's extension.
+                                if let Some(ref path) = s_run_file.open_file.get() {
+                                    let ext = path
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .unwrap_or("");
+                                    let path_str = path.to_string_lossy().to_string();
+                                    let cmd = match ext {
+                                        "rs" => "cargo run".to_string(),
+                                        "py" => format!("python3 {}", path_str),
+                                        "js" => format!("node {}", path_str),
+                                        "ts" => format!("npx ts-node {}", path_str),
+                                        "sh" => format!("bash {}", path_str),
+                                        "rb" => format!("ruby {}", path_str),
+                                        "go" => format!("go run {}", path_str),
+                                        _ => format!("./{}", path_str),
+                                    };
+                                    s_run_file.run_in_terminal_text.set(Some(cmd));
+                                    s_run_file.show_bottom_panel.set(true);
+                                    s_run_file.bottom_panel_tab.set(Tab::Terminal);
                                 }
                             }));
                         show_context_menu(menu, None);
@@ -4611,6 +4751,17 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),
         create_rw_signal(false), // relative_line_numbers
         create_rw_signal(Vec::<String>::new()), // yank_ring
+        state.tab_size,          // tab_size
+        state.line_ending,       // line_ending_out
+        create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (down pane)
+        create_rw_signal(0u64),  // transform_title_nonce
+        create_rw_signal(0u64),  // format_selection_nonce
+        create_rw_signal(0u64),  // save_no_format_nonce
+        create_rw_signal(0u64),  // fold_all_nonce
+        create_rw_signal(0u64),  // unfold_all_nonce
+        create_rw_signal(vec![]), // code_lens_sig
+        create_rw_signal(true),  // code_lens_visible
+        create_rw_signal(false), // organize_imports_on_save
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -5197,10 +5348,19 @@ pub fn launch_phaze_ide() {
                                             return;
                                         }
                                     }
-                                    // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition
+                                    // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition; Ctrl+F12 — go to implementation
                                     floem::keyboard::NamedKey::F12 => {
                                         if let Some((path, line, col)) = state.active_cursor.get() {
-                                            if shift {
+                                            if ctrl {
+                                                // Ctrl+F12: go to implementation
+                                                let _ = state.lsp_cmd.send(
+                                                    LspCommand::RequestImplementation {
+                                                        path,
+                                                        line,
+                                                        col,
+                                                    },
+                                                );
+                                            } else if shift {
                                                 // Shift+F12: find all references
                                                 let _ = state.lsp_cmd.send(
                                                     LspCommand::RequestReferences {
@@ -5363,6 +5523,20 @@ pub fn launch_phaze_ide() {
                             if ctrl && !shift && !alt && key_event.key.logical_key == Key::Character("g".into()) {
                                 state.goto_overlay_open.set(true);
                                 state.goto_overlay_input.set(String::new());
+                                return;
+                            }
+
+                            // Ctrl+Alt+S → save without formatting
+                            if ctrl && !shift && alt && key_event.key.logical_key == Key::Character("s".into()) {
+                                state.save_no_format_nonce.update(|v| *v += 1);
+                                return;
+                            }
+
+                            // Ctrl+Alt+I → toggle inlay hints
+                            if ctrl && !shift && alt && key_event.key.logical_key == Key::Character("i".into()) {
+                                state.inlay_hints_toggle.update(|v| *v = !*v);
+                                let msg = if state.inlay_hints_toggle.get() { "Inlay Hints: on" } else { "Inlay Hints: off" };
+                                show_toast(state.status_toast, msg);
                                 return;
                             }
 
@@ -5582,9 +5756,25 @@ pub fn launch_phaze_ide() {
                                         state.transform_lower_nonce.update(|v| *v += 1);
                                         return;
                                     }
+                                    // Ctrl+Shift+T → transform title case
+                                    if ch.as_str() == "t" {
+                                        state.transform_title_nonce.update(|v| *v += 1);
+                                        return;
+                                    }
                                     // Ctrl+Shift+J → join lines
                                     if ch.as_str() == "j" {
                                         state.join_line_nonce.update(|v| *v += 1);
+                                        return;
+                                    }
+                                    // Ctrl+Shift+V → cycle yank ring and paste
+                                    if ch.as_str() == "v" {
+                                        let ring = state.yank_ring.get();
+                                        if !ring.is_empty() {
+                                            let idx = (state.yank_ring_idx.get() + 1) % ring.len();
+                                            state.yank_ring_idx.set(idx);
+                                            let text = ring[idx].clone();
+                                            state.pending_completion.set(Some((text, 0)));
+                                        }
                                         return;
                                     }
                                 }

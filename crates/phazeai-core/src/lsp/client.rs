@@ -383,6 +383,59 @@ impl LspClient {
         Ok(symbols)
     }
 
+    /// Request go-to-implementation at a position (textDocument/implementation).
+    pub async fn goto_implementation(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, String> {
+        let uri = path_to_uri(path)?;
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = self
+            .send_request::<request::GotoImplementation>(params)
+            .await?;
+        match result {
+            Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
+            Some(GotoDefinitionResponse::Array(locs)) => Ok(locs),
+            Some(GotoDefinitionResponse::Link(_links)) => Ok(vec![]),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Request folding ranges for a document (textDocument/foldingRange).
+    pub async fn folding_range(&self, path: &Path) -> Result<Vec<FoldingRange>, String> {
+        let uri = path_to_uri(path)?;
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = self
+            .send_request::<request::FoldingRangeRequest>(params)
+            .await?;
+        Ok(result.unwrap_or_default())
+    }
+
+    /// Request code actions at a position (textDocument/codeAction).
+    pub async fn code_action(
+        &self,
+        params: lsp_types::CodeActionParams,
+    ) -> Result<Vec<lsp_types::CodeActionOrCommand>, String> {
+        let result = self
+            .send_request::<request::CodeActionRequest>(params)
+            .await?;
+        Ok(result.unwrap_or_default())
+    }
+
     /// Request workspace symbols matching a query string (Ctrl+T).
     pub async fn workspace_symbol(&self, query: &str) -> Result<Vec<SymbolInformation>, String> {
         use lsp_types::WorkspaceSymbolParams;

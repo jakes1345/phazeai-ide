@@ -24,6 +24,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let tree_view: RwSignal<bool> = create_rw_signal(false);
     let selected_idx: RwSignal<Option<usize>> = create_rw_signal(None);
 
+    // Search history — Up/Down cycles through past queries (capped at 50)
+    let search_history: RwSignal<Vec<String>> = create_rw_signal(Vec::new());
+    let history_idx: RwSignal<Option<usize>> = create_rw_signal(None);
+
     // ── Header ───────────────────────────────────────────────────────────────
     let header = container(
         stack((
@@ -187,19 +191,55 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     })
                     .on_event_stop(floem::event::EventListener::KeyDown, move |event| {
                         if let floem::event::Event::KeyDown(ke) = event {
-                            if ke.key.logical_key
-                                == floem::keyboard::Key::Named(floem::keyboard::NamedKey::Enter)
-                            {
-                                let root = state2.workspace_root.get();
-                                perform_search(
-                                    state2.clone(),
-                                    is_searching,
-                                    root,
-                                    use_regex,
-                                    case_sensitive,
-                                    include_glob,
-                                    exclude_glob,
-                                );
+                            use floem::keyboard::{Key, NamedKey};
+                            match &ke.key.logical_key {
+                                Key::Named(NamedKey::Enter) => {
+                                    let q = query.get_untracked();
+                                    if !q.trim().is_empty() {
+                                        // Push to history (deduplicate head, cap 50)
+                                        search_history.update(|h| {
+                                            h.retain(|s| s != &q);
+                                            h.insert(0, q.clone());
+                                            h.truncate(50);
+                                        });
+                                        history_idx.set(None);
+                                    }
+                                    let root = state2.workspace_root.get();
+                                    perform_search(
+                                        state2.clone(),
+                                        is_searching,
+                                        root,
+                                        use_regex,
+                                        case_sensitive,
+                                        include_glob,
+                                        exclude_glob,
+                                    );
+                                }
+                                Key::Named(NamedKey::ArrowUp) => {
+                                    let hist = search_history.get_untracked();
+                                    if hist.is_empty() { return; }
+                                    let next = match history_idx.get_untracked() {
+                                        None => 0,
+                                        Some(i) => (i + 1).min(hist.len() - 1),
+                                    };
+                                    history_idx.set(Some(next));
+                                    query.set(hist[next].clone());
+                                }
+                                Key::Named(NamedKey::ArrowDown) => {
+                                    let hist = search_history.get_untracked();
+                                    match history_idx.get_untracked() {
+                                        None | Some(0) => {
+                                            history_idx.set(None);
+                                            query.set(String::new());
+                                        }
+                                        Some(i) => {
+                                            let next = i - 1;
+                                            history_idx.set(Some(next));
+                                            query.set(hist[next].clone());
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }),
