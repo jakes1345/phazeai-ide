@@ -177,7 +177,7 @@ fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
             .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| {
-        theme.set(PhazeTheme::from_str(name));
+        theme.set(PhazeTheme::from_name(name));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         is_hovered.set(true);

@@ -80,6 +80,12 @@ pub enum VimMotion {
     // Selection ops (editor operations)
     ExpandSelection,   // Ctrl+Shift+→
     ShrinkSelection,   // Ctrl+Shift+←
+    /// Delete the current visual selection and exit visual mode.
+    DeleteVisualSelection,
+    /// Yank (copy) the current visual selection and exit visual mode.
+    YankVisualSelection,
+    /// Change (delete + enter insert) the current visual selection.
+    ChangeVisualSelection,
 }
 
 /// Global IDE state shared across all panels via Floem reactive system.
@@ -543,7 +549,7 @@ fn load_editor_config() -> (u32, u32) {
 
 impl IdeState {
     pub fn new(settings: &Settings) -> Self {
-        let _theme = PhazeTheme::from_str(&settings.editor.theme);
+        let _theme = PhazeTheme::from_name(&settings.editor.theme);
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let git_branch = create_rw_signal("main".to_string());
@@ -741,7 +747,7 @@ impl IdeState {
         }
 
         // Create persistent settings signals before Self so we can wire save effects.
-        let theme_signal = create_rw_signal(PhazeTheme::from_str(&session.theme));
+        let theme_signal = create_rw_signal(PhazeTheme::from_name(&session.theme));
         let font_size_signal = create_rw_signal(saved_font_size);
         let tab_size_signal = create_rw_signal(saved_tab_size);
 
@@ -1347,6 +1353,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
     let query = state.command_palette_query;
 
     // Build a filtered list of matching commands driven by the query signal.
+    #[allow(clippy::type_complexity)]
     let commands_list = move || -> Vec<(usize, &'static str, fn(IdeState))> {
         let q = query.get().to_lowercase();
         all_commands()
@@ -4205,7 +4212,7 @@ fn vim_ex_overlay(state: IdeState) -> impl IntoView {
     container(bar)
         .style(move |s| {
             s.absolute()
-                .inset_bottom(24.0)  // just above status bar
+                .inset_bottom(32.0)  // just above status bar
                 .inset_left(0)
                 .inset_right(0)
                 .z_index(490)
@@ -5232,8 +5239,7 @@ pub fn launch_phaze_ide() {
                             if let Event::PointerMove(pe) = e {
                                 let delta = pe.pos.x - move_s.panel_drag_start_x.get();
                                 let new_w = (move_s.panel_drag_start_width.get() + delta)
-                                    .max(80.0)
-                                    .min(700.0);
+                                    .clamp(80.0, 700.0);
                                 move_s.left_panel_width.set(new_w);
                                 move_s.show_left_panel.set(true);
                             }
@@ -5883,117 +5889,120 @@ pub fn launch_phaze_ide() {
                                         return;
                                     }
 
+                                    // Visual mode intercepts d/y/c to operate on selection
+                                    if state.vim_visual_mode.get_untracked() {
+                                        match ch_str {
+                                            "d" | "x" => {
+                                                state.vim_motion.set(Some(VimMotion::DeleteVisualSelection));
+                                                state.vim_visual_mode.set(false);
+                                                state.vim_last_motion.set(Some(VimMotion::DeleteVisualSelection));
+                                                return;
+                                            }
+                                            "y" => {
+                                                state.vim_motion.set(Some(VimMotion::YankVisualSelection));
+                                                state.vim_visual_mode.set(false);
+                                                return;
+                                            }
+                                            "c" => {
+                                                state.vim_visual_mode.set(false);
+                                                state.vim_normal_mode.set(false);
+                                                state.vim_motion.set(Some(VimMotion::ChangeVisualSelection));
+                                                state.vim_last_motion.set(Some(VimMotion::ChangeVisualSelection));
+                                                return;
+                                            }
+                                            _ => {} // fall through to normal motion handling
+                                        }
+                                    }
+
                                     // Single-key normal mode commands
                                     match ch_str {
                                         "h" => {
                                             state.vim_motion.set(Some(VimMotion::Left));
-                                            return;
                                         }
                                         "j" => {
                                             state.vim_motion.set(Some(VimMotion::Down));
-                                            return;
                                         }
                                         "k" => {
                                             state.vim_motion.set(Some(VimMotion::Up));
-                                            return;
                                         }
                                         "l" => {
                                             state.vim_motion.set(Some(VimMotion::Right));
-                                            return;
                                         }
                                         "w" => {
                                             state.vim_motion.set(Some(VimMotion::WordForward));
-                                            return;
                                         }
                                         "b" => {
                                             state.vim_motion.set(Some(VimMotion::WordBackward));
-                                            return;
                                         }
                                         "0" => {
                                             state.vim_motion.set(Some(VimMotion::LineStart));
-                                            return;
                                         }
                                         "$" => {
                                             state.vim_motion.set(Some(VimMotion::LineEnd));
-                                            return;
                                         }
                                         "x" => {
                                             state.vim_motion.set(Some(VimMotion::DeleteChar));
-                                            return;
                                         }
                                         "i" => {
                                             state.vim_normal_mode.set(false);
                                             state.vim_motion.set(Some(VimMotion::EnterInsert));
-                                            return;
                                         }
                                         "a" => {
                                             state.vim_normal_mode.set(false);
                                             state.vim_motion.set(Some(VimMotion::EnterInsertAfter));
-                                            return;
                                         }
                                         "o" => {
                                             state.vim_normal_mode.set(false);
                                             state
                                                 .vim_motion
                                                 .set(Some(VimMotion::EnterInsertNewlineBelow));
-                                            return;
                                         }
                                         // p / P — paste from vim register
                                         "p" => {
                                             state.vim_motion.set(Some(VimMotion::Paste));
-                                            return;
                                         }
                                         "P" => {
                                             state.vim_motion.set(Some(VimMotion::PasteBefore));
-                                            return;
                                         }
                                         // G — go to end of file
                                         "G" => {
                                             state.vim_motion.set(Some(VimMotion::GotoFileBottom));
-                                            return;
                                         }
                                         // A — insert at end of line
                                         "A" => {
                                             state.vim_normal_mode.set(false);
                                             state.vim_motion.set(Some(VimMotion::InsertAtLineEnd));
-                                            return;
                                         }
                                         // I — insert at start of line
                                         "I" => {
                                             state.vim_normal_mode.set(false);
                                             state.vim_motion.set(Some(VimMotion::InsertAtLineStart));
-                                            return;
                                         }
                                         // C — change to end of line (delete + insert)
                                         "C" => {
                                             state.vim_normal_mode.set(false);
                                             state.vim_motion.set(Some(VimMotion::ChangeToLineEnd));
-                                            return;
                                         }
                                         // D — delete to end of line
                                         "D" => {
                                             state.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
                                             state.vim_last_motion.set(Some(VimMotion::DeleteToLineEnd));
-                                            return;
                                         }
                                         // % — jump to matching bracket
                                         "%" => {
                                             state.vim_motion.set(Some(VimMotion::JumpMatchingBracket));
-                                            return;
                                         }
                                         // v — start char-wise visual mode
                                         "v" => {
                                             state.vim_visual_mode.set(true);
                                             state.vim_visual_line.set(false);
                                             state.vim_motion.set(Some(VimMotion::VisualCharStart));
-                                            return;
                                         }
                                         // V — start line-wise visual mode
                                         "V" => {
                                             state.vim_visual_mode.set(true);
                                             state.vim_visual_line.set(true);
                                             state.vim_motion.set(Some(VimMotion::VisualLineStart));
-                                            return;
                                         }
                                         // Escape in visual mode — return to normal
                                         // (handled in NamedKey::Escape section below)
@@ -6002,20 +6011,17 @@ pub fn launch_phaze_ide() {
                                             if let Some(last) = state.vim_last_motion.get() {
                                                 state.vim_motion.set(Some(last));
                                             }
-                                            return;
                                         }
                                         // : — open ex command bar
                                         ":" => {
                                             state.vim_ex_open.set(true);
                                             state.vim_ex_input.set(String::new());
-                                            return;
                                         }
                                         // d, g, y, c, r, m, ` — pending keys for two-key sequences
                                         "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
                                             state
                                                 .vim_pending_key
                                                 .set(Some(ch_str.chars().next().unwrap()));
-                                            return;
                                         }
                                         _ => {}
                                     }

@@ -1,8 +1,10 @@
 use floem::peniko::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ThemeVariant {
     // Cosmic / PhazeAI originals
+    #[default]
     MidnightBlue,
     Cyberpunk,
     Synthwave84,
@@ -20,11 +22,6 @@ pub enum ThemeVariant {
     Light,
 }
 
-impl Default for ThemeVariant {
-    fn default() -> Self {
-        Self::MidnightBlue
-    }
-}
 
 impl ThemeVariant {
     pub fn all() -> &'static [ThemeVariant] {
@@ -44,7 +41,7 @@ impl ThemeVariant {
         ]
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_name(s: &str) -> Self {
         match s.to_lowercase().replace([' ', '-', '_'], "").as_str() {
             "midnightblue" | "midnight" => Self::MidnightBlue,
             "cyberpunk" | "cyber" => Self::Cyberpunk,
@@ -693,8 +690,8 @@ impl PhazeTheme {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
-        Self::from_variant(ThemeVariant::from_str(s))
+    pub fn from_name(s: &str) -> Self {
+        Self::from_variant(ThemeVariant::from_name(s))
     }
 
     pub fn is_dark(&self) -> bool {

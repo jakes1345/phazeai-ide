@@ -333,7 +333,7 @@ fn extract_rust_symbols(content: &str) -> Vec<Symbol> {
             // Extract the type being implemented
             let name = sig
                 .replace("impl ", "")
-                .split(|c: char| c == '<' || c == ' ')
+                .split(['<', ' '])
                 .next()
                 .unwrap_or("")
                 .to_string();
@@ -466,9 +466,9 @@ fn extract_python_symbols(content: &str) -> Vec<Symbol> {
                     signature: sig,
                 });
             }
-        } else if trimmed.starts_with("class ") {
-            let name = trimmed[6..]
-                .split(|c: char| c == '(' || c == ':')
+        } else if let Some(rest) = trimmed.strip_prefix("class ") {
+            let name = rest
+                .split(['(', ':'])
                 .next()
                 .unwrap_or("")
                 .trim()
@@ -590,9 +590,9 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("func ") {
+        if let Some(func_rest) = trimmed.strip_prefix("func ") {
             let sig = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
-            let name = if trimmed.contains("(") && trimmed[5..].starts_with('(') {
+            let name = if trimmed.contains("(") && func_rest.starts_with('(') {
                 // Method: func (r *Receiver) Name(
                 let after_close = trimmed.find(") ").map(|i| &trimmed[i + 2..]).unwrap_or("");
                 after_close
@@ -602,7 +602,7 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
                     .trim()
                     .to_string()
             } else {
-                trimmed[5..]
+                func_rest
                     .split('(')
                     .next()
                     .unwrap_or("")
@@ -765,9 +765,9 @@ fn extract_ruby_symbols(content: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("def ") {
-            let name = trimmed[4..]
-                .split(|c: char| c == '(' || c == ' ')
+        if let Some(def_rest) = trimmed.strip_prefix("def ") {
+            let name = def_rest
+                .split(['(', ' '])
                 .next()
                 .unwrap_or("")
                 .to_string();
@@ -779,9 +779,9 @@ fn extract_ruby_symbols(content: &str) -> Vec<Symbol> {
                     signature: trimmed.to_string(),
                 });
             }
-        } else if trimmed.starts_with("class ") {
-            let name = trimmed[6..]
-                .split(|c: char| c == '<' || c == ' ')
+        } else if let Some(class_rest) = trimmed.strip_prefix("class ") {
+            let name = class_rest
+                .split(['<', ' '])
                 .next()
                 .unwrap_or("")
                 .trim()
@@ -794,8 +794,8 @@ fn extract_ruby_symbols(content: &str) -> Vec<Symbol> {
                     signature: name,
                 });
             }
-        } else if trimmed.starts_with("module ") {
-            let name = trimmed[7..].trim().to_string();
+        } else if let Some(module_rest) = trimmed.strip_prefix("module ") {
+            let name = module_rest.trim().to_string();
             if !name.is_empty() {
                 symbols.push(Symbol {
                     name: name.clone(),

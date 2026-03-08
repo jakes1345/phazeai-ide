@@ -479,10 +479,9 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
     let mut in_hunk = false;
 
     let raw_lines: Vec<&str> = raw.lines().collect();
-    let n = raw_lines.len();
 
-    for i in 0..n {
-        let line = raw_lines[i];
+    for line in &raw_lines {
+        let line = *line;
 
         if line.starts_with("diff ") || line.starts_with("index ") {
             // Flush pending hunk first.
@@ -685,11 +684,11 @@ fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
         .map(|open| {
             let rest = &raw[open + 1..];
             if date.is_empty() {
-                rest.splitn(2, ' ').next().unwrap_or("?").trim().to_string()
+                rest.split(' ').next().unwrap_or("?").trim().to_string()
             } else if let Some(dp) = rest.find(date.as_str()) {
                 rest[..dp].trim().to_string()
             } else {
-                rest.splitn(2, ' ').next().unwrap_or("?").trim().to_string()
+                rest.split(' ').next().unwrap_or("?").trim().to_string()
             }
         })
         .unwrap_or_else(|| "?".to_string());
@@ -784,6 +783,34 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Initial load
     full_refresh();
+
+    // Background watcher: auto-refresh when .git/index changes (e.g. after external git commands)
+    {
+        let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let refresh_sig = create_signal_from_channel(refresh_rx);
+
+        let root_for_watch = state.workspace_root.get_untracked();
+        std::thread::spawn(move || {
+            let git_index = root_for_watch.join(".git").join("index");
+            let mut last_mtime = git_index.metadata().ok()
+                .and_then(|m| m.modified().ok());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let current_mtime = git_index.metadata().ok()
+                    .and_then(|m| m.modified().ok());
+                if current_mtime != last_mtime {
+                    last_mtime = current_mtime;
+                    let _ = refresh_tx.try_send(());
+                }
+            }
+        });
+
+        create_effect(move |_| {
+            if refresh_sig.get().is_some() {
+                full_refresh();
+            }
+        });
+    }
 
     // Load stash list on startup
     {
@@ -1924,8 +1951,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .apply_if(!diff_shown.get(), |s| s.display(floem::style::Display::None))
             });
 
-            let root_for_diff = state_for_diff.workspace_root.clone();
-            let root_for_cp = state_for_diff.workspace_root.clone();
+            let root_for_diff = state_for_diff.workspace_root;
+            let root_for_cp = state_for_diff.workspace_root;
             let cp_hov = create_rw_signal(false);
             let hash_cp = hash.clone();
             let cherry_pick_btn = container(label(|| "🍒").style(move |s| {
@@ -2332,8 +2359,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let row_hov = create_rw_signal(false);
             let apply_hov = create_rw_signal(false);
             let drop_hov = create_rw_signal(false);
-            let root_apply = state_stash_apply.workspace_root.clone();
-            let root_drop = state_stash_drop.workspace_root.clone();
+            let root_apply = state_stash_apply.workspace_root;
+            let root_drop = state_stash_drop.workspace_root;
             let display_text = if label_text.len() > 60 {
                 format!("{}…", &label_text[..60])
             } else {
@@ -2446,7 +2473,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         move |branch_name: String| {
             let row_hov = create_rw_signal(false);
             let bn = branch_name.clone();
-            let root = state_merge_do.workspace_root.clone();
+            let root = state_merge_do.workspace_root;
             container(
                 label(move || bn.clone()).style(move |s| {
                     let t = theme.get();
@@ -2746,7 +2773,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .background(if diff_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
     })
     .on_click_stop({
-        let load_diff2 = load_diff.clone();
+        let load_diff2 = load_diff;
         move |_| load_diff2()
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| diff_refresh_hov.set(true))
@@ -2754,7 +2781,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // "Clear" button — resets selected_commit and reloads HEAD diff.
     let diff_clear_hov = create_rw_signal(false);
-    let load_diff_for_clear = load_diff.clone();
+    let load_diff_for_clear = load_diff;
     let diff_clear_btn = container(label(|| "✕ Clear").style(move |s| {
         let t = theme.get();
         s.font_size(9.0)
@@ -2830,7 +2857,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .background(if diff_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
     })
     .on_click_stop({
-        let load_diff3 = load_diff.clone();
+        let load_diff3 = load_diff;
         move |_| {
             let was_expanded = diff_expanded.get();
             diff_expanded.set(!was_expanded);
@@ -2882,8 +2909,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             // Revert button — always rendered but hidden for non-hunk-header lines.
             let revert_hov = create_rw_signal(false);
-            let root_rev = state_diff_revert.workspace_root.clone();
-            let load_after = load_diff.clone();
+            let root_rev = state_diff_revert.workspace_root;
+            let load_after = load_diff;
             let revert_btn = container(label(|| "Revert").style(move |s| {
                 let t = theme.get();
                 s.font_size(9.0)
@@ -2925,7 +2952,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 let root = root_rev.get();
                 let scope = Scope::new();
                 let root2 = root.clone();
-                let load_after2 = load_after.clone();
+                let load_after2 = load_after;
                 let send = create_ext_action(scope, move |result: Result<String, String>| {
                     match result {
                         Ok(msg) => {
@@ -3020,7 +3047,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .background(if log_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
     })
     .on_click_stop({
-        let load_log2 = load_commit_log.clone();
+        let load_log2 = load_commit_log;
         move |_| load_log2()
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| log_refresh_hov.set(true))
@@ -3056,7 +3083,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .background(if log_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
     })
     .on_click_stop({
-        let load_log3 = load_commit_log.clone();
+        let load_log3 = load_commit_log;
         move |_| {
             let was_expanded = log_expanded.get();
             log_expanded.set(!was_expanded);

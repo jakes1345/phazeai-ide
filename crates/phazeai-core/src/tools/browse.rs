@@ -184,12 +184,11 @@ fn html_to_text(html: &str, include_links: bool) -> String {
                     | "article"
                     | "header"
                     | "footer"
-            ) {
-                if consecutive_newlines < 2 {
+            )
+                && consecutive_newlines < 2 {
                     result.push('\n');
                     consecutive_newlines += 1;
                 }
-            }
 
             // Headers get markdown-style formatting
             if tag_name == "h1" && !tag_lower.starts_with('/') {

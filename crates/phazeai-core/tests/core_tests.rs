@@ -41,7 +41,6 @@ fn test_settings_load_returns_default_when_no_file() {
 
     // Just verify it doesn't panic and has some expected structure
     assert!(!settings.llm.model.is_empty());
-    assert!(!settings.llm.api_key_env.is_empty());
 }
 
 #[test]

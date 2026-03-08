@@ -128,7 +128,7 @@ impl Tool for DownloadTool {
         if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
             return Err(PhazeError::tool(
                 "download",
-                format!("Downloaded data exceeds size limit"),
+                "Downloaded data exceeds size limit".to_string(),
             ));
         }
 

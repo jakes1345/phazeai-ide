@@ -403,9 +403,7 @@ pub fn explorer_panel(
                 let keyboard_focused = focused_idx.get() == Some(this_idx);
                 let bg = if selected {
                     p.selection
-                } else if keyboard_focused {
-                    p.bg_elevated
-                } else if hovered {
+                } else if keyboard_focused || hovered {
                     p.bg_elevated
                 } else {
                     floem::peniko::Color::TRANSPARENT
@@ -928,7 +926,7 @@ pub fn explorer_panel(
 
 /// Find a unique file/dir path like `name`, `name_1`, `name_2`, etc.
 /// `ext` should be empty string for no extension, or e.g. `"rs"` for Rust files.
-fn find_unique_path(dir: &PathBuf, base: &str, ext: &str) -> PathBuf {
+fn find_unique_path(dir: &std::path::Path, base: &str, ext: &str) -> PathBuf {
     let make_path = |suffix: &str| {
         let fname = if ext.is_empty() {
             format!("{}{}", base, suffix)

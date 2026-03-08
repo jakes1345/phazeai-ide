@@ -690,6 +690,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn perform_search(
     state: IdeState,
     is_searching: RwSignal<bool>,
@@ -927,11 +928,10 @@ fn perform_replace_all(
                 new
             };
 
-            if new_content != content {
-                if std::fs::write(&path, new_content).is_ok() {
+            if new_content != content
+                && std::fs::write(&path, new_content).is_ok() {
                     replaced_files += 1;
                 }
-            }
         }
 
         let _ = tx.send(format!(
