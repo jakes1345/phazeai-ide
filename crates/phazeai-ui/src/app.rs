@@ -355,6 +355,8 @@ pub struct IdeState {
     pub code_lens_visible: RwSignal<bool>,
     /// Whether LSP inlay hints are shown in the editor.
     pub inlay_hints_toggle: RwSignal<bool>,
+    /// Inlay hint entries from LSP or regex fallback for the active file.
+    pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -606,6 +608,7 @@ impl IdeState {
             peek_def_lines,
             code_lens,
             folding_ranges,
+            inlay_hints_lsp,
         ) = start_lsp_bridge(workspace.clone());
 
         // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
@@ -685,6 +688,12 @@ impl IdeState {
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
                     let _ = lsp_tx2.send(LspCommand::RequestCodeLens { path });
+                }
+            });
+            let lsp_tx3 = lsp_cmd.clone();
+            create_effect(move |_| {
+                if let Some(path) = open_file.get() {
+                    let _ = lsp_tx3.send(LspCommand::RequestInlayHints { path, start_line: 0, end_line: 2000 });
                 }
             });
         }
@@ -893,6 +902,7 @@ impl IdeState {
             unfold_all_nonce: create_rw_signal(0u64),
             code_lens_visible: create_rw_signal(true),
             inlay_hints_toggle: create_rw_signal(true),
+            inlay_hints_sig: inlay_hints_lsp,
         }
     }
 }
@@ -4434,6 +4444,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.code_lens,
         state.code_lens_visible,
         state.organize_imports_on_save,
+        state.inlay_hints_sig,
+        state.inlay_hints_toggle,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4488,6 +4500,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]), // code_lens_sig
         create_rw_signal(true),  // code_lens_visible
         create_rw_signal(false), // organize_imports_on_save
+        create_rw_signal(vec![]), // inlay_hints_sig
+        create_rw_signal(false), // inlay_hints_toggle
     );
     let split_pane = container(split_raw)
         .style(move |s| {
@@ -4790,6 +4804,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]), // code_lens_sig
         create_rw_signal(true),  // code_lens_visible
         create_rw_signal(false), // organize_imports_on_save
+        create_rw_signal(vec![]), // inlay_hints_sig
+        create_rw_signal(false), // inlay_hints_toggle
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

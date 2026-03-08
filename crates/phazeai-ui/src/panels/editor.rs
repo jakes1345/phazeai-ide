@@ -921,6 +921,8 @@ pub fn editor_panel(
     code_lens_sig: RwSignal<Vec<crate::lsp_bridge::CodeLensEntry>>,
     code_lens_visible: RwSignal<bool>,
     organize_imports_on_save: RwSignal<bool>,
+    inlay_hints: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
+    inlay_hints_toggle: RwSignal<bool>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -4408,11 +4410,55 @@ pub fn editor_panel(
         })
     };
 
+    // ── Inlay hints bar — shows type annotations for the current cursor line ──
+    let inlay_bar = {
+        let ih_theme = theme;
+        dyn_stack(
+            move || {
+                if !inlay_hints_toggle.get() { return vec![]; }
+                let cur_line = active_cursor.get()
+                    .map(|(_, l, _)| l.saturating_sub(1))
+                    .unwrap_or(0);
+                inlay_hints.get()
+                    .into_iter()
+                    .filter(|h| h.line == cur_line)
+                    .collect::<Vec<_>>()
+            },
+            |h| format!("{}{}{}", h.line, h.col, h.label),
+            move |h| {
+                let t = ih_theme.get();
+                label(move || format!("  {} col:{} {}", "⟩", h.col, h.label))
+                    .style(move |s| {
+                        let t2 = ih_theme.get();
+                        s.padding_horiz(8.0)
+                            .padding_vert(1.0)
+                            .font_size(10.0)
+                            .color(t2.palette.text_secondary)
+                            .font_style(floem::text::Style::Italic)
+                    })
+            },
+        )
+        .style(move |s| {
+            let visible = inlay_hints_toggle.get() && {
+                let cur_line = active_cursor.get()
+                    .map(|(_, l, _)| l.saturating_sub(1))
+                    .unwrap_or(0);
+                inlay_hints.get().iter().any(|h| h.line == cur_line)
+            };
+            s.flex_row()
+                .width_full()
+                .background(floem::peniko::Color::from_rgba8(80, 80, 160, 25))
+                .border_bottom(1.0)
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     stack((
         tab_bar,
         breadcrumbs,
         sticky_bar,
         code_lens_bar,
+        inlay_bar,
         find_bar,
         editor_row,
         ghost_strip,

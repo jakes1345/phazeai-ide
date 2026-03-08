@@ -412,6 +412,23 @@ impl LspClient {
     }
 
     /// Request folding ranges for a document (textDocument/foldingRange).
+    /// Request inlay hints for a range of lines (textDocument/inlayHint).
+    pub async fn inlay_hints(&self, path: &Path, start_line: u32, end_line: u32) -> Result<Vec<InlayHint>, String> {
+        let uri = path_to_uri(path)?;
+        let params = InlayHintParams {
+            text_document: TextDocumentIdentifier { uri },
+            range: Range {
+                start: Position { line: start_line, character: 0 },
+                end:   Position { line: end_line,   character: u32::MAX },
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let result = self
+            .send_request::<request::InlayHintRequest>(params)
+            .await?;
+        Ok(result.unwrap_or_default())
+    }
+
     pub async fn folding_range(&self, path: &Path) -> Result<Vec<FoldingRange>, String> {
         let uri = path_to_uri(path)?;
         let params = FoldingRangeParams {

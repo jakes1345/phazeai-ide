@@ -2677,6 +2677,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let tag_section = stack((tag_list_header, tag_body)).style(|s| s.flex_col().width_full());
 
     // ── Working-Tree Diff section (git diff HEAD with per-hunk Revert) ────────
+    // When set, the diff section shows this commit's diff instead of HEAD diff.
+    let selected_commit: RwSignal<Option<String>> = create_rw_signal(None);
     let diff_expanded: RwSignal<bool> = create_rw_signal(false);
     let diff_hdr_hov: RwSignal<bool> = create_rw_signal(false);
     let diff_refresh_hov: RwSignal<bool> = create_rw_signal(false);
@@ -2706,6 +2708,27 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         }
     };
 
+    // Reactive effect: when selected_commit changes, load that commit's diff.
+    {
+        let root = state.workspace_root;
+        create_effect(move |_| {
+            if let Some(hash) = selected_commit.get() {
+                let r = root.get();
+                let scope = Scope::new();
+                let send = create_ext_action(scope, move |raw: String| {
+                    let (dl, dh) = parse_diff_display(&raw);
+                    diff_display.set(dl);
+                    diff_hunks.set(dh);
+                    diff_raw.set(raw);
+                    if !diff_expanded.get() {
+                        diff_expanded.set(true);
+                    }
+                });
+                std::thread::spawn(move || send(run_git_show_diff(&r, &hash)));
+            }
+        });
+    }
+
     // Refresh button for diff section.
     let diff_refresh_btn = container(label(|| "↻").style(move |s| {
         let t = theme.get();
@@ -2729,6 +2752,41 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| diff_refresh_hov.set(true))
     .on_event_stop(floem::event::EventListener::PointerLeave, move |_| diff_refresh_hov.set(false));
 
+    // "Clear" button — resets selected_commit and reloads HEAD diff.
+    let diff_clear_hov = create_rw_signal(false);
+    let load_diff_for_clear = load_diff.clone();
+    let diff_clear_btn = container(label(|| "✕ Clear").style(move |s| {
+        let t = theme.get();
+        s.font_size(9.0)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(if diff_clear_hov.get() {
+                floem::peniko::Color::from_rgb8(255, 80, 100)
+            } else {
+                t.palette.text_muted
+            })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0).padding_vert(1.0).border_radius(3.0).margin_right(4.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border(1.0)
+            .border_color(if diff_clear_hov.get() {
+                floem::peniko::Color::from_rgb8(255, 80, 100)
+            } else {
+                p.border
+            })
+            .background(if diff_clear_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+            // Only visible when a commit is selected.
+            .apply_if(selected_commit.get().is_none(), |s| s.display(floem::style::Display::None))
+    })
+    .on_click_stop(move |_| {
+        selected_commit.set(None);
+        load_diff_for_clear();
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| diff_clear_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| diff_clear_hov.set(false));
+
     let diff_header = container(
         stack((
             label(move || if diff_expanded.get() { "▾ " } else { "▸ " }).style(move |s| {
@@ -2736,16 +2794,29 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             }),
             label(move || {
                 let n = diff_hunks.get().len();
-                if n == 0 {
-                    "WORKING TREE DIFF".to_string()
-                } else {
-                    format!("WORKING TREE DIFF ({n} hunks)")
+                match selected_commit.get() {
+                    Some(ref hash) => {
+                        let short = &hash[..hash.len().min(7)];
+                        if n == 0 {
+                            format!("COMMIT: {short}")
+                        } else {
+                            format!("COMMIT: {short} ({n} hunks)")
+                        }
+                    }
+                    None => {
+                        if n == 0 {
+                            "WORKING TREE DIFF".to_string()
+                        } else {
+                            format!("WORKING TREE DIFF ({n} hunks)")
+                        }
+                    }
                 }
             })
             .style(move |s| {
                 let t = theme.get();
                 s.font_size(11.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
             }),
+            diff_clear_btn,
             diff_refresh_btn,
         ))
         .style(|s| s.items_center().width_full()),
@@ -3062,10 +3133,13 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 let hash_to_copy = full_hash.clone();
+                // Copy hash to clipboard.
                 if let Ok(mut cb) = arboard::Clipboard::new() {
                     let _ = cb.set_text(hash_to_copy.clone());
                 }
-                status_msg.set(format!("Copied hash: {}", &hash_to_copy[..hash_to_copy.len().min(12)]));
+                // Show commit diff in the diff section.
+                selected_commit.set(Some(hash_to_copy.clone()));
+                status_msg.set(format!("Showing diff for: {}", &hash_to_copy[..hash_to_copy.len().min(12)]));
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| row_hov.set(true))
             .on_event_stop(floem::event::EventListener::PointerLeave, move |_| row_hov.set(false))

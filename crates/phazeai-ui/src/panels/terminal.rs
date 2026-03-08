@@ -1025,6 +1025,18 @@ fn single_terminal(
                             }
                             return;
                         }
+
+                        // Ctrl+Shift+= — zoom terminal font in
+                        if ch.as_str() == "=" || ch.as_str() == "+" {
+                            term_font_size.update(|v| *v = (*v + 1).min(32));
+                            return;
+                        }
+
+                        // Ctrl+Shift+- — zoom terminal font out
+                        if ch.as_str() == "-" || ch.as_str() == "_" {
+                            term_font_size.update(|v| *v = (*v).saturating_sub(1).max(8));
+                            return;
+                        }
                     }
                 }
 

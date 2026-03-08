@@ -64,8 +64,21 @@ pub enum LspCommand {
     RequestFoldingRanges { path: PathBuf },
     /// Organize imports on save using LSP textDocument/codeAction source.organizeImports.
     OrganizeImports { path: PathBuf },
+    /// Request inlay hints for a visible range of a file (textDocument/inlayHint).
+    RequestInlayHints { path: PathBuf, start_line: u32, end_line: u32 },
     /// Graceful shutdown.
     Shutdown,
+}
+
+/// An inlay hint (type annotation, parameter name, etc.) for inline display.
+#[derive(Debug, Clone)]
+pub struct InlayHintEntry {
+    /// 0-based line the hint appears on.
+    pub line: u32,
+    /// 0-based column (byte offset within the line) after which the hint is shown.
+    pub col: u32,
+    /// Text to display, e.g. ": i32" or "name: ".
+    pub label: String,
 }
 
 /// A code lens entry attached to a specific line.
@@ -187,6 +200,7 @@ pub fn start_lsp_bridge(
     RwSignal<Vec<String>>,
     RwSignal<Vec<CodeLensEntry>>,
     RwSignal<Vec<(u32, u32)>>,
+    RwSignal<Vec<InlayHintEntry>>,
 ) {
     let (lsp_cmd_tx, mut lsp_cmd_rx) = mpsc::unbounded_channel::<LspCommand>();
 
@@ -216,6 +230,8 @@ pub fn start_lsp_bridge(
     let (code_lens_tx, code_lens_rx) = std::sync::mpsc::sync_channel::<Vec<CodeLensEntry>>(4);
     // Folding ranges: bridge → Floem (start_line, end_line pairs, 0-based)
     let (fold_ranges_tx, fold_ranges_rx) = std::sync::mpsc::sync_channel::<Vec<(u32, u32)>>(4);
+    // Inlay hints: bridge → Floem
+    let (inlay_tx, inlay_rx) = std::sync::mpsc::sync_channel::<Vec<InlayHintEntry>>(4);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -614,6 +630,38 @@ pub fn start_lsp_bridge(
                                     let _ = organize_rust_imports(&path);
                                 }
                             }
+                            Some(LspCommand::RequestInlayHints { path, start_line, end_line }) => {
+                                let inlay_tx2 = inlay_tx.clone();
+                                let path2 = path.clone();
+                                let client_opt = manager.client_for_file(&path).cloned();
+                                tokio::spawn(async move {
+                                    // Try LSP first (textDocument/inlayHint)
+                                    if let Some(client) = client_opt {
+                                        if let Ok(hints) = client.inlay_hints(&path2, start_line, end_line).await {
+                                            let entries: Vec<InlayHintEntry> = hints.into_iter().map(|h| {
+                                                let label = match &h.label {
+                                                    lsp_types::InlayHintLabel::String(s) => s.clone(),
+                                                    lsp_types::InlayHintLabel::LabelParts(parts) => {
+                                                        parts.iter().map(|p| p.value.as_str()).collect::<String>()
+                                                    }
+                                                };
+                                                InlayHintEntry {
+                                                    line: h.position.line,
+                                                    col: h.position.character,
+                                                    label,
+                                                }
+                                            }).collect();
+                                            if !entries.is_empty() {
+                                                let _ = inlay_tx2.try_send(entries);
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    // Fallback: regex-based hints for common Rust patterns
+                                    let hints = inlay_hints_from_file(&path2, start_line, end_line);
+                                    let _ = inlay_tx2.try_send(hints);
+                                });
+                            }
                             Some(LspCommand::Shutdown) | None => break,
                         }
                     }
@@ -750,6 +798,7 @@ pub fn start_lsp_bridge(
     let peek_chan = create_signal_from_channel(peek_rx);
     let code_lens_chan = create_signal_from_channel(code_lens_rx);
     let fold_ranges_chan = create_signal_from_channel(fold_ranges_rx);
+    let inlay_chan = create_signal_from_channel(inlay_rx);
 
     let diag_sig: RwSignal<Vec<DiagEntry>> = create_rw_signal(vec![]);
     let comp_sig: RwSignal<Vec<CompletionEntry>> = create_rw_signal(vec![]);
@@ -764,6 +813,7 @@ pub fn start_lsp_bridge(
     let peek_def_lines_sig: RwSignal<Vec<String>> = create_rw_signal(vec![]);
     let code_lens_sig: RwSignal<Vec<CodeLensEntry>> = create_rw_signal(vec![]);
     let folding_ranges_sig: RwSignal<Vec<(u32, u32)>> = create_rw_signal(vec![]);
+    let inlay_hints_sig: RwSignal<Vec<InlayHintEntry>> = create_rw_signal(vec![]);
 
     create_effect(move |_| {
         if let Some(entries) = diag_chan.get() {
@@ -830,6 +880,11 @@ pub fn start_lsp_bridge(
             folding_ranges_sig.set(pairs);
         }
     });
+    create_effect(move |_| {
+        if let Some(hints) = inlay_chan.get() {
+            inlay_hints_sig.set(hints);
+        }
+    });
 
     (
         lsp_cmd_tx,
@@ -846,6 +901,7 @@ pub fn start_lsp_bridge(
         peek_def_lines_sig,
         code_lens_sig,
         folding_ranges_sig,
+        inlay_hints_sig,
     )
 }
 
@@ -1537,4 +1593,49 @@ fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
     }
 
     lenses
+}
+
+/// Regex-based inlay hint generator for common patterns when no LSP server is available.
+/// Produces type/parameter hints for Rust `let x =` and function calls.
+fn inlay_hints_from_file(path: &PathBuf, start_line: u32, end_line: u32) -> Vec<InlayHintEntry> {
+    let Ok(content) = std::fs::read_to_string(path) else { return vec![]; };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "rs" { return vec![]; }
+
+    let mut hints = Vec::new();
+    for (line_idx, line) in content.lines().enumerate() {
+        let line_num = line_idx as u32;
+        if line_num < start_line || line_num > end_line { continue; }
+
+        let trimmed = line.trim();
+
+        // `let x = <literal>` — show type after variable name
+        if let Some(rest) = trimmed.strip_prefix("let ") {
+            // Extract variable name (stop at whitespace, :, =)
+            let var_end = rest.find(|c: char| c == ':' || c == '=' || c.is_whitespace())
+                .unwrap_or(rest.len());
+            let var_name = &rest[..var_end];
+            if var_name.is_empty() || var_name == "_" || var_name == "mut" { continue; }
+
+            // Determine type from rhs
+            let rhs = if let Some(eq_pos) = rest.find('=') { rest[eq_pos + 1..].trim() } else { continue };
+            let type_hint = if rhs.starts_with('"') { ": &str" }
+                else if rhs.starts_with("vec![") || rhs.starts_with("Vec::") { ": Vec<_>" }
+                else if rhs.parse::<i64>().is_ok() { ": i32" }
+                else if rhs.parse::<f64>().is_ok() && rhs.contains('.') { ": f64" }
+                else if rhs == "true" || rhs == "false" { ": bool" }
+                else if rhs.starts_with("HashMap::") || rhs.starts_with("std::collections::HashMap") { ": HashMap<_, _>" }
+                else { continue };
+
+            // Column after the variable name in the original line
+            if let Some(col) = line.find(var_name) {
+                hints.push(InlayHintEntry {
+                    line: line_num,
+                    col: (col + var_name.len()) as u32,
+                    label: type_hint.to_string(),
+                });
+            }
+        }
+    }
+    hints
 }
