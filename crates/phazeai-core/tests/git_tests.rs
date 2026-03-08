@@ -29,6 +29,12 @@ fn init_git_repo(dir: &Path) {
         .current_dir(dir)
         .output()
         .expect("Failed to set git user.name");
+
+    Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(dir)
+        .output()
+        .expect("Failed to disable gpg signing");
 }
 
 /// Create a file with content in the given directory
