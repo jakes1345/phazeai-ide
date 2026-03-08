@@ -183,6 +183,7 @@ pub struct CompletionEntry {
 /// folding_ranges_sig)`.
 ///
 /// **Call from within a Floem reactive scope.**
+#[allow(clippy::type_complexity)]
 pub fn start_lsp_bridge(
     workspace_root: PathBuf,
 ) -> (
@@ -386,10 +387,7 @@ pub fn start_lsp_bridge(
                                 let did_lsp = if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2     = path.clone();
                                     let new_name2 = new_name.clone();
-                                    let old_word2 = match word_at_position(&path, line, col) {
-                                        Some(w) => w,
-                                        None    => String::new(),
-                                    };
+                                    let old_word2 = word_at_position(&path, line, col).unwrap_or_default();
                                     // Ask LSP for workspace edits; apply by rewriting files directly.
                                     match client.rename_symbol(&path2, line, col, new_name2).await {
                                         Ok(Some(workspace_edit)) => {
@@ -706,13 +704,13 @@ pub fn start_lsp_bridge(
                                 let entries: Vec<CompletionEntry> = items.iter().map(|item| {
                                     // Prefer TextEdit text, then insert_text, then label.
                                     let insert_text = item.insert_text.clone()
-                                        .or_else(|| item.text_edit.as_ref().and_then(|te| {
+                                        .or_else(|| item.text_edit.as_ref().map(|te| {
                                             use lsp_types::CompletionTextEdit;
                                             match te {
                                                 CompletionTextEdit::Edit(e) =>
-                                                    Some(e.new_text.clone()),
+                                                    e.new_text.clone(),
                                                 CompletionTextEdit::InsertAndReplace(e) =>
-                                                    Some(e.new_text.clone()),
+                                                    e.new_text.clone(),
                                             }
                                         }))
                                         .unwrap_or_else(|| item.label.clone());
@@ -973,10 +971,10 @@ fn word_at_position(path: &PathBuf, line: u32, col: u32) -> Option<String> {
 /// Ripgrep-based fallback for find-references.
 /// Runs `rg --json <word> <workspace>` and parses the output into ReferenceEntry.
 fn ripgrep_references(
-    path: &PathBuf,
+    path: &std::path::Path,
     line: u32,
     col: u32,
-    workspace: &PathBuf,
+    workspace: &std::path::Path,
 ) -> Vec<ReferenceEntry> {
     let word = match word_at_position(path, line, col) {
         Some(w) if !w.is_empty() => w,
@@ -1218,18 +1216,18 @@ fn apply_text_edits(
     // Flatten into (start_line, start_char, end_line, end_char, new_text)
     let mut flat: Vec<(u32, u32, u32, u32, String)> = edits
         .iter()
-        .filter_map(|e| {
+        .map(|e| {
             let te = match e {
                 lsp_types::OneOf::Left(t) => t.clone(),
                 lsp_types::OneOf::Right(a) => a.text_edit.clone(),
             };
-            Some((
+            (
                 te.range.start.line,
                 te.range.start.character,
                 te.range.end.line,
                 te.range.end.character,
                 te.new_text.clone(),
-            ))
+            )
         })
         .collect();
 
@@ -1281,7 +1279,7 @@ fn parse_signature_help(sh: lsp_types::SignatureHelp) -> Option<SignatureHelpRes
     let label = sig.label.clone();
     let active_param = sh
         .active_parameter
-        .or_else(|| sig.active_parameter)
+        .or(sig.active_parameter)
         .unwrap_or(0) as usize;
     let params: Vec<String> = sig
         .parameters

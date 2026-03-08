@@ -1353,6 +1353,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
     let query = state.command_palette_query;
 
     // Build a filtered list of matching commands driven by the query signal.
+    #[allow(clippy::type_complexity)]
     let commands_list = move || -> Vec<(usize, &'static str, fn(IdeState))> {
         let q = query.get().to_lowercase();
         all_commands()
@@ -5238,8 +5239,7 @@ pub fn launch_phaze_ide() {
                             if let Event::PointerMove(pe) = e {
                                 let delta = pe.pos.x - move_s.panel_drag_start_x.get();
                                 let new_w = (move_s.panel_drag_start_width.get() + delta)
-                                    .max(80.0)
-                                    .min(700.0);
+                                    .clamp(80.0, 700.0);
                                 move_s.left_panel_width.set(new_w);
                                 move_s.show_left_panel.set(true);
                             }

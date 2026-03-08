@@ -927,11 +927,10 @@ fn perform_replace_all(
                 new
             };
 
-            if new_content != content {
-                if std::fs::write(&path, new_content).is_ok() {
+            if new_content != content
+                && std::fs::write(&path, new_content).is_ok() {
                     replaced_files += 1;
                 }
-            }
         }
 
         let _ = tx.send(format!(

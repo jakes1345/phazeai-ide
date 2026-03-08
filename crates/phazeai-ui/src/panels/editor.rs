@@ -883,6 +883,7 @@ struct TabState {
 /// `lsp_cmd` notifies the LSP server on every edit (did_change).
 /// `active_cursor` is written with (path, 0-based line, 0-based col) whenever
 ///   the active editor's cursor moves — read by the completion popup.
+#[allow(clippy::too_many_arguments)]
 pub fn editor_panel(
     open_file: RwSignal<Option<PathBuf>>,
     theme: RwSignal<PhazeTheme>,

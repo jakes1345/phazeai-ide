@@ -210,7 +210,7 @@ impl TermState {
             match code {
                 0 => self.reset_attrs(),
                 1 => self.cur_bold = true,
-                2 | 3 | 4 => {}
+                2..=4 => {}
                 22 => self.cur_bold = false,
                 30..=37 => self.cur_fg = TermColor::Indexed(code as u8 - 30),
                 38 => {
@@ -313,12 +313,11 @@ impl Perform for VtePerformer {
                         .next()
                         .and_then(|p| p.first().copied())
                         .unwrap_or(0);
-                    if p == 2 || p == 3 {
-                        if !state.current_line.is_empty() {
+                    if (p == 2 || p == 3)
+                        && !state.current_line.is_empty() {
                             let line = std::mem::replace(&mut state.current_line, TermLine::new());
                             state.lines.push(line);
                         }
-                    }
                 }
                 'K' => {
                     let p = params
@@ -372,7 +371,7 @@ impl Perform for VtePerformer {
         if params[0] == b"7" && params.len() > 1 {
             let url = String::from_utf8_lossy(params[1]);
             if let Some(path) = url.strip_prefix("file://") {
-                let path = if let Some(p) = path.splitn(2, '/').nth(1) {
+                let path = if let Some(p) = path.split_once('/').map(|x| x.1) {
                     format!("/{}", p)
                 } else {
                     path.to_string()
@@ -948,10 +947,14 @@ fn single_terminal(
     let pty_writer_c = Arc::clone(&pty_writer);
     let term_state_c = Arc::clone(&term_state);
     let pty_master_resize = Arc::clone(&pty_master);
+    let pty_master_font_resize = Arc::clone(&pty_master);
 
     // Track the last PTY size to avoid redundant resize calls.
     let last_pty_cols: RwSignal<u16> = create_rw_signal(220u16);
     let last_pty_rows: RwSignal<u16> = create_rw_signal(40u16);
+    // Track the last known pixel dimensions so font-size changes can recompute cols/rows.
+    let last_pixel_w: RwSignal<f64> = create_rw_signal(0.0_f64);
+    let last_pixel_h: RwSignal<f64> = create_rw_signal(0.0_f64);
 
     // Wrap scroll in a keyboard-navigable container so it can receive focus
     // and capture all key events to forward to the PTY.
@@ -1047,10 +1050,15 @@ fn single_terminal(
         .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
         // Resize PTY when this view's layout size changes.
         .on_resize(move |rect| {
-            let char_w = 8.4_f64;
-            let char_h = (term_font_size.get_untracked() as f64) + 3.0;
-            let cols = (rect.width() / char_w).max(1.0) as u16;
-            let rows = (rect.height() / char_h).max(1.0) as u16;
+            let font_sz = term_font_size.get_untracked() as f64;
+            let char_w = font_sz * 0.60; // standard monospace width-to-height ratio
+            let char_h = font_sz + 3.0;
+            let pw = rect.width();
+            let ph = rect.height();
+            last_pixel_w.set(pw);
+            last_pixel_h.set(ph);
+            let cols = (pw / char_w).max(1.0) as u16;
+            let rows = (ph / char_h).max(1.0) as u16;
             if cols == last_pty_cols.get_untracked() && rows == last_pty_rows.get_untracked() {
                 return;
             }
@@ -1061,12 +1069,38 @@ fn single_terminal(
                     let _ = master.resize(PtySize {
                         rows,
                         cols,
-                        pixel_width: rect.width() as u16,
-                        pixel_height: rect.height() as u16,
+                        pixel_width: pw as u16,
+                        pixel_height: ph as u16,
                     });
                 }
             }
         });
+
+    // Re-trigger PTY resize whenever the terminal font size changes.
+    create_effect(move |_| {
+        let font_sz = term_font_size.get() as f64; // subscribes to font size changes
+        let pw = last_pixel_w.get_untracked();
+        let ph = last_pixel_h.get_untracked();
+        if pw == 0.0 || ph == 0.0 {
+            return;
+        }
+        let char_w = font_sz * 0.60;
+        let char_h = font_sz + 3.0;
+        let cols = (pw / char_w).max(1.0) as u16;
+        let rows = (ph / char_h).max(1.0) as u16;
+        last_pty_cols.set(cols);
+        last_pty_rows.set(rows);
+        if let Ok(guard) = pty_master_font_resize.lock() {
+            if let Some(ref master) = *guard {
+                let _ = master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: pw as u16,
+                    pixel_height: ph as u16,
+                });
+            }
+        }
+    });
 
     // ── Find bar (shown when find_open is true) ───────────────────────────
     let find_results_count = create_memo(move |_| {

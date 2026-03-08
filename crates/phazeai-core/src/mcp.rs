@@ -398,13 +398,7 @@ impl McpClient {
     ) {
         let mut reader = BufReader::new(stdout);
 
-        loop {
-            // Read Content-Length header
-            let content_length = match Self::read_content_length(&mut reader) {
-                Ok(len) => len,
-                Err(_) => break,
-            };
-
+        while let Ok(content_length) = Self::read_content_length(&mut reader) {
             // Read the body
             let mut body = vec![0u8; content_length];
             if reader.read_exact(&mut body).is_err() {
