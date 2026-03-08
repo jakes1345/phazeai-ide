@@ -96,6 +96,9 @@ struct SyntaxStyle {
     blame_line: Option<(usize, String)>,
     /// Bracket pair guides: (open_line, open_col_chars, close_line, depth) for vertical lines.
     bracket_pair_guides: Vec<(usize, usize, usize, usize)>,
+    /// Last known rope length for cache invalidation. If rope length changes,
+    /// the entire states cache is cleared to prevent stale highlighting.
+    last_rope_len: std::cell::Cell<usize>,
 }
 
 impl SyntaxStyle {
@@ -156,6 +159,7 @@ impl SyntaxStyle {
             char_width_px: 8.4,
             blame_line: None,
             bracket_pair_guides: Vec::new(),
+            last_rope_len: std::cell::Cell::new(0),
         }
     }
 
@@ -364,6 +368,15 @@ impl Styling for SyntaxStyle {
     ) {
         attrs.clear_spans();
         let Some(doc) = &self.doc else { return };
+
+        // Invalidate cache when rope length changes (edit happened between saves)
+        if let Some(doc) = &self.doc {
+            let current_len = doc.rope_text().len();
+            if current_len != self.last_rope_len.get() {
+                self.states.borrow_mut().clear();
+                self.last_rope_len.set(current_len);
+            }
+        }
 
         let mut states_cache = self.states.borrow_mut();
         // Rebuild cache up to the nearest 16-line boundary before `line`
@@ -954,7 +967,7 @@ pub fn editor_panel(
                     }
                 });
             }
-            tabs.update(|list| disambiguate_tab_names(list));
+            tabs.update(disambiguate_tab_names);
             let n = tabs.get_untracked().len();
             if n > 0 {
                 active_idx.set(Some(n - 1));
@@ -1102,6 +1115,10 @@ pub fn editor_panel(
     let _ = create_memo(move |_| {
         let path = open_file.get();
         if let Some(p) = path {
+            // Don't open tabs for files that no longer exist
+            if !p.exists() {
+                return;
+            }
             let existing = tabs.get().iter().position(|t| t.path == p);
             if let Some(idx) = existing {
                 active_idx.set(Some(idx));
@@ -1770,7 +1787,7 @@ pub fn editor_panel(
                             '"' => {
                                 let prev_is_escape = cur_pos >= 2 && {
                                     let s = rope.slice_to_cow((cur_pos - 2)..(cur_pos - 1));
-                                    s.chars().next() == Some('\\')
+                                    s.starts_with('\\')
                                 };
                                 if prev_is_escape {
                                     None
@@ -1962,7 +1979,7 @@ pub fn editor_panel(
                     let pl_start = rope.offset_of_line(prev_line);
                     let pl_end = rope.offset_of_line(cur_line);
                     let pl_text = rope.slice_to_cow(pl_start..pl_end).to_string();
-                    let pl_trim = pl_text.trim_end_matches(|c: char| c == '\n' || c == '\r');
+                    let pl_trim = pl_text.trim_end_matches(['\n', '\r']);
                     let ws_len = pl_trim.len() - pl_trim.trim_start().len();
                     let indent = pl_trim[..ws_len].to_string();
                     let extra = if pl_trim.trim_end().ends_with('{')
@@ -2021,7 +2038,7 @@ pub fn editor_panel(
                     }
                     // The last typed character must be `}`.
                     let prefix = rope.slice_to_cow(cur_pos.saturating_sub(1)..cur_pos);
-                    if prefix.chars().next() != Some('}') {
+                    if !prefix.starts_with('}') {
                         return;
                     }
                     // Find the line containing the `}`.
@@ -2030,7 +2047,7 @@ pub fn editor_panel(
                     let line_end = rope.offset_of_line(cur_line + 1).min(rope.len());
                     let line_text = rope.slice_to_cow(line_start..line_end).to_string();
                     // The `}` must be the first non-whitespace character.
-                    let trimmed = line_text.trim_start_matches(|c: char| c == ' ' || c == '\t');
+                    let trimmed = line_text.trim_start_matches([' ', '\t']);
                     if !trimmed.starts_with('}') {
                         return;
                     }
@@ -3004,6 +3021,48 @@ pub fn editor_panel(
                             }
                             cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
+                        // ── Visual selection operations ───────────────
+                        VimMotion::DeleteVisualSelection => {
+                            let anchor = vim_visual_anchor.get_untracked().unwrap_or(cur_offset);
+                            let (start, end) = (anchor.min(cur_offset), anchor.max(cur_offset));
+                            let end = end.min(doc_for_vim.rope_text().len());
+                            let text = doc_for_vim.rope_text().slice_to_cow(start..end).to_string();
+                            yank_ring.update(|r| { r.insert(0, text); r.truncate(5); });
+                            if end > start {
+                                doc_for_vim.edit_single(
+                                    Selection::region(start, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                                dirty.set(true);
+                            }
+                            vim_visual_anchor.set(None);
+                            start.min(doc_for_vim.rope_text().len())
+                        }
+                        VimMotion::YankVisualSelection => {
+                            let anchor = vim_visual_anchor.get_untracked().unwrap_or(cur_offset);
+                            let (start, end) = (anchor.min(cur_offset), anchor.max(cur_offset));
+                            let end = end.min(doc_for_vim.rope_text().len());
+                            let text = doc_for_vim.rope_text().slice_to_cow(start..end).to_string();
+                            yank_ring.update(|r| { r.insert(0, text); r.truncate(5); });
+                            vim_visual_anchor.set(None);
+                            cur_offset
+                        }
+                        VimMotion::ChangeVisualSelection => {
+                            let anchor = vim_visual_anchor.get_untracked().unwrap_or(cur_offset);
+                            let (start, end) = (anchor.min(cur_offset), anchor.max(cur_offset));
+                            let end = end.min(doc_for_vim.rope_text().len());
+                            if end > start {
+                                doc_for_vim.edit_single(
+                                    Selection::region(start, end),
+                                    "",
+                                    EditType::Delete,
+                                );
+                                dirty.set(true);
+                            }
+                            vim_visual_anchor.set(None);
+                            start.min(doc_for_vim.rope_text().len())
+                        }
                         // ── Visual mode start — anchor position ────────
                         VimMotion::VisualCharStart => {
                             vim_visual_anchor.set(Some(cur_offset));
@@ -3474,6 +3533,11 @@ pub fn editor_panel(
 
                     let prefix = rope.slice_to_cow(0..offset).to_string();
                     if prefix.trim().is_empty() {
+                        return;
+                    }
+                    // Don't fire FIM when cursor is at start of a line (nothing typed yet on this line)
+                    let current_line_prefix = prefix.rsplit_once('\n').map(|(_, s)| s).unwrap_or(&prefix);
+                    if current_line_prefix.trim().is_empty() {
                         return;
                     }
                     let suffix = rope.slice_to_cow(offset..len).to_string();
@@ -4382,7 +4446,7 @@ pub fn editor_panel(
             |entry| entry.line,
             move |entry| {
                 let t = cl_theme.get();
-                let p = &t.palette;
+                let _p = &t.palette;
                 label(move || format!("● {} ─ line {}", entry.label, entry.line + 1))
                     .style(move |s| {
                         let t2 = cl_theme.get();
@@ -4426,7 +4490,7 @@ pub fn editor_panel(
             },
             |h| format!("{}{}{}", h.line, h.col, h.label),
             move |h| {
-                let t = ih_theme.get();
+                let _t = ih_theme.get();
                 label(move || format!("  {} col:{} {}", "⟩", h.col, h.label))
                     .style(move |s| {
                         let t2 = ih_theme.get();
@@ -4611,7 +4675,7 @@ fn tab_bar_view(
                             if dirty.get_untracked() {
                                 let confirmed = rfd::MessageDialog::new()
                                     .set_title("Unsaved Changes")
-                                    .set_description(&format!(
+                                    .set_description(format!(
                                         "\"{}\" has unsaved changes. Close without saving?",
                                         tab_name_for_close
                                     ))
@@ -4791,7 +4855,7 @@ pub fn read_editorconfig(file_path: &std::path::Path, workspace_root: &std::path
                 // Match [*], [*.ext], [*.{ext1,ext2}], or [**]
                 in_matching_section = glob == "*"
                     || glob == "**"
-                    || glob == &format!("*.{ext}")
+                    || glob == format!("*.{ext}")
                     || glob.starts_with("*.{")
                         && glob.ends_with('}')
                         && glob[3..glob.len() - 1]
