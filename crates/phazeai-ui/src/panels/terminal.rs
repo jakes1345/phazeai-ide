@@ -617,6 +617,7 @@ type SharedPtyWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 /// (Feature 3 — Run in Terminal).
 /// `prompt_positions_out`: if `Some`, receives live-updated prompt line positions from
 /// OSC 133;A markers so the caller can implement prev/next command navigation (Feature 2).
+#[allow(clippy::too_many_arguments)]
 fn single_terminal(
     theme: RwSignal<PhazeTheme>,
     clear_nonce: RwSignal<u64>,

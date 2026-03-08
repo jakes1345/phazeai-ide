@@ -479,10 +479,9 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
     let mut in_hunk = false;
 
     let raw_lines: Vec<&str> = raw.lines().collect();
-    let n = raw_lines.len();
 
-    for i in 0..n {
-        let line = raw_lines[i];
+    for line in &raw_lines {
+        let line = *line;
 
         if line.starts_with("diff ") || line.starts_with("index ") {
             // Flush pending hunk first.

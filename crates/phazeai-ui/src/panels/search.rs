@@ -690,6 +690,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn perform_search(
     state: IdeState,
     is_searching: RwSignal<bool>,

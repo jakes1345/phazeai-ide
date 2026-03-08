@@ -968,7 +968,7 @@ pub fn editor_panel(
                     }
                 });
             }
-            tabs.update(disambiguate_tab_names);
+            tabs.update(|list| disambiguate_tab_names(list));
             let n = tabs.get_untracked().len();
             if n > 0 {
                 active_idx.set(Some(n - 1));

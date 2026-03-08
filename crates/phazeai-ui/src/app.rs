@@ -549,7 +549,7 @@ fn load_editor_config() -> (u32, u32) {
 
 impl IdeState {
     pub fn new(settings: &Settings) -> Self {
-        let _theme = PhazeTheme::from_str(&settings.editor.theme);
+        let _theme = PhazeTheme::from_name(&settings.editor.theme);
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let git_branch = create_rw_signal("main".to_string());
@@ -747,7 +747,7 @@ impl IdeState {
         }
 
         // Create persistent settings signals before Self so we can wire save effects.
-        let theme_signal = create_rw_signal(PhazeTheme::from_str(&session.theme));
+        let theme_signal = create_rw_signal(PhazeTheme::from_name(&session.theme));
         let font_size_signal = create_rw_signal(saved_font_size);
         let tab_size_signal = create_rw_signal(saved_tab_size);
 

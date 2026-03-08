@@ -41,7 +41,7 @@ impl ThemeVariant {
         ]
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_name(s: &str) -> Self {
         match s.to_lowercase().replace([' ', '-', '_'], "").as_str() {
             "midnightblue" | "midnight" => Self::MidnightBlue,
             "cyberpunk" | "cyber" => Self::Cyberpunk,
@@ -690,8 +690,8 @@ impl PhazeTheme {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
-        Self::from_variant(ThemeVariant::from_str(s))
+    pub fn from_name(s: &str) -> Self {
+        Self::from_variant(ThemeVariant::from_name(s))
     }
 
     pub fn is_dark(&self) -> bool {
