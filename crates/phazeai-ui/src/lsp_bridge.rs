@@ -941,7 +941,7 @@ fn severity_from_lsp(s: Option<lsp_types::DiagnosticSeverity>) -> DiagSeverity {
 // ── Fallback helpers ──────────────────────────────────────────────────────────
 
 /// Extract the word at the given 0-based (line, col) from file content.
-fn word_at_position(path: &PathBuf, line: u32, col: u32) -> Option<String> {
+fn word_at_position(path: &std::path::Path, line: u32, col: u32) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let target_line = text.lines().nth(line as usize)?;
     let col = (col as usize).min(target_line.len());

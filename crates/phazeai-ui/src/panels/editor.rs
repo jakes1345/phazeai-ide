@@ -1479,6 +1479,7 @@ pub fn editor_panel(
 
             // ── Code folding per-tab state ─────────────────────────────────
             // (foldable_ranges, folded_starts): detected ranges + which starts are collapsed.
+            #[allow(clippy::type_complexity)]
             let fold_state: RwSignal<(Vec<(usize, usize)>, HashSet<usize>)> =
                 create_rw_signal((Vec::new(), HashSet::new()));
 
@@ -2967,8 +2968,8 @@ pub fn editor_panel(
                                         // find forward
                                         let mut d = 0i32;
                                         let mut found = cur_offset;
-                                        for idx in cur_offset..len {
-                                            let c = bytes[idx] as char;
+                                        for (idx, &byte) in bytes[cur_offset..len].iter().enumerate().map(|(i, b)| (i + cur_offset, b)) {
+                                            let c = byte as char;
                                             if c == open { d += 1; }
                                             else if c == close {
                                                 d -= 1;
@@ -2979,8 +2980,8 @@ pub fn editor_panel(
                                     } else {
                                         let mut d = 0i32;
                                         let mut found = cur_offset;
-                                        for idx in (0..=cur_offset).rev() {
-                                            let c = bytes[idx] as char;
+                                        for (idx, &byte) in bytes[..=cur_offset].iter().enumerate().rev() {
+                                            let c = byte as char;
                                             if c == close { d += 1; }
                                             else if c == open {
                                                 d -= 1;
@@ -3874,7 +3875,7 @@ pub fn editor_panel(
         let line_count = text.lines().count().max(1);
         let max_line_len = text.lines().map(|l| l.len()).max().unwrap_or(1).max(1);
         let scale_y = h / (line_count as f64);
-        let line_h = scale_y.max(1.0).min(3.0);
+        let line_h = scale_y.clamp(1.0, 3.0);
 
         // Get diagnostic info for the active tab
         let all_diags = diagnostics.get();
@@ -4761,7 +4762,7 @@ fn tab_bar_view(
 /// For any tabs that share the same filename, update their `name` field to include
 /// one parent directory segment: e.g. `"src/main.rs"` instead of `"main.rs"`.
 /// Tabs with unique filenames keep their plain filename.
-fn disambiguate_tab_names(list: &mut Vec<TabState>) {
+fn disambiguate_tab_names(list: &mut [TabState]) {
     // Count how many tabs share each base filename.
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for tab in list.iter() {
@@ -4822,8 +4823,7 @@ pub fn read_editorconfig(file_path: &std::path::Path, workspace_root: &std::path
     // Collect directories from file's parent up to workspace_root (inclusive).
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut cur = file_path.parent().map(|p| p.to_path_buf());
-    loop {
-        let Some(dir) = cur else { break };
+    while let Some(dir) = cur {
         dirs.push(dir.clone());
         if dir == workspace_root {
             break;
