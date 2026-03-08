@@ -17,6 +17,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let replace_status = create_rw_signal(String::new());
     let use_regex = create_rw_signal(false);
     let case_sensitive = create_rw_signal(false);
+    let whole_word = create_rw_signal(false);
+    let open_editors_only = create_rw_signal(false);
     let include_glob = create_rw_signal(String::new());
     let exclude_glob = create_rw_signal(String::new());
 
@@ -169,6 +171,42 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             })
     };
 
+    let opt_word = {
+        let t = theme;
+        container(label(|| "W"))
+            .style(move |s| {
+                let p = t.get().palette;
+                s.font_size(11.0)
+                    .padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if whole_word.get() { p.bg_base } else { p.text_muted })
+                    .background(if whole_word.get() { p.accent } else { p.bg_elevated })
+                    .border(1.0)
+                    .border_color(p.border)
+            })
+            .on_click_stop(move |_| { whole_word.update(|v| *v = !*v); })
+    };
+
+    let opt_open_only = {
+        let t = theme;
+        container(label(|| "⊞"))
+            .style(move |s| {
+                let p = t.get().palette;
+                s.font_size(11.0)
+                    .padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if open_editors_only.get() { p.bg_base } else { p.text_muted })
+                    .background(if open_editors_only.get() { p.accent } else { p.bg_elevated })
+                    .border(1.0)
+                    .border_color(p.border)
+            })
+            .on_click_stop(move |_| { open_editors_only.update(|v| *v = !*v); })
+    };
+
     // ── Search input ──────────────────────────────────────────────────────────
     let search_bar = {
         let state2 = state.clone();
@@ -211,6 +249,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                         root,
                                         use_regex,
                                         case_sensitive,
+                                        whole_word,
+                                        open_editors_only,
                                         include_glob,
                                         exclude_glob,
                                     );
@@ -245,6 +285,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     }),
                 opt_regex,
                 opt_case,
+                opt_word,
+                opt_open_only,
             ))
             .style(|s| s.flex_row().items_center().gap(4.0).width_full()),
         )
@@ -654,6 +696,8 @@ fn perform_search(
     root: std::path::PathBuf,
     use_regex: RwSignal<bool>,
     case_sensitive: RwSignal<bool>,
+    whole_word: RwSignal<bool>,
+    open_editors_only: RwSignal<bool>,
     include_glob: RwSignal<String>,
     exclude_glob: RwSignal<String>,
 ) {
@@ -667,8 +711,16 @@ fn perform_search(
 
     let regex = use_regex.get();
     let case_sens = case_sensitive.get();
+    let word = whole_word.get();
+    let open_only = open_editors_only.get();
     let include = include_glob.get();
     let exclude = exclude_glob.get();
+    // Capture open tabs for filtering (only if open_only is enabled)
+    let open_tab_paths: Vec<std::path::PathBuf> = if open_only {
+        state.open_tabs.get()
+    } else {
+        vec![]
+    };
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
@@ -681,6 +733,9 @@ fn perform_search(
         ];
         if !case_sens {
             rg_args.push("--ignore-case".to_string());
+        }
+        if word {
+            rg_args.push("--word-regexp".to_string());
         }
         if !regex {
             rg_args.push("--fixed-strings".to_string());
@@ -760,6 +815,10 @@ fn perform_search(
                     break;
                 }
             }
+        }
+        // Filter to open editors only if requested
+        if open_only && !open_tab_paths.is_empty() {
+            found.retain(|r| open_tab_paths.contains(&r.path));
         }
         let _ = tx.send(found);
     });

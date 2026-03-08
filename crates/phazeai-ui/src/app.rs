@@ -689,6 +689,23 @@ impl IdeState {
             });
         }
 
+        // Detect read-only status when active file changes.
+        let active_readonly_sig: RwSignal<bool> = create_rw_signal(false);
+        {
+            let ro_open_file = open_file;
+            let ro_sig = active_readonly_sig;
+            create_effect(move |_| {
+                let readonly = if let Some(path) = ro_open_file.get() {
+                    std::fs::metadata(&path)
+                        .map(|m| m.permissions().readonly())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                ro_sig.set(readonly);
+            });
+        }
+
         // Detect line-ending style when the active file changes.
         let line_ending_sig: RwSignal<&'static str> = create_rw_signal("LF");
         {
@@ -858,7 +875,7 @@ impl IdeState {
             scratch_paths: create_rw_signal(Vec::new()),
             yank_ring: create_rw_signal(Vec::new()),
             yank_ring_idx: create_rw_signal(0usize),
-            active_readonly: create_rw_signal(false),
+            active_readonly: active_readonly_sig,
             goto_overlay_open: create_rw_signal(false),
             goto_overlay_input: create_rw_signal(String::new()),
             bottom_panel_maximized: create_rw_signal(false),
@@ -2209,6 +2226,17 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.color(state.theme.get().palette.text_muted)
                 .font_size(11.0)
         }),
+        // Read-only indicator
+        {
+            let ro_theme = state.theme;
+            let ro_sig = state.active_readonly;
+            label(move || if ro_sig.get() { "🔒 READ-ONLY  " } else { "" })
+                .style(move |s| {
+                    let p = ro_theme.get().palette;
+                    s.color(p.error).font_size(11.0)
+                        .apply_if(!ro_sig.get(), |s| s.display(floem::style::Display::None))
+                })
+        },
     ))
     .style(|s| s.items_center().padding_horiz(8.0));
 

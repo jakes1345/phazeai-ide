@@ -74,6 +74,21 @@ pub struct CommitEntry {
     pub date: String,
 }
 
+/// A commit log entry with both full and short hash, for the COMMIT LOG section.
+#[derive(Clone, Debug)]
+pub struct CommitLogEntry {
+    /// Full 40-char hash.
+    pub hash: String,
+    /// Abbreviated 7-char hash.
+    pub short_hash: String,
+    /// Commit subject line.
+    pub message: String,
+    /// Author name.
+    pub author: String,
+    /// Human-readable relative time ("2 hours ago").
+    pub relative_time: String,
+}
+
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
 fn parse_porcelain(output: &str) -> GitStatusData {
@@ -596,6 +611,36 @@ fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
                     message: parts[1].to_string(),
                     author: parts[2].to_string(),
                     date: parts[3].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Loads up to 50 recent commits with full hash for the COMMIT LOG section.
+fn run_git_log_full(root: &std::path::Path, limit: usize) -> Vec<CommitLogEntry> {
+    let limit_str = limit.to_string();
+    let out = std::process::Command::new("git")
+        .args(["log", "--format=%H|%h|%s|%an|%ar", &format!("-{limit_str}")])
+        .current_dir(root)
+        .output();
+    let Ok(o) = out else { return vec![] };
+    if !o.status.success() {
+        return vec![];
+    }
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            if parts.len() == 5 {
+                Some(CommitLogEntry {
+                    hash: parts[0].to_string(),
+                    short_hash: parts[1].to_string(),
+                    message: parts[2].to_string(),
+                    author: parts[3].to_string(),
+                    relative_time: parts[4].to_string(),
                 })
             } else {
                 None
@@ -2866,9 +2911,197 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let diff_section = stack((diff_header, diff_scroll)).style(|s| s.flex_col().width_full());
 
+    // ── Commit Log section ────────────────────────────────────────────────────
+    let log_expanded: RwSignal<bool> = create_rw_signal(false);
+    let log_hdr_hov: RwSignal<bool> = create_rw_signal(false);
+    let log_refresh_hov: RwSignal<bool> = create_rw_signal(false);
+    let commit_log: RwSignal<Vec<CommitLogEntry>> = create_rw_signal(Vec::new());
+
+    let state_log = state.clone();
+
+    // Helper closure: load commit log entries.
+    let load_commit_log = {
+        let root = state_log.workspace_root;
+        move || {
+            let r = root.get();
+            let scope = Scope::new();
+            let send = create_ext_action(scope, move |entries: Vec<CommitLogEntry>| {
+                commit_log.set(entries);
+            });
+            std::thread::spawn(move || send(run_git_log_full(&r, 50)));
+        }
+    };
+
+    // Refresh button for commit log section.
+    let log_refresh_btn = container(label(|| "↻").style(move |s| {
+        let t = theme.get();
+        s.font_size(12.0).color(if log_refresh_hov.get() {
+            t.palette.accent_hover
+        } else {
+            t.palette.text_muted
+        })
+    }))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(5.0).padding_vert(2.0).border_radius(3.0)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .background(if log_refresh_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop({
+        let load_log2 = load_commit_log.clone();
+        move |_| load_log2()
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| log_refresh_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| log_refresh_hov.set(false));
+
+    let log_header = container(
+        stack((
+            label(move || if log_expanded.get() { "▾ " } else { "▸ " }).style(move |s| {
+                s.font_size(10.0).color(theme.get().palette.text_muted).margin_right(2.0)
+            }),
+            label(move || {
+                let n = commit_log.get().len();
+                if n == 0 {
+                    "COMMIT LOG".to_string()
+                } else {
+                    format!("COMMIT LOG ({n})")
+                }
+            })
+            .style(move |s| {
+                let t = theme.get();
+                s.font_size(11.0).color(t.palette.text_muted).font_weight(floem::text::Weight::BOLD).flex_grow(1.0)
+            }),
+            log_refresh_btn,
+        ))
+        .style(|s| s.items_center().width_full()),
+    )
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.padding_horiz(10.0).padding_vert(5.0).width_full()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border_top(1.0).border_color(p.border)
+            .background(if log_hdr_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop({
+        let load_log3 = load_commit_log.clone();
+        move |_| {
+            let was_expanded = log_expanded.get();
+            log_expanded.set(!was_expanded);
+            if !was_expanded {
+                load_log3();
+            }
+        }
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| log_hdr_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| log_hdr_hov.set(false));
+
+    let log_rows = dyn_stack(
+        move || {
+            if !log_expanded.get() {
+                return vec![];
+            }
+            commit_log.get()
+        },
+        |e| e.hash.clone(),
+        move |entry: CommitLogEntry| {
+            let row_hov = create_rw_signal(false);
+            let short_hash = entry.short_hash.clone();
+            let msg = entry.message.clone();
+            let author = entry.author.clone();
+            let rel_time = entry.relative_time.clone();
+            let full_hash = entry.hash.clone();
+
+            let msg_display = if msg.len() > 80 {
+                format!("{}…", &msg[..80])
+            } else {
+                msg.clone()
+            };
+
+            container(
+                stack((
+                    label(move || short_hash.clone()).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(10.0)
+                            .color(t.palette.accent)
+                            .min_width(54.0)
+                            .font_family("monospace".to_string())
+                    }),
+                    label(move || msg_display.clone()).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(11.0)
+                            .color(t.palette.text_primary)
+                            .flex_grow(1.0)
+                            .min_width(0.0)
+                    }),
+                    label(move || format!(" — {author}")).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(10.0).color(t.palette.text_muted)
+                    }),
+                    label(move || format!(" ({rel_time})")).style(move |s| {
+                        let t = theme.get();
+                        s.font_size(10.0).color(t.palette.text_muted)
+                    }),
+                ))
+                .style(|s| s.items_center().width_full().min_width(0.0)),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width_full()
+                    .padding_horiz(12.0)
+                    .padding_vert(3.0)
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if row_hov.get() {
+                        p.bg_elevated
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    })
+            })
+            .on_click_stop(move |_| {
+                let hash_to_copy = full_hash.clone();
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_text(hash_to_copy.clone());
+                }
+                status_msg.set(format!("Copied hash: {}", &hash_to_copy[..hash_to_copy.len().min(12)]));
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| row_hov.set(true))
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| row_hov.set(false))
+        },
+    )
+    .style(|s: floem::style::Style| s.flex_col().width_full());
+
+    let log_empty_msg = label(move || {
+        if log_expanded.get() && commit_log.get().is_empty() {
+            "No commits found".to_string()
+        } else {
+            String::new()
+        }
+    })
+    .style(move |s| {
+        let t = theme.get();
+        s.font_size(11.0).color(t.palette.text_muted).padding_horiz(14.0).padding_vert(6.0).width_full()
+            .apply_if(
+                !log_expanded.get() || !commit_log.get().is_empty(),
+                |s| s.display(floem::style::Display::None),
+            )
+    });
+
+    let log_scroll = scroll(
+        stack((log_rows, log_empty_msg)).style(|s| s.flex_col().width_full()),
+    )
+    .style(move |s| {
+        s.max_height(400.0).width_full()
+            .apply_if(!log_expanded.get(), |s| s.display(floem::style::Display::None))
+    });
+
+    let commit_log_section = stack((log_header, log_scroll)).style(|s| s.flex_col().width_full());
+
     // ── Full scrollable body ──────────────────────────────────────────────────
     let body = scroll(
-        stack((file_sections, commit_history, blame_section, stash_list_section, merge_section, tag_section, diff_section))
+        stack((file_sections, commit_history, blame_section, stash_list_section, merge_section, tag_section, diff_section, commit_log_section))
             .style(|s| s.flex_col().width_full()),
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
