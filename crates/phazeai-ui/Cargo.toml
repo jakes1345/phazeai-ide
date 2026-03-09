@@ -17,6 +17,7 @@ path = "src/bin/phazeai-ui.rs"
 floem = { workspace = true }
 floem-editor-core = { workspace = true }
 phazeai-core = { path = "../phazeai-core" }
+phazeai-sidecar = { path = "../phazeai-sidecar" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

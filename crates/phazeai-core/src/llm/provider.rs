@@ -426,6 +426,22 @@ impl ProviderRegistry {
             ],
             ProviderId::Gemini => vec![
                 ModelInfo {
+                    id: "gemini-2.5-pro".into(),
+                    name: "Gemini 2.5 Pro (thinking)".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 1.25,
+                    output_cost_per_m: 10.0,
+                },
+                ModelInfo {
+                    id: "gemini-2.5-flash".into(),
+                    name: "Gemini 2.5 Flash".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 0.075,
+                    output_cost_per_m: 0.30,
+                },
+                ModelInfo {
                     id: "gemini-2.0-flash".into(),
                     name: "Gemini 2.0 Flash".into(),
                     context_window: 1_000_000,
@@ -449,6 +465,14 @@ impl ProviderRegistry {
                     input_cost_per_m: 1.25,
                     output_cost_per_m: 5.0,
                 },
+                ModelInfo {
+                    id: "gemini-1.5-flash".into(),
+                    name: "Gemini 1.5 Flash".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 0.075,
+                    output_cost_per_m: 0.30,
+                },
             ],
             ProviderId::LmStudio | ProviderId::Ollama => {
                 // Dynamic - must query the server
@@ -468,7 +492,7 @@ fn default_model_for(id: &ProviderId) -> &str {
         ProviderId::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         ProviderId::OpenRouter => "anthropic/claude-sonnet-4-5-20250929",
         ProviderId::LmStudio => "default",
-        ProviderId::Gemini => "gemini-2.0-flash",
+        ProviderId::Gemini => "gemini-2.5-flash",
         ProviderId::Custom(_) => "default",
     }
 }

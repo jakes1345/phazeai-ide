@@ -4035,6 +4035,7 @@ dependencies = [
  "lsp-types",
  "notify",
  "phazeai-core",
+ "phazeai-sidecar",
  "portable-pty",
  "regex",
  "rfd",

@@ -26,7 +26,15 @@ pub mod models {
     pub const DEFAULT_TOGETHER_MODEL: &str = "deepseek-r1-distill-llama-70b";
     pub const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-sonnet-4-5";
     pub const DEFAULT_LMSTUDIO_MODEL: &str = "local-model";
-    pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
+    /// Default Gemini model — 2.5 Flash: fast, cheap, 1M context, optional thinking
+    pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
+    pub const GEMINI_PRO_MODEL: &str = "gemini-2.5-pro";
+    pub const GEMINI_FLASH_MODEL: &str = "gemini-2.5-flash";
+    pub const GEMINI_FLASH_LITE_MODEL: &str = "gemini-2.0-flash-lite";
+    pub const GEMINI_FLASH_20_MODEL: &str = "gemini-2.0-flash";
+    pub const GEMINI_15_PRO_MODEL: &str = "gemini-1.5-pro";
+    pub const GEMINI_15_FLASH_MODEL: &str = "gemini-1.5-flash";
+    pub const GEMINI_EMBEDDING_MODEL: &str = "text-embedding-004";
 }
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -39,8 +47,12 @@ pub mod endpoints {
     pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
     pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
     pub const LMSTUDIO_BASE_URL: &str = "http://localhost:1234";
-    // Google Gemini uses an OpenAI-compatible endpoint
+    /// Google Gemini OpenAI-compatible endpoint (works with existing OpenAIClient)
     pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
+    /// Gemini native REST endpoint (for context caching, thinking mode, grounding)
+    pub const GEMINI_NATIVE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+    /// Pi Ollama LAN endpoint (configured via setup script)
+    pub const PI_OLLAMA_LAN_URL: &str = "http://192.168.1.155:8080";
     pub const SEARCH_ENGINE_URL: &str = "https://html.duckduckgo.com/html/?q={}";
 }
 

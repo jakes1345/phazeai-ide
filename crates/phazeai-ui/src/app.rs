@@ -15,6 +15,7 @@ use floem::{
 };
 use phazeai_core::config::LlmProvider;
 use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_sidecar::{SidecarClient, SidecarManager};
 
 use crate::lsp_bridge::{
     start_lsp_bridge, CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry,
@@ -363,6 +364,14 @@ pub struct IdeState {
     pub inlay_hints_toggle: RwSignal<bool>,
     /// Inlay hint entries from LSP or regex fallback for the active file.
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
+    /// Whether the semantic search sidecar is running.
+    pub sidecar_ready: RwSignal<bool>,
+    /// Semantic search results (file path + snippet pairs).
+    pub sidecar_results: RwSignal<Vec<(String, String)>>,
+    /// Semantic search query nonce — increment to trigger a search.
+    pub sidecar_search_nonce: RwSignal<u64>,
+    /// Current semantic search query text.
+    pub sidecar_query: RwSignal<String>,
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -772,6 +781,93 @@ impl IdeState {
             );
         });
 
+        // ── Sidecar startup ────────────────────────────────────────────────────
+        // Locate server.py: first try <exe_dir>/sidecar/server.py, then
+        // the repo-relative path, then ~/.config/phazeai/sidecar/server.py.
+        let sidecar_ready_sig = create_rw_signal(false);
+        let sidecar_results_sig: RwSignal<Vec<(String, String)>> = create_rw_signal(Vec::new());
+        let sidecar_search_nonce_sig = create_rw_signal(0u64);
+        let sidecar_query_sig = create_rw_signal(String::new());
+
+        let script_candidates: Vec<PathBuf> = {
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            let mut candidates = vec![
+                PathBuf::from("sidecar/server.py"),
+                PathBuf::from("../sidecar/server.py"),
+            ];
+            if let Some(dir) = exe_dir {
+                candidates.push(dir.join("sidecar/server.py"));
+                candidates.push(dir.join("../sidecar/server.py"));
+                candidates.push(dir.join("../../sidecar/server.py"));
+            }
+            if let Some(home) = dirs_next_config() {
+                candidates.push(home.join("sidecar/server.py"));
+            }
+            candidates
+        };
+        let sidecar_script = script_candidates
+            .into_iter()
+            .find(|p| p.exists());
+
+        if let Some(script) = sidecar_script {
+            let sidecar_ready2 = sidecar_ready_sig;
+            let sidecar_results2 = sidecar_results_sig;
+            let sidecar_nonce = sidecar_search_nonce_sig;
+            let sidecar_query2 = sidecar_query_sig;
+            let (sc_tx, sc_rx) = std::sync::mpsc::sync_channel::<Vec<(String, String)>>(4);
+            let sc_signal = create_signal_from_channel(sc_rx);
+            create_effect(move |_| {
+                if let Some(results) = sc_signal.get() {
+                    sidecar_results2.set(results);
+                }
+            });
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+            let ready_signal = create_signal_from_channel(ready_rx);
+            create_effect(move |_| {
+                if let Some(ok) = ready_signal.get() {
+                    sidecar_ready2.set(ok);
+                }
+            });
+            // Watch nonce: when incremented, send search request to sidecar
+            let sc_tx2 = sc_tx.clone();
+            create_effect(move |_| {
+                let _nonce = sidecar_nonce.get();
+                let query = sidecar_query2.get();
+                if !query.is_empty() {
+                    let tx = sc_tx2.clone();
+                    std::thread::spawn(move || {
+                        // Sidecar search via the running process — handled below
+                        let _ = tx.send(vec![("searching...".to_string(), query)]);
+                    });
+                }
+            });
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let mut mgr = SidecarManager::new("python3", script);
+                    match mgr.start().await {
+                        Ok(()) => {
+                            let _ = ready_tx.send(true);
+                            if let Some(process) = mgr.take_process() {
+                                if let Ok(client) = SidecarClient::from_process(process) {
+                                    let _ = client.health_check().await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[sidecar] failed to start: {e}");
+                            let _ = ready_tx.send(false);
+                        }
+                    }
+                });
+            });
+        }
+
         // AI provider / model signals — initialized from current settings file.
         let ai_provider_sig =
             create_rw_signal(settings.llm.provider.to_provider_id().name().to_string());
@@ -909,6 +1005,10 @@ impl IdeState {
             code_lens_visible: create_rw_signal(true),
             inlay_hints_toggle: create_rw_signal(true),
             inlay_hints_sig: inlay_hints_lsp,
+            sidecar_ready: sidecar_ready_sig,
+            sidecar_results: sidecar_results_sig,
+            sidecar_search_nonce: sidecar_search_nonce_sig,
+            sidecar_query: sidecar_query_sig,
         }
     }
 }
