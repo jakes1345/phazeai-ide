@@ -49,7 +49,7 @@ async fn main() -> Result<(), PhazeError> {
                 MultiAgentEvent::AgentStarted(role) => {
                     println!("\n▶️  Agent Started: {:?}", role);
                 }
-                MultiAgentEvent::AgentOutput { role, text } => {
+                MultiAgentEvent::AgentOutput { role: _, text: _ } => {
                     // Just print a dot for animation
                     print!(".");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -73,7 +73,7 @@ async fn main() -> Result<(), PhazeError> {
                 MultiAgentEvent::RefinementComplete { clean_build, iterations_used } => {
                     println!("\n▶️  Refinement Complete (clean: {}, iters: {})", clean_build, iterations_used);
                 }
-                MultiAgentEvent::PipelineComplete { plan, code, review } => {
+                MultiAgentEvent::PipelineComplete { plan: _, code: _, review: _ } => {
                     println!("\n🏁 PIPELINE COMPLETE!");
                 }
                 MultiAgentEvent::Error(e) => {

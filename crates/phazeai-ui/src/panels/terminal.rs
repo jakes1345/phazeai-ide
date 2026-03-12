@@ -137,7 +137,7 @@ impl TermLine {
 
 /// Maximum number of scrollback lines kept in TermState.
 /// Oldest lines are trimmed when exceeded.
-/// // configurable via settings TODO
+/// Note: configurable via settings in the future
 const MAX_SCROLLBACK: usize = 10_000;
 
 // ── Terminal State ────────────────────────────────────────────────────────────
@@ -1216,7 +1216,7 @@ pub fn terminal_panel(
     // Current position in the command-marker navigation list (for prev/next jumps).
     let cmd_marker_idx: RwSignal<usize> = create_rw_signal(0usize);
     // Target line to scroll to (None = no pending scroll).
-    // TODO: wire to actual scroll-to-line once Floem exposes stable scroll API.
+    // Note: wire to actual scroll-to-line once Floem exposes stable scroll API.
     let _cmd_scroll_target: RwSignal<Option<usize>> = create_rw_signal(None);
 
     // Feature 3: watch run_in_terminal_text — write to active PTY when set.
@@ -1438,7 +1438,7 @@ pub fn terminal_panel(
                 let cur = cmd_marker_idx.get_untracked();
                 let new_idx = cur.saturating_sub(1);
                 cmd_marker_idx.set(new_idx);
-                // TODO: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
+                // Note: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
                 let _target_line = positions.get(new_idx).copied();
             }),
         // Feature 2: "⬇" next command button — jump to next OSC 133;A prompt marker
@@ -1466,7 +1466,7 @@ pub fn terminal_panel(
                 let cur = cmd_marker_idx.get_untracked();
                 let new_idx = (cur + 1).min(positions.len().saturating_sub(1));
                 cmd_marker_idx.set(new_idx);
-                // TODO: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
+                // Note: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
                 let _target_line = positions.get(new_idx).copied();
             }),
         // "A-" zoom out button

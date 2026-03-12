@@ -983,7 +983,9 @@ enum VimMotion {
     ChangeWholeLine,
     ChangeWord,
     DeleteWord,
+    #[allow(dead_code)]
     HalfPageDown,
+    #[allow(dead_code)]
     HalfPageUp,
     JumpMatchingBracket,
     ReplaceChar(char),
@@ -1101,7 +1103,7 @@ fn vim_zero_line_start() {
 }
 
 #[test]
-fn vim_G_goto_file_bottom() {
+fn vim_g_goto_file_bottom() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('G'), Some(VimMotion::GotoFileBottom));
 }
@@ -1113,7 +1115,7 @@ fn vim_p_paste() {
 }
 
 #[test]
-fn vim_P_paste_before() {
+fn vim_p_paste_before() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('P'), Some(VimMotion::PasteBefore));
 }
@@ -1131,25 +1133,25 @@ fn vim_dot_repeat_last_edit() {
 }
 
 #[test]
-fn vim_A_insert_at_line_end() {
+fn vim_a_insert_at_line_end() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('A'), Some(VimMotion::InsertAtLineEnd));
 }
 
 #[test]
-fn vim_I_insert_at_line_start() {
+fn vim_i_insert_at_line_start() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('I'), Some(VimMotion::InsertAtLineStart));
 }
 
 #[test]
-fn vim_D_delete_to_line_end() {
+fn vim_d_delete_to_line_end() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('D'), Some(VimMotion::DeleteToLineEnd));
 }
 
 #[test]
-fn vim_C_change_to_line_end() {
+fn vim_c_change_to_line_end() {
     let mut d = VimDispatch::default();
     assert_eq!(d.key('C'), Some(VimMotion::ChangeToLineEnd));
 }

@@ -30,6 +30,9 @@ comrak = { workspace = true }
 tree-sitter = { workspace = true }
 lsp-types = { workspace = true }
 urlencoding = "2.1"
+wasmtime = "42.0.1"
+deno_core = "0.390.0"
+zip = "8.2.0"
 
 [dev-dependencies]
 tempfile = "3.10"

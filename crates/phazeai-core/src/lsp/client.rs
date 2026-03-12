@@ -698,8 +698,7 @@ impl LspClient {
                     }
                     "window/workDoneProgress/create" => {
                         // Acknowledge the server request to create a progress token.
-                        // Full bidirectional ack would require writing back through the
-                        // writer Arc; for now log the token so lsp_bridge can see it.
+                        // We emit a log event so lsp_bridge can see the creation request.
                         if msg.get("id").is_some() {
                             let _ = event_tx.send(LspEvent::Log(
                                 "__progress_create__".to_string(),

@@ -6,7 +6,7 @@ members = [
     "crates/phazeai-cli",
     "crates/phazeai-ui",
     "crates/phazeai-cloud",
-    "crates/ollama-rs",
+    "crates/ollama-rs", "ext-host/wasm-extension",
 ]
 
 [workspace.package]

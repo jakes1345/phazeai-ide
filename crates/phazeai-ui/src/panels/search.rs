@@ -866,46 +866,18 @@ fn perform_replace_all(
             };
 
             let new_content = if use_regex {
-                // Use regex replace via rg/sed or manual regex
-                // For now fall back to fixed string (regex crate not guaranteed available)
-                let mut out = String::new();
-                let mut count = 0usize;
-                for line in content.lines() {
-                    let new_line = if case_sensitive {
-                        if line.contains(&find2) {
-                            count += line.matches(&find2).count();
-                            line.replace(&find2, &replace2)
-                        } else {
-                            line.to_string()
-                        }
-                    } else {
-                        let lo_line = line.to_lowercase();
-                        let lo_find = find2.to_lowercase();
-                        if lo_line.contains(&lo_find) {
-                            // case-insensitive replace: use rg --replace via process
-                            count += 1;
-                            // Simple approach: find-replace preserving case
-                            let mut result = String::new();
-                            let mut rest = line;
-                            while let Some(pos) = rest.to_lowercase().find(&lo_find) {
-                                result.push_str(&rest[..pos]);
-                                result.push_str(&replace2);
-                                rest = &rest[pos + find2.len()..];
-                            }
-                            result.push_str(rest);
-                            result
-                        } else {
-                            line.to_string()
-                        }
-                    };
-                    out.push_str(&new_line);
-                    out.push('\n');
+                // Use regex replace
+                if let Ok(re) = regex::RegexBuilder::new(&find2).case_insensitive(!case_sensitive).build() {
+                    let replaced = re.replace_all(&content, replace2.as_str());
+                    let new_text = replaced.to_string();
+                    if new_text != content {
+                        // Count occurrences approximately by finding the number of matches
+                        replaced_count += re.find_iter(&content).count();
+                    }
+                    new_text
+                } else {
+                    content.clone() // if regex is invalid, skip
                 }
-                if !content.ends_with('\n') && out.ends_with('\n') {
-                    out.pop();
-                }
-                replaced_count += count;
-                out
             } else {
                 let mut count = 0usize;
                 let new = if case_sensitive {

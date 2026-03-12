@@ -741,6 +741,7 @@ fn cursor_offset_second_line_mid() {
 
 #[derive(Debug, Default)]
 struct MockEditorTab {
+    #[allow(dead_code)]
     path: String,
     content: String,
     saved_content: String,

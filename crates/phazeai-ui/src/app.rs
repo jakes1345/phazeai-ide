@@ -1,6 +1,31 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use arboard;
+use phazeai_core::ext_host::IdeDelegate;
+
+struct UiIdeDelegate {
+    toast_tx: std::sync::mpsc::SyncSender<String>,
+    active_text: Arc<std::sync::Mutex<String>>,
+}
+
+impl IdeDelegate for UiIdeDelegate {
+    fn log(&self, msg: &str) {
+        println!("[EXT LOG] {}", msg);
+    }
+
+    fn show_message(&self, msg: &str) {
+        let _ = self.toast_tx.send(msg.to_string());
+    }
+
+    fn get_active_text(&self) -> String {
+        if let Ok(text) = self.active_text.lock() {
+            text.clone()
+        } else {
+            String::new()
+        }
+    }
+}
 use floem::{
     action::show_context_menu,
     event::{Event, EventListener},
@@ -26,11 +51,11 @@ use crate::{
     components::icon::{icons, phaze_icon},
     panels::{
         ai_panel::ai_panel, chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
-        git::git_panel, search, settings::settings_panel, terminal::terminal_panel,
+        extensions::extensions_panel, git::git_panel, search, settings::settings_panel,
+        terminal::terminal_panel,
     },
     theme::{PhazeTheme, ThemeVariant},
 };
-use std::time::Duration;
 
 /// Vim normal-mode motions dispatched to the active editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,7 +147,7 @@ pub enum Tab {
     GitDiff,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IdeState {
     pub theme: RwSignal<PhazeTheme>,
     pub left_panel_tab: RwSignal<Tab>,
@@ -136,8 +161,8 @@ pub struct IdeState {
     /// Shared with the editor's sentient gutter so it glows during inference.
     pub ai_thinking: RwSignal<bool>,
     /// Rendered width of the left sidebar (260.0 when open, 0.0 when closed).
-    /// TODO: drive this through a smooth animation loop once Floem exposes a
-    /// stable `create_animation` / `spring` API.  For now it snaps immediately.
+    /// Note: This snaps immediately. In the future, this could use a smooth animation loop
+    /// when Floem exposes a stable `create_animation` / `spring` API.
     pub left_panel_width: RwSignal<f64>,
     /// Real git branch — populated async from `git rev-parse --abbrev-ref HEAD`.
     pub git_branch: RwSignal<String>,
@@ -372,6 +397,24 @@ pub struct IdeState {
     pub sidecar_search_nonce: RwSignal<u64>,
     /// Current semantic search query text.
     pub sidecar_query: RwSignal<String>,
+    
+    // Extensions
+    /// Extension host manager for JS/WASM extensions
+    pub ext_manager: Arc<phazeai_core::ext_host::ExtensionManager>,
+    /// Extensions currently loading or starting up
+    pub ext_loading: RwSignal<bool>,
+    /// Commands registered by extensions
+    pub ext_commands: RwSignal<Vec<String>>,
+    /// List of loaded extensions
+    pub extensions: RwSignal<Vec<String>>,
+}
+
+impl std::fmt::Debug for IdeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdeState")
+            .field("workspace_root", &self.workspace_root.get_untracked())
+            .finish()
+    }
 }
 
 /// Persisted layout state from ~/.config/phazeai/session.toml
@@ -873,6 +916,39 @@ impl IdeState {
             create_rw_signal(settings.llm.provider.to_provider_id().name().to_string());
         let ai_model_sig = create_rw_signal(settings.llm.model.clone());
 
+        let status_toast_sig = create_rw_signal(None);
+
+        // Extension Manager
+        let (toast_tx, toast_rx) = std::sync::mpsc::sync_channel::<String>(64);
+        let toast_sig = create_signal_from_channel(toast_rx);
+        let status_toast_for_delegate = status_toast_sig;
+        create_effect(move |_| {
+            if let Some(msg) = toast_sig.get() {
+                show_toast(status_toast_for_delegate, msg);
+            }
+        });
+        
+        let active_text = Arc::new(std::sync::Mutex::new(String::new()));
+        let active_text_clone = active_text.clone();
+        let open_file_sig = open_file;
+        create_effect(move |_| {
+            if let Some(path) = open_file_sig.get() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(mut lock) = active_text_clone.lock() {
+                        *lock = content;
+                    }
+                }
+            } else {
+                if let Ok(mut lock) = active_text_clone.lock() {
+                    lock.clear();
+                }
+            }
+        });
+        
+        let ext_manager = phazeai_core::ext_host::ExtensionManager::with_delegate(
+            std::sync::Arc::new(UiIdeDelegate { toast_tx, active_text })
+        );
+
         // Persist provider + model changes to settings.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
@@ -940,7 +1016,7 @@ impl IdeState {
             rename_target: create_rw_signal(String::new()),
             sig_help,
             doc_symbols,
-            status_toast: create_rw_signal(None),
+            status_toast: status_toast_sig,
             zen_mode: create_rw_signal(false),
             line_ending: line_ending_sig,
             ws_syms_open: create_rw_signal(false),
@@ -1009,6 +1085,10 @@ impl IdeState {
             sidecar_results: sidecar_results_sig,
             sidecar_search_nonce: sidecar_search_nonce_sig,
             sidecar_query: sidecar_query_sig,
+            ext_manager,
+            ext_loading: create_rw_signal(false),
+            ext_commands: create_rw_signal(Vec::new()),
+            extensions: create_rw_signal(Vec::new()),
         }
     }
 }
@@ -1827,7 +1907,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let extensions_wrap = container(placeholder_tab("Extensions", state.clone())).style({
+    let extensions_wrap = container(extensions_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -5266,7 +5346,7 @@ fn menu_bar(state: IdeState) -> impl IntoView {
                 )
                 .separator()
                 .entry(MenuItem::new("About PhazeAI IDE").action(|| {
-                    // TODO: about dialog
+                    // Note: about dialog is not yet implemented
                 }));
             show_context_menu(menu, None);
         })
