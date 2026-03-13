@@ -51,8 +51,8 @@ use crate::{
     components::icon::{icons, phaze_icon},
     panels::{
         ai_panel::ai_panel, chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
-        extensions::extensions_panel, git::git_panel, search, settings::settings_panel,
-        terminal::terminal_panel,
+        extensions::extensions_panel, git::git_panel, github_actions::github_actions_panel, search,
+        settings::settings_panel, terminal::terminal_panel,
     },
     theme::{PhazeTheme, ThemeVariant},
 };
@@ -1966,7 +1966,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let github_wrap = container(placeholder_tab("GitHub Actions", state.clone())).style({
+    let github_wrap = container(github_actions_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
