@@ -32,6 +32,7 @@ regex = "1"
 lazy_static = "1.5"
 lsp-types = { workspace = true }
 notify = { workspace = true }
+stacker = "0.1"
 
 [dev-dependencies]
 image = "0.25"
