@@ -413,13 +413,24 @@ impl LspClient {
 
     /// Request folding ranges for a document (textDocument/foldingRange).
     /// Request inlay hints for a range of lines (textDocument/inlayHint).
-    pub async fn inlay_hints(&self, path: &Path, start_line: u32, end_line: u32) -> Result<Vec<InlayHint>, String> {
+    pub async fn inlay_hints(
+        &self,
+        path: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<InlayHint>, String> {
         let uri = path_to_uri(path)?;
         let params = InlayHintParams {
             text_document: TextDocumentIdentifier { uri },
             range: Range {
-                start: Position { line: start_line, character: 0 },
-                end:   Position { line: end_line,   character: u32::MAX },
+                start: Position {
+                    line: start_line,
+                    character: 0,
+                },
+                end: Position {
+                    line: end_line,
+                    character: u32::MAX,
+                },
             },
             work_done_progress_params: Default::default(),
         };
@@ -700,9 +711,7 @@ impl LspClient {
                         // Acknowledge the server request to create a progress token.
                         // We emit a log event so lsp_bridge can see the creation request.
                         if msg.get("id").is_some() {
-                            let _ = event_tx.send(LspEvent::Log(
-                                "__progress_create__".to_string(),
-                            ));
+                            let _ = event_tx.send(LspEvent::Log("__progress_create__".to_string()));
                         }
                     }
                     _ => {

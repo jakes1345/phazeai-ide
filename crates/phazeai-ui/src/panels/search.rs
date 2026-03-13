@@ -182,12 +182,22 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .color(if whole_word.get() { p.bg_base } else { p.text_muted })
-                    .background(if whole_word.get() { p.accent } else { p.bg_elevated })
+                    .color(if whole_word.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if whole_word.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
                     .border(1.0)
                     .border_color(p.border)
             })
-            .on_click_stop(move |_| { whole_word.update(|v| *v = !*v); })
+            .on_click_stop(move |_| {
+                whole_word.update(|v| *v = !*v);
+            })
     };
 
     let opt_open_only = {
@@ -200,12 +210,22 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .color(if open_editors_only.get() { p.bg_base } else { p.text_muted })
-                    .background(if open_editors_only.get() { p.accent } else { p.bg_elevated })
+                    .color(if open_editors_only.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if open_editors_only.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
                     .border(1.0)
                     .border_color(p.border)
             })
-            .on_click_stop(move |_| { open_editors_only.update(|v| *v = !*v); })
+            .on_click_stop(move |_| {
+                open_editors_only.update(|v| *v = !*v);
+            })
     };
 
     // ── Search input ──────────────────────────────────────────────────────────
@@ -258,7 +278,9 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                 }
                                 Key::Named(NamedKey::ArrowUp) => {
                                     let hist = search_history.get_untracked();
-                                    if hist.is_empty() { return; }
+                                    if hist.is_empty() {
+                                        return;
+                                    }
                                     let next = match history_idx.get_untracked() {
                                         None => 0,
                                         Some(i) => (i + 1).min(hist.len() - 1),
@@ -403,13 +425,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let flat_results_view = {
         let state_flat = state.clone();
         dyn_stack(
-            move || {
-                results
-                    .get()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>()
-            },
+            move || results.get().into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             move |(i, r)| {
                 let path_str = r
@@ -424,12 +440,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                 let s = state_flat.clone();
                 container(
                     stack((
-                        label(move || format!("{}:{}", path_str, r.line + 1)).style(
-                            move |s| {
-                                let p = theme.get().palette;
-                                s.font_size(10.0).color(p.accent).padding_right(6.0)
-                            },
-                        ),
+                        label(move || format!("{}:{}", path_str, r.line + 1)).style(move |s| {
+                            let p = theme.get().palette;
+                            s.font_size(10.0).color(p.accent).padding_right(6.0)
+                        }),
                         label(move || content_text.clone()).style(move |s| {
                             let p = theme.get().palette;
                             s.font_size(11.0).color(p.text_primary).flex_grow(1.0)
@@ -606,70 +620,60 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
 
     // ── Combine flat + tree into a conditional container ─────────────────────
     // We wrap both in a container and show/hide based on tree_view signal.
-    let flat_container = container(
-        stack((flat_results_view, searching_label))
-            .style(|s| s.flex_col().width_full()),
-    )
-    .style(move |s| {
-        s.flex_col()
-            .width_full()
-            .apply_if(tree_view.get(), |s| {
-                s.display(floem::style::Display::None)
-            })
-    });
+    let flat_container =
+        container(stack((flat_results_view, searching_label)).style(|s| s.flex_col().width_full()))
+            .style(move |s| {
+                s.flex_col()
+                    .width_full()
+                    .apply_if(tree_view.get(), |s| s.display(floem::style::Display::None))
+            });
 
     let tree_container = container(tree_results_view).style(move |s| {
         s.flex_col()
             .width_full()
-            .apply_if(!tree_view.get(), |s| {
-                s.display(floem::style::Display::None)
-            })
+            .apply_if(!tree_view.get(), |s| s.display(floem::style::Display::None))
     });
 
-    let results_inner = scroll(
-        stack((flat_container, tree_container)).style(|s| s.flex_col().width_full()),
-    )
-    .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
-    .keyboard_navigable();
+    let results_inner =
+        scroll(stack((flat_container, tree_container)).style(|s| s.flex_col().width_full()))
+            .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
+            .keyboard_navigable();
 
     // ── Keyboard navigation wrapper ───────────────────────────────────────────
     let results_area = container(results_inner)
-        .on_event_stop(
-            floem::event::EventListener::KeyDown,
-            move |event| {
-                if let floem::event::Event::KeyDown(e) = event {
-                    use floem::keyboard::NamedKey;
-                    let total = results.get().len();
-                    match e.key.logical_key {
-                        floem::keyboard::Key::Named(NamedKey::ArrowDown) => {
-                            selected_idx.update(|i| {
-                                *i = Some(match *i {
-                                    None => 0,
-                                    Some(n) => (n + 1).min(total.saturating_sub(1)),
-                                });
+        .on_event_stop(floem::event::EventListener::KeyDown, move |event| {
+            if let floem::event::Event::KeyDown(e) = event {
+                use floem::keyboard::NamedKey;
+                let total = results.get().len();
+                match e.key.logical_key {
+                    floem::keyboard::Key::Named(NamedKey::ArrowDown) => {
+                        selected_idx.update(|i| {
+                            *i = Some(match *i {
+                                None => 0,
+                                Some(n) => (n + 1).min(total.saturating_sub(1)),
                             });
-                        }
-                        floem::keyboard::Key::Named(NamedKey::ArrowUp) => {
-                            selected_idx.update(|i| {
-                                *i = Some(match *i {
-                                    None => 0,
-                                    Some(n) => n.saturating_sub(1),
-                                });
+                        });
+                    }
+                    floem::keyboard::Key::Named(NamedKey::ArrowUp) => {
+                        selected_idx.update(|i| {
+                            *i = Some(match *i {
+                                None => 0,
+                                Some(n) => n.saturating_sub(1),
                             });
-                        }
-                        floem::keyboard::Key::Named(NamedKey::Enter) => {
-                            if let Some(idx) = selected_idx.get() {
-                                if let Some(r) = results.get().get(idx).cloned() {
-                                    state.open_file.set(Some(r.path.clone()));
-                                    state.goto_line.set(r.line as u32 + 1);
-                                }
+                        });
+                    }
+                    floem::keyboard::Key::Named(NamedKey::Enter) => {
+                        if let Some(idx) = selected_idx.get() {
+                            if let Some(r) = results.get().get(idx).cloned() {
+                                state.open_file.set(Some(r.path.clone()));
+                                state.goto_line.set(r.line as u32 + 1);
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
-            },
-        )
+            }
+        })
         .keyboard_navigable()
         .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
@@ -871,7 +875,10 @@ fn perform_replace_all(
 
             let new_content = if use_regex {
                 // Use regex replace
-                if let Ok(re) = regex::RegexBuilder::new(&find2).case_insensitive(!case_sensitive).build() {
+                if let Ok(re) = regex::RegexBuilder::new(&find2)
+                    .case_insensitive(!case_sensitive)
+                    .build()
+                {
                     let replaced = re.replace_all(&content, replace2.as_str());
                     let new_text = replaced.to_string();
                     if new_text != content {
@@ -904,10 +911,9 @@ fn perform_replace_all(
                 new
             };
 
-            if new_content != content
-                && std::fs::write(&path, new_content).is_ok() {
-                    replaced_files += 1;
-                }
+            if new_content != content && std::fs::write(&path, new_content).is_ok() {
+                replaced_files += 1;
+            }
         }
 
         let _ = tx.send(format!(

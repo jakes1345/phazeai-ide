@@ -84,9 +84,7 @@ impl Tool for ScreenshotTool {
         }
 
         let path = PathBuf::from(output_path);
-        let file_size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
         Ok(serde_json::json!({
             "path": output_path,
@@ -98,7 +96,10 @@ impl Tool for ScreenshotTool {
     }
 }
 
-fn detect_screenshot_command(output_path: &str, region: &str) -> Result<(String, Vec<String>), PhazeError> {
+fn detect_screenshot_command(
+    output_path: &str,
+    region: &str,
+) -> Result<(String, Vec<String>), PhazeError> {
     // Check if Wayland
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
         || std::env::var("XDG_SESSION_TYPE")
@@ -113,7 +114,11 @@ fn detect_screenshot_command(output_path: &str, region: &str) -> Result<(String,
                     if which_exists("slurp") {
                         // slurp lets user select a region
                         // We need to pipe slurp output to grim -g
-                        vec!["-g".to_string(), "$(slurp)".to_string(), output_path.to_string()]
+                        vec![
+                            "-g".to_string(),
+                            "$(slurp)".to_string(),
+                            output_path.to_string(),
+                        ]
                     } else {
                         vec![output_path.to_string()]
                     }
@@ -128,9 +133,9 @@ fn detect_screenshot_command(output_path: &str, region: &str) -> Result<(String,
     if which_exists("scrot") {
         let mut args = vec![];
         match region {
-            "window" => args.push("-u".to_string()), // active window
+            "window" => args.push("-u".to_string()),    // active window
             "selection" => args.push("-s".to_string()), // selection mode
-            _ => {} // fullscreen is default
+            _ => {}                                     // fullscreen is default
         }
         args.push(output_path.to_string());
         return Ok(("scrot".to_string(), args));

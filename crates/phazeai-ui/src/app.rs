@@ -69,15 +69,15 @@ pub enum VimMotion {
     WordBackward,
     LineStart,
     LineEnd,
-    GotoFileTop,     // gg
-    GotoFileBottom,  // G
-    HalfPageDown,    // Ctrl+d
-    HalfPageUp,      // Ctrl+u
+    GotoFileTop,         // gg
+    GotoFileBottom,      // G
+    HalfPageDown,        // Ctrl+d
+    HalfPageUp,          // Ctrl+u
     JumpMatchingBracket, // %
     // Edit
     DeleteLine,
     DeleteChar,
-    DeleteToLineEnd, // D
+    DeleteToLineEnd,   // D
     ReplaceChar(char), // r<char>
     // Change (delete + enter insert mode)
     ChangeToLineEnd, // C
@@ -94,18 +94,18 @@ pub enum VimMotion {
     InsertAtLineEnd,   // A
     InsertAtLineStart, // I
     // Visual mode
-    VisualCharStart,   // v — start char-wise visual selection
-    VisualLineStart,   // V — start line-wise visual selection
+    VisualCharStart, // v — start char-wise visual selection
+    VisualLineStart, // V — start line-wise visual selection
     // Repeat
-    RepeatLastEdit,    // .
+    RepeatLastEdit, // .
     // Marks
-    SetMark(char),     // m<char>
-    GotoMark(char),    // `<char>
+    SetMark(char),  // m<char>
+    GotoMark(char), // `<char>
     // Ex command
-    EnterExMode,       // :
+    EnterExMode, // :
     // Selection ops (editor operations)
-    ExpandSelection,   // Ctrl+Shift+→
-    ShrinkSelection,   // Ctrl+Shift+←
+    ExpandSelection, // Ctrl+Shift+→
+    ShrinkSelection, // Ctrl+Shift+←
     /// Delete the current visual selection and exit visual mode.
     DeleteVisualSelection,
     /// Yank (copy) the current visual selection and exit visual mode.
@@ -397,7 +397,7 @@ pub struct IdeState {
     pub sidecar_search_nonce: RwSignal<u64>,
     /// Current semantic search query text.
     pub sidecar_query: RwSignal<String>,
-    
+
     // Extensions
     /// Extension host manager for JS/WASM extensions
     pub ext_manager: Arc<phazeai_core::ext_host::ExtensionManager>,
@@ -751,7 +751,11 @@ impl IdeState {
             let lsp_tx3 = lsp_cmd.clone();
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    let _ = lsp_tx3.send(LspCommand::RequestInlayHints { path, start_line: 0, end_line: 2000 });
+                    let _ = lsp_tx3.send(LspCommand::RequestInlayHints {
+                        path,
+                        start_line: 0,
+                        end_line: 2000,
+                    });
                 }
             });
         }
@@ -850,9 +854,7 @@ impl IdeState {
             }
             candidates
         };
-        let sidecar_script = script_candidates
-            .into_iter()
-            .find(|p| p.exists());
+        let sidecar_script = script_candidates.into_iter().find(|p| p.exists());
 
         if let Some(script) = sidecar_script {
             let sidecar_ready2 = sidecar_ready_sig;
@@ -934,7 +936,7 @@ impl IdeState {
                 show_toast(status_toast_for_delegate, msg);
             }
         });
-        
+
         let active_text = Arc::new(std::sync::Mutex::new(String::new()));
         let active_text_clone = active_text.clone();
         let open_file_sig = open_file;
@@ -945,15 +947,16 @@ impl IdeState {
                         *lock = content;
                     }
                 }
-            } else {
-                if let Ok(mut lock) = active_text_clone.lock() {
-                    lock.clear();
-                }
+            } else if let Ok(mut lock) = active_text_clone.lock() {
+                lock.clear();
             }
         });
-        
+
         let ext_manager = phazeai_core::ext_host::ExtensionManager::with_delegate(
-            std::sync::Arc::new(UiIdeDelegate { toast_tx, active_text })
+            std::sync::Arc::new(UiIdeDelegate {
+                toast_tx,
+                active_text,
+            }),
         );
 
         // Persist provider + model changes to settings.toml whenever they change.
@@ -1868,7 +1871,12 @@ fn placeholder_tab(tab_name: &'static str, state: IdeState) -> impl IntoView {
 }
 
 fn left_panel(state: IdeState) -> impl IntoView {
-    let explorer = explorer_panel(state.workspace_root, state.open_file, state.theme, state.open_tabs);
+    let explorer = explorer_panel(
+        state.workspace_root,
+        state.open_file,
+        state.theme,
+        state.open_tabs,
+    );
 
     let explorer_wrap = container(explorer).style({
         let state = state.clone();
@@ -2366,13 +2374,12 @@ fn status_bar(state: IdeState) -> impl IntoView {
             let le_theme = state.theme;
             let le_hov = create_rw_signal(false);
             container(
-                label(move || format!("UTF-8 {}  ", le_state.line_ending.get()))
-                    .style(move |s| {
-                        let p = le_theme.get().palette;
-                        s.color(if le_hov.get() { p.accent } else { p.text_muted })
-                            .font_size(11.0)
-                            .cursor(floem::style::CursorStyle::Pointer)
-                    }),
+                label(move || format!("UTF-8 {}  ", le_state.line_ending.get())).style(move |s| {
+                    let p = le_theme.get().palette;
+                    s.color(if le_hov.get() { p.accent } else { p.text_muted })
+                        .font_size(11.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                }),
             )
             .on_click_stop(move |_| {
                 // Toggle line ending and convert file bytes
@@ -2386,7 +2393,10 @@ fn status_bar(state: IdeState) -> impl IntoView {
                         if let Ok(bytes) = std::fs::read(&path) {
                             let converted = if new_le == "LF" {
                                 // Remove all \r
-                                bytes.into_iter().filter(|&b| b != b'\r').collect::<Vec<_>>()
+                                bytes
+                                    .into_iter()
+                                    .filter(|&b| b != b'\r')
+                                    .collect::<Vec<_>>()
                             } else {
                                 // Add \r before each \n that isn't already preceded by \r
                                 let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 20);
@@ -2434,12 +2444,12 @@ fn status_bar(state: IdeState) -> impl IntoView {
         {
             let ro_theme = state.theme;
             let ro_sig = state.active_readonly;
-            label(move || if ro_sig.get() { "🔒 READ-ONLY  " } else { "" })
-                .style(move |s| {
-                    let p = ro_theme.get().palette;
-                    s.color(p.error).font_size(11.0)
-                        .apply_if(!ro_sig.get(), |s| s.display(floem::style::Display::None))
-                })
+            label(move || if ro_sig.get() { "🔒 READ-ONLY  " } else { "" }).style(move |s| {
+                let p = ro_theme.get().palette;
+                s.color(p.error)
+                    .font_size(11.0)
+                    .apply_if(!ro_sig.get(), |s| s.display(floem::style::Display::None))
+            })
         },
     ))
     .style(|s| s.items_center().padding_horiz(8.0));
@@ -3175,13 +3185,15 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             }),
             // Content
             stack((
-                container(terminal_panel(state.theme, state.run_in_terminal_text)).style(move |s| {
-                    s.width_full()
-                        .height_full()
-                        .apply_if(current_tab.get() != Tab::Terminal, |s| {
-                            s.display(floem::style::Display::None)
-                        })
-                }),
+                container(terminal_panel(state.theme, state.run_in_terminal_text)).style(
+                    move |s| {
+                        s.width_full()
+                            .height_full()
+                            .apply_if(current_tab.get() != Tab::Terminal, |s| {
+                                s.display(floem::style::Display::None)
+                            })
+                    },
+                ),
                 container(problems_view(state.clone())).style(move |s| {
                     s.width_full()
                         .height_full()
@@ -4396,15 +4408,14 @@ fn vim_ex_overlay(state: IdeState) -> impl IntoView {
             .border_color(p.glass_border)
     });
 
-    container(bar)
-        .style(move |s| {
-            s.absolute()
-                .inset_bottom(32.0)  // just above status bar
-                .inset_left(0)
-                .inset_right(0)
-                .z_index(490)
-                .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
-        })
+    container(bar).style(move |s| {
+        s.absolute()
+            .inset_bottom(32.0) // just above status bar
+            .inset_left(0)
+            .inset_right(0)
+            .z_index(490)
+            .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
+    })
 }
 
 // ── Goto line/col overlay (Ctrl+G) ────────────────────────────────────────────
@@ -4453,7 +4464,9 @@ fn goto_overlay(state: IdeState) -> impl IntoView {
 
     let dialog = stack((
         label(|| "Go to Line  ").style(move |s| {
-            s.font_size(11.0).color(theme.get().palette.text_muted).font_weight(floem::text::Weight::BOLD)
+            s.font_size(11.0)
+                .color(theme.get().palette.text_muted)
+                .font_weight(floem::text::Weight::BOLD)
         }),
         input_view,
     ))
@@ -4561,16 +4574,15 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
     )
     .style(|s| s.max_height(280.0).width_full());
 
-    let popup = stack((header, content))
-        .style(move |s| {
-            let p = theme.get().palette;
-            s.flex_col()
-                .width(560.0)
-                .background(p.bg_panel)
-                .border(1.5)
-                .border_color(p.glass_border)
-                .border_radius(8.0)
-        });
+    let popup = stack((header, content)).style(move |s| {
+        let p = theme.get().palette;
+        s.flex_col()
+            .width(560.0)
+            .background(p.bg_panel)
+            .border(1.5)
+            .border_color(p.glass_border)
+            .border_radius(8.0)
+    });
 
     container(popup)
         .style(move |s| {
@@ -4661,61 +4673,59 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.workspace_root.get_untracked(),
         state.font_size,
         state.word_wrap,
-        create_rw_signal(0u64), // ctrl_d
-        create_rw_signal(0u64), // fold
-        create_rw_signal(0u64), // unfold
-        create_rw_signal(0u64), // move_up
-        create_rw_signal(0u64), // move_down
-        create_rw_signal(0u64), // duplicate
-        create_rw_signal(0u64), // delete_line
+        create_rw_signal(0u64),          // ctrl_d
+        create_rw_signal(0u64),          // fold
+        create_rw_signal(0u64),          // unfold
+        create_rw_signal(0u64),          // move_up
+        create_rw_signal(0u64),          // move_down
+        create_rw_signal(0u64),          // duplicate
+        create_rw_signal(0u64),          // delete_line
         create_rw_signal(String::new()), // blame
-        create_rw_signal(0u64), // col_cursor_up
-        create_rw_signal(0u64), // col_cursor_down
-        create_rw_signal(Vec::new()), // sticky_lines
-        create_rw_signal(0u64), // transform_upper
-        create_rw_signal(0u64), // transform_lower
-        create_rw_signal(0u64), // join_line
-        create_rw_signal(0u64), // sort_lines
+        create_rw_signal(0u64),          // col_cursor_up
+        create_rw_signal(0u64),          // col_cursor_down
+        create_rw_signal(Vec::new()),    // sticky_lines
+        create_rw_signal(0u64),          // transform_upper
+        create_rw_signal(0u64),          // transform_lower
+        create_rw_signal(0u64),          // join_line
+        create_rw_signal(0u64),          // sort_lines
         state.vim_visual_mode,
         state.vim_marks,
         state.vim_last_motion,
-        create_rw_signal(0u64), // expand_selection
-        create_rw_signal(0u64), // shrink_selection
-        create_rw_signal(false), // relative_line_numbers
-        create_rw_signal(Vec::<String>::new()), // yank_ring
-        state.tab_size,          // tab_size
-        state.line_ending,       // line_ending_out
+        create_rw_signal(0u64),                     // expand_selection
+        create_rw_signal(0u64),                     // shrink_selection
+        create_rw_signal(false),                    // relative_line_numbers
+        create_rw_signal(Vec::<String>::new()),     // yank_ring
+        state.tab_size,                             // tab_size
+        state.line_ending,                          // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (split pane)
-        create_rw_signal(0u64),  // transform_title_nonce
-        create_rw_signal(0u64),  // format_selection_nonce
-        create_rw_signal(0u64),  // save_no_format_nonce
-        create_rw_signal(0u64),  // fold_all_nonce
-        create_rw_signal(0u64),  // unfold_all_nonce
-        create_rw_signal(vec![]), // code_lens_sig
-        create_rw_signal(true),  // code_lens_visible
-        create_rw_signal(false), // organize_imports_on_save
-        create_rw_signal(vec![]), // inlay_hints_sig
-        create_rw_signal(false), // inlay_hints_toggle
+        create_rw_signal(0u64),                     // transform_title_nonce
+        create_rw_signal(0u64),                     // format_selection_nonce
+        create_rw_signal(0u64),                     // save_no_format_nonce
+        create_rw_signal(0u64),                     // fold_all_nonce
+        create_rw_signal(0u64),                     // unfold_all_nonce
+        create_rw_signal(vec![]),                   // code_lens_sig
+        create_rw_signal(true),                     // code_lens_visible
+        create_rw_signal(false),                    // organize_imports_on_save
+        create_rw_signal(vec![]),                   // inlay_hints_sig
+        create_rw_signal(false),                    // inlay_hints_toggle
     );
-    let split_pane = container(split_raw)
-        .style(move |s| {
-            s.flex_grow(1.0)
-                .min_width(0.0)
-                .min_height(0.0)
-                .apply_if(!state.split_editor.get(), |s| {
-                    s.display(floem::style::Display::None)
-                })
-        });
-    let split_divider = container(floem::views::empty())
-        .style(move |s| {
-            let t = state.theme.get();
-            s.width(3.0)
-                .height_full()
-                .background(t.palette.glass_border)
-                .apply_if(!state.split_editor.get(), |s| {
-                    s.display(floem::style::Display::None)
-                })
-        });
+    let split_pane = container(split_raw).style(move |s| {
+        s.flex_grow(1.0)
+            .min_width(0.0)
+            .min_height(0.0)
+            .apply_if(!state.split_editor.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+    let split_divider = container(floem::views::empty()).style(move |s| {
+        let t = state.theme.get();
+        s.width(3.0)
+            .height_full()
+            .background(t.palette.glass_border)
+            .apply_if(!state.split_editor.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
 
     // ── Editor right-click context menu ──────────────────────────────────────
     let editor = {
@@ -4850,7 +4860,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                     String::new()
                                 };
                                 if !text.trim().is_empty() {
-                                    s_run.run_in_terminal_text.set(Some(text.trim().to_string()));
+                                    s_run
+                                        .run_in_terminal_text
+                                        .set(Some(text.trim().to_string()));
                                     s_run.show_bottom_panel.set(true);
                                     s_run.bottom_panel_tab.set(Tab::Terminal);
                                 }
@@ -4858,10 +4870,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
                             .entry(MenuItem::new("Run File").action(move || {
                                 // Build a shell command based on the active file's extension.
                                 if let Some(ref path) = s_run_file.open_file.get() {
-                                    let ext = path
-                                        .extension()
-                                        .and_then(|e| e.to_str())
-                                        .unwrap_or("");
+                                    let ext =
+                                        path.extension().and_then(|e| e.to_str()).unwrap_or("");
                                     let path_str = path.to_string_lossy().to_string();
                                     let cmd = match ext {
                                         "rs" => "cargo run".to_string(),
@@ -4985,21 +4995,21 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.vim_last_motion,
         create_rw_signal(0u64),
         create_rw_signal(0u64),
-        create_rw_signal(false), // relative_line_numbers
-        create_rw_signal(Vec::<String>::new()), // yank_ring
-        state.tab_size,          // tab_size
-        state.line_ending,       // line_ending_out
+        create_rw_signal(false),                    // relative_line_numbers
+        create_rw_signal(Vec::<String>::new()),     // yank_ring
+        state.tab_size,                             // tab_size
+        state.line_ending,                          // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (down pane)
-        create_rw_signal(0u64),  // transform_title_nonce
-        create_rw_signal(0u64),  // format_selection_nonce
-        create_rw_signal(0u64),  // save_no_format_nonce
-        create_rw_signal(0u64),  // fold_all_nonce
-        create_rw_signal(0u64),  // unfold_all_nonce
-        create_rw_signal(vec![]), // code_lens_sig
-        create_rw_signal(true),  // code_lens_visible
-        create_rw_signal(false), // organize_imports_on_save
-        create_rw_signal(vec![]), // inlay_hints_sig
-        create_rw_signal(false), // inlay_hints_toggle
+        create_rw_signal(0u64),                     // transform_title_nonce
+        create_rw_signal(0u64),                     // format_selection_nonce
+        create_rw_signal(0u64),                     // save_no_format_nonce
+        create_rw_signal(0u64),                     // fold_all_nonce
+        create_rw_signal(0u64),                     // unfold_all_nonce
+        create_rw_signal(vec![]),                   // code_lens_sig
+        create_rw_signal(true),                     // code_lens_visible
+        create_rw_signal(false),                    // organize_imports_on_save
+        create_rw_signal(vec![]),                   // inlay_hints_sig
+        create_rw_signal(false),                    // inlay_hints_toggle
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -5040,7 +5050,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
     let bottom_panel_max = state.bottom_panel_maximized;
     let bottom = container(bottom_raw).style(move |s| {
         let s = s.apply_if(zen.get(), |s| s.display(floem::style::Display::None));
-        if bottom_panel_max.get() { s.flex_grow(10.0).min_height(0.0) } else { s }
+        if bottom_panel_max.get() {
+            s.flex_grow(10.0).min_height(0.0)
+        } else {
+            s
+        }
     });
 
     let state_for_status = state.clone();
@@ -5442,10 +5456,10 @@ pub fn launch_phaze_ide() {
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((
-                    peek_def_popup,      // z_index(485) — peek definition (Alt+F12)
-                    vim_ex_popup,        // z_index(490) — vim ex command bar
-                    goto_popup,          // z_index(495) — goto line/col (Ctrl+G)
-                    drag_overlay,        // z_index(50)  — only shown during resize
+                    peek_def_popup, // z_index(485) — peek definition (Alt+F12)
+                    vim_ex_popup,   // z_index(490) — vim ex command bar
+                    goto_popup,     // z_index(495) — goto line/col (Ctrl+G)
+                    drag_overlay,   // z_index(50)  — only shown during resize
                 ))
                 .style(|s| s.absolute().width_full().height_full());
 
@@ -5712,7 +5726,9 @@ pub fn launch_phaze_ide() {
                                         state.col_cursor_up_nonce.update(|n| *n += 1);
                                         return;
                                     }
-                                    floem::keyboard::NamedKey::ArrowDown if ctrl && alt && !shift => {
+                                    floem::keyboard::NamedKey::ArrowDown
+                                        if ctrl && alt && !shift =>
+                                    {
                                         state.col_cursor_down_nonce.update(|n| *n += 1);
                                         return;
                                     }
@@ -5757,31 +5773,52 @@ pub fn launch_phaze_ide() {
                             }
 
                             // Ctrl+G → goto line/col overlay
-                            if ctrl && !shift && !alt && key_event.key.logical_key == Key::Character("g".into()) {
+                            if ctrl
+                                && !shift
+                                && !alt
+                                && key_event.key.logical_key == Key::Character("g".into())
+                            {
                                 state.goto_overlay_open.set(true);
                                 state.goto_overlay_input.set(String::new());
                                 return;
                             }
 
                             // Ctrl+Alt+S → save without formatting
-                            if ctrl && !shift && alt && key_event.key.logical_key == Key::Character("s".into()) {
+                            if ctrl
+                                && !shift
+                                && alt
+                                && key_event.key.logical_key == Key::Character("s".into())
+                            {
                                 state.save_no_format_nonce.update(|v| *v += 1);
                                 return;
                             }
 
                             // Ctrl+Alt+I → toggle inlay hints
-                            if ctrl && !shift && alt && key_event.key.logical_key == Key::Character("i".into()) {
+                            if ctrl
+                                && !shift
+                                && alt
+                                && key_event.key.logical_key == Key::Character("i".into())
+                            {
                                 state.inlay_hints_toggle.update(|v| *v = !*v);
-                                let msg = if state.inlay_hints_toggle.get() { "Inlay Hints: on" } else { "Inlay Hints: off" };
+                                let msg = if state.inlay_hints_toggle.get() {
+                                    "Inlay Hints: on"
+                                } else {
+                                    "Inlay Hints: off"
+                                };
                                 show_toast(state.status_toast, msg);
                                 return;
                             }
 
                             // Ctrl+N → new scratch file (untitled buffer)
-                            if ctrl && !shift && !alt && key_event.key.logical_key == Key::Character("n".into()) {
+                            if ctrl
+                                && !shift
+                                && !alt
+                                && key_event.key.logical_key == Key::Character("n".into())
+                            {
                                 let n = state.scratch_counter.get() + 1;
                                 state.scratch_counter.set(n);
-                                let scratch_path = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
+                                let scratch_path =
+                                    std::path::PathBuf::from(format!("scratch://untitled-{n}"));
                                 state.scratch_paths.update(|v| v.push(scratch_path.clone()));
                                 state.open_file.set(Some(scratch_path));
                                 return;
@@ -6037,7 +6074,9 @@ pub fn launch_phaze_ide() {
                                         match (prev, ch_str) {
                                             ('d', "d") => {
                                                 state.vim_motion.set(Some(VimMotion::DeleteLine));
-                                                state.vim_last_motion.set(Some(VimMotion::DeleteLine));
+                                                state
+                                                    .vim_last_motion
+                                                    .set(Some(VimMotion::DeleteLine));
                                             }
                                             ('g', "g") => {
                                                 state.vim_motion.set(Some(VimMotion::GotoFileTop));
@@ -6047,28 +6086,42 @@ pub fn launch_phaze_ide() {
                                             }
                                             ('c', "c") => {
                                                 state.vim_normal_mode.set(false);
-                                                state.vim_motion.set(Some(VimMotion::ChangeWholeLine));
-                                                state.vim_last_motion.set(Some(VimMotion::ChangeWholeLine));
+                                                state
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::ChangeWholeLine));
+                                                state
+                                                    .vim_last_motion
+                                                    .set(Some(VimMotion::ChangeWholeLine));
                                             }
                                             ('c', "w") => {
                                                 state.vim_normal_mode.set(false);
                                                 state.vim_motion.set(Some(VimMotion::ChangeWord));
-                                                state.vim_last_motion.set(Some(VimMotion::ChangeWord));
+                                                state
+                                                    .vim_last_motion
+                                                    .set(Some(VimMotion::ChangeWord));
                                             }
                                             ('r', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.vim_motion.set(Some(VimMotion::ReplaceChar(c)));
-                                                    state.vim_last_motion.set(Some(VimMotion::ReplaceChar(c)));
+                                                    state
+                                                        .vim_motion
+                                                        .set(Some(VimMotion::ReplaceChar(c)));
+                                                    state
+                                                        .vim_last_motion
+                                                        .set(Some(VimMotion::ReplaceChar(c)));
                                                 }
                                             }
                                             ('m', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.vim_motion.set(Some(VimMotion::SetMark(c)));
+                                                    state
+                                                        .vim_motion
+                                                        .set(Some(VimMotion::SetMark(c)));
                                                 }
                                             }
                                             ('`', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.vim_motion.set(Some(VimMotion::GotoMark(c)));
+                                                    state
+                                                        .vim_motion
+                                                        .set(Some(VimMotion::GotoMark(c)));
                                                 }
                                             }
                                             _ => {}
@@ -6080,21 +6133,31 @@ pub fn launch_phaze_ide() {
                                     if state.vim_visual_mode.get_untracked() {
                                         match ch_str {
                                             "d" | "x" => {
-                                                state.vim_motion.set(Some(VimMotion::DeleteVisualSelection));
+                                                state
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::DeleteVisualSelection));
                                                 state.vim_visual_mode.set(false);
-                                                state.vim_last_motion.set(Some(VimMotion::DeleteVisualSelection));
+                                                state
+                                                    .vim_last_motion
+                                                    .set(Some(VimMotion::DeleteVisualSelection));
                                                 return;
                                             }
                                             "y" => {
-                                                state.vim_motion.set(Some(VimMotion::YankVisualSelection));
+                                                state
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::YankVisualSelection));
                                                 state.vim_visual_mode.set(false);
                                                 return;
                                             }
                                             "c" => {
                                                 state.vim_visual_mode.set(false);
                                                 state.vim_normal_mode.set(false);
-                                                state.vim_motion.set(Some(VimMotion::ChangeVisualSelection));
-                                                state.vim_last_motion.set(Some(VimMotion::ChangeVisualSelection));
+                                                state
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::ChangeVisualSelection));
+                                                state
+                                                    .vim_last_motion
+                                                    .set(Some(VimMotion::ChangeVisualSelection));
                                                 return;
                                             }
                                             _ => {} // fall through to normal motion handling
@@ -6163,7 +6226,9 @@ pub fn launch_phaze_ide() {
                                         // I — insert at start of line
                                         "I" => {
                                             state.vim_normal_mode.set(false);
-                                            state.vim_motion.set(Some(VimMotion::InsertAtLineStart));
+                                            state
+                                                .vim_motion
+                                                .set(Some(VimMotion::InsertAtLineStart));
                                         }
                                         // C — change to end of line (delete + insert)
                                         "C" => {
@@ -6173,11 +6238,15 @@ pub fn launch_phaze_ide() {
                                         // D — delete to end of line
                                         "D" => {
                                             state.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
-                                            state.vim_last_motion.set(Some(VimMotion::DeleteToLineEnd));
+                                            state
+                                                .vim_last_motion
+                                                .set(Some(VimMotion::DeleteToLineEnd));
                                         }
                                         // % — jump to matching bracket
                                         "%" => {
-                                            state.vim_motion.set(Some(VimMotion::JumpMatchingBracket));
+                                            state
+                                                .vim_motion
+                                                .set(Some(VimMotion::JumpMatchingBracket));
                                         }
                                         // v — start char-wise visual mode
                                         "v" => {

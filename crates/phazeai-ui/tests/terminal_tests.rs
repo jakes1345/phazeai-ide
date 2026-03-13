@@ -87,10 +87,7 @@ fn ansi_strip_true_color() {
 #[test]
 fn ansi_strip_osc_window_title() {
     // OSC 0 sets window title
-    assert_eq!(
-        strip_ansi_codes("\x1b]0;My Terminal\x07hello"),
-        "hello"
-    );
+    assert_eq!(strip_ansi_codes("\x1b]0;My Terminal\x07hello"), "hello");
 }
 
 #[test]
@@ -162,10 +159,7 @@ fn url_detect_http_plain() {
 #[test]
 fn url_detect_url_with_path_and_query() {
     let result = find_url_in_line("See https://docs.rs/crate/1.0/index.html for details");
-    assert_eq!(
-        result,
-        Some("https://docs.rs/crate/1.0/index.html")
-    );
+    assert_eq!(result, Some("https://docs.rs/crate/1.0/index.html"));
 }
 
 #[test]
@@ -283,13 +277,19 @@ const DEFAULT_TERM_ROWS: u16 = 40;
 fn terminal_default_cols() {
     // 220 is wide enough for most side-by-side split editors
     assert_eq!(DEFAULT_TERM_COLS, 220);
-    assert!(DEFAULT_TERM_COLS >= 80, "cols should be at least a standard 80-col terminal");
+    assert!(
+        DEFAULT_TERM_COLS >= 80,
+        "cols should be at least a standard 80-col terminal"
+    );
 }
 
 #[test]
 fn terminal_default_rows() {
     assert_eq!(DEFAULT_TERM_ROWS, 40);
-    assert!(DEFAULT_TERM_ROWS >= 24, "rows should be at least a standard 24-row terminal");
+    assert!(
+        DEFAULT_TERM_ROWS >= 24,
+        "rows should be at least a standard 24-row terminal"
+    );
 }
 
 #[test]

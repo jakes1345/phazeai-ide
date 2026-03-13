@@ -36,7 +36,10 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                         crate::app::show_toast(state.status_toast, "Extension loaded successfully");
                     }
                     Err(e) => {
-                        crate::app::show_toast(state.status_toast, format!("Failed to load: {}", e));
+                        crate::app::show_toast(
+                            state.status_toast,
+                            format!("Failed to load: {}", e),
+                        );
                     }
                 }
             });
@@ -67,8 +70,11 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
 
     let ext_list = scroll(
         v_stack((
-            label(|| "Installed Extensions".to_string())
-                .style(|s| s.font_size(14.0).font_weight(floem::text::Weight::BOLD).margin_bottom(10.0)),
+            label(|| "Installed Extensions".to_string()).style(|s| {
+                s.font_size(14.0)
+                    .font_weight(floem::text::Weight::BOLD)
+                    .margin_bottom(10.0)
+            }),
             label(move || {
                 if state.ext_loading.get() {
                     "Loading extension...".to_string()
@@ -77,15 +83,20 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                 } else {
                     format!("{} extensions loaded.", state.extensions.get().len())
                 }
-            }).style(|s| s.color(floem::peniko::Color::from_rgb8(150, 150, 150))),
+            })
+            .style(|s| s.color(floem::peniko::Color::from_rgb8(150, 150, 150))),
             floem::views::dyn_stack(
                 move || state.extensions.get(),
                 |ext| ext.clone(),
                 |ext| {
-                    container(label(move || ext.clone()))
-                        .style(|s| s.padding(5.0).width_full().border_bottom(1.0).border_color(floem::peniko::Color::from_rgb8(50, 50, 50)))
-                }
-            )
+                    container(label(move || ext.clone())).style(|s| {
+                        s.padding(5.0)
+                            .width_full()
+                            .border_bottom(1.0)
+                            .border_color(floem::peniko::Color::from_rgb8(50, 50, 50))
+                    })
+                },
+            ),
         ))
         .style(|s| s.padding(10.0).width_full()),
     )
@@ -93,18 +104,17 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
 
     v_stack((
         // Header
-        h_stack((
-            label(|| "EXTENSIONS".to_string())
-                .style(|s| s.font_size(12.0).font_weight(floem::text::Weight::BOLD)),
-        ))
+        h_stack((label(|| "EXTENSIONS".to_string())
+            .style(|s| s.font_size(12.0).font_weight(floem::text::Weight::BOLD)),))
         .style(|s| s.padding(10.0).width_full().justify_between()),
-        
         // Actions
-        h_stack((
-            phaze_button("Install from VSIX...", ButtonVariant::Secondary, state.theme, move || load_vsix_action(())),
-        ))
+        h_stack((phaze_button(
+            "Install from VSIX...",
+            ButtonVariant::Secondary,
+            state.theme,
+            move || load_vsix_action(()),
+        ),))
         .style(|s| s.padding_horiz(10.0).padding_bottom(10.0).width_full()),
-        
         // Search
         container(
             phaze_input(
@@ -115,7 +125,6 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
             .style(|s| s.width_full()),
         )
         .style(|s| s.padding_horiz(10.0).padding_bottom(10.0).width_full()),
-
         // List
         ext_list,
     ))

@@ -281,7 +281,12 @@ fn editor_section(state: IdeState) -> impl IntoView {
         stepper_row("Tab Size", tab_size, 1, 16, state.clone()),
         toggle_row("Auto Save (1.5 s delay)", auto_save, as_hov, theme_as),
         toggle_row("Word Wrap  (Alt+Z)", word_wrap, ww_hov, theme_as),
-        toggle_row("Organize Imports on Save", organize_imports, oi_hov, theme_as),
+        toggle_row(
+            "Organize Imports on Save",
+            organize_imports,
+            oi_hov,
+            theme_as,
+        ),
         toggle_row("Show Code Lens", code_lens_vis, cl_hov, theme_as),
         toggle_row("Inlay Hints  (Ctrl+Alt+I)", inlay_hints, ih_hov, theme_as),
         toggle_row("Relative Line Numbers", relative_ln, rln_hov, theme_as),

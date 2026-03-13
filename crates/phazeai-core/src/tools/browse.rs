@@ -62,7 +62,10 @@ impl Tool for BrowseTool {
 
         let response = client
             .get(url)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Language", "en-US,en;q=0.9")
             .send()
             .await
@@ -91,7 +94,11 @@ impl Tool for BrowseTool {
         // Truncate if too long
         let truncated = text.len() > MAX_CONTENT_CHARS;
         let content = if truncated {
-            format!("{}...\n\n[Content truncated at {} chars]", &text[..MAX_CONTENT_CHARS], MAX_CONTENT_CHARS)
+            format!(
+                "{}...\n\n[Content truncated at {} chars]",
+                &text[..MAX_CONTENT_CHARS],
+                MAX_CONTENT_CHARS
+            )
         } else {
             text
         };
@@ -184,11 +191,11 @@ fn html_to_text(html: &str, include_links: bool) -> String {
                     | "article"
                     | "header"
                     | "footer"
-            )
-                && consecutive_newlines < 2 {
-                    result.push('\n');
-                    consecutive_newlines += 1;
-                }
+            ) && consecutive_newlines < 2
+            {
+                result.push('\n');
+                consecutive_newlines += 1;
+            }
 
             // Headers get markdown-style formatting
             if tag_name == "h1" && !tag_lower.starts_with('/') {

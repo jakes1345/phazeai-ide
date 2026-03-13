@@ -73,10 +73,26 @@ fn inlay_hint_entry_large_position() {
 #[test]
 fn inlay_hint_collection_sorted_by_line_then_col() {
     let mut hints = vec![
-        InlayHintEntry { line: 3, col: 5, label: "a".into() },
-        InlayHintEntry { line: 1, col: 0, label: "b".into() },
-        InlayHintEntry { line: 3, col: 2, label: "c".into() },
-        InlayHintEntry { line: 0, col: 10, label: "d".into() },
+        InlayHintEntry {
+            line: 3,
+            col: 5,
+            label: "a".into(),
+        },
+        InlayHintEntry {
+            line: 1,
+            col: 0,
+            label: "b".into(),
+        },
+        InlayHintEntry {
+            line: 3,
+            col: 2,
+            label: "c".into(),
+        },
+        InlayHintEntry {
+            line: 0,
+            col: 10,
+            label: "d".into(),
+        },
     ];
     hints.sort_by_key(|h| (h.line, h.col));
     assert_eq!(hints[0].label, "d"); // line 0
@@ -125,97 +141,177 @@ impl SymbolEntry {
 
 #[test]
 fn symbol_kind_fn() {
-    let sym = SymbolEntry { name: "my_func".into(), kind: "fn".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "my_func".into(),
+        kind: "fn".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "fn");
 }
 
 #[test]
 fn symbol_kind_function_alias() {
-    let sym = SymbolEntry { name: "my_func".into(), kind: "function".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "my_func".into(),
+        kind: "function".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "fn");
 }
 
 #[test]
 fn symbol_kind_struct() {
-    let sym = SymbolEntry { name: "MyStruct".into(), kind: "struct".into(), line: 5, depth: 0 };
+    let sym = SymbolEntry {
+        name: "MyStruct".into(),
+        kind: "struct".into(),
+        line: 5,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "struct");
 }
 
 #[test]
 fn symbol_kind_enum() {
-    let sym = SymbolEntry { name: "Color".into(), kind: "enum".into(), line: 10, depth: 0 };
+    let sym = SymbolEntry {
+        name: "Color".into(),
+        kind: "enum".into(),
+        line: 10,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "enum");
 }
 
 #[test]
 fn symbol_kind_trait() {
-    let sym = SymbolEntry { name: "Display".into(), kind: "trait".into(), line: 20, depth: 0 };
+    let sym = SymbolEntry {
+        name: "Display".into(),
+        kind: "trait".into(),
+        line: 20,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "trait");
 }
 
 #[test]
 fn symbol_kind_impl() {
-    let sym = SymbolEntry { name: "impl MyStruct".into(), kind: "impl".into(), line: 30, depth: 0 };
+    let sym = SymbolEntry {
+        name: "impl MyStruct".into(),
+        kind: "impl".into(),
+        line: 30,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "impl");
 }
 
 #[test]
 fn symbol_kind_mod() {
-    let sym = SymbolEntry { name: "utils".into(), kind: "mod".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "utils".into(),
+        kind: "mod".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "mod");
 }
 
 #[test]
 fn symbol_kind_module_alias() {
-    let sym = SymbolEntry { name: "utils".into(), kind: "module".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "utils".into(),
+        kind: "module".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "mod");
 }
 
 #[test]
 fn symbol_kind_class() {
-    let sym = SymbolEntry { name: "MyClass".into(), kind: "class".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "MyClass".into(),
+        kind: "class".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "class");
 }
 
 #[test]
 fn symbol_kind_interface() {
-    let sym = SymbolEntry { name: "ISerializable".into(), kind: "interface".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "ISerializable".into(),
+        kind: "interface".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "interface");
 }
 
 #[test]
 fn symbol_kind_unknown_falls_back_to_sym() {
-    let sym = SymbolEntry { name: "something".into(), kind: "unknown_kind".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "something".into(),
+        kind: "unknown_kind".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "sym");
 }
 
 #[test]
 fn symbol_kind_empty_falls_back_to_sym() {
-    let sym = SymbolEntry { name: "x".into(), kind: "".into(), line: 1, depth: 0 };
+    let sym = SymbolEntry {
+        name: "x".into(),
+        kind: "".into(),
+        line: 1,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "sym");
 }
 
 #[test]
 fn symbol_kind_const() {
-    let sym = SymbolEntry { name: "MAX_SIZE".into(), kind: "const".into(), line: 3, depth: 0 };
+    let sym = SymbolEntry {
+        name: "MAX_SIZE".into(),
+        kind: "const".into(),
+        line: 3,
+        depth: 0,
+    };
     assert_eq!(sym.kind_str(), "const");
 }
 
 #[test]
 fn symbol_kind_field() {
-    let sym = SymbolEntry { name: "width".into(), kind: "field".into(), line: 8, depth: 1 };
+    let sym = SymbolEntry {
+        name: "width".into(),
+        kind: "field".into(),
+        line: 8,
+        depth: 1,
+    };
     assert_eq!(sym.kind_str(), "field");
 }
 
 #[test]
 fn symbol_kind_property_alias() {
-    let sym = SymbolEntry { name: "width".into(), kind: "property".into(), line: 8, depth: 1 };
+    let sym = SymbolEntry {
+        name: "width".into(),
+        kind: "property".into(),
+        line: 8,
+        depth: 1,
+    };
     assert_eq!(sym.kind_str(), "field");
 }
 
 #[test]
 fn symbol_kind_variable() {
-    let sym = SymbolEntry { name: "count".into(), kind: "variable".into(), line: 15, depth: 2 };
+    let sym = SymbolEntry {
+        name: "count".into(),
+        kind: "variable".into(),
+        line: 15,
+        depth: 2,
+    };
     assert_eq!(sym.kind_str(), "var");
 }
 
@@ -311,10 +407,10 @@ impl DiagSeverity {
     /// Numeric priority: higher = more severe.
     fn priority(self) -> u8 {
         match self {
-            DiagSeverity::Error   => 3,
+            DiagSeverity::Error => 3,
             DiagSeverity::Warning => 2,
-            DiagSeverity::Info    => 1,
-            DiagSeverity::Hint    => 0,
+            DiagSeverity::Info => 1,
+            DiagSeverity::Hint => 0,
         }
     }
 }
@@ -371,7 +467,11 @@ fn diag_severity_all_unique_priorities() {
     let mut unique = priorities.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(priorities.len(), unique.len(), "all severities must have distinct priorities");
+    assert_eq!(
+        priorities.len(),
+        unique.len(),
+        "all severities must have distinct priorities"
+    );
 }
 
 // ── DiagEntry ─────────────────────────────────────────────────────────────────
@@ -431,15 +531,36 @@ fn diag_entry_line_col_are_one_based() {
 
 /// Filter diagnostics to only errors (used in status bar indicator).
 fn errors_only(diags: &[DiagEntry]) -> Vec<&DiagEntry> {
-    diags.iter().filter(|d| d.severity == DiagSeverity::Error).collect()
+    diags
+        .iter()
+        .filter(|d| d.severity == DiagSeverity::Error)
+        .collect()
 }
 
 #[test]
 fn diag_filter_errors_only() {
     let diags = vec![
-        DiagEntry { path: PathBuf::from("/a.rs"), line: 1, col: 1, message: "err".into(), severity: DiagSeverity::Error },
-        DiagEntry { path: PathBuf::from("/b.rs"), line: 2, col: 1, message: "warn".into(), severity: DiagSeverity::Warning },
-        DiagEntry { path: PathBuf::from("/c.rs"), line: 3, col: 1, message: "err2".into(), severity: DiagSeverity::Error },
+        DiagEntry {
+            path: PathBuf::from("/a.rs"),
+            line: 1,
+            col: 1,
+            message: "err".into(),
+            severity: DiagSeverity::Error,
+        },
+        DiagEntry {
+            path: PathBuf::from("/b.rs"),
+            line: 2,
+            col: 1,
+            message: "warn".into(),
+            severity: DiagSeverity::Warning,
+        },
+        DiagEntry {
+            path: PathBuf::from("/c.rs"),
+            line: 3,
+            col: 1,
+            message: "err2".into(),
+            severity: DiagSeverity::Error,
+        },
     ];
     let errors = errors_only(&diags);
     assert_eq!(errors.len(), 2);
@@ -448,9 +569,13 @@ fn diag_filter_errors_only() {
 
 #[test]
 fn diag_filter_no_errors_returns_empty() {
-    let diags = vec![
-        DiagEntry { path: PathBuf::from("/a.rs"), line: 1, col: 1, message: "hint".into(), severity: DiagSeverity::Hint },
-    ];
+    let diags = vec![DiagEntry {
+        path: PathBuf::from("/a.rs"),
+        line: 1,
+        col: 1,
+        message: "hint".into(),
+        severity: DiagSeverity::Hint,
+    }];
     assert!(errors_only(&diags).is_empty());
 }
 
@@ -468,7 +593,10 @@ struct CompletionEntry {
 }
 
 /// Filter completion entries by case-insensitive prefix match on `label`.
-fn filter_completions<'a>(entries: &'a [CompletionEntry], prefix: &str) -> Vec<&'a CompletionEntry> {
+fn filter_completions<'a>(
+    entries: &'a [CompletionEntry],
+    prefix: &str,
+) -> Vec<&'a CompletionEntry> {
     let p = prefix.to_lowercase();
     entries
         .iter()
@@ -658,8 +786,16 @@ fn definition_result_line_col_one_based() {
 
 #[test]
 fn reference_entry_equality() {
-    let r1 = ReferenceEntry { path: PathBuf::from("/a.rs"), line: 3, col: 7 };
-    let r2 = ReferenceEntry { path: PathBuf::from("/a.rs"), line: 3, col: 7 };
+    let r1 = ReferenceEntry {
+        path: PathBuf::from("/a.rs"),
+        line: 3,
+        col: 7,
+    };
+    let r2 = ReferenceEntry {
+        path: PathBuf::from("/a.rs"),
+        line: 3,
+        col: 7,
+    };
     assert_eq!(r1, r2);
 }
 
@@ -667,9 +803,21 @@ fn reference_entry_equality() {
 fn reference_entries_dedup() {
     // Duplicates should be removable (e.g. same definition counted twice)
     let mut refs = vec![
-        ReferenceEntry { path: PathBuf::from("/a.rs"), line: 1, col: 1 },
-        ReferenceEntry { path: PathBuf::from("/a.rs"), line: 1, col: 1 },
-        ReferenceEntry { path: PathBuf::from("/b.rs"), line: 2, col: 3 },
+        ReferenceEntry {
+            path: PathBuf::from("/a.rs"),
+            line: 1,
+            col: 1,
+        },
+        ReferenceEntry {
+            path: PathBuf::from("/a.rs"),
+            line: 1,
+            col: 1,
+        },
+        ReferenceEntry {
+            path: PathBuf::from("/b.rs"),
+            line: 2,
+            col: 3,
+        },
     ];
     refs.dedup_by(|a, b| a == b);
     assert_eq!(refs.len(), 2);
@@ -687,7 +835,10 @@ struct CodeLensEntry {
 
 #[test]
 fn code_lens_entry_fields() {
-    let lens = CodeLensEntry { line: 10, label: "2 references".to_string() };
+    let lens = CodeLensEntry {
+        line: 10,
+        label: "2 references".to_string(),
+    };
     assert_eq!(lens.line, 10);
     assert_eq!(lens.label, "2 references");
 }
@@ -695,9 +846,18 @@ fn code_lens_entry_fields() {
 #[test]
 fn code_lens_multiple_entries_on_same_file() {
     let lenses = vec![
-        CodeLensEntry { line: 1, label: "Run test".into() },
-        CodeLensEntry { line: 15, label: "3 references".into() },
-        CodeLensEntry { line: 22, label: "Run test".into() },
+        CodeLensEntry {
+            line: 1,
+            label: "Run test".into(),
+        },
+        CodeLensEntry {
+            line: 15,
+            label: "3 references".into(),
+        },
+        CodeLensEntry {
+            line: 22,
+            label: "Run test".into(),
+        },
     ];
     let run_tests: Vec<&CodeLensEntry> = lenses.iter().filter(|l| l.label == "Run test").collect();
     assert_eq!(run_tests.len(), 2);
@@ -706,9 +866,18 @@ fn code_lens_multiple_entries_on_same_file() {
 #[test]
 fn code_lens_sorted_by_line() {
     let mut lenses = vec![
-        CodeLensEntry { line: 50, label: "a".into() },
-        CodeLensEntry { line: 10, label: "b".into() },
-        CodeLensEntry { line: 30, label: "c".into() },
+        CodeLensEntry {
+            line: 50,
+            label: "a".into(),
+        },
+        CodeLensEntry {
+            line: 10,
+            label: "b".into(),
+        },
+        CodeLensEntry {
+            line: 30,
+            label: "c".into(),
+        },
     ];
     lenses.sort_by_key(|l| l.line);
     assert_eq!(lenses[0].line, 10);
@@ -777,7 +946,11 @@ fn lsp_command_list_no_duplicates() {
     sorted.sort();
     let original_len = sorted.len();
     sorted.dedup();
-    assert_eq!(sorted.len(), original_len, "duplicate entries in EXPECTED_LSP_COMMANDS");
+    assert_eq!(
+        sorted.len(),
+        original_len,
+        "duplicate entries in EXPECTED_LSP_COMMANDS"
+    );
 }
 
 // ── FoldingRange pair utilities ───────────────────────────────────────────────

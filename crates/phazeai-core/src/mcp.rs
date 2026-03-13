@@ -136,9 +136,8 @@ impl McpClient {
             .ok_or_else(|| "Failed to get stdout of MCP server".to_string())?;
 
         let stdin = Arc::new(Mutex::new(Box::new(stdin) as Box<dyn Write + Send>));
-        let pending: Arc<
-            Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
-        > = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn reader thread
         let pending_clone = pending.clone();
@@ -250,10 +249,7 @@ impl McpClient {
 
     /// Read a resource from the MCP server
     pub fn read_resource(&self, uri: &str) -> Result<Vec<McpContent>, String> {
-        let result = self.send_request(
-            "resources/read",
-            serde_json::json!({ "uri": uri }),
-        )?;
+        let result = self.send_request("resources/read", serde_json::json!({ "uri": uri }))?;
 
         if let Some(contents) = result.get("contents") {
             serde_json::from_value(contents.clone())
@@ -353,14 +349,13 @@ impl McpClient {
             return Err(format!("MCP error ({code}): {message}"));
         }
 
-        Ok(response.get("result").cloned().unwrap_or(serde_json::json!({})))
+        Ok(response
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::json!({})))
     }
 
-    fn send_notification(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<(), String> {
+    fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<(), String> {
         let notification = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

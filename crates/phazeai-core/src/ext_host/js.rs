@@ -44,7 +44,7 @@ enum JsCommand {
     },
     RegisterCommand {
         command: String,
-    }
+    },
 }
 
 pub struct JsExtension {
@@ -55,14 +55,15 @@ pub struct JsExtension {
 }
 
 impl JsExtension {
-    pub fn new(id: impl Into<String>, commands: Vec<String>, js_code: impl Into<String>) -> Result<Self, String> {
+    pub fn new(
+        id: impl Into<String>,
+        commands: Vec<String>,
+        js_code: impl Into<String>,
+    ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel::<JsCommand>();
-        
+
         thread::spawn(move || {
-            let decls = vec![
-                op_vscode_show_message(),
-                op_vscode_get_active_text(),
-            ];
+            let decls = vec![op_vscode_show_message(), op_vscode_get_active_text()];
             let ext = DenoExtension {
                 name: "vscode_shim",
                 ops: std::borrow::Cow::Owned(decls),
@@ -109,7 +110,7 @@ impl JsExtension {
                     }
                 };
             "#;
-            
+
             if let Err(e) = runtime.execute_script("vscode_shim", shim) {
                 tracing::error!("Failed to inject VSCode shim: {}", e);
                 return;
@@ -122,21 +123,33 @@ impl JsExtension {
                         runtime.op_state().borrow_mut().put(context);
                         let _ = reply.send(Ok(()));
                     }
-                    JsCommand::ExecuteScript { name: _, code, reply } => {
-                        let res = runtime.execute_script("<extension>", code)
+                    JsCommand::ExecuteScript {
+                        name: _,
+                        code,
+                        reply,
+                    } => {
+                        let res = runtime
+                            .execute_script("<extension>", code)
                             .map(|_| ())
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
-                    JsCommand::ExecuteExtensionCommand { command, args, reply } => {
-                        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
+                    JsCommand::ExecuteExtensionCommand {
+                        command,
+                        args,
+                        reply,
+                    } => {
+                        let args_json =
+                            serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
                         // JSON-encode command to prevent injection (adds quotes + escapes internals)
-                        let command_json = serde_json::to_string(&command).unwrap_or_else(|_| "\"\"".to_string());
+                        let command_json =
+                            serde_json::to_string(&command).unwrap_or_else(|_| "\"\"".to_string());
                         let invoke_code = format!(
                             "if (globalThis.vscode && globalThis.vscode.commands && globalThis.vscode.commands.executeCommand) {{ globalThis.vscode.commands.executeCommand({}, {}); }} else {{ null }}",
                             command_json, args_json
                         );
-                        let res = runtime.execute_script("<command>", invoke_code)
+                        let res = runtime
+                            .execute_script("<command>", invoke_code)
                             .map(|_| Value::Null)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
@@ -167,32 +180,44 @@ impl Extension for JsExtension {
 
     async fn activate(&mut self, context: IdeContext) -> Result<(), String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(JsCommand::InitContext {
-            context,
-            reply: reply_tx,
-        }).map_err(|_| "JS thread died".to_string())?;
-        reply_rx.await.map_err(|_| "JS thread died before replying".to_string())??;
+        self.tx
+            .send(JsCommand::InitContext {
+                context,
+                reply: reply_tx,
+            })
+            .map_err(|_| "JS thread died".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "JS thread died before replying".to_string())??;
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(JsCommand::ExecuteScript {
-            name: self.id.clone(),
-            code: self.script_content.clone(),
-            reply: reply_tx,
-        }).map_err(|_| "JS thread died".to_string())?;
-        
-        reply_rx.await.map_err(|_| "JS thread died before replying".to_string())??;
+        self.tx
+            .send(JsCommand::ExecuteScript {
+                name: self.id.clone(),
+                code: self.script_content.clone(),
+                reply: reply_tx,
+            })
+            .map_err(|_| "JS thread died".to_string())?;
+
+        reply_rx
+            .await
+            .map_err(|_| "JS thread died before replying".to_string())??;
         Ok(())
     }
 
     async fn execute_command(&mut self, command: &str, args: Value) -> Result<Value, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(JsCommand::ExecuteExtensionCommand {
-            command: command.to_string(),
-            args,
-            reply: reply_tx,
-        }).map_err(|_| "JS thread died".to_string())?;
-        
-        reply_rx.await.map_err(|_| "JS thread died before replying".to_string())?
+        self.tx
+            .send(JsCommand::ExecuteExtensionCommand {
+                command: command.to_string(),
+                args,
+                reply: reply_tx,
+            })
+            .map_err(|_| "JS thread died".to_string())?;
+
+        reply_rx
+            .await
+            .map_err(|_| "JS thread died before replying".to_string())?
     }
 
     async fn deactivate(&mut self) -> Result<(), String> {

@@ -36,9 +36,9 @@ impl VsixLoader {
 
         let pkg_str = fs::read_to_string(&pkg_path)
             .map_err(|e| format!("Failed to read package.json: {}", e))?;
-            
-        let pkg: VSCodePackageJson = serde_json::from_str(&pkg_str)
-            .map_err(|e| format!("Invalid package.json: {}", e))?;
+
+        let pkg: VSCodePackageJson =
+            serde_json::from_str(&pkg_str).map_err(|e| format!("Invalid package.json: {}", e))?;
 
         let main_file = pkg.main.unwrap_or_else(|| "index.js".to_string());
         let main_path = dir.join(main_file);
@@ -52,30 +52,39 @@ impl VsixLoader {
 
         // Extract commands and register them
         let mut js_wrapper = String::new();
-        
+
         // Add CommonJS requires shim (since we are injecting directly into V8)
-        js_wrapper.push_str(r#"
+        js_wrapper.push_str(
+            r#"
             const module = { exports: {} };
             const exports = module.exports;
             function require(mod) {
                 if (mod === 'vscode') return globalThis.vscode;
                 return {};
             }
-        "#);
-        
+        "#,
+        );
+
         js_wrapper.push_str(&js_code);
-        
+
         // Add activation call
-        js_wrapper.push_str(r#"
+        js_wrapper.push_str(
+            r#"
             if (typeof module.exports.activate === 'function') {
                 module.exports.activate({
                     subscriptions: [],
                     extensionPath: ""
                 });
             }
-        "#);
+        "#,
+        );
 
-        let commands: Vec<String> = pkg.contributes.commands.into_iter().map(|c| c.command).collect();
+        let commands: Vec<String> = pkg
+            .contributes
+            .commands
+            .into_iter()
+            .map(|c| c.command)
+            .collect();
 
         let ext = JsExtension::new(&pkg.name, commands, js_wrapper)?;
         manager.load_extension(Box::new(ext)).await?;
@@ -85,15 +94,14 @@ impl VsixLoader {
 
     /// Extracts a .vsix file to a temp directory and loads it
     pub async fn load_vsix(vsix_path: &Path, manager: &ExtensionManager) -> Result<(), String> {
-        let file = fs::File::open(vsix_path)
-            .map_err(|e| format!("Failed to open vsix: {}", e))?;
-            
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("Invalid zip archive: {}", e))?;
+        let file = fs::File::open(vsix_path).map_err(|e| format!("Failed to open vsix: {}", e))?;
+
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("Invalid zip archive: {}", e))?;
 
         // Use persistent extension dir so JS runtime can still reference sibling files at runtime
         let ext_store = dirs::config_dir()
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("phazeai")
             .join("extensions")
             .join(format!("ext-{}", uuid::Uuid::new_v4()));
@@ -123,7 +131,11 @@ impl VsixLoader {
 
         // VSCode extensions in vsix are typically inside an "extension" subdirectory
         let ext_dir = temp_dir.join("extension");
-        let target_dir = if ext_dir.exists() { ext_dir } else { temp_dir.clone() };
+        let target_dir = if ext_dir.exists() {
+            ext_dir
+        } else {
+            temp_dir.clone()
+        };
 
         // No cleanup — extension dir is persistent so JS runtime can reference sibling files
         Self::load_from_dir(&target_dir, manager).await

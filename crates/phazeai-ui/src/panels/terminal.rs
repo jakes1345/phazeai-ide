@@ -313,11 +313,10 @@ impl Perform for VtePerformer {
                         .next()
                         .and_then(|p| p.first().copied())
                         .unwrap_or(0);
-                    if (p == 2 || p == 3)
-                        && !state.current_line.is_empty() {
-                            let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                            state.lines.push(line);
-                        }
+                    if (p == 2 || p == 3) && !state.current_line.is_empty() {
+                        let line = std::mem::replace(&mut state.current_line, TermLine::new());
+                        state.lines.push(line);
+                    }
                 }
                 'K' => {
                     let p = params
@@ -563,7 +562,12 @@ const DEFAULT_TERM_FONT_SIZE: f32 = 13.0;
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
 
-fn build_line_layout(line: &TermLine, default_fg: Color, _default_bg: Color, font_size: f32) -> TextLayout {
+fn build_line_layout(
+    line: &TermLine,
+    default_fg: Color,
+    _default_bg: Color,
+    font_size: f32,
+) -> TextLayout {
     let plain = line.plain_text();
     let fonts = [
         FamilyOwned::Name("JetBrains Mono".to_string()),
@@ -1153,7 +1157,12 @@ fn single_terminal(
                 })
                 .on_click_stop(move |_| find_open.set(false)),
         ))
-        .style(|s| s.flex_row().items_center().padding_horiz(8.0).padding_vert(4.0)),
+        .style(|s| {
+            s.flex_row()
+                .items_center()
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
+        }),
     )
     .style(move |s| {
         let t = theme.get();
@@ -1166,16 +1175,15 @@ fn single_terminal(
     });
 
     // ── Assemble — find bar + output area ────────────────────────────────
-    stack((find_bar, output_area))
-        .style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.flex_col()
-                .flex_grow(1.0)
-                .min_height(0.0)
-                .width_full()
-                .background(p.bg_base)
-        })
+    stack((find_bar, output_area)).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.flex_col()
+            .flex_grow(1.0)
+            .min_height(0.0)
+            .width_full()
+            .background(p.bg_base)
+    })
 }
 
 // ── Multi-tab terminal panel ───────────────────────────────────────────────────
@@ -1269,7 +1277,8 @@ pub fn terminal_panel(
         create_effect(move |_| {
             let id = active_tab.get();
             let data = tab_data.get();
-            if let Some((_, _, _, _, _, pw_sig, pp_sig)) = data.iter().find(|(tid, ..)| *tid == id) {
+            if let Some((_, _, _, _, _, pw_sig, pp_sig)) = data.iter().find(|(tid, ..)| *tid == id)
+            {
                 active_pty_writer.set(pw_sig.get());
                 prompt_positions.set(pp_sig.get());
             }
@@ -1283,7 +1292,13 @@ pub fn terminal_panel(
     let tab_bar = stack((
         // Scrollable row of tabs
         dyn_stack(
-            move || tab_data.get().into_iter().map(|(id, ns, cs, _sh, cwd, _pw, _pp)| (id, ns, cs, cwd)).collect::<Vec<_>>(),
+            move || {
+                tab_data
+                    .get()
+                    .into_iter()
+                    .map(|(id, ns, cs, _sh, cwd, _pw, _pp)| (id, ns, cs, cwd))
+                    .collect::<Vec<_>>()
+            },
             |(id, _, _, _)| *id,
             move |(id, name_sig, _clear_sig, cwd_sig)| {
                 let is_active = move || active_tab.get() == id;
@@ -1300,36 +1315,36 @@ pub fn terminal_panel(
                         format!("{} [{}]", name, basename)
                     }
                 })
-                    .style(move |s| {
-                        let t = theme.get();
-                        let p = &t.palette;
-                        let active = is_active();
-                        let hov = hovered.get();
-                        let editing = editing_tab.get() == Some(id);
-                        s.font_size(11.0)
-                            .color(if active {
-                                p.text_primary
-                            } else if hov {
-                                p.text_secondary
-                            } else {
-                                p.text_muted
-                            })
-                            .padding_horiz(10.0)
-                            .padding_vert(5.0)
-                            .border_bottom(if active { 2.0 } else { 0.0 })
-                            .border_color(p.accent)
-                            .cursor(CursorStyle::Pointer)
-                            .apply_if(editing, |s| s.display(Display::None))
-                    })
-                    .on_click_stop(move |_| {
-                        if active_tab.get_untracked() == id {
-                            // Second click on already-active tab → start rename
-                            editing_tab.set(Some(id));
-                            rename_text.set(name_sig.get_untracked());
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    let active = is_active();
+                    let hov = hovered.get();
+                    let editing = editing_tab.get() == Some(id);
+                    s.font_size(11.0)
+                        .color(if active {
+                            p.text_primary
+                        } else if hov {
+                            p.text_secondary
                         } else {
-                            active_tab.set(id);
-                        }
-                    });
+                            p.text_muted
+                        })
+                        .padding_horiz(10.0)
+                        .padding_vert(5.0)
+                        .border_bottom(if active { 2.0 } else { 0.0 })
+                        .border_color(p.accent)
+                        .cursor(CursorStyle::Pointer)
+                        .apply_if(editing, |s| s.display(Display::None))
+                })
+                .on_click_stop(move |_| {
+                    if active_tab.get_untracked() == id {
+                        // Second click on already-active tab → start rename
+                        editing_tab.set(Some(id));
+                        rename_text.set(name_sig.get_untracked());
+                    } else {
+                        active_tab.set(id);
+                    }
+                });
 
                 // Inline rename input — shown when editing_tab == Some(id)
                 let rename_input = container(
@@ -1376,7 +1391,8 @@ pub fn terminal_panel(
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
-                        let show = hovered.get() && tab_data.get().len() > 1
+                        let show = hovered.get()
+                            && tab_data.get().len() > 1
                             && editing_tab.get() != Some(id);
                         s.font_size(11.0)
                             .color(p.text_muted)
@@ -1390,7 +1406,8 @@ pub fn terminal_panel(
                     .on_click_stop(move |_| {
                         tab_data.update(|data| data.retain(|(tid, _, _, _, _, _, _)| *tid != id));
                         if active_tab.get_untracked() == id {
-                            if let Some((last, _, _, _, _, _, _)) = tab_data.get_untracked().last() {
+                            if let Some((last, _, _, _, _, _, _)) = tab_data.get_untracked().last()
+                            {
                                 active_tab.set(*last);
                             }
                         }
@@ -1422,7 +1439,11 @@ pub fn terminal_panel(
                 s.padding_horiz(6.0)
                     .padding_vert(5.0)
                     .font_size(11.0)
-                    .color(if has_markers { p.text_muted } else { p.text_muted.with_alpha(0.35) })
+                    .color(if has_markers {
+                        p.text_muted
+                    } else {
+                        p.text_muted.with_alpha(0.35)
+                    })
                     .cursor(CursorStyle::Pointer)
                     .border(1.0)
                     .border_color(p.border)
@@ -1450,7 +1471,11 @@ pub fn terminal_panel(
                 s.padding_horiz(6.0)
                     .padding_vert(5.0)
                     .font_size(11.0)
-                    .color(if has_markers { p.text_muted } else { p.text_muted.with_alpha(0.35) })
+                    .color(if has_markers {
+                        p.text_muted
+                    } else {
+                        p.text_muted.with_alpha(0.35)
+                    })
                     .cursor(CursorStyle::Pointer)
                     .border(1.0)
                     .border_color(p.border)
@@ -1558,28 +1583,32 @@ pub fn terminal_panel(
             })
             .on_click_stop(move |_| {
                 let id = active_tab.get_untracked();
-                if let Some((_, _, clear_sig, _, _, _, _)) =
-                    tab_data.get_untracked().into_iter().find(|(tid, ..)| *tid == id)
+                if let Some((_, _, clear_sig, _, _, _, _)) = tab_data
+                    .get_untracked()
+                    .into_iter()
+                    .find(|(tid, ..)| *tid == id)
                 {
                     clear_sig.update(|v| *v += 1);
                 }
             }),
         // Shell selector button (cycles through SHELLS)
-        container(label(move || SHELLS[shell_idx.get() % SHELLS.len()].to_string()))
-            .style(move |s| {
-                let p = theme.get().palette;
-                s.padding_horiz(8.0)
-                    .padding_vert(5.0)
-                    .font_size(11.0)
-                    .color(p.text_muted)
-                    .cursor(CursorStyle::Pointer)
-                    .border(1.0)
-                    .border_color(p.border)
-                    .border_radius(3.0)
-                    .margin_right(4.0)
-                    .hover(|s| s.color(p.accent))
-            })
-            .on_click_stop(move |_| shell_idx.update(|i| *i = (*i + 1) % SHELLS.len())),
+        container(label(move || {
+            SHELLS[shell_idx.get() % SHELLS.len()].to_string()
+        }))
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.padding_horiz(8.0)
+                .padding_vert(5.0)
+                .font_size(11.0)
+                .color(p.text_muted)
+                .cursor(CursorStyle::Pointer)
+                .border(1.0)
+                .border_color(p.border)
+                .border_radius(3.0)
+                .margin_right(4.0)
+                .hover(|s| s.color(p.accent))
+        })
+        .on_click_stop(move |_| shell_idx.update(|i| *i = (*i + 1) % SHELLS.len())),
         // "+" new terminal button
         container(label(|| "+"))
             .style(move |s| {
@@ -1673,9 +1702,7 @@ pub fn terminal_panel(
     // When split is active we show instances + divider + split_term side by side.
     let content_area = stack((
         // Normal terminal instances (always present, manages visibility per tab)
-        container(instances).style(move |s| {
-            s.flex_grow(1.0).min_width(0.0).min_height(0.0)
-        }),
+        container(instances).style(move |s| s.flex_grow(1.0).min_width(0.0).min_height(0.0)),
         // Vertical divider (only shown when split)
         container(empty()).style(move |s| {
             let t = theme.get();

@@ -114,9 +114,7 @@ impl Tool for McpToolBridge {
 
 /// Create Tool-trait-compatible bridges for all tools from an McpManager.
 /// Returns boxed Tool objects that can be directly registered into a ToolRegistry.
-pub fn create_mcp_tool_bridges(
-    manager: Arc<Mutex<McpManager>>,
-) -> Vec<Box<dyn Tool>> {
+pub fn create_mcp_tool_bridges(manager: Arc<Mutex<McpManager>>) -> Vec<Box<dyn Tool>> {
     let mgr = match manager.lock() {
         Ok(m) => m,
         Err(e) => {

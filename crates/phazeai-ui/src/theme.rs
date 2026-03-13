@@ -1,7 +1,6 @@
 use floem::peniko::Color;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeVariant {
     // Cosmic / PhazeAI originals
     #[default]
@@ -21,7 +20,6 @@ pub enum ThemeVariant {
     // Light
     Light,
 }
-
 
 impl ThemeVariant {
     pub fn all() -> &'static [ThemeVariant] {

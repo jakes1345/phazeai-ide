@@ -151,7 +151,7 @@ struct AppState {
     // Conversation management
     conversation_id: String,
     conversation_store: ConversationStore,
-    
+
     // Session Picker UI
     show_session_picker: bool,
     session_picker_list: Vec<ConversationMetadata>,
@@ -217,7 +217,7 @@ impl AppState {
 
             conversation_id: conv_id,
             conversation_store: store,
-            
+
             show_session_picker: false,
             session_picker_list: Vec::new(),
             session_picker_index: 0,
@@ -1297,9 +1297,17 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
                 }
             }
             KeyCode::Enter => {
-                if let Some(meta) = state.session_picker_list.get(state.session_picker_index).cloned() {
+                if let Some(meta) = state
+                    .session_picker_list
+                    .get(state.session_picker_index)
+                    .cloned()
+                {
                     state.show_session_picker = false;
-                    handle_command_result(state, CommandResult::LoadConversation(meta.id), user_input_tx);
+                    handle_command_result(
+                        state,
+                        CommandResult::LoadConversation(meta.id),
+                        user_input_tx,
+                    );
                 } else {
                     state.show_session_picker = false;
                 }
@@ -1353,7 +1361,10 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
                     }
                 }
                 Err(e) => {
-                    state.add_message(MessageRole::System, format!("Failed to list conversations: {e}"));
+                    state.add_message(
+                        MessageRole::System,
+                        format!("Failed to list conversations: {e}"),
+                    );
                 }
             }
         }
@@ -2308,7 +2319,7 @@ fn handle_command_result(
                 if let Err(e) = std::fs::create_dir_all(workflow_dir) {
                     state.add_message(
                         MessageRole::System,
-                        format!("Failed to create .github/workflows directory: {e}")
+                        format!("Failed to create .github/workflows directory: {e}"),
                     );
                     return;
                 }
@@ -2349,7 +2360,7 @@ jobs:
                 Err(e) => {
                     state.add_message(
                         MessageRole::System,
-                        format!("Failed to write workflow file: {e}")
+                        format!("Failed to write workflow file: {e}"),
                     );
                 }
             }

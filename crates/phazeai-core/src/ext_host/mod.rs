@@ -28,7 +28,7 @@ impl IdeDelegate for DummyDelegate {
     }
 }
 
-/// The context passed to extensions. 
+/// The context passed to extensions.
 #[derive(Clone)]
 pub struct IdeContext {
     pub delegate: Arc<dyn IdeDelegate>,
@@ -55,16 +55,16 @@ impl Default for IdeContext {
 pub trait Extension: Send + Sync {
     /// Unique identifier for this extension
     fn id(&self) -> &str;
-    
+
     /// Get the commands this extension contributes
     fn commands(&self) -> Vec<String>;
-    
+
     /// Called when the extension is activated
     async fn activate(&mut self, context: IdeContext) -> Result<(), String>;
-    
+
     /// Execute a registered command
     async fn execute_command(&mut self, command: &str, args: Value) -> Result<Value, String>;
-    
+
     /// Called when the extension is deactivated
     async fn deactivate(&mut self) -> Result<(), String>;
 }
@@ -95,15 +95,15 @@ impl ExtensionManager {
 
     pub async fn load_extension(&self, mut ext: Box<dyn Extension>) -> Result<(), String> {
         ext.activate(self.context.clone()).await?;
-        
+
         let mut exts = self.extensions.lock().await;
         let mut registry = self.command_registry.lock().await;
-        
+
         let idx = exts.len();
         for cmd in ext.commands() {
             registry.insert(cmd, idx);
         }
-        
+
         exts.push(ext);
         Ok(())
     }

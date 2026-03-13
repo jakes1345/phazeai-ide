@@ -585,8 +585,8 @@ impl Styling for SyntaxStyle {
             let line_h = self.inner.line_height(edid, line) as f64;
             // Cycle through 4 colors by depth
             let color = match depth % 4 {
-                0 => floem::peniko::Color::from_rgba8(255, 215, 0, 50),   // gold
-                1 => floem::peniko::Color::from_rgba8(86, 182, 194, 50),  // sky blue
+                0 => floem::peniko::Color::from_rgba8(255, 215, 0, 50), // gold
+                1 => floem::peniko::Color::from_rgba8(86, 182, 194, 50), // sky blue
                 2 => floem::peniko::Color::from_rgba8(198, 120, 221, 50), // violet
                 _ => floem::peniko::Color::from_rgba8(152, 195, 121, 50), // mint
             };
@@ -1360,10 +1360,15 @@ pub fn editor_panel(
                 let mut space4 = 0usize;
                 let mut space8 = 0usize;
                 for line in content[..sample_len].lines() {
-                    if line.starts_with('\t') { tab_count += 1; }
-                    else if line.starts_with("        ") { space8 += 1; }
-                    else if line.starts_with("    ") { space4 += 1; }
-                    else if line.starts_with("  ") { space2 += 1; }
+                    if line.starts_with('\t') {
+                        tab_count += 1;
+                    } else if line.starts_with("        ") {
+                        space8 += 1;
+                    } else if line.starts_with("    ") {
+                        space4 += 1;
+                    } else if line.starts_with("  ") {
+                        space2 += 1;
+                    }
                 }
                 let detected = if tab_count > space2 + space4 + space8 {
                     4u32 // tabs → treat as 4
@@ -1635,17 +1640,18 @@ pub fn editor_panel(
                         .into_iter()
                         .map(|(s, e)| (s as usize, e as usize))
                         .collect();
-                    let send = create_ext_action(fold_scope, move |brace_ranges: Vec<(usize, usize)>| {
-                        // Merge brace-based and LSP ranges, dedup by start line.
-                        let mut merged = brace_ranges;
-                        for lsp_r in &lsp_ranges {
-                            if !merged.iter().any(|b| b.0 == lsp_r.0) {
-                                merged.push(*lsp_r);
+                    let send =
+                        create_ext_action(fold_scope, move |brace_ranges: Vec<(usize, usize)>| {
+                            // Merge brace-based and LSP ranges, dedup by start line.
+                            let mut merged = brace_ranges;
+                            for lsp_r in &lsp_ranges {
+                                if !merged.iter().any(|b| b.0 == lsp_r.0) {
+                                    merged.push(*lsp_r);
+                                }
                             }
-                        }
-                        merged.sort_by_key(|r| r.0);
-                        fold_state.update(|(r, _f)| *r = merged);
-                    });
+                            merged.sort_by_key(|r| r.0);
+                            fold_state.update(|(r, _f)| *r = merged);
+                        });
                     if text.is_empty() {
                         send(vec![]);
                         return;
@@ -2549,10 +2555,7 @@ pub fn editor_panel(
                         line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
                     }
 
-                    let cur_indent = lines
-                        .get(cur_line)
-                        .map(|l| indent_of(l))
-                        .unwrap_or(0);
+                    let cur_indent = lines.get(cur_line).map(|l| indent_of(l)).unwrap_or(0);
 
                     let mut headers: Vec<String> = Vec::new();
                     let mut last_indent = cur_indent;
@@ -2944,9 +2947,12 @@ pub fn editor_panel(
                             if cur_offset < len {
                                 let ch = bytes[cur_offset] as char;
                                 let (search, fwd) = match ch {
-                                    '(' => (')', true), ')' => ('(', false),
-                                    '[' => (']', true), ']' => ('[', false),
-                                    '{' => ('}', true), '}' => ('{', false),
+                                    '(' => (')', true),
+                                    ')' => ('(', false),
+                                    '[' => (']', true),
+                                    ']' => ('[', false),
+                                    '{' => ('}', true),
+                                    '}' => ('{', false),
                                     _ => (ch, true),
                                 };
                                 if search != ch || fwd {
@@ -2956,36 +2962,55 @@ pub fn editor_panel(
                                     if fwd {
                                         for (idx, &b) in bytes.iter().enumerate().skip(cur_offset) {
                                             let c = b as char;
-                                            if c == open { depth += 1; }
-                                            else if c == close {
+                                            if c == open {
+                                                depth += 1;
+                                            } else if c == close {
                                                 depth -= 1;
-                                                if depth == 0 { break; }
+                                                if depth == 0 {
+                                                    break;
+                                                }
                                                 // continue
                                             }
-                                            if depth == 0 { break; }
+                                            if depth == 0 {
+                                                break;
+                                            }
                                             let _ = idx;
                                         }
                                         // find forward
                                         let mut d = 0i32;
                                         let mut found = cur_offset;
-                                        for (idx, &byte) in bytes[cur_offset..len].iter().enumerate().map(|(i, b)| (i + cur_offset, b)) {
+                                        for (idx, &byte) in bytes[cur_offset..len]
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, b)| (i + cur_offset, b))
+                                        {
                                             let c = byte as char;
-                                            if c == open { d += 1; }
-                                            else if c == close {
+                                            if c == open {
+                                                d += 1;
+                                            } else if c == close {
                                                 d -= 1;
-                                                if d == 0 { found = idx; break; }
+                                                if d == 0 {
+                                                    found = idx;
+                                                    break;
+                                                }
                                             }
                                         }
                                         found
                                     } else {
                                         let mut d = 0i32;
                                         let mut found = cur_offset;
-                                        for (idx, &byte) in bytes[..=cur_offset].iter().enumerate().rev() {
+                                        for (idx, &byte) in
+                                            bytes[..=cur_offset].iter().enumerate().rev()
+                                        {
                                             let c = byte as char;
-                                            if c == close { d += 1; }
-                                            else if c == open {
+                                            if c == close {
+                                                d += 1;
+                                            } else if c == open {
                                                 d -= 1;
-                                                if d == 0 { found = idx; break; }
+                                                if d == 0 {
+                                                    found = idx;
+                                                    break;
+                                                }
                                             }
                                         }
                                         found
@@ -3006,7 +3031,11 @@ pub fn editor_panel(
                             // Skip current word chars, then leading whitespace
                             let mut end = cur_offset;
                             // skip non-whitespace
-                            while end < len && bytes[end] != b' ' && bytes[end] != b'\t' && bytes[end] != b'\n' {
+                            while end < len
+                                && bytes[end] != b' '
+                                && bytes[end] != b'\t'
+                                && bytes[end] != b'\n'
+                            {
                                 end += 1;
                             }
                             // skip trailing spaces/tabs (but not newline)
@@ -3029,7 +3058,10 @@ pub fn editor_panel(
                             let (start, end) = (anchor.min(cur_offset), anchor.max(cur_offset));
                             let end = end.min(doc_for_vim.rope_text().len());
                             let text = doc_for_vim.rope_text().slice_to_cow(start..end).to_string();
-                            yank_ring.update(|r| { r.insert(0, text); r.truncate(5); });
+                            yank_ring.update(|r| {
+                                r.insert(0, text);
+                                r.truncate(5);
+                            });
                             if end > start {
                                 doc_for_vim.edit_single(
                                     Selection::region(start, end),
@@ -3046,7 +3078,10 @@ pub fn editor_panel(
                             let (start, end) = (anchor.min(cur_offset), anchor.max(cur_offset));
                             let end = end.min(doc_for_vim.rope_text().len());
                             let text = doc_for_vim.rope_text().slice_to_cow(start..end).to_string();
-                            yank_ring.update(|r| { r.insert(0, text); r.truncate(5); });
+                            yank_ring.update(|r| {
+                                r.insert(0, text);
+                                r.truncate(5);
+                            });
                             vim_visual_anchor.set(None);
                             cur_offset
                         }
@@ -3089,11 +3124,14 @@ pub fn editor_panel(
                                 .get(i)
                                 .map(|t| t.path.clone())
                                 .unwrap_or_default();
-                            vim_marks.update(|m| { m.insert(ch, (path, cur_offset)); });
+                            vim_marks.update(|m| {
+                                m.insert(ch, (path, cur_offset));
+                            });
                             cur_offset
                         }
                         VimMotion::GotoMark(ch) => {
-                            if let Some(off) = vim_marks.get_untracked().get(&ch).map(|(_p, o)| *o) {
+                            if let Some(off) = vim_marks.get_untracked().get(&ch).map(|(_p, o)| *o)
+                            {
                                 off.min(doc_for_vim.rope_text().len())
                             } else {
                                 cur_offset
@@ -3134,7 +3172,9 @@ pub fn editor_panel(
                 create_effect(move |_| {
                     let exp_n = expand_selection_nonce.get();
                     let shr_n = shrink_selection_nonce.get();
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     if exp_n > 0 && exp_n != last_exp.get_untracked() {
                         last_exp.set(exp_n);
                         let rope = doc_for_es.rope_text();
@@ -3142,20 +3182,32 @@ pub fn editor_panel(
                         let offset = cur.offset();
                         let len = rope.len();
                         // Expand: if at caret, select word; if word selected, select line
-                        let (sel_start, sel_end) =
-                            if let CursorMode::Insert(ref s) = cur.mode {
-                                if let Some(r) = s.regions().first().copied() {
-                                    (r.start.min(r.end), r.start.max(r.end))
-                                } else { (offset, offset) }
-                            } else { (offset, offset) };
+                        let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
+                            } else {
+                                (offset, offset)
+                            }
+                        } else {
+                            (offset, offset)
+                        };
                         let text = rope.slice_to_cow(0..rope.len()).to_string();
                         let bytes = text.as_bytes();
                         let new_sel = if sel_start == sel_end {
                             // Expand to word
                             let mut start = offset;
                             let mut end = offset;
-                            while start > 0 && (bytes[start-1].is_ascii_alphanumeric() || bytes[start-1] == b'_') { start -= 1; }
-                            while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') { end += 1; }
+                            while start > 0
+                                && (bytes[start - 1].is_ascii_alphanumeric()
+                                    || bytes[start - 1] == b'_')
+                            {
+                                start -= 1;
+                            }
+                            while end < len
+                                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                            {
+                                end += 1;
+                            }
                             Selection::region(start, end)
                         } else {
                             // Expand to enclosing line
@@ -3163,7 +3215,9 @@ pub fn editor_panel(
                             let line_start = rope.offset_of_line(line);
                             let line_end = if line + 1 < rope.num_lines() {
                                 rope.offset_of_line(line + 1).saturating_sub(1)
-                            } else { len };
+                            } else {
+                                len
+                            };
                             Selection::region(line_start, line_end)
                         };
                         cursor_sig.set(Cursor::new(CursorMode::Insert(new_sel), None, None));
@@ -3197,16 +3251,15 @@ pub fn editor_panel(
                         last_upper.set(upper_n);
                         let cur = cursor_sig.get_untracked();
                         let offset = cur.offset();
-                        let (sel_start, sel_end) =
-                            if let CursorMode::Insert(ref s) = cur.mode {
-                                if let Some(r) = s.regions().first().copied() {
-                                    (r.start.min(r.end), r.start.max(r.end))
-                                } else {
-                                    (offset, offset)
-                                }
+                        let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
                             } else {
                                 (offset, offset)
-                            };
+                            }
+                        } else {
+                            (offset, offset)
+                        };
                         if sel_start < sel_end {
                             let text = doc_for_tc
                                 .rope_text()
@@ -3224,16 +3277,15 @@ pub fn editor_panel(
                         last_lower.set(lower_n);
                         let cur = cursor_sig.get_untracked();
                         let offset = cur.offset();
-                        let (sel_start, sel_end) =
-                            if let CursorMode::Insert(ref s) = cur.mode {
-                                if let Some(r) = s.regions().first().copied() {
-                                    (r.start.min(r.end), r.start.max(r.end))
-                                } else {
-                                    (offset, offset)
-                                }
+                        let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                            if let Some(r) = s.regions().first().copied() {
+                                (r.start.min(r.end), r.start.max(r.end))
                             } else {
                                 (offset, offset)
-                            };
+                            }
+                        } else {
+                            (offset, offset)
+                        };
                         if sel_start < sel_end {
                             let text = doc_for_tc
                                 .rope_text()
@@ -3272,9 +3324,7 @@ pub fn editor_panel(
                     let cur_end = rope.offset_of_line(line + 1);
                     // Delete the newline and any leading whitespace on the next line
                     let next_content_start = {
-                        let next_line_text = rope
-                            .slice_to_cow(cur_end..rope.len())
-                            .to_string();
+                        let next_line_text = rope.slice_to_cow(cur_end..rope.len()).to_string();
                         let ws_len: usize = next_line_text
                             .chars()
                             .take_while(|c| *c == ' ' || *c == '\t')
@@ -3313,16 +3363,15 @@ pub fn editor_panel(
                     let rope = doc_for_sl.rope_text();
                     let cur = cursor_sig.get_untracked();
                     let offset = cur.offset();
-                    let (sel_start, sel_end) =
-                        if let CursorMode::Insert(ref s) = cur.mode {
-                            if let Some(r) = s.regions().first().copied() {
-                                (r.start.min(r.end), r.start.max(r.end))
-                            } else {
-                                (offset, offset)
-                            }
+                    let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                        if let Some(r) = s.regions().first().copied() {
+                            (r.start.min(r.end), r.start.max(r.end))
                         } else {
                             (offset, offset)
-                        };
+                        }
+                    } else {
+                        (offset, offset)
+                    };
                     // Determine line range to sort
                     let (range_start, range_end) = if sel_start < sel_end {
                         let first_line = rope.line_of_offset(sel_start);
@@ -3362,19 +3411,31 @@ pub fn editor_panel(
                 let last_tt = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = transform_title_nonce.get();
-                    if n == 0 || n == last_tt.get_untracked() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if n == 0 || n == last_tt.get_untracked() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_tt.set(n);
                     let cur = cursor_sig.get_untracked();
                     let offset = cur.offset();
-                    let (sel_start, sel_end) =
-                        if let CursorMode::Insert(ref s) = cur.mode {
-                            if let Some(r) = s.regions().first().copied() {
-                                (r.start.min(r.end), r.start.max(r.end))
-                            } else { (offset, offset) }
-                        } else { (offset, offset) };
-                    if sel_start >= sel_end { return; }
-                    let raw = doc_tt.rope_text().slice_to_cow(sel_start..sel_end).to_string();
+                    let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                        if let Some(r) = s.regions().first().copied() {
+                            (r.start.min(r.end), r.start.max(r.end))
+                        } else {
+                            (offset, offset)
+                        }
+                    } else {
+                        (offset, offset)
+                    };
+                    if sel_start >= sel_end {
+                        return;
+                    }
+                    let raw = doc_tt
+                        .rope_text()
+                        .slice_to_cow(sel_start..sel_end)
+                        .to_string();
                     // Title-case: capitalize first letter of each word
                     let titled: String = raw
                         .split_inclusive(|c: char| c.is_whitespace() || c == '-' || c == '_')
@@ -3404,23 +3465,38 @@ pub fn editor_panel(
                 let last_fs = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = format_selection_nonce.get();
-                    if n == 0 || n == last_fs.get_untracked() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if n == 0 || n == last_fs.get_untracked() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_fs.set(n);
                     let cur = cursor_sig.get_untracked();
                     let offset = cur.offset();
-                    let (sel_start, sel_end) =
-                        if let CursorMode::Insert(ref s) = cur.mode {
-                            if let Some(r) = s.regions().first().copied() {
-                                (r.start.min(r.end), r.start.max(r.end))
-                            } else { (offset, offset) }
-                        } else { (offset, offset) };
-                    if sel_start >= sel_end { return; }
+                    let (sel_start, sel_end) = if let CursorMode::Insert(ref s) = cur.mode {
+                        if let Some(r) = s.regions().first().copied() {
+                            (r.start.min(r.end), r.start.max(r.end))
+                        } else {
+                            (offset, offset)
+                        }
+                    } else {
+                        (offset, offset)
+                    };
+                    if sel_start >= sel_end {
+                        return;
+                    }
                     let rope = doc_fs.rope_text();
                     let sel_text = rope.slice_to_cow(sel_start..sel_end).to_string();
-                    let ext = tabs.get_untracked()
+                    let ext = tabs
+                        .get_untracked()
                         .get(i)
-                        .and_then(|t| t.path.extension().and_then(|e| e.to_str()).map(|s| s.to_string()))
+                        .and_then(|t| {
+                            t.path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|s| s.to_string())
+                        })
                         .unwrap_or_default();
                     // Async: format on bg thread, apply on UI thread via create_ext_action
                     let scope = Scope::new();
@@ -3440,17 +3516,30 @@ pub fn editor_panel(
                             let tmp = std::env::temp_dir().join(format!(
                                 "phaze_fmt_{}.{}",
                                 std::process::id(),
-                                if ext.is_empty() { "txt".to_string() } else { ext.clone() }
+                                if ext.is_empty() {
+                                    "txt".to_string()
+                                } else {
+                                    ext.clone()
+                                }
                             ));
                             std::fs::write(&tmp, &sel_text).ok()?;
                             let (cmd, args): (&str, Vec<String>) = match ext.as_str() {
                                 "rs" => ("rustfmt", vec![tmp.to_string_lossy().to_string()]),
-                                "js" | "ts" | "jsx" | "tsx" => ("prettier", vec!["--write".to_string(), tmp.to_string_lossy().to_string()]),
+                                "js" | "ts" | "jsx" | "tsx" => (
+                                    "prettier",
+                                    vec!["--write".to_string(), tmp.to_string_lossy().to_string()],
+                                ),
                                 "py" => ("black", vec![tmp.to_string_lossy().to_string()]),
                                 _ => return None,
                             };
-                            let ok = std::process::Command::new(cmd).args(&args).status().ok()?.success();
-                            if !ok { return None; }
+                            let ok = std::process::Command::new(cmd)
+                                .args(&args)
+                                .status()
+                                .ok()?
+                                .success();
+                            if !ok {
+                                return None;
+                            }
                             let result = std::fs::read_to_string(&tmp).ok()?;
                             let _ = std::fs::remove_file(&tmp);
                             Some(result)
@@ -3469,8 +3558,12 @@ pub fn editor_panel(
                 let last_snf = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = save_no_format_nonce.get();
-                    if n == 0 || n == last_snf.get_untracked() { return; }
-                    if active_idx.get() != Some(i) { return; }
+                    if n == 0 || n == last_snf.get_untracked() {
+                        return;
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     last_snf.set(n);
                     let content = doc_snf.text().to_string();
                     if std::fs::write(&tab_path_snf, content).is_ok() {
@@ -3489,7 +3582,9 @@ pub fn editor_panel(
                 create_effect(move |_| {
                     let fa = fold_all_nonce.get();
                     let ua = unfold_all_nonce.get();
-                    if active_idx.get() != Some(i) { return; }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
                     if fa > 0 && fa != last_fa.get_untracked() {
                         last_fa.set(fa);
                         fold_state.update(|(ranges, folded)| {
@@ -3538,7 +3633,8 @@ pub fn editor_panel(
                         return;
                     }
                     // Don't fire FIM when cursor is at start of a line (nothing typed yet on this line)
-                    let current_line_prefix = prefix.rsplit_once('\n').map(|(_, s)| s).unwrap_or(&prefix);
+                    let current_line_prefix =
+                        prefix.rsplit_once('\n').map(|(_, s)| s).unwrap_or(&prefix);
                     if current_line_prefix.trim().is_empty() {
                         return;
                     }
@@ -4442,7 +4538,9 @@ pub fn editor_panel(
         let cl_theme = theme;
         dyn_stack(
             move || {
-                if !code_lens_visible.get() { return vec![]; }
+                if !code_lens_visible.get() {
+                    return vec![];
+                }
                 code_lens_sig.get()
             },
             |entry| entry.line,
@@ -4481,11 +4579,15 @@ pub fn editor_panel(
         let ih_theme = theme;
         dyn_stack(
             move || {
-                if !inlay_hints_toggle.get() { return vec![]; }
-                let cur_line = active_cursor.get()
+                if !inlay_hints_toggle.get() {
+                    return vec![];
+                }
+                let cur_line = active_cursor
+                    .get()
                     .map(|(_, l, _)| l.saturating_sub(1))
                     .unwrap_or(0);
-                inlay_hints.get()
+                inlay_hints
+                    .get()
                     .into_iter()
                     .filter(|h| h.line == cur_line)
                     .collect::<Vec<_>>()
@@ -4493,20 +4595,20 @@ pub fn editor_panel(
             |h| format!("{}{}{}", h.line, h.col, h.label),
             move |h| {
                 let _t = ih_theme.get();
-                label(move || format!("  {} col:{} {}", "⟩", h.col, h.label))
-                    .style(move |s| {
-                        let t2 = ih_theme.get();
-                        s.padding_horiz(8.0)
-                            .padding_vert(1.0)
-                            .font_size(10.0)
-                            .color(t2.palette.text_secondary)
-                            .font_style(floem::text::Style::Italic)
-                    })
+                label(move || format!("  {} col:{} {}", "⟩", h.col, h.label)).style(move |s| {
+                    let t2 = ih_theme.get();
+                    s.padding_horiz(8.0)
+                        .padding_vert(1.0)
+                        .font_size(10.0)
+                        .color(t2.palette.text_secondary)
+                        .font_style(floem::text::Style::Italic)
+                })
             },
         )
         .style(move |s| {
             let visible = inlay_hints_toggle.get() && {
-                let cur_line = active_cursor.get()
+                let cur_line = active_cursor
+                    .get()
                     .map(|(_, l, _)| l.saturating_sub(1))
                     .unwrap_or(0);
                 inlay_hints.get().iter().any(|h| h.line == cur_line)
@@ -4809,7 +4911,10 @@ pub struct EditorConfigSettings {
 
 /// Walk up from `file_path`'s parent toward `workspace_root`, reading `.editorconfig`
 /// files (innermost wins for each key).  Parses `[*]` and extension-specific sections.
-pub fn read_editorconfig(file_path: &std::path::Path, workspace_root: &std::path::Path) -> EditorConfigSettings {
+pub fn read_editorconfig(
+    file_path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> EditorConfigSettings {
     let ext = file_path
         .extension()
         .and_then(|e| e.to_str())
@@ -4859,9 +4964,7 @@ pub fn read_editorconfig(file_path: &std::path::Path, workspace_root: &std::path
                     || glob == format!("*.{ext}")
                     || glob.starts_with("*.{")
                         && glob.ends_with('}')
-                        && glob[3..glob.len() - 1]
-                            .split(',')
-                            .any(|e| e.trim() == ext);
+                        && glob[3..glob.len() - 1].split(',').any(|e| e.trim() == ext);
                 continue;
             }
             if !in_matching_section {

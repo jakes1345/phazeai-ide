@@ -65,7 +65,11 @@ pub enum LspCommand {
     /// Organize imports on save using LSP textDocument/codeAction source.organizeImports.
     OrganizeImports { path: PathBuf },
     /// Request inlay hints for a visible range of a file (textDocument/inlayHint).
-    RequestInlayHints { path: PathBuf, start_line: u32, end_line: u32 },
+    RequestInlayHints {
+        path: PathBuf,
+        start_line: u32,
+        end_line: u32,
+    },
     /// Graceful shutdown.
     Shutdown,
 }
@@ -1277,10 +1281,7 @@ fn parse_signature_help(sh: lsp_types::SignatureHelp) -> Option<SignatureHelpRes
     let active_sig = sh.active_signature.unwrap_or(0) as usize;
     let sig = sh.signatures.into_iter().nth(active_sig)?;
     let label = sig.label.clone();
-    let active_param = sh
-        .active_parameter
-        .or(sig.active_parameter)
-        .unwrap_or(0) as usize;
+    let active_param = sh.active_parameter.or(sig.active_parameter).unwrap_or(0) as usize;
     let params: Vec<String> = sig
         .parameters
         .unwrap_or_default()
@@ -1596,34 +1597,55 @@ fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
 /// Regex-based inlay hint generator for common patterns when no LSP server is available.
 /// Produces type/parameter hints for Rust `let x =` and function calls.
 fn inlay_hints_from_file(path: &PathBuf, start_line: u32, end_line: u32) -> Vec<InlayHintEntry> {
-    let Ok(content) = std::fs::read_to_string(path) else { return vec![]; };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext != "rs" { return vec![]; }
+    if ext != "rs" {
+        return vec![];
+    }
 
     let mut hints = Vec::new();
     for (line_idx, line) in content.lines().enumerate() {
         let line_num = line_idx as u32;
-        if line_num < start_line || line_num > end_line { continue; }
+        if line_num < start_line || line_num > end_line {
+            continue;
+        }
 
         let trimmed = line.trim();
 
         // `let x = <literal>` — show type after variable name
         if let Some(rest) = trimmed.strip_prefix("let ") {
             // Extract variable name (stop at whitespace, :, =)
-            let var_end = rest.find(|c: char| c == ':' || c == '=' || c.is_whitespace())
+            let var_end = rest
+                .find(|c: char| c == ':' || c == '=' || c.is_whitespace())
                 .unwrap_or(rest.len());
             let var_name = &rest[..var_end];
-            if var_name.is_empty() || var_name == "_" || var_name == "mut" { continue; }
+            if var_name.is_empty() || var_name == "_" || var_name == "mut" {
+                continue;
+            }
 
             // Determine type from rhs
-            let rhs = if let Some(eq_pos) = rest.find('=') { rest[eq_pos + 1..].trim() } else { continue };
-            let type_hint = if rhs.starts_with('"') { ": &str" }
-                else if rhs.starts_with("vec![") || rhs.starts_with("Vec::") { ": Vec<_>" }
-                else if rhs.parse::<i64>().is_ok() { ": i32" }
-                else if rhs.parse::<f64>().is_ok() && rhs.contains('.') { ": f64" }
-                else if rhs == "true" || rhs == "false" { ": bool" }
-                else if rhs.starts_with("HashMap::") || rhs.starts_with("std::collections::HashMap") { ": HashMap<_, _>" }
-                else { continue };
+            let rhs = if let Some(eq_pos) = rest.find('=') {
+                rest[eq_pos + 1..].trim()
+            } else {
+                continue;
+            };
+            let type_hint = if rhs.starts_with('"') {
+                ": &str"
+            } else if rhs.starts_with("vec![") || rhs.starts_with("Vec::") {
+                ": Vec<_>"
+            } else if rhs.parse::<i64>().is_ok() {
+                ": i32"
+            } else if rhs.parse::<f64>().is_ok() && rhs.contains('.') {
+                ": f64"
+            } else if rhs == "true" || rhs == "false" {
+                ": bool"
+            } else if rhs.starts_with("HashMap::") || rhs.starts_with("std::collections::HashMap") {
+                ": HashMap<_, _>"
+            } else {
+                continue;
+            };
 
             // Column after the variable name in the original line
             if let Some(col) = line.find(var_name) {

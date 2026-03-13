@@ -42,7 +42,9 @@ fn line_col_to_offset(text: &str, line: usize, col: usize) -> usize {
     for (i, ch) in text.char_indices() {
         if current_line == line {
             // col is clamped to the line length
-            let line_len = text[line_start..].find('\n').unwrap_or(text.len() - line_start);
+            let line_len = text[line_start..]
+                .find('\n')
+                .unwrap_or(text.len() - line_start);
             return line_start + col.min(line_len);
         }
         if ch == '\n' {
@@ -378,8 +380,14 @@ fn outline_rust_detects_traits() {
     let src = "pub trait Drawable {}\ntrait Private {}\n";
     let symbols = extract_symbols_generic(src, "rs");
     let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"Drawable"), "expected 'Drawable' in {names:?}");
-    assert!(names.contains(&"Private"), "expected 'Private' in {names:?}");
+    assert!(
+        names.contains(&"Drawable"),
+        "expected 'Drawable' in {names:?}"
+    );
+    assert!(
+        names.contains(&"Private"),
+        "expected 'Private' in {names:?}"
+    );
 }
 
 #[test]
@@ -396,7 +404,10 @@ fn outline_rust_detects_modules() {
     let symbols = extract_symbols_generic(src, "rs");
     let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"utils"), "expected 'utils' in {names:?}");
-    assert!(names.contains(&"internal"), "expected 'internal' in {names:?}");
+    assert!(
+        names.contains(&"internal"),
+        "expected 'internal' in {names:?}"
+    );
 }
 
 #[test]
@@ -411,7 +422,9 @@ impl Counter {
 "#;
     let symbols = extract_symbols_generic(src, "rs");
     // The impl block should produce a Struct symbol with Method children
-    let impl_sym = symbols.iter().find(|s| s.name == "Counter" && !s.children.is_empty());
+    let impl_sym = symbols
+        .iter()
+        .find(|s| s.name == "Counter" && !s.children.is_empty());
     assert!(
         impl_sym.is_some(),
         "expected impl Counter block with children; got {symbols:?}"
@@ -422,7 +435,10 @@ impl Counter {
         .iter()
         .map(|c| c.name.as_str())
         .collect();
-    assert!(children.contains(&"new"), "expected 'new' in children {children:?}");
+    assert!(
+        children.contains(&"new"),
+        "expected 'new' in children {children:?}"
+    );
     assert!(
         children.contains(&"increment"),
         "expected 'increment' in children {children:?}"
@@ -440,7 +456,8 @@ fn outline_rust_impl_methods_kind_is_method() {
 
 #[test]
 fn outline_rust_trait_for_impl() {
-    let src = "impl Display for MyType {\n    fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) }\n}\n";
+    let src =
+        "impl Display for MyType {\n    fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) }\n}\n";
     let symbols = extract_symbols_generic(src, "rs");
     // "impl Display for MyType" → name should be "MyType"
     let impl_sym = symbols.iter().find(|s| s.name == "MyType");
@@ -528,7 +545,10 @@ fn outline_python_class_methods_are_children() {
 fn outline_python_class_methods_kind_is_method() {
     let src = "class A:\n    def foo(self):\n        pass\n";
     let symbols = extract_symbols_generic(src, "py");
-    let class_sym = symbols.iter().find(|s| s.kind == SymbolKind::Class).unwrap();
+    let class_sym = symbols
+        .iter()
+        .find(|s| s.kind == SymbolKind::Class)
+        .unwrap();
     let method = class_sym.children.iter().find(|c| c.name == "foo").unwrap();
     assert_eq!(method.kind, SymbolKind::Method);
 }
@@ -684,7 +704,10 @@ fn lint(code: &str, lang: LanguageTag) -> phazeai_core::analysis::CodeAnalysis {
     // Generic rules (all languages)
     for (line_num, line) in code.lines().enumerate() {
         let line_upper = line.to_uppercase();
-        if line_upper.contains("TODO") || line_upper.contains("FIXME") || line_upper.contains("HACK") {
+        if line_upper.contains("TODO")
+            || line_upper.contains("FIXME")
+            || line_upper.contains("HACK")
+        {
             issues.push(phazeai_core::analysis::Issue {
                 line: line_num + 1,
                 column: 0,
@@ -743,7 +766,11 @@ fn linter_rust_flags_unwrap() {
         .iter()
         .filter(|i| i.severity == Severity::Warning && i.message.contains("unwrap"))
         .collect();
-    assert!(!warnings.is_empty(), "expected unwrap warning; issues: {:?}", analysis.issues);
+    assert!(
+        !warnings.is_empty(),
+        "expected unwrap warning; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -779,7 +806,11 @@ fn linter_rust_clone_without_ref_is_info() {
         .iter()
         .filter(|i| i.severity == Severity::Info && i.message.contains("clone"))
         .collect();
-    assert!(!info.is_empty(), "expected clone info; issues: {:?}", analysis.issues);
+    assert!(
+        !info.is_empty(),
+        "expected clone info; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -792,7 +823,10 @@ fn linter_rust_clone_with_ref_not_flagged() {
         .iter()
         .filter(|i| i.message.contains("clone"))
         .collect();
-    assert!(clone_issues.is_empty(), "should not flag clone when & is present: {clone_issues:?}");
+    assert!(
+        clone_issues.is_empty(),
+        "should not flag clone when & is present: {clone_issues:?}"
+    );
 }
 
 #[test]
@@ -844,7 +878,11 @@ fn linter_python_bare_except_is_warning() {
         .iter()
         .filter(|i| i.severity == Severity::Warning && i.message.contains("Bare except"))
         .collect();
-    assert!(!warnings.is_empty(), "expected bare-except warning; issues: {:?}", analysis.issues);
+    assert!(
+        !warnings.is_empty(),
+        "expected bare-except warning; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -868,7 +906,10 @@ fn linter_python_specific_except_not_flagged() {
         .iter()
         .filter(|i| i.message.contains("Bare except"))
         .collect();
-    assert!(bare.is_empty(), "specific except should not be flagged: {bare:?}");
+    assert!(
+        bare.is_empty(),
+        "specific except should not be flagged: {bare:?}"
+    );
 }
 
 #[test]
@@ -889,7 +930,11 @@ fn linter_js_var_is_warning() {
         .iter()
         .filter(|i| i.severity == Severity::Warning && i.message.contains("var"))
         .collect();
-    assert!(!warnings.is_empty(), "expected var warning; issues: {:?}", analysis.issues);
+    assert!(
+        !warnings.is_empty(),
+        "expected var warning; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -901,7 +946,10 @@ fn linter_js_let_const_not_flagged() {
         .iter()
         .filter(|i| i.message.contains("var"))
         .collect();
-    assert!(var_issues.is_empty(), "let/const should not be flagged: {var_issues:?}");
+    assert!(
+        var_issues.is_empty(),
+        "let/const should not be flagged: {var_issues:?}"
+    );
 }
 
 // ── Linter: generic cross-language rules ─────────────────────────────────────
@@ -915,7 +963,11 @@ fn linter_generic_flags_todo_comment() {
         .iter()
         .filter(|i| i.message.contains("TODO"))
         .collect();
-    assert!(!todos.is_empty(), "expected TODO issue; issues: {:?}", analysis.issues);
+    assert!(
+        !todos.is_empty(),
+        "expected TODO issue; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -927,7 +979,11 @@ fn linter_generic_flags_fixme_comment() {
         .iter()
         .filter(|i| i.message.contains("TODO"))
         .collect();
-    assert!(!fixme.is_empty(), "expected FIXME issue; issues: {:?}", analysis.issues);
+    assert!(
+        !fixme.is_empty(),
+        "expected FIXME issue; issues: {:?}",
+        analysis.issues
+    );
 }
 
 #[test]
@@ -939,7 +995,11 @@ fn linter_generic_long_line_is_info() {
         .iter()
         .filter(|i| i.message.contains("too long"))
         .collect();
-    assert!(!long.is_empty(), "expected long-line info; issues: {:?}", analysis.issues);
+    assert!(
+        !long.is_empty(),
+        "expected long-line info; issues: {:?}",
+        analysis.issues
+    );
     assert_eq!(long[0].column, 120);
 }
 
@@ -1014,7 +1074,12 @@ impl VimDispatch {
             (Some('c'), 'w') => Some(VimMotion::ChangeWord),
             (Some('d'), 'w') => Some(VimMotion::DeleteWord),
             // Pending accumulation: second char needed
-            (None, 'g') | (None, 'd') | (None, 'y') | (None, 'c') | (None, 'r') | (None, 'm')
+            (None, 'g')
+            | (None, 'd')
+            | (None, 'y')
+            | (None, 'c')
+            | (None, 'r')
+            | (None, 'm')
             | (None, '`') => {
                 self.pending = Some(key);
                 None
@@ -1552,9 +1617,7 @@ fn find_all_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<(usize
 /// Find all regex matches in `text`.  Returns byte ranges.
 fn find_all_regex_matches(text: &str, pattern: &str) -> Vec<(usize, usize)> {
     let re = regex::Regex::new(pattern).expect("invalid regex");
-    re.find_iter(text)
-        .map(|m| (m.start(), m.end()))
-        .collect()
+    re.find_iter(text).map(|m| (m.start(), m.end())).collect()
 }
 
 /// Replace all occurrences of `old` with `new` in `text` (case-sensitive).
