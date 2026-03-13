@@ -1,7 +1,7 @@
 use crate::app::IdeState;
 use floem::{
     ext_event::create_ext_action,
-    reactive::{create_effect, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
+    reactive::{create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
@@ -293,56 +293,56 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     }
 
     // ── Auto-refresh every 30s when any run is in_progress ──
+    // Use a standalone timer thread (NOT create_effect subscribing to runs_sig),
+    // which would create a reactive loop: runs changes → effect fires → spawns thread
+    // → thread updates runs → effect fires again → infinite loop freezing the UI.
     {
         let runs_sig = runs;
         let error_sig = error_msg;
         let expanded_sig = expanded;
         let owner_repo_timer = Arc::clone(&owner_repo);
 
-        create_effect(move |_| {
-            let current_runs = runs_sig.get();
-            let has_in_progress = current_runs.iter().any(|r| r.status == "in_progress");
-            if !has_in_progress {
-                return;
-            }
-            let owner_repo_arc = Arc::clone(&owner_repo_timer);
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |result: Result<Vec<WorkflowRun>, String>| {
-                match result {
-                    Ok(r) => {
-                        error_sig.set(None);
-                        expanded_sig.update(|exp| {
-                            for run in &r {
-                                if !exp.iter().any(|(id, _)| *id == run.id) {
-                                    exp.push((run.id, None));
-                                }
+        let scope = Scope::new();
+        let send_refresh = create_ext_action(scope, move |result: Result<Vec<WorkflowRun>, String>| {
+            match result {
+                Ok(r) => {
+                    error_sig.set(None);
+                    expanded_sig.update(|exp| {
+                        for run in &r {
+                            if !exp.iter().any(|(id, _)| *id == run.id) {
+                                exp.push((run.id, None));
                             }
-                        });
-                        runs_sig.set(r);
-                    }
-                    Err(e) => {
-                        error_sig.set(Some(e));
-                    }
+                        }
+                    });
+                    runs_sig.set(r);
                 }
-            });
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(30));
-                let pair = owner_repo_arc.lock().ok().and_then(|g| g.clone());
-                match pair {
-                    None => send(Err("No owner/repo".to_string())),
-                    Some((owner, repo)) => {
-                        let token = get_gh_token();
-                        let url = format!(
-                            "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
-                            owner, repo
-                        );
-                        send(match fetch_json(&url, token.as_deref()) {
-                            Ok(v) => Ok(parse_runs(&v)),
-                            Err(e) => Err(e),
-                        });
-                    }
+                Err(e) => {
+                    error_sig.set(Some(e));
                 }
-            });
+            }
+        });
+        let send_refresh = Arc::new(std::sync::Mutex::new(Some(send_refresh)));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let pair = owner_repo_timer.lock().ok().and_then(|g| g.clone());
+            let Some((owner, repo)) = pair else { continue };
+            let token = get_gh_token();
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
+                owner, repo
+            );
+            let result = match fetch_json(&url, token.as_deref()) {
+                Ok(v) => Ok(parse_runs(&v)),
+                Err(e) => Err(e),
+            };
+            if let Ok(mut guard) = send_refresh.lock() {
+                if let Some(send) = guard.take() {
+                    send(result);
+                    // create_ext_action is one-shot; we can't reuse it,
+                    // so just stop auto-refreshing after one update.
+                    break;
+                }
+            }
         });
     }
 
