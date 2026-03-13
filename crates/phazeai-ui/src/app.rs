@@ -887,10 +887,17 @@ impl IdeState {
                 }
             });
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .unwrap();
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("[sidecar] failed to create runtime: {e}");
+                        let _ = ready_tx.send(false);
+                        return;
+                    }
+                };
                 rt.block_on(async move {
                     let mut mgr = SidecarManager::new("python3", script);
                     match mgr.start().await {

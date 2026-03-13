@@ -43,10 +43,16 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
 
             let manager = state.ext_manager.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .unwrap();
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        on_done(Err(format!("Failed to create runtime: {}", e)));
+                        return;
+                    }
+                };
                 rt.block_on(async move {
                     if let Err(e) = VsixLoader::load_vsix(&path, &manager).await {
                         on_done(Err(e));

@@ -31,8 +31,12 @@ impl WasmExtension {
                 _ => return,
             };
             
+            let end = match ptr.checked_add(len) {
+                Some(e) => e as usize,
+                None => return,
+            };
             let data = mem.data(&caller)
-                .get(ptr as usize..(ptr + len) as usize)
+                .get(ptr as usize..end)
                 .unwrap_or(&[]);
                 
             let msg = std::str::from_utf8(data).unwrap_or("invalid utf8").to_string();

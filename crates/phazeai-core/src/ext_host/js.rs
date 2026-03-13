@@ -130,9 +130,11 @@ impl JsExtension {
                     }
                     JsCommand::ExecuteExtensionCommand { command, args, reply } => {
                         let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "null".to_string());
+                        // JSON-encode command to prevent injection (adds quotes + escapes internals)
+                        let command_json = serde_json::to_string(&command).unwrap_or_else(|_| "\"\"".to_string());
                         let invoke_code = format!(
-                            "if (globalThis.vscode && globalThis.vscode.commands && globalThis.vscode.commands.executeCommand) {{ globalThis.vscode.commands.executeCommand('{}', {}); }} else {{ null }}",
-                            command, args_json
+                            "if (globalThis.vscode && globalThis.vscode.commands && globalThis.vscode.commands.executeCommand) {{ globalThis.vscode.commands.executeCommand({}, {}); }} else {{ null }}",
+                            command_json, args_json
                         );
                         let res = runtime.execute_script("<command>", invoke_code)
                             .map(|_| Value::Null)

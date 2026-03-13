@@ -91,9 +91,15 @@ impl VsixLoader {
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| format!("Invalid zip archive: {}", e))?;
 
-        let temp_dir = std::env::temp_dir().join(format!("phazeai-ext-{}", uuid::Uuid::new_v4()));
+        // Use persistent extension dir so JS runtime can still reference sibling files at runtime
+        let ext_store = dirs::config_dir()
+            .unwrap_or_else(|| std::env::temp_dir())
+            .join("phazeai")
+            .join("extensions")
+            .join(format!("ext-{}", uuid::Uuid::new_v4()));
+        let temp_dir = ext_store;
         fs::create_dir_all(&temp_dir)
-            .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+            .map_err(|e| format!("Failed to create extension dir: {}", e))?;
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -119,11 +125,7 @@ impl VsixLoader {
         let ext_dir = temp_dir.join("extension");
         let target_dir = if ext_dir.exists() { ext_dir } else { temp_dir.clone() };
 
-        let result = Self::load_from_dir(&target_dir, manager).await;
-        
-        // Clean up
-        let _ = fs::remove_dir_all(temp_dir);
-
-        result
+        // No cleanup — extension dir is persistent so JS runtime can reference sibling files
+        Self::load_from_dir(&target_dir, manager).await
     }
 }

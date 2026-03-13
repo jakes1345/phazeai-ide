@@ -1,5 +1,6 @@
 use floem::{
-    reactive::{create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    ext_event::create_ext_action,
+    reactive::{create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -825,11 +826,14 @@ fn perform_search(
     });
 
     let results_sig = state.search_results;
-    let rx_sig = floem::ext_event::create_signal_from_channel(rx);
-    floem::reactive::create_effect(move |_| {
-        if let Some(found) = rx_sig.get() {
-            results_sig.set(found);
-            is_searching.set(false);
+    // create_ext_action avoids leaking a new signal+effect on every search invocation
+    let on_results = create_ext_action(Scope::current(), move |found: Vec<SearchResult>| {
+        results_sig.set(found);
+        is_searching.set(false);
+    });
+    std::thread::spawn(move || {
+        if let Ok(found) = rx.recv() {
+            on_results(found);
         }
     });
 }
@@ -911,10 +915,12 @@ fn perform_replace_all(
         ));
     });
 
-    let rx_sig = floem::ext_event::create_signal_from_channel(rx);
-    floem::reactive::create_effect(move |_| {
-        if let Some(msg) = rx_sig.get() {
-            status.set(msg);
+    let on_done = create_ext_action(Scope::current(), move |msg: String| {
+        status.set(msg);
+    });
+    std::thread::spawn(move || {
+        if let Ok(msg) = rx.recv() {
+            on_done(msg);
         }
     });
 }
