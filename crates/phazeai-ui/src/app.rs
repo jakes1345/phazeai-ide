@@ -564,18 +564,16 @@ pub fn save_settings(theme_name: &str, font_size: u32, tab_size: u32) {
 /// Show a toast notification that auto-dismisses after 3 seconds.
 /// Safe to call from any code that has access to `IdeState`.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
-    use floem::ext_event::create_signal_from_channel;
+    use floem::ext_event::create_ext_action;
+    use floem::reactive::Scope;
     toast.set(Some(msg.into()));
-    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let dismiss_sig = create_signal_from_channel(rx);
-    create_effect(move |_| {
-        if dismiss_sig.get().is_some() {
-            toast.set(None);
-        }
+    // Use Scope::current() to reuse the caller's scope — no leak.
+    let dismiss = create_ext_action(Scope::current(), move |_: ()| {
+        toast.set(None);
     });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
-        let _ = tx.send(());
+        dismiss(());
     });
 }
 
@@ -709,22 +707,28 @@ impl IdeState {
             let tabs_for_save = open_tabs_sig;
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        let _ = lsp_tx.send(LspCommand::OpenFile {
-                            path: path.clone(),
-                            text,
-                        });
-                    }
-                    let current = session_load();
+                    // Read file + send LSP did_open + save session in background
+                    // to avoid blocking the UI thread with synchronous I/O.
+                    let lsp = lsp_tx.clone();
                     let all_tabs = tabs_for_save.get_untracked();
-                    session_save_tabs(
-                        &all_tabs,
-                        Some(&path),
-                        current.left_panel_width,
-                        current.show_bottom_panel,
-                        current.vim_mode,
-                        &current.theme,
-                    );
+                    let p = path.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(text) = std::fs::read_to_string(&p) {
+                            let _ = lsp.send(LspCommand::OpenFile {
+                                path: p.clone(),
+                                text,
+                            });
+                        }
+                        let current = session_load();
+                        session_save_tabs(
+                            &all_tabs,
+                            Some(&p),
+                            current.left_panel_width,
+                            current.show_bottom_panel,
+                            current.vim_mode,
+                            &current.theme,
+                        );
+                    });
                 }
             });
         }
@@ -765,44 +769,47 @@ impl IdeState {
             });
         }
 
-        // Detect read-only status when active file changes.
+        // Detect read-only status + line-ending style in background thread.
         let active_readonly_sig: RwSignal<bool> = create_rw_signal(false);
-        {
-            let ro_open_file = open_file;
-            let ro_sig = active_readonly_sig;
-            create_effect(move |_| {
-                let readonly = if let Some(path) = ro_open_file.get() {
-                    std::fs::metadata(&path)
-                        .map(|m| m.permissions().readonly())
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                ro_sig.set(readonly);
-            });
-        }
-
-        // Detect line-ending style when the active file changes.
         let line_ending_sig: RwSignal<&'static str> = create_rw_signal("LF");
         {
+            use floem::ext_event::create_signal_from_channel;
+            let (file_info_tx, file_info_rx) =
+                std::sync::mpsc::sync_channel::<(bool, &'static str)>(1);
+            let file_info_sig = create_signal_from_channel(file_info_rx);
+            create_effect(move |_| {
+                if let Some((readonly, ending)) = file_info_sig.get() {
+                    active_readonly_sig.set(readonly);
+                    line_ending_sig.set(ending);
+                }
+            });
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    // Read raw bytes to distinguish CRLF vs LF vs Mixed.
-                    let style = std::fs::read(&path)
-                        .ok()
-                        .map(|bytes| {
-                            let crlf_count = bytes.windows(2).filter(|w| *w == b"\r\n").count();
-                            let lf_count = bytes.iter().filter(|&&b| b == b'\n').count();
-                            if crlf_count > 0 && lf_count > crlf_count {
-                                "Mixed"
-                            } else if crlf_count > 0 {
-                                "CRLF"
-                            } else {
-                                "LF"
-                            }
-                        })
-                        .unwrap_or("LF");
-                    line_ending_sig.set(style);
+                    let tx = file_info_tx.clone();
+                    std::thread::spawn(move || {
+                        let readonly = std::fs::metadata(&path)
+                            .map(|m| m.permissions().readonly())
+                            .unwrap_or(false);
+                        let style = std::fs::read(&path)
+                            .ok()
+                            .map(|bytes| {
+                                let crlf_count =
+                                    bytes.windows(2).filter(|w| *w == b"\r\n").count();
+                                let lf_count = bytes.iter().filter(|&&b| b == b'\n').count();
+                                if crlf_count > 0 && lf_count > crlf_count {
+                                    "Mixed"
+                                } else if crlf_count > 0 {
+                                    "CRLF"
+                                } else {
+                                    "LF"
+                                }
+                            })
+                            .unwrap_or("LF");
+                        let _ = tx.try_send((readonly, style));
+                    });
+                } else {
+                    active_readonly_sig.set(false);
+                    line_ending_sig.set("LF");
                 }
             });
         }
@@ -813,24 +820,29 @@ impl IdeState {
         let tab_size_signal = create_rw_signal(saved_tab_size);
 
         // Whenever theme, font_size, or tab_size changes, persist to config.toml.
+        // Done in a background thread to avoid blocking the UI.
         create_effect(move |_| {
             let theme_name = theme_signal.get().variant.name().to_string();
             let fs = font_size_signal.get();
             let ts = tab_size_signal.get();
-            save_settings(&theme_name, fs, ts);
+            std::thread::spawn(move || {
+                save_settings(&theme_name, fs, ts);
+            });
         });
 
         // Also persist theme name to session.toml whenever it changes.
         create_effect(move |_| {
             let theme_name = theme_signal.get().variant.name().to_string();
-            let current = session_load();
-            session_save_full(
-                current.open_file.as_ref(),
-                current.left_panel_width,
-                current.show_bottom_panel,
-                current.vim_mode,
-                &theme_name,
-            );
+            std::thread::spawn(move || {
+                let current = session_load();
+                session_save_full(
+                    current.open_file.as_ref(),
+                    current.left_panel_width,
+                    current.show_bottom_panel,
+                    current.vim_mode,
+                    &theme_name,
+                );
+            });
         });
 
         // ── Sidecar startup ────────────────────────────────────────────────────
@@ -947,11 +959,14 @@ impl IdeState {
         let open_file_sig = open_file;
         create_effect(move |_| {
             if let Some(path) = open_file_sig.get() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(mut lock) = active_text_clone.lock() {
-                        *lock = content;
+                let atc = active_text_clone.clone();
+                std::thread::spawn(move || {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(mut lock) = atc.lock() {
+                            *lock = content;
+                        }
                     }
-                }
+                });
             } else if let Ok(mut lock) = active_text_clone.lock() {
                 lock.clear();
             }
@@ -968,10 +983,12 @@ impl IdeState {
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
-            let mut s = Settings::load();
-            s.llm.provider = provider_name_to_llm_provider(&provider_name);
-            s.llm.model = model;
-            let _ = s.save();
+            std::thread::spawn(move || {
+                let mut s = Settings::load();
+                s.llm.provider = provider_name_to_llm_provider(&provider_name);
+                s.llm.model = model;
+                let _ = s.save();
+            });
         });
 
         Self {
@@ -2197,8 +2214,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
         label(|| "   ").style(|s| s.font_size(11.0)),
         phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.theme),
         label(move || {
-            let s = Settings::load();
-            format!(" {}", s.llm.model)
+            format!(" {}", state.ai_model.get())
         })
         .style(move |s| {
             s.color(state.theme.get().palette.text_secondary)
