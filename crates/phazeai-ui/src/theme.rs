@@ -131,7 +131,7 @@ impl PhazePalette {
         Self {
             // Deep space — all backgrounds semi-transparent so the cosmic
             // canvas behind shows through the glass panels.
-            bg_deep: Color::from_rgba8(5, 3, 16, 235), // #050310 deep purple-black
+            bg_deep: Color::from_rgba8(8, 8, 22, 245),  // deep blue-black, slight blue tint
             bg_base: Color::from_rgba8(0, 0, 0, 0),    // Truly transparent base
             bg_surface: Color::from_rgba8(13, 11, 30, 185),
             bg_panel: Color::from_rgba8(10, 9, 22, 145),

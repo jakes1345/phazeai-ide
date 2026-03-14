@@ -1705,8 +1705,9 @@ fn command_palette(state: IdeState) -> impl IntoView {
         })
 }
 
-/// Cosmic nebula canvas — absolute-positioned behind all UI panels.
-/// Uses blurred fills to paint soft gaseous clouds in electric purple/indigo.
+/// Cosmic canvas — absolute-positioned behind all UI panels.
+/// Dark, clean, technical glass aesthetic: deep blue-black base + subtle hex
+/// grid + faint corner glows. No large nebula blobs.
 fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     canvas(move |cx, size| {
         let t = theme.get();
@@ -1714,10 +1715,10 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         let w = size.width;
         let h = size.height;
 
-        // 1. Deep-space base fill — matches MidnightBlue #050310
+        // 1. Deep blue-black base fill — slight blue tint, not pure black
         cx.fill(
             &floem::kurbo::Rect::ZERO.with_size(size),
-            floem::peniko::Color::from_rgb8(5, 3, 16),
+            floem::peniko::Color::from_rgb8(8, 8, 22),
             0.0,
         );
 
@@ -1725,9 +1726,9 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             return;
         }
 
-        // 2. Subtle hex grid — very faint accent dots for an "engineered" feel
+        // 2. Subtle hex grid — faint accent dots for an "engineered" technical feel
         let hex_size = 40.0;
-        let grid_color = p.accent.with_alpha(0.06);
+        let grid_color = p.accent.with_alpha(0.09);
         let horiz_dist = hex_size * 3.0f64.sqrt();
         let vert_dist = hex_size * 1.5;
 
@@ -1737,50 +1738,33 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                 let x = col as f64 * horiz_dist + x_offset;
                 let y = row as f64 * vert_dist;
                 cx.fill(
-                    &floem::kurbo::Circle::new(floem::kurbo::Point::new(x, y), 0.8),
+                    &floem::kurbo::Circle::new(floem::kurbo::Point::new(x, y), 1.0),
                     grid_color,
                     0.0,
                 );
             }
         }
 
-        // 3. Nebula glow clouds — violet / indigo palette matching target screenshot
-        // Top-Left: Deep violet cloud
+        // 3. Subtle corner glows — very faint, small radius, no large blobs
+        // Top-left corner glow
         cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w * 0.1, h * 0.12), 520.0),
-            floem::peniko::Color::from_rgba8(80, 30, 180, 88),
-            150.0,
+            &floem::kurbo::Circle::new(floem::kurbo::Point::new(0.0, 0.0), 200.0),
+            floem::peniko::Color::from_rgba8(40, 20, 120, 25),
+            80.0,
         );
 
-        // Right-Center: Indigo cloud (replaces old cyan — stays in violet family)
+        // Bottom-right corner glow
         cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w * 0.92, h * 0.38), 440.0),
-            floem::peniko::Color::from_rgba8(40, 20, 180, 78),
-            130.0,
+            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w, h), 250.0),
+            floem::peniko::Color::from_rgba8(30, 15, 100, 20),
+            80.0,
         );
 
-        // Bottom-Right: Deep blue-violet
+        // Top-right subtle accent
         cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w * 0.8, h * 0.82), 480.0),
-            floem::peniko::Color::from_rgba8(60, 10, 200, 72),
-            140.0,
-        );
-
-        // Center-Bottom: Violet cloud — grounds the composition
-        cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w * 0.45, h * 0.88), 400.0),
-            floem::peniko::Color::from_rgba8(100, 40, 220, 62),
-            125.0,
-        );
-
-        // Subtle vignette — darkens edges to draw focus inward
-        cx.fill(
-            &floem::kurbo::Circle::new(
-                floem::kurbo::Point::new(w * 0.5, h * 0.5),
-                (w.max(h)) * 0.68,
-            ),
-            floem::peniko::Color::from_rgba8(2, 1, 10, 35),
-            90.0,
+            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w, 0.0), 180.0),
+            floem::peniko::Color::from_rgba8(20, 40, 100, 18),
+            60.0,
         );
     })
     // Absolute-positioned so it doesn't participate in flex layout but
