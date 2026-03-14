@@ -1866,16 +1866,83 @@ fn activity_bar(state: IdeState) -> impl IntoView {
     })
 }
 
-fn placeholder_tab(tab_name: &'static str, state: IdeState) -> impl IntoView {
-    container(label(move || tab_name).style(move |s| {
-        s.color(state.theme.get().palette.text_muted)
-            .font_size(12.0)
-            .padding(16.0)
-    }))
+fn coming_soon_panel(
+    name: &'static str,
+    description: &'static str,
+    theme: RwSignal<PhazeTheme>,
+) -> impl IntoView {
+    let header = container(
+        label(move || name.to_uppercase()).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0)
+                .font_weight(floem::text::Weight::BOLD)
+                .color(p.text_muted)
+                .padding_horiz(12.0)
+                .padding_vert(8.0)
+        }),
+    )
     .style(move |s| {
-        let t = state.theme.get();
-        s.width_full().height_full().background(t.palette.glass_bg)
-    })
+        let p = theme.get().palette;
+        s.width_full()
+            .border_bottom(1.0)
+            .border_color(p.glass_border)
+    });
+
+    let icon = container(
+        label(move || "◇".to_string()).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(32.0).color(p.accent).margin_bottom(12.0)
+        }),
+    );
+
+    let title = label(move || name.to_string()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(14.0)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(p.text_primary)
+            .margin_bottom(6.0)
+    });
+
+    let desc = label(move || description.to_string()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.5)
+            .color(p.text_secondary)
+            .margin_bottom(16.0)
+    });
+
+    let badge = container(
+        label(|| "Coming Soon".to_string()).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(10.0)
+                .font_weight(floem::text::Weight::BOLD)
+                .color(p.accent)
+                .padding_horiz(10.0)
+                .padding_vert(4.0)
+        }),
+    )
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.border(1.0)
+            .border_color(p.accent)
+            .border_radius(12.0)
+    });
+
+    let body = container(
+        stack((icon, title, desc, badge))
+            .style(|s| s.flex_col().items_center().gap(0.0)),
+    )
+    .style(|s| {
+        s.flex_grow(1.0)
+            .width_full()
+            .items_center()
+            .justify_center()
+    });
+
+    container(stack((header, body)).style(|s| s.flex_col().width_full().height_full()))
+        .style(move |s| {
+            let t = theme.get();
+            s.width_full().height_full().background(t.palette.glass_bg)
+        })
 }
 
 fn left_panel(state: IdeState) -> impl IntoView {
@@ -1920,7 +1987,12 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let debug_wrap = container(placeholder_tab("Run and Debug", state.clone())).style({
+    let debug_wrap = container(coming_soon_panel(
+        "Run and Debug",
+        "Run, step, and inspect your code with integrated debugger support.",
+        state.theme,
+    ))
+    .style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1942,7 +2014,12 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let remote_wrap = container(placeholder_tab("Remote Explorer", state.clone())).style({
+    let remote_wrap = container(coming_soon_panel(
+        "Remote Explorer",
+        "Connect to remote machines, containers, and cloud environments via SSH.",
+        state.theme,
+    ))
+    .style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1953,7 +2030,12 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let container_wrap = container(placeholder_tab("Containers", state.clone())).style({
+    let container_wrap = container(coming_soon_panel(
+        "Containers",
+        "Manage Docker containers, images, and compose services.",
+        state.theme,
+    ))
+    .style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1964,7 +2046,12 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let makefile_wrap = container(placeholder_tab("Makefile", state.clone())).style({
+    let makefile_wrap = container(coming_soon_panel(
+        "Makefile",
+        "Browse and run Makefile targets with a single click.",
+        state.theme,
+    ))
+    .style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -2019,6 +2106,22 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
+    let account_wrap = container(coming_soon_panel(
+        "Account",
+        "Sign in to sync settings, manage PhazeAI Cloud features, and collaborate with your team.",
+        state.theme,
+    ))
+    .style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.left_panel_tab.get() != Tab::Account, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
+
     container(
         stack((
             explorer_wrap,
@@ -2033,6 +2136,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             github_wrap,
             ai_wrap,
             settings_wrap,
+            account_wrap,
         ))
         .style(|s| s.width_full().height_full()),
     )
@@ -2062,6 +2166,44 @@ fn left_panel(state: IdeState) -> impl IntoView {
 fn bottom_panel_tab(label_str: &'static str, tab: Tab, state: IdeState) -> impl IntoView {
     let is_hovered = create_rw_signal(false);
     container(label(move || label_str))
+        .style(move |s| {
+            let t = state.theme.get();
+            let p = &t.palette;
+            let active = state.bottom_panel_tab.get() == tab;
+            let hovered = is_hovered.get();
+            s.padding_horiz(12.0)
+                .padding_vert(6.0)
+                .font_size(11.0)
+                .color(if active { p.accent } else { p.text_muted })
+                .background(if active {
+                    p.bg_surface
+                } else if hovered {
+                    p.bg_elevated
+                } else {
+                    floem::peniko::Color::TRANSPARENT
+                })
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(active, |s| s.border_top(2.0).border_color(p.accent))
+        })
+        .on_click_stop(move |_| {
+            state.bottom_panel_tab.set(tab);
+            state.show_bottom_panel.set(true);
+        })
+        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+            is_hovered.set(true);
+        })
+        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+            is_hovered.set(false);
+        })
+}
+
+/// Like `bottom_panel_tab` but with a reactive label closure so the tab text can show counts.
+fn bottom_panel_tab_dyn<F>(label_fn: F, tab: Tab, state: IdeState) -> impl IntoView
+where
+    F: Fn() -> String + 'static,
+{
+    let is_hovered = create_rw_signal(false);
+    container(label(label_fn))
         .style(move |s| {
             let t = state.theme.get();
             let p = &t.palette;
@@ -3162,7 +3304,21 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             // Tab bar — double-click to maximize/restore
             stack((
                 bottom_panel_tab("TERMINAL", Tab::Terminal, state.clone()),
-                bottom_panel_tab("PROBLEMS", Tab::Problems, state.clone()),
+                bottom_panel_tab_dyn(
+                    {
+                        let diags = state.diagnostics;
+                        move || {
+                            let n = diags.get().len();
+                            if n == 0 {
+                                "PROBLEMS".to_string()
+                            } else {
+                                format!("PROBLEMS ({})", n)
+                            }
+                        }
+                    },
+                    Tab::Problems,
+                    state.clone(),
+                ),
                 bottom_panel_tab("REFERENCES", Tab::References, state.clone()),
                 bottom_panel_tab("GIT DIFF", Tab::GitDiff, state.clone()),
                 bottom_panel_tab("OUTPUT", Tab::Output, state.clone()),
