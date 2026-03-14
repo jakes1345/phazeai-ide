@@ -1763,27 +1763,7 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             }
         }
 
-        // 3. Subtle corner glows — very faint, small radius, no large blobs
-        // Top-left corner glow
-        cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(0.0, 0.0), 200.0),
-            floem::peniko::Color::from_rgba8(40, 20, 120, 25),
-            80.0,
-        );
-
-        // Bottom-right corner glow
-        cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w, h), 250.0),
-            floem::peniko::Color::from_rgba8(30, 15, 100, 20),
-            80.0,
-        );
-
-        // Top-right subtle accent
-        cx.fill(
-            &floem::kurbo::Circle::new(floem::kurbo::Point::new(w, 0.0), 180.0),
-            floem::peniko::Color::from_rgba8(20, 40, 100, 18),
-            60.0,
-        );
+        // 3. No blobs, no glows — just the clean hex grid on dark base.
     })
     // Absolute-positioned so it doesn't participate in flex layout but
     // covers the full parent container — rendered below all siblings.
