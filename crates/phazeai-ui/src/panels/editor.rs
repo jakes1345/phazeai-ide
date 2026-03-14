@@ -1276,31 +1276,26 @@ pub fn editor_panel(
         })
     };
 
-    // ── Sentient gutter ────────────────────────────────────────────────────
+    // ── Sentient gutter — thin accent strip, no overflowing circles ─────
     let sentient_gutter = canvas(move |cx, size| {
         let t = theme.get();
         let p = &t.palette;
         cx.fill(&floem::kurbo::Rect::ZERO.with_size(size), p.bg_base, 0.0);
-        let h = size.height;
         let w = size.width;
+        let h = size.height;
+        // Simple 2px accent line when AI is thinking
         if ai_thinking.get() {
-            for frac in [0.15, 0.50, 0.85] {
-                cx.fill(
-                    &Circle::new(Point::new(w * 0.5, h * frac), 18.0),
-                    p.accent.with_alpha(0.70),
-                    14.0,
-                );
-            }
-        } else {
             cx.fill(
-                &Circle::new(Point::new(w * 0.5, h * 0.08), 22.0),
-                p.accent.with_alpha(0.39),
-                18.0,
+                &floem::kurbo::Rect::new(0.0, 0.0, w, h),
+                p.accent.with_alpha(0.35),
+                0.0,
             );
+        } else {
+            // Subtle accent dot at top
             cx.fill(
-                &Circle::new(Point::new(w * 0.5, h * 0.30), 16.0),
-                p.accent.with_alpha(0.16),
-                12.0,
+                &Circle::new(Point::new(w * 0.5, 6.0), 2.0),
+                p.accent.with_alpha(0.25),
+                0.0,
             );
         }
     })
