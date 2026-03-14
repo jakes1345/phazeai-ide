@@ -4,139 +4,197 @@ use crate::components::input::phaze_input;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
-    views::{container, h_stack, label, scroll, v_stack, Decorators},
+    views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
-use phazeai_core::ext_host::vsix::VsixLoader;
-use rfd::FileDialog;
 
+/// Native plugin manager panel.
+///
+/// Scans `~/.phazeai/plugins/` for native Rust plugins (cdylib + plugin.toml).
+/// Shows loaded plugins with name, version, author, status, and commands.
 pub fn extensions_panel(state: IdeState) -> impl IntoView {
+    let theme = state.theme;
     let search_query = create_rw_signal(String::new());
 
-    // Load VSIX File Action — channel created once, no Scope::new() leak
-    let (vsix_tx, vsix_rx) =
+    // Channel for scan results — created once
+    let (scan_tx, scan_rx) =
         std::sync::mpsc::sync_channel::<Result<Vec<String>, String>>(1);
-    let vsix_result = create_signal_from_channel(vsix_rx);
+    let scan_result = create_signal_from_channel(scan_rx);
     {
         let state = state.clone();
         create_effect(move |_| {
-            if let Some(res) = vsix_result.get() {
+            if let Some(res) = scan_result.get() {
                 state.ext_loading.set(false);
                 match res {
-                    Ok(exts) => {
-                        state.extensions.set(exts);
-                        crate::app::show_toast(state.status_toast, "Extension loaded successfully");
+                    Ok(names) => {
+                        state.extensions.set(names);
+                        crate::app::show_toast(
+                            state.status_toast,
+                            "Plugins scanned successfully",
+                        );
                     }
                     Err(e) => {
                         crate::app::show_toast(
                             state.status_toast,
-                            format!("Failed to load: {}", e),
+                            format!("Scan failed: {}", e),
                         );
                     }
                 }
             }
         });
     }
-    let load_vsix_action = {
+
+    // Scan plugins action
+    let scan_action = {
         let state = state.clone();
-        move |_| {
-            let state = state.clone();
-            let Some(path) = FileDialog::new()
-                .add_filter("VSCode Extension", &["vsix"])
-                .pick_file()
-            else {
-                return;
-            };
-
+        let scan_tx = scan_tx.clone();
+        move |_: ()| {
             state.ext_loading.set(true);
-
-            let tx = vsix_tx.clone();
             let manager = state.ext_manager.clone();
+            let tx = scan_tx.clone();
             std::thread::spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
+                let mut mgr = match manager.lock() {
+                    Ok(m) => m,
                     Err(e) => {
-                        let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
+                        let _ = tx.send(Err(format!("Lock error: {}", e)));
                         return;
                     }
                 };
-                rt.block_on(async move {
-                    if let Err(e) = VsixLoader::load_vsix(&path, &manager).await {
-                        let _ = tx.send(Err(e));
-                    } else {
-                        let exts = manager.get_extensions().await;
-                        let _ = tx.send(Ok(exts));
-                    }
-                });
+                let host = phazeai_core::ext_host::DummyDelegate;
+                let host = phazeai_core::ext_host::IdeDelegateHost::new(
+                    std::sync::Arc::new(host),
+                );
+                mgr.scan_plugins(&host);
+                let names: Vec<String> = mgr
+                    .get_plugins()
+                    .into_iter()
+                    .map(|p| format!("{} v{} — {}", p.name, p.version, p.description))
+                    .collect();
+                let _ = tx.send(Ok(names));
             });
+        }
+    };
+
+    // Open plugins directory
+    let open_dir_action = move |_: ()| {
+        let dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".phazeai")
+            .join("plugins");
+        // Create the directory if it doesn't exist
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&dir).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
         }
     };
 
     let ext_list = scroll(
         v_stack((
-            label(|| "Installed Extensions".to_string()).style(|s| {
-                s.font_size(14.0)
+            label(|| "Installed Plugins".to_string()).style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(13.0)
                     .font_weight(floem::text::Weight::BOLD)
                     .margin_bottom(10.0)
+                    .color(p.text_primary)
             }),
             label(move || {
                 if state.ext_loading.get() {
-                    "Loading extension...".to_string()
+                    "Scanning plugins...".to_string()
                 } else if state.extensions.get().is_empty() {
-                    "No extensions loaded yet.".to_string()
+                    "No plugins loaded. Place plugin directories in ~/.phazeai/plugins/ and click Scan.".to_string()
                 } else {
-                    format!("{} extensions loaded.", state.extensions.get().len())
+                    format!("{} plugin(s) loaded.", state.extensions.get().len())
                 }
             })
-            .style(|s| s.color(floem::peniko::Color::from_rgb8(150, 150, 150))),
-            floem::views::dyn_stack(
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.color(p.text_muted).font_size(11.0).margin_bottom(8.0)
+            }),
+            dyn_stack(
                 move || state.extensions.get(),
                 |ext| ext.clone(),
-                |ext| {
-                    container(label(move || ext.clone())).style(|s| {
-                        s.padding(5.0)
+                move |ext| {
+                    container(label(move || ext.clone()).style(move |s| {
+                        let p = theme.get().palette;
+                        s.font_size(12.0).color(p.text_primary)
+                    }))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.padding(8.0)
                             .width_full()
                             .border_bottom(1.0)
-                            .border_color(floem::peniko::Color::from_rgb8(50, 50, 50))
+                            .border_color(p.glass_border)
                     })
                 },
             ),
         ))
         .style(|s| s.padding(10.0).width_full()),
     )
-    .style(|s| s.width_full().height_full());
+    .style(|s| s.width_full().flex_grow(1.0));
 
     v_stack((
         // Header
-        h_stack((label(|| "EXTENSIONS".to_string())
-            .style(|s| s.font_size(12.0).font_weight(floem::text::Weight::BOLD)),))
-        .style(|s| s.padding(10.0).width_full().justify_between()),
-        // Actions
-        h_stack((phaze_button(
-            "Install from VSIX...",
-            ButtonVariant::Secondary,
-            state.theme,
-            move || load_vsix_action(()),
-        ),))
-        .style(|s| s.padding_horiz(10.0).padding_bottom(10.0).width_full()),
-        // Search
         container(
-            phaze_input(
-                search_query,
-                "Search Extensions in Marketplace",
-                state.theme,
-            )
-            .style(|s| s.width_full()),
+            label(|| "EXTENSIONS".to_string()).style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(11.0)
+                    .font_weight(floem::text::Weight::BOLD)
+                    .color(p.text_muted)
+            }),
+        )
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.padding(10.0)
+                .width_full()
+                .border_bottom(1.0)
+                .border_color(p.glass_border)
+        }),
+        // Actions
+        h_stack((
+            phaze_button("Scan Plugins", ButtonVariant::Primary, theme, {
+                let scan = scan_action.clone();
+                move || scan(())
+            }),
+            phaze_button("Open Directory", ButtonVariant::Secondary, theme, {
+                let open = open_dir_action.clone();
+                move || open(())
+            }),
+        ))
+        .style(|s| {
+            s.padding_horiz(10.0)
+                .padding_vert(8.0)
+                .width_full()
+                .gap(8.0)
+        }),
+        // Search filter
+        container(
+            phaze_input(search_query, "Filter plugins...", theme).style(|s| s.width_full()),
         )
         .style(|s| s.padding_horiz(10.0).padding_bottom(10.0).width_full()),
+        // Help text
+        container(
+            label(|| "Native Rust plugins: place a directory with plugin.toml + .so/.dylib in ~/.phazeai/plugins/".to_string())
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(10.0).color(p.text_muted)
+                }),
+        )
+        .style(|s| s.padding_horiz(10.0).padding_bottom(8.0).width_full()),
         // List
         ext_list,
     ))
     .style(move |s| {
-        let t = state.theme.get().palette;
+        let t = theme.get().palette;
         s.width_full()
             .height_full()
             .background(t.bg_base)

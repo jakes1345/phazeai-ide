@@ -363,7 +363,7 @@ pub fn start_lsp_bridge(
                                                         let uri_str = format!("file://{}", e.path.display());
                                                         Location {
                                                             uri: uri_str.parse().unwrap_or_else(|_| {
-                                                                "file:///unknown".parse().unwrap()
+                                                                "file:///unknown".parse().expect("static URL")
                                                             }),
                                                             range: Range {
                                                                 start: Position { line: e.line.saturating_sub(1), character: e.col.saturating_sub(1) },

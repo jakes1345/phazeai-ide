@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use phazeai_core::ext_host::IdeDelegate;
 
+#[allow(dead_code)]
 struct UiIdeDelegate {
     toast_tx: std::sync::mpsc::SyncSender<String>,
     active_text: Arc<std::sync::Mutex<String>>,
@@ -128,6 +129,7 @@ pub enum Tab {
     Search,
     Git,
     AI,
+    Composer,
     Settings,
     Terminal,
     Chat,
@@ -400,7 +402,7 @@ pub struct IdeState {
 
     // Extensions
     /// Extension host manager for JS/WASM extensions
-    pub ext_manager: Arc<phazeai_core::ext_host::ExtensionManager>,
+    pub ext_manager: Arc<std::sync::Mutex<phazeai_core::ext_host::ExtensionManager>>,
     /// Extensions currently loading or starting up
     pub ext_loading: RwSignal<bool>,
     /// Commands registered by extensions
@@ -962,40 +964,8 @@ impl IdeState {
 
         let status_toast_sig = create_rw_signal(None);
 
-        // Extension Manager
-        let (toast_tx, toast_rx) = std::sync::mpsc::sync_channel::<String>(64);
-        let toast_sig = create_signal_from_channel(toast_rx);
-        let status_toast_for_delegate = status_toast_sig;
-        create_effect(move |_| {
-            if let Some(msg) = toast_sig.get() {
-                show_toast(status_toast_for_delegate, msg);
-            }
-        });
-
-        let active_text = Arc::new(std::sync::Mutex::new(String::new()));
-        let active_text_clone = active_text.clone();
-        let open_file_sig = open_file;
-        create_effect(move |_| {
-            if let Some(path) = open_file_sig.get() {
-                let atc = active_text_clone.clone();
-                std::thread::spawn(move || {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(mut lock) = atc.lock() {
-                            *lock = content;
-                        }
-                    }
-                });
-            } else if let Ok(mut lock) = active_text_clone.lock() {
-                lock.clear();
-            }
-        });
-
-        let ext_manager = phazeai_core::ext_host::ExtensionManager::with_delegate(
-            std::sync::Arc::new(UiIdeDelegate {
-                toast_tx,
-                active_text,
-            }),
-        );
+        // Extension Manager — native plugin system
+        let ext_manager = Arc::new(std::sync::Mutex::new(phazeai_core::ext_host::ExtensionManager::new()));
 
         // Persist provider + model changes to settings.toml whenever they change.
         create_effect(move |_| {
@@ -1835,6 +1805,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
         activity_bar_btn(icons::AI, Tab::AI, state.clone()),
+        activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
         activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
         activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
         activity_bar_btn(icons::CONTAINER, Tab::Containers, state.clone()),
@@ -2095,6 +2066,18 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
+    let composer_wrap =
+        container(crate::panels::composer::composer_panel(state.clone())).style({
+            let state = state.clone();
+            move |s| {
+                s.width_full()
+                    .height_full()
+                    .apply_if(state.left_panel_tab.get() != Tab::Composer, |s| {
+                        s.display(floem::style::Display::None)
+                    })
+            }
+        });
+
     let settings_wrap = container(settings_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
@@ -2135,6 +2118,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             makefile_wrap,
             github_wrap,
             ai_wrap,
+            composer_wrap,
             settings_wrap,
             account_wrap,
         ))

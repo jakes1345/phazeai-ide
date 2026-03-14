@@ -1,140 +1,241 @@
-use phazeai_core::ext_host::js::JsExtension;
-use phazeai_core::ext_host::vsix::VsixLoader;
-use phazeai_core::ext_host::{Extension, ExtensionManager, IdeContext, IdeDelegate};
-use std::path::PathBuf;
+// Tests for the native Rust plugin extension host.
+//
+// The tests that required VSIX, JS (Deno), and WASM backends have been
+// removed because those backends no longer exist.  The tests below verify
+// the plugin manager logic that does not depend on an actual .so file being
+// present on disk.
+
+use phazeai_core::ext_host::{
+    DummyDelegate, ExtensionManager, IdeDelegateHost, IdeDelegate, PluginEvent,
+};
 use std::sync::{Arc, Mutex};
 
-struct TestDelegate {
+// ---------------------------------------------------------------------------
+// Helper: a test delegate that records log and message calls
+// ---------------------------------------------------------------------------
+
+struct RecordingDelegate {
+    log_lines: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<String>>>,
 }
 
-impl IdeDelegate for TestDelegate {
+impl IdeDelegate for RecordingDelegate {
     fn log(&self, msg: &str) {
-        let msg = msg.to_string();
-        if let Ok(mut msgs) = self.messages.lock() {
-            msgs.push(msg);
-        }
+        self.log_lines.lock().unwrap().push(msg.to_string());
     }
-
     fn show_message(&self, msg: &str) {
-        let msg = msg.to_string();
-        if let Ok(mut msgs) = self.messages.lock() {
-            msgs.push(msg);
-        }
+        self.messages.lock().unwrap().push(msg.to_string());
     }
-
     fn get_active_text(&self) -> String {
-        "Test text".to_string()
+        "selected text".to_string()
     }
 }
 
-#[tokio::test]
-async fn test_js_extension_execution() {
-    let js_code = r#"
-        vscode.window.showInformationMessage("Hello from PhazeAI JS Extension!");
-        
-        globalThis.vscode.executeCommand = function(cmd, args) {
-            if (cmd === 'test.add') {
-                return args.a + args.b;
-            }
-            return null;
-        };
-    "#;
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    let mut ext = JsExtension::new("test-ext", vec!["test.add".to_string()], js_code)
-        .expect("Failed to create JS extension");
-
-    let msgs = Arc::new(Mutex::new(Vec::new()));
-    let ctx = IdeContext::new(Arc::new(TestDelegate {
-        messages: msgs.clone(),
-    }));
-
-    // Activate the extension
-    ext.activate(ctx)
-        .await
-        .expect("Failed to activate JS extension");
-
-    // Execute a command
-    let res = ext
-        .execute_command("test.add", serde_json::json!({"a": 5, "b": 10}))
-        .await
-        .expect("Failed to execute command");
-
-    // The execution currently just returns Null as mapped in JS, but it didn't crash.
-    assert_eq!(res, serde_json::Value::Null);
-}
-
-#[tokio::test]
-async fn test_vsix_loader() {
-    let mut vsix_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    vsix_path.push("../../ext-host/test-extension.vsix");
-
+#[test]
+fn test_extension_manager_new_has_no_plugins() {
     let manager = ExtensionManager::new();
-
-    // Load the vsix
-    VsixLoader::load_vsix(&vsix_path, &manager)
-        .await
-        .expect("Failed to load vsix");
-
-    // Execute the registered command
-    let res = manager
-        .execute_command("phazeai.testCommand", serde_json::json!({"test": "data"}))
-        .await
-        .expect("Failed to execute command from VSIX");
-
-    // We expect the command to return Null since our executeCommand shim returns null
-    // But importantly, it shouldn't error out.
-    assert_eq!(res, serde_json::Value::Null);
+    assert!(
+        manager.get_plugins().is_empty(),
+        "A freshly created manager should have no plugins loaded"
+    );
 }
 
-#[tokio::test]
-async fn test_wasm_extension() {
-    let mut wasm_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    wasm_path.push("../../target/wasm32-unknown-unknown/release/wasm_extension.wasm");
+#[test]
+fn test_extension_manager_with_custom_dir() {
+    let tmp = tempfile::tempdir().expect("could not create temp dir");
+    let manager = ExtensionManager::with_plugin_dir(tmp.path());
+    assert_eq!(manager.plugin_dir, tmp.path());
+    assert!(manager.get_plugins().is_empty());
+}
 
-    // Only run if the wasm file was built
-    if !wasm_path.exists() {
-        println!("Skipping wasm test: file not found at {:?}", wasm_path);
-        return;
-    }
+#[test]
+fn test_scan_plugins_nonexistent_dir_does_not_panic() {
+    let mut manager = ExtensionManager::with_plugin_dir("/tmp/phazeai_test_nonexistent_plugins");
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    // Scanning a directory that does not exist must not panic — it logs a
+    // message and returns without loading anything.
+    manager.scan_plugins(&host);
+    assert!(manager.get_plugins().is_empty());
+}
 
-    let wasm_bytes = std::fs::read(&wasm_path).expect("Failed to read wasm file");
+#[test]
+fn test_scan_plugins_empty_dir_loads_nothing() {
+    let tmp = tempfile::tempdir().expect("could not create temp dir");
+    let mut manager = ExtensionManager::with_plugin_dir(tmp.path());
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    manager.scan_plugins(&host);
+    assert!(manager.get_plugins().is_empty());
+}
 
-    let mut ext = phazeai_core::ext_host::wasm::WasmExtension::new(
-        "test-wasm",
-        vec!["dummy".to_string()],
-        &wasm_bytes,
-    )
-    .expect("Failed to instantiate WASM extension");
+#[test]
+fn test_scan_plugins_dir_without_manifest_is_skipped() {
+    let tmp = tempfile::tempdir().expect("could not create temp dir");
+    // Create a subdirectory with no plugin.toml.
+    std::fs::create_dir(tmp.path().join("orphan")).unwrap();
+    let mut manager = ExtensionManager::with_plugin_dir(tmp.path());
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    manager.scan_plugins(&host);
+    assert!(manager.get_plugins().is_empty());
+}
 
-    let msgs = Arc::new(Mutex::new(Vec::new()));
-    let ctx = IdeContext::new(Arc::new(TestDelegate {
-        messages: msgs.clone(),
-    }));
+#[test]
+fn test_load_plugin_missing_dir_returns_error() {
+    let mut manager = ExtensionManager::new();
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    let result = manager.load_plugin(
+        std::path::Path::new("/tmp/phazeai_no_such_plugin_dir"),
+        &host,
+    );
+    assert!(result.is_err(), "Loading from a non-existent dir should fail");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("plugin.toml"),
+        "Error should mention plugin.toml; got: {}",
+        err
+    );
+}
 
-    // Test activate
-    ext.activate(ctx.clone())
-        .await
-        .expect("Failed to activate WASM extension");
+#[test]
+fn test_load_plugin_missing_library_returns_error() {
+    let tmp = tempfile::tempdir().expect("could not create temp dir");
+    // Write a valid-looking manifest but no .so file.
+    let manifest = r#"
+name = "test-plugin"
+version = "0.1.0"
+description = "A test plugin with no library"
+author = "Test"
+min_api_version = 1
+"#;
+    std::fs::write(tmp.path().join("plugin.toml"), manifest).unwrap();
 
-    // Check if the log message was recorded
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let m = msgs.lock().unwrap();
-    assert!(m
-        .iter()
-        .any(|msg| msg.contains("WASM Extension Activated!")));
-    drop(m);
+    let mut manager = ExtensionManager::new();
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    let result = manager.load_plugin(tmp.path(), &host);
+    assert!(result.is_err(), "Loading with no library file should fail");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_lowercase().contains("library") || err.to_lowercase().contains("not found"),
+        "Error should mention missing library; got: {}",
+        err
+    );
+}
 
-    // Test command
-    let res = ext
-        .execute_command("dummy", serde_json::Value::Null)
-        .await
-        .expect("Failed to execute WASM command");
-    assert_eq!(res, serde_json::Value::Null);
+#[test]
+fn test_load_plugin_invalid_toml_returns_error() {
+    let tmp = tempfile::tempdir().expect("could not create temp dir");
+    std::fs::write(tmp.path().join("plugin.toml"), "<<< not valid toml >>>").unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let m = msgs.lock().unwrap();
-    assert!(m
-        .iter()
-        .any(|msg| msg.contains("WASM Extension Executed Command!")));
+    let mut manager = ExtensionManager::new();
+    let host = IdeDelegateHost::new(Arc::new(DummyDelegate));
+    let result = manager.load_plugin(tmp.path(), &host);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("Invalid plugin.toml"),
+        "Expected TOML parse error; got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_execute_command_no_plugins_returns_error() {
+    let mut manager = ExtensionManager::new();
+    let result = manager.execute_command("some.command", "{}");
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().contains("No plugin handles command"),
+        "Expected 'no plugin' error"
+    );
+}
+
+#[test]
+fn test_broadcast_event_with_no_plugins_does_not_panic() {
+    let mut manager = ExtensionManager::new();
+    // Must not panic when there are no plugins to deliver the event to.
+    manager.broadcast_event(&PluginEvent::FileSaved {
+        path: "/some/file.rs".to_string(),
+    });
+}
+
+#[test]
+fn test_unload_nonexistent_plugin_does_not_panic() {
+    let mut manager = ExtensionManager::new();
+    // Should silently warn and return without panicking.
+    manager.unload_plugin("nonexistent-plugin");
+    assert!(manager.get_plugins().is_empty());
+}
+
+#[test]
+fn test_ide_delegate_host_log_routes_to_delegate() {
+    use phazeai_core::ext_host::PluginHost;
+
+    let log_lines = Arc::new(Mutex::new(Vec::new()));
+    let delegate = RecordingDelegate {
+        log_lines: log_lines.clone(),
+        messages: Arc::new(Mutex::new(Vec::new())),
+    };
+    let host = IdeDelegateHost::new(Arc::new(delegate));
+    host.log(2, "hello from plugin");
+
+    let recorded = log_lines.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0], "hello from plugin");
+}
+
+#[test]
+fn test_ide_delegate_host_show_message_routes_to_delegate() {
+    use phazeai_core::ext_host::PluginHost;
+
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let delegate = RecordingDelegate {
+        log_lines: Arc::new(Mutex::new(Vec::new())),
+        messages: messages.clone(),
+    };
+    let host = IdeDelegateHost::new(Arc::new(delegate));
+    host.show_message("toast notification");
+
+    let recorded = messages.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0], "toast notification");
+}
+
+#[test]
+fn test_ide_delegate_host_get_active_text() {
+    use phazeai_core::ext_host::PluginHost;
+
+    let delegate = RecordingDelegate {
+        log_lines: Arc::new(Mutex::new(Vec::new())),
+        messages: Arc::new(Mutex::new(Vec::new())),
+    };
+    let host = IdeDelegateHost::new(Arc::new(delegate));
+    assert_eq!(host.get_active_text(), "selected text");
+}
+
+#[test]
+fn test_dummy_delegate_does_not_panic() {
+    let delegate = DummyDelegate;
+    delegate.log("a log line");
+    delegate.show_message("a message");
+    let text = delegate.get_active_text();
+    assert!(text.is_empty(), "DummyDelegate.get_active_text should return empty string");
+}
+
+#[test]
+fn test_plugin_info_fields() {
+    // Verify the PluginInfo struct is accessible and has the expected fields.
+    use phazeai_core::ext_host::PluginInfo;
+    let info = PluginInfo {
+        name: "foo".to_string(),
+        version: "1.0.0".to_string(),
+        description: "A plugin".to_string(),
+        author: "Author".to_string(),
+        active: true,
+        commands: vec![],
+    };
+    assert_eq!(info.name, "foo");
+    assert!(info.active);
 }

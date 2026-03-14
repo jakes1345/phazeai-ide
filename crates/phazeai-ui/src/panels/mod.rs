@@ -1,5 +1,6 @@
 pub mod ai_panel;
 pub mod chat;
+pub mod composer;
 pub mod editor;
 pub mod explorer;
 pub mod extensions;
