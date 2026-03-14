@@ -131,7 +131,11 @@ fn send_to_ai(
 ///
 /// Settings are re-loaded from disk on each send so model/provider changes in
 /// the settings panel take effect immediately without restarting.
-pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> impl IntoView {
+pub fn chat_panel(
+    theme: RwSignal<PhazeTheme>,
+    ai_thinking: RwSignal<bool>,
+    chat_inject: RwSignal<Option<String>>,
+) -> impl IntoView {
     let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(vec![ChatMessage {
         role: ChatRole::Assistant,
         content: "Welcome to PhazeAI. How can I help you?".to_string(),
@@ -240,6 +244,18 @@ pub fn chat_panel(theme: RwSignal<PhazeTheme>, ai_thinking: RwSignal<bool>) -> i
             send_to_ai(trimmed, live_settings, (*update_tx).clone());
         }
     });
+
+    // ── Inject from context menu (Explain Selection / Generate Tests / Fix) ──
+    {
+        let do_send = do_send.clone();
+        create_effect(move |_| {
+            if let Some(text) = chat_inject.get() {
+                input_text.set(text);
+                chat_inject.set(None);
+                do_send();
+            }
+        });
+    }
 
     // ── Header — neon strip + title ───────────────────────────────────────────
 

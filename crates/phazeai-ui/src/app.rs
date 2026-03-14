@@ -400,8 +400,12 @@ pub struct IdeState {
     /// Current semantic search query text.
     pub sidecar_query: RwSignal<String>,
 
+    /// Text to inject into the chat panel input and auto-send.
+    /// Set by context menu "Explain Selection" / "Generate Tests" / "Fix with AI".
+    pub pending_chat_inject: RwSignal<Option<String>>,
+
     // Extensions
-    /// Extension host manager for JS/WASM extensions
+    /// Native plugin manager
     pub ext_manager: Arc<std::sync::Mutex<phazeai_core::ext_host::ExtensionManager>>,
     /// Extensions currently loading or starting up
     pub ext_loading: RwSignal<bool>,
@@ -1105,6 +1109,7 @@ impl IdeState {
             sidecar_results: sidecar_results_sig,
             sidecar_search_nonce: sidecar_search_nonce_sig,
             sidecar_query: sidecar_query_sig,
+            pending_chat_inject: create_rw_signal(None),
             ext_manager,
             ext_loading: create_rw_signal(false),
             ext_commands: create_rw_signal(Vec::new()),
@@ -4973,11 +4978,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
                                         .unwrap_or_else(|| "file".to_string());
-                                    s_explain.search_query.set(format!(
+                                    s_explain.pending_chat_inject.set(Some(format!(
                                         "Explain the code around line {} in {}",
                                         line + 1,
                                         fname
-                                    ));
+                                    )));
                                     s_explain.show_right_panel.set(true);
                                 }
                             }))
@@ -4987,11 +4992,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
                                         .unwrap_or_else(|| "file".to_string());
-                                    s_tests.search_query.set(format!(
+                                    s_tests.pending_chat_inject.set(Some(format!(
                                         "Generate unit tests for the function at line {} in {}",
                                         line + 1,
                                         fname
-                                    ));
+                                    )));
                                     s_tests.show_right_panel.set(true);
                                 }
                             }))
@@ -5002,9 +5007,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
-                                        s_fix
-                                            .search_query
-                                            .set(format!("Fix this error: {}", d.message));
+                                        s_fix.pending_chat_inject.set(Some(
+                                            format!("Fix this error: {}", d.message),
+                                        ));
                                         s_fix.show_right_panel.set(true);
                                     } else {
                                         show_toast(
@@ -5060,7 +5065,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
     };
 
-    let chat = chat_panel(state.theme, state.ai_thinking);
+    let chat = chat_panel(state.theme, state.ai_thinking, state.pending_chat_inject);
 
     let chat_wrap = container(chat).style(move |s| {
         let t = state.theme.get();
