@@ -4825,6 +4825,7 @@ dependencies = [
  "floem-editor-core",
  "image",
  "lazy_static",
+ "libc",
  "lsp-types",
  "notify",
  "phazeai-core",

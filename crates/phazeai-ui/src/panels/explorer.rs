@@ -3,10 +3,10 @@ use std::{collections::HashMap, path::PathBuf, sync::mpsc::channel};
 use floem::{
     action::show_context_menu,
     event::{Event, EventListener},
-    ext_event::{create_ext_action, create_signal_from_channel},
+    ext_event::create_signal_from_channel,
     keyboard::{Key, NamedKey},
     menu::{Menu, MenuItem},
-    reactive::{create_effect, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
+    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, Decorators},
     IntoView,
 };
@@ -166,17 +166,25 @@ pub fn explorer_panel(
     // ── Git status badges ──────────────────────────────────────────────────
     let git_status: RwSignal<HashMap<String, char>> = create_rw_signal(HashMap::new());
 
-    // Initial fetch + re-fetch when workspace root changes
-    create_effect(move |_| {
-        let root = workspace_root.get();
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |map: HashMap<String, char>| {
-            git_status.set(map);
+    // Initial fetch + re-fetch when workspace root changes.
+    // Use a sync_channel + create_signal_from_channel to avoid creating
+    // Scope::new() per-invocation (which leaks since scopes are never disposed).
+    {
+        let (git_tx, git_rx) = std::sync::mpsc::sync_channel::<HashMap<String, char>>(1);
+        let git_result_sig = create_signal_from_channel(git_rx);
+        create_effect(move |_| {
+            if let Some(map) = git_result_sig.get() {
+                git_status.set(map);
+            }
         });
-        std::thread::spawn(move || {
-            send(fetch_git_status(&root));
+        create_effect(move |_| {
+            let root = workspace_root.get();
+            let tx = git_tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(fetch_git_status(&root));
+            });
         });
-    });
+    }
 
     // ── File watcher — auto-refresh tree when files change on disk ─────────
     // We use the `notify` crate to watch the workspace root recursively.
@@ -188,11 +196,14 @@ pub fn explorer_panel(
         let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
 
         // UI-thread side: react when the background watcher fires.
+        // Use get_untracked() for entries to avoid subscribing this effect
+        // to entries changes (which would cause it to re-run on every tree
+        // mutation, not just file-watcher events).
         let refresh_sig = create_signal_from_channel(refresh_rx);
         create_effect(move |_| {
             if refresh_sig.get().is_some() {
-                let r = workspace_root.get();
-                let existing = entries.get();
+                let r = workspace_root.get_untracked();
+                let existing = entries.get_untracked();
                 entries.set(rebuild_tree(&r, &existing));
             }
         });
@@ -238,33 +249,41 @@ pub fn explorer_panel(
     }
 
     // ── Periodic git status refresh (every 5 seconds) ─────────────────────
+    // A tick thread sends () every 5s. The effect reads the tick, grabs the
+    // current workspace root (on UI thread), and spawns a one-shot fetch.
+    // Results come back via a second channel. No Scope::new() leak.
     {
-        // sync_channel of size 1 — coalesces rapid ticks if UI is busy.
         let (tick_tx, tick_rx) = std::sync::mpsc::sync_channel::<()>(1);
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                // try_send: skip if previous tick not yet consumed.
-                // Disconnected error means channel is gone — exit thread.
-                match tick_tx.try_send(()) {
-                    Ok(_) => {}
-                    Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-                }
+        let tick_sig = create_signal_from_channel(tick_rx);
+
+        let (status_tx, status_rx) = std::sync::mpsc::sync_channel::<HashMap<String, char>>(1);
+        let periodic_result_sig = create_signal_from_channel(status_rx);
+
+        // Apply periodic results to git_status
+        create_effect(move |_| {
+            if let Some(map) = periodic_result_sig.get() {
+                git_status.set(map);
             }
         });
-        let tick_sig = create_signal_from_channel(tick_rx);
-        let root_for_tick = workspace_root;
+
+        // When tick fires, read root on UI thread & spawn fetch
         create_effect(move |_| {
             tick_sig.get(); // re-run every 5s tick
-            let root = root_for_tick.get_untracked();
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |map: HashMap<String, char>| {
-                git_status.set(map);
-            });
+            let root = workspace_root.get_untracked();
+            let tx = status_tx.clone();
             std::thread::spawn(move || {
-                send(fetch_git_status(&root));
+                let _ = tx.try_send(fetch_git_status(&root));
             });
+        });
+
+        // Background tick thread
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            match tick_tx.try_send(()) {
+                Ok(_) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+            }
         });
     }
 
@@ -338,9 +357,13 @@ pub fn explorer_panel(
             let is_dir = entry.is_dir;
             let is_hovered = create_rw_signal(false);
 
-            // Calculate this entry's index in the current list
+            // Calculate this entry's index in the current list.
+            // CRITICAL: use get_untracked() — NOT get() — to avoid subscribing
+            // each row view to the `entries` signal. dyn_stack's items_fn already
+            // subscribes; a second subscription inside view_fn causes an infinite
+            // re-render cascade (~70 MB/sec memory growth).
             let this_idx = {
-                let list = entries.get();
+                let list = entries.get_untracked();
                 list.iter().position(|e| e.path == entry_path).unwrap_or(0)
             };
 

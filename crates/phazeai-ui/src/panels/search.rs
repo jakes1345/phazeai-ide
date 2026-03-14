@@ -515,7 +515,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| file_path.clone());
                         let match_count_for_file = grouped_results
-                            .get()
+                            .get_untracked()
                             .iter()
                             .find(|(p, _)| p.display().to_string() == file_path)
                             .map(|(_, v)| v.len())

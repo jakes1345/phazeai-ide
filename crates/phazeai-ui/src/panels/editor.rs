@@ -1,5 +1,3 @@
-use floem::ext_event::create_ext_action;
-use floem::reactive::Scope;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -1623,10 +1621,31 @@ pub fn editor_panel(
             // brace-matching runs in a background thread.
             {
                 let doc_for_fold = doc.clone();
-                let fold_scope = Scope::new();
+                // Use sync_channel + create_signal_from_channel to avoid Scope leak.
+                let (fold_tx, fold_rx) =
+                    std::sync::mpsc::sync_channel::<Vec<(usize, usize)>>(1);
+                let fold_result_sig = create_signal_from_channel(fold_rx);
+                // Receive effect: merges brace-based and LSP ranges when result arrives.
+                create_effect(move |_| {
+                    if let Some(brace_ranges) = fold_result_sig.get() {
+                        let lsp_ranges: Vec<(usize, usize)> = lsp_folding_ranges
+                            .get_untracked()
+                            .into_iter()
+                            .map(|(s, e)| (s as usize, e as usize))
+                            .collect();
+                        let mut merged = brace_ranges;
+                        for lsp_r in &lsp_ranges {
+                            if !merged.iter().any(|b| b.0 == lsp_r.0) {
+                                merged.push(*lsp_r);
+                            }
+                        }
+                        merged.sort_by_key(|r| r.0);
+                        fold_state.update(|(r, _f)| *r = merged);
+                    }
+                });
+                // Trigger effect: re-runs on every save, spawns background detection.
                 create_effect(move |_| {
                     let _dirty = dirty.get(); // re-runs when file is saved
-                                              // Extract text on the UI thread.
                     let rope = doc_for_fold.rope_text();
                     let len = rope.len();
                     let text = if len == 0 || len > 500_000 {
@@ -1634,30 +1653,13 @@ pub fn editor_panel(
                     } else {
                         rope.slice_to_cow(0..len).to_string()
                     };
-                    // Snapshot LSP folding ranges on the UI thread before spawning.
-                    let lsp_ranges: Vec<(usize, usize)> = lsp_folding_ranges
-                        .get_untracked()
-                        .into_iter()
-                        .map(|(s, e)| (s as usize, e as usize))
-                        .collect();
-                    let send =
-                        create_ext_action(fold_scope, move |brace_ranges: Vec<(usize, usize)>| {
-                            // Merge brace-based and LSP ranges, dedup by start line.
-                            let mut merged = brace_ranges;
-                            for lsp_r in &lsp_ranges {
-                                if !merged.iter().any(|b| b.0 == lsp_r.0) {
-                                    merged.push(*lsp_r);
-                                }
-                            }
-                            merged.sort_by_key(|r| r.0);
-                            fold_state.update(|(r, _f)| *r = merged);
-                        });
+                    let tx = fold_tx.clone();
                     if text.is_empty() {
-                        send(vec![]);
+                        let _ = tx.send(vec![]);
                         return;
                     }
                     std::thread::spawn(move || {
-                        send(detect_fold_ranges(&text));
+                        let _ = tx.send(detect_fold_ranges(&text));
                     });
                 });
             }
@@ -1715,7 +1717,17 @@ pub fn editor_panel(
             // and matching-bracket highlight via the styling effect.
             {
                 let doc_for_bp = doc.clone();
-                let bp_scope = Scope::new();
+                // Use sync_channel + create_signal_from_channel to avoid Scope leak.
+                let (bp_tx, bp_rx) =
+                    std::sync::mpsc::sync_channel::<Vec<(usize, usize, usize)>>(1);
+                let bp_result_sig = create_signal_from_channel(bp_rx);
+                // Receive effect: applies bracket pairs when result arrives.
+                create_effect(move |_| {
+                    if let Some(pairs) = bp_result_sig.get() {
+                        bracket_pairs_sig.set(pairs);
+                    }
+                });
+                // Trigger effect: re-runs on dirty, spawns background detection.
                 create_effect(move |_| {
                     let _dirty = dirty.get(); // re-runs on every save
                     let rope = doc_for_bp.rope_text();
@@ -1725,15 +1737,13 @@ pub fn editor_panel(
                     } else {
                         rope.slice_to_cow(0..len).to_string()
                     };
-                    let send = create_ext_action(bp_scope, move |pairs| {
-                        bracket_pairs_sig.set(pairs);
-                    });
+                    let tx = bp_tx.clone();
                     if text.is_empty() {
-                        send(vec![]);
+                        let _ = tx.send(vec![]);
                         return;
                     }
                     std::thread::spawn(move || {
-                        send(compute_bracket_pairs(&text));
+                        let _ = tx.send(compute_bracket_pairs(&text));
                     });
                 });
             }
@@ -3463,6 +3473,28 @@ pub fn editor_panel(
             {
                 let doc_fs = doc.clone();
                 let last_fs = create_rw_signal(0u64);
+                // Channel created once outside the effect to avoid Scope leak.
+                // The channel is bounded(1); old results are discarded when a new
+                // format request fires before the previous one is consumed.
+                let (fmt_tx, fmt_rx) =
+                    std::sync::mpsc::sync_channel::<(Option<String>, usize, usize)>(1);
+                let fmt_result_sig = create_signal_from_channel(fmt_rx);
+                // Receive effect: applies formatted text when result arrives.
+                {
+                    let doc_apply = doc_fs.clone();
+                    create_effect(move |_| {
+                        if let Some((result, sel_start, sel_end)) = fmt_result_sig.get() {
+                            if let Some(text) = result {
+                                doc_apply.edit_single(
+                                    Selection::region(sel_start, sel_end),
+                                    &text,
+                                    EditType::InsertChars,
+                                );
+                                dirty.set(true);
+                            }
+                        }
+                    });
+                }
                 create_effect(move |_| {
                     let n = format_selection_nonce.get();
                     if n == 0 || n == last_fs.get_untracked() {
@@ -3498,19 +3530,7 @@ pub fn editor_panel(
                                 .map(|s| s.to_string())
                         })
                         .unwrap_or_default();
-                    // Async: format on bg thread, apply on UI thread via create_ext_action
-                    let scope = Scope::new();
-                    let doc_apply = doc_fs.clone();
-                    let send = create_ext_action(scope, move |result: Option<String>| {
-                        if let Some(text) = result {
-                            doc_apply.edit_single(
-                                Selection::region(sel_start, sel_end),
-                                &text,
-                                EditType::InsertChars,
-                            );
-                            dirty.set(true);
-                        }
-                    });
+                    let tx = fmt_tx.clone();
                     std::thread::spawn(move || {
                         let result: Option<String> = (|| {
                             let tmp = std::env::temp_dir().join(format!(
@@ -3544,7 +3564,7 @@ pub fn editor_panel(
                             let _ = std::fs::remove_file(&tmp);
                             Some(result)
                         })();
-                        send(result);
+                        let _ = tx.send((result, sel_start, sel_end));
                     });
                 });
             }
@@ -3732,19 +3752,26 @@ pub fn editor_panel(
             // ── Git gutter decorations ────────────────────────────────────
             // Re-runs on every save (dirty toggles false) and on first mount.
             // Calls `git diff HEAD` in a background thread; result is delivered
-            // back to the UI thread via create_ext_action.
+            // back to the UI thread via create_signal_from_channel.
             let git_changes: RwSignal<Vec<(usize, u8)>> = create_rw_signal(vec![]);
             {
                 let git_path = tab.path.clone();
-                let scope = Scope::new();
+                let (git_tx, git_rx) =
+                    std::sync::mpsc::sync_channel::<Vec<(usize, u8)>>(1);
+                let git_result_sig = create_signal_from_channel(git_rx);
+                // Receive effect: applies git change markers when result arrives.
+                create_effect(move |_| {
+                    if let Some(changes) = git_result_sig.get() {
+                        git_changes.set(changes);
+                    }
+                });
+                // Trigger effect: re-runs on save, spawns background git diff.
                 create_effect(move |_| {
                     let _dirty = dirty.get(); // tracked — re-runs on save
-                    let send = create_ext_action(scope, move |changes| {
-                        git_changes.set(changes);
-                    });
                     let p = git_path.clone();
+                    let tx = git_tx.clone();
                     std::thread::spawn(move || {
-                        send(git_changed_lines(&p));
+                        let _ = tx.send(git_changed_lines(&p));
                     });
                 });
             }
@@ -3755,13 +3782,20 @@ pub fn editor_panel(
             let blame_data: RwSignal<Vec<(String, String)>> = create_rw_signal(vec![]);
             {
                 let blame_path = tab.path.clone();
-                let scope = Scope::new();
+                let (blame_tx, blame_rx) =
+                    std::sync::mpsc::sync_channel::<Vec<(String, String)>>(1);
+                let blame_result_sig = create_signal_from_channel(blame_rx);
+                // Receive effect: applies blame entries when result arrives.
+                create_effect(move |_| {
+                    if let Some(data) = blame_result_sig.get() {
+                        blame_data.set(data);
+                    }
+                });
+                // Trigger effect: re-runs on save, spawns background git blame.
                 create_effect(move |_| {
                     let _dirty = dirty.get();
-                    let send = create_ext_action(scope, move |data: Vec<(String, String)>| {
-                        blame_data.set(data);
-                    });
                     let p = blame_path.clone();
+                    let tx = blame_tx.clone();
                     std::thread::spawn(move || {
                         let dir = p.parent().unwrap_or(&p);
                         let out = std::process::Command::new("git")
@@ -3797,7 +3831,7 @@ pub fn editor_panel(
                                 }
                             }
                         }
-                        send(entries);
+                        let _ = tx.send(entries);
                     });
                 });
             }

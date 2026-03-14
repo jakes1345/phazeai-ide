@@ -5,10 +5,8 @@
 //! Also includes branch switching, pull/push, stash, and commit history.
 
 use floem::{
-    ext_event::{create_ext_action, create_signal_from_channel},
-    reactive::{
-        create_effect, create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate,
-    },
+    ext_event::create_signal_from_channel,
+    reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -839,15 +837,32 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     // Load stash list on startup
     {
         let root = state.workspace_root.get_untracked();
-        let send = create_ext_action(Scope::new(), move |list| stash_list.set(list));
-        std::thread::spawn(move || send(run_git_stash_list(&root)));
+        let (stash_init_tx, stash_init_rx) =
+            std::sync::mpsc::sync_channel::<Vec<(usize, String)>>(1);
+        let stash_init_sig = create_signal_from_channel(stash_init_rx);
+        create_effect(move |_| {
+            if let Some(list) = stash_init_sig.get() {
+                stash_list.set(list);
+            }
+        });
+        std::thread::spawn(move || {
+            let _ = stash_init_tx.send(run_git_stash_list(&root));
+        });
     }
 
     // Load tag list on startup
     {
         let root = state.workspace_root.get_untracked();
-        let send = create_ext_action(Scope::new(), move |list| tag_list.set(list));
-        std::thread::spawn(move || send(run_git_tag_list(&root)));
+        let (tag_init_tx, tag_init_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(1);
+        let tag_init_sig = create_signal_from_channel(tag_init_rx);
+        create_effect(move |_| {
+            if let Some(list) = tag_init_sig.get() {
+                tag_list.set(list);
+            }
+        });
+        std::thread::spawn(move || {
+            let _ = tag_init_tx.send(run_git_tag_list(&root));
+        });
     }
 
     // ── Row 1: branch button + pull + push ────────────────────────────────────
@@ -857,6 +872,47 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let state_pull = state.clone();
     let state_push = state.clone();
+
+    // Shared channels for pull/push results
+    let (pull_tx, pull_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let pull_result_sig = create_signal_from_channel(pull_rx);
+    {
+        let state_pull2 = state_pull.clone();
+        create_effect(move |_| {
+            if let Some(result) = pull_result_sig.get() {
+                match result {
+                    Ok(msg) => {
+                        let summary = if msg.is_empty() {
+                            "Already up to date.".to_string()
+                        } else {
+                            msg
+                        };
+                        status_msg.set(summary);
+                    }
+                    Err(e) => {
+                        let first = e.lines().next().unwrap_or("pull failed").to_string();
+                        status_msg.set(format!("Pull error: {first}"));
+                    }
+                }
+                refresh_git_status(state_pull2.workspace_root.get(), git_data, is_loading);
+                refresh_commits(state_pull2.workspace_root.get(), commits);
+            }
+        });
+    }
+
+    let (push_tx, push_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let push_result_sig = create_signal_from_channel(push_rx);
+    create_effect(move |_| {
+        if let Some(result) = push_result_sig.get() {
+            match result {
+                Ok(msg) => status_msg.set(msg),
+                Err(e) => {
+                    let first = e.lines().next().unwrap_or("push failed").to_string();
+                    status_msg.set(format!("Push error: {first}"));
+                }
+            }
+        }
+    });
 
     let pull_btn = container(label(|| "Pull").style(move |s| {
         let t = theme.get();
@@ -884,27 +940,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_pull.workspace_root.get();
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |result: Result<String, String>| {
-            match result {
-                Ok(msg) => {
-                    let summary = if msg.is_empty() {
-                        "Already up to date.".to_string()
-                    } else {
-                        msg
-                    };
-                    status_msg.set(summary);
-                }
-                Err(e) => {
-                    let first = e.lines().next().unwrap_or("pull failed").to_string();
-                    status_msg.set(format!("Pull error: {first}"));
-                }
-            }
-            refresh_git_status(state_pull.workspace_root.get(), git_data, is_loading);
-            refresh_commits(state_pull.workspace_root.get(), commits);
-        });
+        let tx = pull_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_pull(&root));
+            let _ = tx.send(run_git_pull(&root));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -940,18 +978,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_push.workspace_root.get();
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |result: Result<String, String>| match result {
-            Ok(msg) => {
-                status_msg.set(msg);
-            }
-            Err(e) => {
-                let first = e.lines().next().unwrap_or("push failed").to_string();
-                status_msg.set(format!("Push error: {first}"));
-            }
-        });
+        let tx = push_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_push(&root));
+            let _ = tx.send(run_git_push(&root));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1047,6 +1076,39 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_stash = state.clone();
     let state_stashp = state.clone();
 
+    // Shared channels for stash/stash-pop results
+    let (stash_tx, stash_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let stash_result_sig = create_signal_from_channel(stash_rx);
+    {
+        let state_stash2 = state_stash.clone();
+        create_effect(move |_| {
+            if let Some(result) = stash_result_sig.get() {
+                match result {
+                    Ok(_) => status_msg.set("Stashed WIP.".to_string()),
+                    Err(e) => status_msg
+                        .set(format!("Stash error: {}", e.lines().next().unwrap_or("?"))),
+                }
+                refresh_git_status(state_stash2.workspace_root.get(), git_data, is_loading);
+            }
+        });
+    }
+
+    let (stash_pop_tx, stash_pop_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let stash_pop_result_sig = create_signal_from_channel(stash_pop_rx);
+    {
+        let state_stashp2 = state_stashp.clone();
+        create_effect(move |_| {
+            if let Some(result) = stash_pop_result_sig.get() {
+                match result {
+                    Ok(_) => status_msg.set("Stash popped.".to_string()),
+                    Err(e) => status_msg
+                        .set(format!("Pop error: {}", e.lines().next().unwrap_or("?"))),
+                }
+                refresh_git_status(state_stashp2.workspace_root.get(), git_data, is_loading);
+            }
+        });
+    }
+
     let stash_btn = container(label(|| "Stash").style(move |s| {
         let t = theme.get();
         let p = &t.palette;
@@ -1071,21 +1133,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_stash.workspace_root.get();
-        let scope = Scope::new();
-        let root2 = root.clone();
-        let send = create_ext_action(scope, move |result: Result<String, String>| {
-            match result {
-                Ok(_) => {
-                    status_msg.set("Stashed WIP.".to_string());
-                }
-                Err(e) => {
-                    status_msg.set(format!("Stash error: {}", e.lines().next().unwrap_or("?")));
-                }
-            }
-            refresh_git_status(root2.clone(), git_data, is_loading);
-        });
+        let tx = stash_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_stash(&root));
+            let _ = tx.send(run_git_stash(&root));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1119,21 +1169,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_stashp.workspace_root.get();
-        let scope = Scope::new();
-        let root2 = root.clone();
-        let send = create_ext_action(scope, move |result: Result<String, String>| {
-            match result {
-                Ok(_) => {
-                    status_msg.set("Stash popped.".to_string());
-                }
-                Err(e) => {
-                    status_msg.set(format!("Pop error: {}", e.lines().next().unwrap_or("?")));
-                }
-            }
-            refresh_git_status(root2.clone(), git_data, is_loading);
-        });
+        let tx = stash_pop_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_stash_pop(&root));
+            let _ = tx.send(run_git_stash_pop(&root));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1146,6 +1184,19 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     // ── Fetch button ──────────────────────────────────────────────────────────
     let fetch_hov = create_rw_signal(false);
     let state_fetch = state.clone();
+
+    let (fetch_tx, fetch_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let fetch_result_sig = create_signal_from_channel(fetch_rx);
+    create_effect(move |_| {
+        if let Some(result) = fetch_result_sig.get() {
+            match result {
+                Ok(_) => status_msg.set("Fetch complete.".to_string()),
+                Err(e) => {
+                    status_msg.set(format!("Fetch error: {}", e.lines().next().unwrap_or("?")))
+                }
+            }
+        }
+    });
     let fetch_btn = container(label(|| "Fetch").style(move |s| {
         let t = theme.get();
         let p = &t.palette;
@@ -1170,13 +1221,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_fetch.workspace_root.get();
-        let scope = Scope::new();
-        let status_msg2 = status_msg;
-        let send = create_ext_action(scope, move |result: Result<String, String>| match result {
-            Ok(_) => status_msg2.set("Fetch complete.".to_string()),
-            Err(e) => status_msg2.set(format!("Fetch error: {}", e.lines().next().unwrap_or("?"))),
+        let tx = fetch_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_git_fetch(&root));
         });
-        std::thread::spawn(move || send(run_git_fetch(&root)));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         fetch_hov.set(true)
@@ -1191,6 +1239,17 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_r = state.clone();
     let state_sa = state.clone();
     let state_for_diff = state.clone();
+
+    let (stage_all_tx, stage_all_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let stage_all_result_sig = create_signal_from_channel(stage_all_rx);
+    {
+        let state_sa2 = state_sa.clone();
+        create_effect(move |_| {
+            if stage_all_result_sig.get().is_some() {
+                refresh_git_status(state_sa2.workspace_root.get(), git_data, is_loading);
+            }
+        });
+    }
 
     let stage_all_btn = container(label(|| "+A").style(move |s| {
         let t = theme.get();
@@ -1219,16 +1278,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_sa.workspace_root.get();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let tx = stage_all_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_add(&root, "-A"));
-        });
-        let rx_sig = create_signal_from_channel(rx);
-        let root2 = state_sa.workspace_root.get();
-        create_effect(move |_| {
-            if rx_sig.get().is_some() {
-                refresh_git_status(root2.clone(), git_data, is_loading);
-            }
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1344,6 +1396,57 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         new_branch_hov.set(false)
     });
 
+    // Shared channels for branch delete and checkout results
+    let (branch_del_tx, branch_del_rx) =
+        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let branch_del_result_sig = create_signal_from_channel(branch_del_rx);
+    create_effect(move |_| {
+        if let Some(result) = branch_del_result_sig.get() {
+            match result {
+                Ok(msg) => status_msg.set(msg),
+                Err(e) => {
+                    status_msg.set(format!("Delete error: {}", e.lines().next().unwrap_or("?")))
+                }
+            }
+            refresh_branches(
+                state_checkout.workspace_root.get(),
+                current_branch,
+                branches,
+            );
+        }
+    });
+
+    let (branch_checkout_tx, branch_checkout_rx) =
+        std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let branch_checkout_result_sig = create_signal_from_channel(branch_checkout_rx);
+    create_effect(move |_| {
+        if let Some(result) = branch_checkout_result_sig.get() {
+            match result {
+                Ok(()) => {
+                    refresh_branches(
+                        state_checkout.workspace_root.get(),
+                        current_branch,
+                        branches,
+                    );
+                    refresh_git_status(
+                        state_checkout.workspace_root.get(),
+                        git_data,
+                        is_loading,
+                    );
+                    refresh_commits(state_checkout.workspace_root.get(), commits);
+                    status_msg.set(format!("Switched to branch '{}'", current_branch.get()));
+                }
+                Err(e) => {
+                    status_msg.set(format!(
+                        "Checkout error: {}",
+                        e.lines().next().unwrap_or("?")
+                    ));
+                }
+            }
+            branch_picker_open.set(false);
+        }
+    });
+
     let branch_list = dyn_stack(
         move || branches.get(),
         |b| b.clone(),
@@ -1355,6 +1458,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let bn_del = branch_name.clone();
             let root = state_checkout.workspace_root.get();
             let root_del = root.clone();
+            let branch_del_tx = branch_del_tx.clone();
+            let branch_checkout_tx = branch_checkout_tx.clone();
 
             let del_btn = container(label(|| "×").style(move |s| {
                 let t = theme.get();
@@ -1377,20 +1482,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     status_msg.set("Cannot delete current branch".to_string());
                     return;
                 }
-                let scope = Scope::new();
-                let r2 = r.clone();
-                let send =
-                    create_ext_action(scope, move |result: Result<String, String>| match result {
-                        Ok(msg) => {
-                            status_msg.set(msg);
-                            refresh_branches(r2.clone(), current_branch, branches);
-                        }
-                        Err(e) => {
-                            status_msg
-                                .set(format!("Delete error: {}", e.lines().next().unwrap_or("?")));
-                        }
-                    });
-                std::thread::spawn(move || send(run_git_delete_branch(&r, &b)));
+                let tx = branch_del_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_git_delete_branch(&r, &b));
+                });
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 del_hov.set(true)
@@ -1432,29 +1527,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .on_click_stop(move |_| {
                 let b = branch_name.clone();
                 let r = root.clone();
-                let scope = Scope::new();
-                let send = create_ext_action(scope, move |result: Result<(), String>| {
-                    match result {
-                        Ok(()) => {
-                            refresh_branches(r.clone(), current_branch, branches);
-                            refresh_git_status(r.clone(), git_data, is_loading);
-                            refresh_commits(r.clone(), commits);
-                            status_msg
-                                .set(format!("Switched to branch '{}'", current_branch.get()));
-                        }
-                        Err(e) => {
-                            status_msg.set(format!(
-                                "Checkout error: {}",
-                                e.lines().next().unwrap_or("?")
-                            ));
-                        }
-                    }
-                    branch_picker_open.set(false);
-                });
-                let b2 = b.clone();
-                let r2 = root.clone();
+                let tx = branch_checkout_tx.clone();
                 std::thread::spawn(move || {
-                    send(run_git_checkout(&r2, &b2));
+                    let _ = tx.send(run_git_checkout(&r, &b));
                 });
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1489,6 +1564,28 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let confirm_new_branch_hov = create_rw_signal(false);
     let cancel_new_branch_hov = create_rw_signal(false);
     let state_nb = state.clone();
+
+    // Channel for "create branch" result; sends (result, branch_name_attempted)
+    let (new_branch_tx, new_branch_rx) =
+        std::sync::mpsc::sync_channel::<(Result<(), String>, String)>(1);
+    let new_branch_result_sig = create_signal_from_channel(new_branch_rx);
+    create_effect(move |_| {
+        if let Some((result, attempted_name)) = new_branch_result_sig.get() {
+            match result {
+                Ok(()) => {
+                    refresh_branches(state_nb.workspace_root.get(), current_branch, branches);
+                    refresh_git_status(state_nb.workspace_root.get(), git_data, is_loading);
+                    refresh_commits(state_nb.workspace_root.get(), commits);
+                    status_msg.set(format!("Created and switched to '{attempted_name}'"));
+                    new_branch_name.set(String::new());
+                }
+                Err(e) => {
+                    status_msg.set(format!("Error: {}", e.lines().next().unwrap_or("?")));
+                }
+            }
+            new_branch_open.set(false);
+        }
+    });
 
     let new_branch_input = text_input(new_branch_name)
         .placeholder("New branch name")
@@ -1532,26 +1629,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             return;
         }
         let root = state_nb.workspace_root.get();
-        let name2 = name.clone();
-        let scope = Scope::new();
-        let root2 = root.clone();
-        let send = create_ext_action(scope, move |result: Result<(), String>| {
-            match result {
-                Ok(()) => {
-                    refresh_branches(root2.clone(), current_branch, branches);
-                    refresh_git_status(root2.clone(), git_data, is_loading);
-                    refresh_commits(root2.clone(), commits);
-                    status_msg.set(format!("Created and switched to '{name2}'"));
-                    new_branch_name.set(String::new());
-                }
-                Err(e) => {
-                    status_msg.set(format!("Error: {}", e.lines().next().unwrap_or("?")));
-                }
-            }
-            new_branch_open.set(false);
-        });
+        let tx = new_branch_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_checkout_new(&root, &name));
+            let result = run_git_checkout_new(&root, &name);
+            let _ = tx.send((result, name));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1623,9 +1704,42 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         });
 
     // ── AI commit message generator ───────────────────────────────────────────
+    // Shared channel for commit result
+    let (commit_result_tx, commit_result_rx) =
+        std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let commit_result_sig = create_signal_from_channel(commit_result_rx);
+    let state_commit = state.clone();
+    create_effect(move |_| {
+        if let Some(result) = commit_result_sig.get() {
+            match result {
+                Ok(()) => {
+                    commit_msg.set(String::new());
+                    status_msg.set("Committed successfully!".to_string());
+                    refresh_git_status(state_commit.workspace_root.get(), git_data, is_loading);
+                    refresh_commits(state_commit.workspace_root.get(), commits);
+                }
+                Err(e) => {
+                    let first = e.lines().next().unwrap_or("unknown error").to_string();
+                    status_msg.set(format!("Error: {first}"));
+                }
+            }
+        }
+    });
+
     let ai_gen_active = create_rw_signal(false);
     let ai_gen_hov = create_rw_signal(false);
     let state_ai = state.clone();
+
+    let (ai_commit_tx, ai_commit_rx) = std::sync::mpsc::sync_channel::<String>(1);
+    let ai_commit_result_sig = create_signal_from_channel(ai_commit_rx);
+    create_effect(move |_| {
+        if let Some(result) = ai_commit_result_sig.get() {
+            if !result.is_empty() {
+                commit_msg.set(result);
+            }
+            ai_gen_active.set(false);
+        }
+    });
     let ai_btn = container(
         label(move || {
             if ai_gen_active.get() {
@@ -1675,13 +1789,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         ai_gen_active.set(true);
 
         let root = state_ai.workspace_root.get();
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |result: String| {
-            if !result.is_empty() {
-                commit_msg.set(result);
-            }
-            ai_gen_active.set(false);
-        });
+        let tx = ai_commit_tx.clone();
 
         std::thread::spawn(move || {
             // Collect staged diff summary + full diff (capped at 8 kB)
@@ -1695,7 +1803,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .unwrap_or_default();
 
             if stat.is_empty() {
-                send("No staged changes.".to_string());
+                let _ = tx.send("No staged changes.".to_string());
                 return;
             }
 
@@ -1728,7 +1836,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             {
                 Ok(rt) => rt,
                 Err(_) => {
-                    send(String::new());
+                    let _ = tx.send(String::new());
                     return;
                 }
             };
@@ -1739,9 +1847,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     Err(_) => return String::new(),
                 };
                 let agent = Agent::new(client);
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+                let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
                 let mut accumulated = String::new();
-                let run_fut = agent.run_with_events(&prompt, tx);
+                let run_fut = agent.run_with_events(&prompt, atx);
                 let drain_fut = async {
                     while let Some(ev) = rx.recv().await {
                         match ev {
@@ -1755,7 +1863,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 accumulated.trim().to_string()
             });
 
-            send(result);
+            let _ = tx.send(result);
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1794,27 +1902,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         }
         let root = state_c.workspace_root.get();
         let msg2 = msg.clone();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let tx = commit_result_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_commit(&root, &msg2));
-        });
-        let rx_sig = create_signal_from_channel(rx);
-        let state_d = state_c.clone();
-        create_effect(move |_| {
-            if let Some(result) = rx_sig.get() {
-                match result {
-                    Ok(()) => {
-                        commit_msg.set(String::new());
-                        status_msg.set("Committed successfully!".to_string());
-                        refresh_git_status(state_d.workspace_root.get(), git_data, is_loading);
-                        refresh_commits(state_d.workspace_root.get(), commits);
-                    }
-                    Err(e) => {
-                        let first = e.lines().next().unwrap_or("unknown error").to_string();
-                        status_msg.set(format!("Error: {first}"));
-                    }
-                }
-            }
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1941,6 +2031,30 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let expanded_diff_hash: RwSignal<Option<String>> = create_rw_signal(None);
     let expanded_diff_text: RwSignal<String> = create_rw_signal(String::new());
 
+    // Shared channels for commit history actions
+    let (cherry_pick_tx, cherry_pick_rx) =
+        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let cherry_pick_result_sig = create_signal_from_channel(cherry_pick_rx);
+    create_effect(move |_| {
+        if let Some(result) = cherry_pick_result_sig.get() {
+            match result {
+                Ok(msg) => status_msg.set(msg),
+                Err(e) => status_msg.set(format!(
+                    "Cherry-pick error: {}",
+                    e.lines().next().unwrap_or("?")
+                )),
+            }
+        }
+    });
+
+    let (commit_diff_tx, commit_diff_rx) = std::sync::mpsc::sync_channel::<String>(1);
+    let commit_diff_result_sig = create_signal_from_channel(commit_diff_rx);
+    create_effect(move |_| {
+        if let Some(diff) = commit_diff_result_sig.get() {
+            expanded_diff_text.set(diff);
+        }
+    });
+
     let commit_rows = dyn_stack(
         move || {
             if !history_expanded.get() {
@@ -1957,6 +2071,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let msg = entry.message.clone();
             let author = entry.author.clone();
             let date = entry.date.clone();
+            let cherry_pick_tx = cherry_pick_tx.clone();
+            let commit_diff_tx = commit_diff_tx.clone();
 
             let diff_shown =
                 create_memo(move |_| expanded_diff_hash.get().as_deref() == Some(&hash3));
@@ -2018,16 +2134,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .on_click_stop(move |_| {
                 let h = hash_cp.clone();
                 let root = root_for_cp.get();
-                let scope = Scope::new();
-                let send =
-                    create_ext_action(scope, move |result: Result<String, String>| match result {
-                        Ok(msg) => status_msg.set(msg),
-                        Err(e) => status_msg.set(format!(
-                            "Cherry-pick error: {}",
-                            e.lines().next().unwrap_or("?")
-                        )),
-                    });
-                std::thread::spawn(move || send(run_git_cherry_pick(&root, &h)));
+                let tx = cherry_pick_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_git_cherry_pick(&root, &h));
+                });
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 cp_hov.set(true)
@@ -2087,12 +2197,11 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     } else {
                         expanded_diff_hash.set(Some(hash2.clone()));
                         let root = root_for_diff.get();
-                        let scope = Scope::new();
                         let h = hash2.clone();
-                        let send = create_ext_action(scope, move |diff: String| {
-                            expanded_diff_text.set(diff);
+                        let tx = commit_diff_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(run_git_show_diff(&root, &h));
                         });
-                        std::thread::spawn(move || send(run_git_show_diff(&root, &h)));
                     }
                 })
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -2123,6 +2232,16 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let blame_hov = create_rw_signal(false);
     let blame_btn_hov = create_rw_signal(false);
     let state_blame = state.clone();
+
+    // Shared channel for blame results
+    let (blame_tx, blame_rx) = std::sync::mpsc::sync_channel::<Vec<BlameEntry>>(1);
+    let blame_result_sig = create_signal_from_channel(blame_rx);
+    create_effect(move |_| {
+        if let Some(entries) = blame_result_sig.get() {
+            blame_lines.set(entries);
+            blame_loading.set(false);
+        }
+    });
 
     // "Blame Current File" button
     let blame_btn = container(
@@ -2166,13 +2285,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         blame_loading.set(true);
         blame_file.set(path.to_string_lossy().to_string());
         blame_expanded.set(true);
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |entries: Vec<BlameEntry>| {
-            blame_lines.set(entries);
-            blame_loading.set(false);
-        });
+        let tx = blame_tx.clone();
         std::thread::spawn(move || {
-            send(run_git_blame(&path));
+            let _ = tx.send(run_git_blame(&path));
         });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -2334,6 +2449,61 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_stash_apply = state.clone();
     let state_stash_drop = state.clone();
 
+    // Shared channel for stash list reload (used by refresh, apply, drop)
+    let (stash_list_reload_tx, stash_list_reload_rx) =
+        std::sync::mpsc::sync_channel::<Vec<(usize, String)>>(1);
+    let stash_list_reload_sig = create_signal_from_channel(stash_list_reload_rx);
+    create_effect(move |_| {
+        if let Some(list) = stash_list_reload_sig.get() {
+            stash_list.set(list);
+        }
+    });
+
+    // Channels for stash apply and drop results
+    let (stash_apply_tx, stash_apply_rx) =
+        std::sync::mpsc::sync_channel::<(Result<String, String>, usize)>(1);
+    let stash_apply_result_sig = create_signal_from_channel(stash_apply_rx);
+    {
+        let root_sa = state_stash_apply.workspace_root;
+        let reload_tx = stash_list_reload_tx.clone();
+        create_effect(move |_| {
+            if let Some((result, idx)) = stash_apply_result_sig.get() {
+                match result {
+                    Ok(_) => stash_list_status.set(format!("Applied stash@{{{idx}}}")),
+                    Err(e) => stash_list_status
+                        .set(format!("Apply error: {}", e.lines().next().unwrap_or("?"))),
+                }
+                let root = root_sa.get();
+                let tx = reload_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_git_stash_list(&root));
+                });
+            }
+        });
+    }
+
+    let (stash_drop_tx, stash_drop_rx) =
+        std::sync::mpsc::sync_channel::<(Result<String, String>, usize)>(1);
+    let stash_drop_result_sig = create_signal_from_channel(stash_drop_rx);
+    {
+        let root_sd = state_stash_drop.workspace_root;
+        let reload_tx = stash_list_reload_tx.clone();
+        create_effect(move |_| {
+            if let Some((result, idx)) = stash_drop_result_sig.get() {
+                match result {
+                    Ok(_) => stash_list_status.set(format!("Dropped stash@{{{idx}}}")),
+                    Err(e) => stash_list_status
+                        .set(format!("Drop error: {}", e.lines().next().unwrap_or("?"))),
+                }
+                let root = root_sd.get();
+                let tx = reload_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_git_stash_list(&root));
+                });
+            }
+        });
+    }
+
     let stash_refresh_btn = container(label(|| "↻").style(move |s| {
         let t = theme.get();
         s.font_size(12.0).color(if stash_refresh_hov.get() {
@@ -2357,8 +2527,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_stash_list.workspace_root.get();
-        let send = create_ext_action(Scope::new(), move |list| stash_list.set(list));
-        std::thread::spawn(move || send(run_git_stash_list(&root)));
+        let tx = stash_list_reload_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_git_stash_list(&root));
+        });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         stash_refresh_hov.set(true)
@@ -2445,6 +2617,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let drop_hov = create_rw_signal(false);
             let root_apply = state_stash_apply.workspace_root;
             let root_drop = state_stash_drop.workspace_root;
+            let stash_apply_tx = stash_apply_tx.clone();
+            let stash_drop_tx = stash_drop_tx.clone();
             let display_text = if label_text.len() > 60 {
                 format!("{}…", &label_text[..60])
             } else {
@@ -2475,18 +2649,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 let root = root_apply.get();
-                let scope = Scope::new();
-                let root2 = root.clone();
-                let send = create_ext_action(scope, move |result: Result<String, String>| {
-                    match result {
-                        Ok(_) => stash_list_status.set(format!("Applied stash@{{{idx}}}")),
-                        Err(e) => stash_list_status
-                            .set(format!("Apply error: {}", e.lines().next().unwrap_or("?"))),
-                    }
-                    let s2 = create_ext_action(Scope::new(), move |list| stash_list.set(list));
-                    std::thread::spawn(move || s2(run_git_stash_list(&root2)));
+                let tx = stash_apply_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send((run_git_stash_apply(&root, idx), idx));
                 });
-                std::thread::spawn(move || send(run_git_stash_apply(&root, idx)));
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 apply_hov.set(true)
@@ -2519,18 +2685,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 let root = root_drop.get();
-                let scope = Scope::new();
-                let root2 = root.clone();
-                let send = create_ext_action(scope, move |result: Result<String, String>| {
-                    match result {
-                        Ok(_) => stash_list_status.set(format!("Dropped stash@{{{idx}}}")),
-                        Err(e) => stash_list_status
-                            .set(format!("Drop error: {}", e.lines().next().unwrap_or("?"))),
-                    }
-                    let s2 = create_ext_action(Scope::new(), move |list| stash_list.set(list));
-                    std::thread::spawn(move || s2(run_git_stash_list(&root2)));
+                let tx = stash_drop_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send((run_git_stash_drop(&root, idx), idx));
                 });
-                std::thread::spawn(move || send(run_git_stash_drop(&root, idx)));
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 drop_hov.set(true)
@@ -2593,6 +2751,20 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     // ── Merge picker section ──────────────────────────────────────────────────
     let state_merge_do = state.clone();
 
+    let (merge_tx, merge_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let merge_result_sig = create_signal_from_channel(merge_rx);
+    create_effect(move |_| {
+        if let Some(result) = merge_result_sig.get() {
+            match result {
+                Ok(msg) => merge_status.set(msg),
+                Err(e) => {
+                    merge_status.set(format!("Merge error: {}", e.lines().next().unwrap_or("?")))
+                }
+            }
+            merge_picker_open.set(false);
+        }
+    });
+
     let merge_branch_rows = dyn_stack(
         move || {
             if !merge_picker_open.get() {
@@ -2605,6 +2777,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let row_hov = create_rw_signal(false);
             let bn = branch_name.clone();
             let root = state_merge_do.workspace_root;
+            let merge_tx = merge_tx.clone();
             container(label(move || bn.clone()).style(move |s| {
                 let t = theme.get();
                 s.font_size(12.0)
@@ -2627,16 +2800,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .on_click_stop(move |_| {
                 let b = branch_name.clone();
                 let r = root.get();
-                let scope = Scope::new();
-                let send = create_ext_action(scope, move |result: Result<String, String>| {
-                    match result {
-                        Ok(msg) => merge_status.set(msg),
-                        Err(e) => merge_status
-                            .set(format!("Merge error: {}", e.lines().next().unwrap_or("?"))),
-                    }
-                    merge_picker_open.set(false);
+                let tx = merge_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_git_merge(&r, &b));
                 });
-                std::thread::spawn(move || send(run_git_merge(&r, &b)));
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 row_hov.set(true)
@@ -2696,6 +2863,56 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_tag_create = state.clone();
     let state_tag_push = state.clone();
     let create_tag_hov = create_rw_signal(false);
+
+    // Shared channels for tag operations
+    let (tag_list_reload_tx, tag_list_reload_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(1);
+    let tag_list_reload_sig = create_signal_from_channel(tag_list_reload_rx);
+    create_effect(move |_| {
+        if let Some(list) = tag_list_reload_sig.get() {
+            tag_list.set(list);
+        }
+    });
+
+    let (tag_create_tx, tag_create_rx) =
+        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let tag_create_result_sig = create_signal_from_channel(tag_create_rx);
+    {
+        let root_tc = state_tag_create.workspace_root;
+        let reload_tx = tag_list_reload_tx.clone();
+        create_effect(move |_| {
+            if let Some(result) = tag_create_result_sig.get() {
+                match result {
+                    Ok(msg) => {
+                        tag_status.set(msg);
+                        new_tag_name.set(String::new());
+                        let root = root_tc.get();
+                        let tx = reload_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(run_git_tag_list(&root));
+                        });
+                    }
+                    Err(e) => {
+                        tag_status
+                            .set(format!("Tag error: {}", e.lines().next().unwrap_or("?")))
+                    }
+                }
+            }
+        });
+    }
+
+    let (push_tags_tx, push_tags_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let push_tags_result_sig = create_signal_from_channel(push_tags_rx);
+    create_effect(move |_| {
+        if let Some(result) = push_tags_result_sig.get() {
+            match result {
+                Ok(msg) => tag_status.set(msg),
+                Err(e) => tag_status.set(format!(
+                    "Push tags error: {}",
+                    e.lines().next().unwrap_or("?")
+                )),
+            }
+        }
+    });
     let push_tags_hov = create_rw_signal(false);
 
     let tag_refresh_btn = container(label(|| "↻").style(move |s| {
@@ -2721,8 +2938,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_tag_refresh.workspace_root.get();
-        let send = create_ext_action(Scope::new(), move |list| tag_list.set(list));
-        std::thread::spawn(move || send(run_git_tag_list(&root)));
+        let tx = tag_list_reload_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_git_tag_list(&root));
+        });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         tag_refresh_hov.set(true)
@@ -2864,19 +3083,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             return;
         }
         let root = state_tag_create.workspace_root.get();
-        let name2 = name.clone();
-        let scope = Scope::new();
-        let root2 = root.clone();
-        let send = create_ext_action(scope, move |result: Result<String, String>| match result {
-            Ok(msg) => {
-                tag_status.set(msg);
-                new_tag_name.set(String::new());
-                let s2 = create_ext_action(Scope::new(), move |list| tag_list.set(list));
-                std::thread::spawn(move || s2(run_git_tag_list(&root2)));
-            }
-            Err(e) => tag_status.set(format!("Tag error: {}", e.lines().next().unwrap_or("?"))),
+        let tx = tag_create_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_git_tag_create(&root, &name));
         });
-        std::thread::spawn(move || send(run_git_tag_create(&root, &name2)));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         create_tag_hov.set(true)
@@ -2908,15 +3118,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         let root = state_tag_push.workspace_root.get();
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |result: Result<String, String>| match result {
-            Ok(msg) => tag_status.set(msg),
-            Err(e) => tag_status.set(format!(
-                "Push tags error: {}",
-                e.lines().next().unwrap_or("?")
-            )),
+        let tx = push_tags_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_git_tag_push(&root));
         });
-        std::thread::spawn(move || send(run_git_tag_push(&root)));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         push_tags_hov.set(true)
@@ -2978,39 +3183,45 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_diff_load = state.clone();
     let state_diff_revert = state.clone();
 
-    // Helper closure: reload the diff and parse it.
-    let load_diff = {
-        let root = state_diff_load.workspace_root;
-        move || {
-            let r = root.get();
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |raw: String| {
-                let (dl, dh) = parse_diff_display(&raw);
-                diff_display.set(dl);
-                diff_hunks.set(dh);
-                diff_raw.set(raw);
-            });
-            std::thread::spawn(move || send(run_git_diff_head(&r)));
+    // Shared channel for diff raw text (used by load_diff and selected_commit effect)
+    let (diff_raw_tx, diff_raw_rx) = std::sync::mpsc::sync_channel::<(String, bool)>(1);
+    let diff_raw_result_sig = create_signal_from_channel(diff_raw_rx);
+    create_effect(move |_| {
+        if let Some((raw, expand_if_collapsed)) = diff_raw_result_sig.get() {
+            let (dl, dh) = parse_diff_display(&raw);
+            diff_display.set(dl);
+            diff_hunks.set(dh);
+            diff_raw.set(raw);
+            if expand_if_collapsed && !diff_expanded.get() {
+                diff_expanded.set(true);
+            }
         }
+    });
+
+    // Helper closure: reload the diff and parse it.
+    let load_diff: std::rc::Rc<dyn Fn()> = {
+        let root = state_diff_load.workspace_root;
+        let tx = diff_raw_tx.clone();
+        std::rc::Rc::new(move || {
+            let r = root.get();
+            let tx2 = tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx2.send((run_git_diff_head(&r), false));
+            });
+        })
     };
 
     // Reactive effect: when selected_commit changes, load that commit's diff.
     {
         let root = state.workspace_root;
+        let tx = diff_raw_tx.clone();
         create_effect(move |_| {
             if let Some(hash) = selected_commit.get() {
                 let r = root.get();
-                let scope = Scope::new();
-                let send = create_ext_action(scope, move |raw: String| {
-                    let (dl, dh) = parse_diff_display(&raw);
-                    diff_display.set(dl);
-                    diff_hunks.set(dh);
-                    diff_raw.set(raw);
-                    if !diff_expanded.get() {
-                        diff_expanded.set(true);
-                    }
+                let tx2 = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx2.send((run_git_show_diff(&r, &hash), true));
                 });
-                std::thread::spawn(move || send(run_git_show_diff(&r, &hash)));
             }
         });
     }
@@ -3038,7 +3249,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop({
-        let load_diff2 = load_diff;
+        let load_diff2 = load_diff.clone();
         move |_| load_diff2()
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -3050,7 +3261,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // "Clear" button — resets selected_commit and reloads HEAD diff.
     let diff_clear_hov = create_rw_signal(false);
-    let load_diff_for_clear = load_diff;
+    let load_diff_for_clear = load_diff.clone();
     let diff_clear_btn = container(label(|| "✕ Clear").style(move |s| {
         let t = theme.get();
         s.font_size(9.0)
@@ -3151,7 +3362,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop({
-        let load_diff3 = load_diff;
+        let load_diff3 = load_diff.clone();
         move |_| {
             let was_expanded = diff_expanded.get();
             diff_expanded.set(!was_expanded);
@@ -3167,6 +3378,29 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         diff_hdr_hov.set(false)
     });
 
+    // Shared channel for hunk revert results
+    let (revert_hunk_tx, revert_hunk_rx) =
+        std::sync::mpsc::sync_channel::<(Result<String, String>, std::path::PathBuf)>(1);
+    let revert_hunk_result_sig = create_signal_from_channel(revert_hunk_rx);
+    {
+        let load_diff_for_revert = load_diff.clone();
+        create_effect(move |_| {
+            if let Some((result, root)) = revert_hunk_result_sig.get() {
+                match result {
+                    Ok(msg) => {
+                        status_msg.set(msg);
+                        refresh_git_status(root, git_data, is_loading);
+                        load_diff_for_revert();
+                    }
+                    Err(e) => {
+                        status_msg
+                            .set(format!("Revert error: {}", e.lines().next().unwrap_or("?")));
+                    }
+                }
+            }
+        });
+    }
+
     let diff_rows = dyn_stack(
         move || {
             if !diff_expanded.get() {
@@ -3179,6 +3413,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let is_hunk_header = dl.hunk_index.is_some();
             let hunk_idx = dl.hunk_index.unwrap_or(0);
             let kind = dl.kind;
+            let revert_hunk_tx = revert_hunk_tx.clone();
 
             let text_display = if dl.text.len() > 200 {
                 format!("{}…", &dl.text[..200])
@@ -3208,7 +3443,6 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             // Revert button — always rendered but hidden for non-hunk-header lines.
             let revert_hov = create_rw_signal(false);
             let root_rev = state_diff_revert.workspace_root;
-            let load_after = load_diff;
             let revert_btn = container(label(|| "Revert").style(move |s| {
                 let t = theme.get();
                 s.font_size(9.0)
@@ -3251,22 +3485,11 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     return;
                 }
                 let root = root_rev.get();
-                let scope = Scope::new();
+                let tx = revert_hunk_tx.clone();
                 let root2 = root.clone();
-                let load_after2 = load_after;
-                let send =
-                    create_ext_action(scope, move |result: Result<String, String>| match result {
-                        Ok(msg) => {
-                            status_msg.set(msg);
-                            refresh_git_status(root2.clone(), git_data, is_loading);
-                            load_after2();
-                        }
-                        Err(e) => {
-                            status_msg
-                                .set(format!("Revert error: {}", e.lines().next().unwrap_or("?")));
-                        }
-                    });
-                std::thread::spawn(move || send(run_git_revert_hunk(&root, &patch)));
+                std::thread::spawn(move || {
+                    let _ = tx.send((run_git_revert_hunk(&root, &patch), root2));
+                });
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 if is_hunk_header {
@@ -3323,17 +3546,27 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let state_log = state.clone();
 
-    // Helper closure: load commit log entries.
-    let load_commit_log = {
-        let root = state_log.workspace_root;
-        move || {
-            let r = root.get();
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |entries: Vec<CommitLogEntry>| {
-                commit_log.set(entries);
-            });
-            std::thread::spawn(move || send(run_git_log_full(&r, 50)));
+    // Shared channel for commit log loading
+    let (commit_log_tx, commit_log_rx) =
+        std::sync::mpsc::sync_channel::<Vec<CommitLogEntry>>(1);
+    let commit_log_result_sig = create_signal_from_channel(commit_log_rx);
+    create_effect(move |_| {
+        if let Some(entries) = commit_log_result_sig.get() {
+            commit_log.set(entries);
         }
+    });
+
+    // Helper closure: load commit log entries.
+    let load_commit_log: std::rc::Rc<dyn Fn()> = {
+        let root = state_log.workspace_root;
+        let tx = commit_log_tx.clone();
+        std::rc::Rc::new(move || {
+            let r = root.get();
+            let tx2 = tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx2.send(run_git_log_full(&r, 50));
+            });
+        })
     };
 
     // Refresh button for commit log section.
@@ -3359,7 +3592,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop({
-        let load_log2 = load_commit_log;
+        let load_log2 = load_commit_log.clone();
         move |_| load_log2()
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -3411,7 +3644,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop({
-        let load_log3 = load_commit_log;
+        let load_log3 = load_commit_log.clone();
         move |_| {
             let was_expanded = log_expanded.get();
             log_expanded.set(!was_expanded);
@@ -3603,23 +3836,29 @@ fn refresh_branches(
     current_branch: RwSignal<String>,
     branches: RwSignal<Vec<String>>,
 ) {
-    let scope = Scope::new();
-    let send = create_ext_action(scope, move |(cur, list): (String, Vec<String>)| {
-        current_branch.set(cur);
-        branches.set(list);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(String, Vec<String>)>(1);
+    let sig = create_signal_from_channel(rx);
+    create_effect(move |_| {
+        if let Some((cur, list)) = sig.get() {
+            current_branch.set(cur);
+            branches.set(list);
+        }
     });
     std::thread::spawn(move || {
-        send(run_git_branches(&root));
+        let _ = tx.send(run_git_branches(&root));
     });
 }
 
 fn refresh_commits(root: std::path::PathBuf, commits: RwSignal<Vec<CommitEntry>>) {
-    let scope = Scope::new();
-    let send = create_ext_action(scope, move |list: Vec<CommitEntry>| {
-        commits.set(list);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<CommitEntry>>(1);
+    let sig = create_signal_from_channel(rx);
+    create_effect(move |_| {
+        if let Some(list) = sig.get() {
+            commits.set(list);
+        }
     });
     std::thread::spawn(move || {
-        send(run_git_log(&root));
+        let _ = tx.send(run_git_log(&root));
     });
 }
 
@@ -3690,6 +3929,25 @@ fn git_section(
         hov.set(false)
     });
 
+    // Shared channels for primary action (stage/unstage) and discard results
+    let (primary_action_tx, primary_action_rx) =
+        std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let primary_action_result_sig = create_signal_from_channel(primary_action_rx);
+    create_effect(move |_| {
+        if primary_action_result_sig.get().is_some() {
+            refresh_git_status(state.workspace_root.get(), git_data, is_loading);
+        }
+    });
+
+    let (discard_action_tx, discard_action_rx) =
+        std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    let discard_action_result_sig = create_signal_from_channel(discard_action_rx);
+    create_effect(move |_| {
+        if discard_action_result_sig.get().is_some() {
+            refresh_git_status(state.workspace_root.get(), git_data, is_loading);
+        }
+    });
+
     let rows = dyn_stack(
         move || {
             if !expanded.get() {
@@ -3710,6 +3968,8 @@ fn git_section(
                 let badge = entry.badge();
                 let badge_col = entry.badge_color();
                 let rel_path = entry.path.clone();
+                let primary_action_tx = primary_action_tx.clone();
+                let discard_action_tx = discard_action_tx.clone();
                 let fname = std::path::Path::new(&rel_path)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -3759,7 +4019,7 @@ fn git_section(
                 .on_click_stop(move |_| {
                     let path = rel_path1.clone();
                     let r = root1.clone();
-                    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+                    let tx = primary_action_tx.clone();
                     std::thread::spawn(move || {
                         let result = match kind {
                             SectionKind::Staged => run_git_reset(&r, &path),
@@ -3767,13 +4027,6 @@ fn git_section(
                             SectionKind::Untracked => run_git_add(&r, &path),
                         };
                         let _ = tx.send(result);
-                    });
-                    let rx_sig = create_signal_from_channel(rx);
-                    let r2 = root1.clone();
-                    create_effect(move |_| {
-                        if rx_sig.get().is_some() {
-                            refresh_git_status(r2.clone(), git_data, is_loading);
-                        }
                     });
                 })
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -3815,16 +4068,9 @@ fn git_section(
                 .on_click_stop(move |_| {
                     let path = rel_path2.clone();
                     let r = root2.clone();
-                    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+                    let tx = discard_action_tx.clone();
                     std::thread::spawn(move || {
                         let _ = tx.send(run_git_discard(&r, &path));
-                    });
-                    let rx_sig = create_signal_from_channel(rx);
-                    let r2 = root2.clone();
-                    create_effect(move |_| {
-                        if rx_sig.get().is_some() {
-                            refresh_git_status(r2.clone(), git_data, is_loading);
-                        }
                     });
                 })
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {

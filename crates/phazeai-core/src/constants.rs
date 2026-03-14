@@ -47,6 +47,7 @@ pub mod endpoints {
     pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
     pub const OLLAMA_BASE_URL: &str = "http://localhost:11434";
     pub const LMSTUDIO_BASE_URL: &str = "http://localhost:1234";
+    pub const LMSTUDIO_PORT: u16 = 1234;
     /// Google Gemini OpenAI-compatible endpoint (works with existing OpenAIClient)
     pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/";
     /// Gemini native REST endpoint (for context caching, thinking mode, grounding)
@@ -161,7 +162,7 @@ pub mod paths {
     ];
 }
 
-// ─── UI Layout (egui — will be replaced by Floem layout in phazeai-ui) ────────
+// ─── UI Layout (Floem-based layout in phazeai-ui) ──────────────────────────────
 
 pub mod ui {
     pub const ACTIVITY_BAR_WIDTH: f32 = 48.0;

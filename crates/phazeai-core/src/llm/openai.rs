@@ -17,8 +17,8 @@ impl OpenAIClient {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
-            model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com".to_string(),
+            model: crate::constants::models::DEFAULT_OPENAI_MODEL.to_string(),
+            base_url: crate::constants::endpoints::OPENAI_BASE_URL.to_string(),
         }
     }
 

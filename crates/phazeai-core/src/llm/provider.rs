@@ -173,7 +173,7 @@ impl ProviderRegistry {
         Self {
             providers,
             active_provider: ProviderId::Claude,
-            active_model: "claude-sonnet-4-5-20250929".to_string(),
+            active_model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
         }
     }
 
@@ -484,15 +484,16 @@ impl ProviderRegistry {
 }
 
 fn default_model_for(id: &ProviderId) -> &str {
+    use crate::constants::models;
     match id {
-        ProviderId::Claude => "claude-sonnet-4-5-20250929",
-        ProviderId::OpenAI => "gpt-4o",
-        ProviderId::Ollama => "phaze-beast",
-        ProviderId::Groq => "llama-3.3-70b-versatile",
-        ProviderId::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        ProviderId::OpenRouter => "anthropic/claude-sonnet-4-5-20250929",
-        ProviderId::LmStudio => "default",
-        ProviderId::Gemini => "gemini-2.5-flash",
+        ProviderId::Claude => models::DEFAULT_CLAUDE_MODEL,
+        ProviderId::OpenAI => models::DEFAULT_OPENAI_MODEL,
+        ProviderId::Ollama => models::PHAZE_BEAST,
+        ProviderId::Groq => models::DEFAULT_GROQ_MODEL,
+        ProviderId::Together => models::DEFAULT_TOGETHER_MODEL,
+        ProviderId::OpenRouter => models::DEFAULT_OPENROUTER_MODEL,
+        ProviderId::LmStudio => models::DEFAULT_LMSTUDIO_MODEL,
+        ProviderId::Gemini => models::DEFAULT_GEMINI_MODEL,
         ProviderId::Custom(_) => "default",
     }
 }

@@ -2,8 +2,8 @@ use crate::app::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::components::input::phaze_input;
 use floem::{
-    ext_event::create_ext_action,
-    reactive::{create_rw_signal, Scope, SignalGet, SignalUpdate},
+    ext_event::create_signal_from_channel,
+    reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
     views::{container, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
@@ -13,22 +13,14 @@ use rfd::FileDialog;
 pub fn extensions_panel(state: IdeState) -> impl IntoView {
     let search_query = create_rw_signal(String::new());
 
-    // Load VSIX File Action
-    let load_vsix_action = {
+    // Load VSIX File Action — channel created once, no Scope::new() leak
+    let (vsix_tx, vsix_rx) =
+        std::sync::mpsc::sync_channel::<Result<Vec<String>, String>>(1);
+    let vsix_result = create_signal_from_channel(vsix_rx);
+    {
         let state = state.clone();
-        move |_| {
-            let state = state.clone();
-            let Some(path) = FileDialog::new()
-                .add_filter("VSCode Extension", &["vsix"])
-                .pick_file()
-            else {
-                return;
-            };
-
-            state.ext_loading.set(true);
-
-            let scope = Scope::new();
-            let on_done = create_ext_action(scope, move |res: Result<Vec<String>, String>| {
+        create_effect(move |_| {
+            if let Some(res) = vsix_result.get() {
                 state.ext_loading.set(false);
                 match res {
                     Ok(exts) => {
@@ -42,8 +34,23 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                         );
                     }
                 }
-            });
+            }
+        });
+    }
+    let load_vsix_action = {
+        let state = state.clone();
+        move |_| {
+            let state = state.clone();
+            let Some(path) = FileDialog::new()
+                .add_filter("VSCode Extension", &["vsix"])
+                .pick_file()
+            else {
+                return;
+            };
 
+            state.ext_loading.set(true);
+
+            let tx = vsix_tx.clone();
             let manager = state.ext_manager.clone();
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -52,16 +59,16 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        on_done(Err(format!("Failed to create runtime: {}", e)));
+                        let _ = tx.send(Err(format!("Failed to create runtime: {}", e)));
                         return;
                     }
                 };
                 rt.block_on(async move {
                     if let Err(e) = VsixLoader::load_vsix(&path, &manager).await {
-                        on_done(Err(e));
+                        let _ = tx.send(Err(e));
                     } else {
                         let exts = manager.get_extensions().await;
-                        on_done(Ok(exts));
+                        let _ = tx.send(Ok(exts));
                     }
                 });
             });

@@ -2037,13 +2037,15 @@ fn handle_command_result(
                 }
             }
 
-            // Check LM Studio (port 1234)
+            // Check LM Studio
+            let lm_port = phazeai_core::constants::endpoints::LMSTUDIO_PORT;
+            let lm_addr = format!("127.0.0.1:{}", lm_port);
             let lm_check = std::net::TcpStream::connect_timeout(
-                &"127.0.0.1:1234".parse().unwrap(),
+                &lm_addr.parse().unwrap(),
                 std::time::Duration::from_millis(500),
             );
             if lm_check.is_ok() {
-                msg.push_str("  LM Studio: running on port 1234\n");
+                msg.push_str(&format!("  LM Studio: running on port {}\n", lm_port));
             } else {
                 msg.push_str("  LM Studio: not detected\n");
             }
@@ -2348,7 +2350,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           provider: "anthropic"  # Options: anthropic, openai, ollama
-          model: "claude-3-7-sonnet" # Options: any supported model by provider
+          model: "claude-sonnet-4-5-20250929" # Options: any supported model by provider
 "#;
             match std::fs::write(&workflow_path, workflow_content) {
                 Ok(_) => {

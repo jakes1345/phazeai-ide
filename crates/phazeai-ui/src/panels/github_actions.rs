@@ -1,7 +1,7 @@
 use crate::app::IdeState;
 use floem::{
-    ext_event::create_ext_action,
-    reactive::{create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
+    ext_event::create_signal_from_channel,
+    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
@@ -190,7 +190,10 @@ fn month_days(year: u64, month: u64) -> u64 {
         0
     };
     // Add leap day if month > 2 and it's a leap year
-    let leap = if month > 2 && year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) {
+    let leap = if month > 2
+        && year.is_multiple_of(4)
+        && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+    {
         1
     } else {
         0
@@ -236,34 +239,43 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         Arc::new(std::sync::Mutex::new(None));
     let owner_repo_fetch = Arc::clone(&owner_repo);
 
-    // ── Initial fetch ──
+    // ── Shared channel for fetch results (initial + refresh + manual) ──
+    let (fetch_tx, fetch_rx) = std::sync::mpsc::sync_channel::<(String, Result<Vec<WorkflowRun>, String>)>(1);
+    let fetch_result = create_signal_from_channel(fetch_rx);
     {
         let runs_sig = runs;
         let repo_label_sig = repo_label;
         let error_sig = error_msg;
         let loading_sig = loading;
         let expanded_sig = expanded;
-
-        let scope = Scope::new();
-        let send = create_ext_action(
-            scope,
-            move |(label, result): (String, Result<Vec<WorkflowRun>, String>)| {
+        create_effect(move |_| {
+            if let Some((lbl, result)) = fetch_result.get() {
                 loading_sig.set(false);
-                repo_label_sig.set(label);
+                repo_label_sig.set(lbl);
                 match result {
                     Ok(r) => {
                         error_sig.set(None);
-                        expanded_sig.set(r.iter().map(|run| (run.id, None)).collect());
+                        expanded_sig.update(|exp| {
+                            for run in &r {
+                                if !exp.iter().any(|(id, _)| *id == run.id) {
+                                    exp.push((run.id, None));
+                                }
+                            }
+                        });
                         runs_sig.set(r);
                     }
                     Err(e) => {
                         error_sig.set(Some(e));
                     }
                 }
-            },
-        );
+            }
+        });
+    }
 
+    // ── Initial fetch ──
+    {
         loading.set(true);
+        let tx = fetch_tx.clone();
         std::thread::spawn(move || {
             let token = get_gh_token();
             let pair = parse_owner_repo();
@@ -288,7 +300,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                     }
                 }
             };
-            send((label, result));
+            let _ = tx.send((label, result));
         });
     }
 
@@ -296,32 +308,11 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     // Use a standalone timer thread (NOT create_effect subscribing to runs_sig),
     // which would create a reactive loop: runs changes → effect fires → spawns thread
     // → thread updates runs → effect fires again → infinite loop freezing the UI.
+    // Now uses shared fetch_tx channel — no Scope::new() needed, and auto-refresh
+    // actually continues working (old code broke after first update).
     {
-        let runs_sig = runs;
-        let error_sig = error_msg;
-        let expanded_sig = expanded;
         let owner_repo_timer = Arc::clone(&owner_repo);
-
-        let scope = Scope::new();
-        let send_refresh = create_ext_action(scope, move |result: Result<Vec<WorkflowRun>, String>| {
-            match result {
-                Ok(r) => {
-                    error_sig.set(None);
-                    expanded_sig.update(|exp| {
-                        for run in &r {
-                            if !exp.iter().any(|(id, _)| *id == run.id) {
-                                exp.push((run.id, None));
-                            }
-                        }
-                    });
-                    runs_sig.set(r);
-                }
-                Err(e) => {
-                    error_sig.set(Some(e));
-                }
-            }
-        });
-        let send_refresh = Arc::new(std::sync::Mutex::new(Some(send_refresh)));
+        let tx = fetch_tx.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
             let pair = owner_repo_timer.lock().ok().and_then(|g| g.clone());
@@ -331,67 +322,67 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                 "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
                 owner, repo
             );
+            let label = format!("{}/{}", owner, repo);
             let result = match fetch_json(&url, token.as_deref()) {
                 Ok(v) => Ok(parse_runs(&v)),
                 Err(e) => Err(e),
             };
-            if let Ok(mut guard) = send_refresh.lock() {
-                if let Some(send) = guard.take() {
-                    send(result);
-                    // create_ext_action is one-shot; we can't reuse it,
-                    // so just stop auto-refreshing after one update.
-                    break;
-                }
-            }
+            let _ = tx.try_send((label, result));
         });
     }
 
-    // ── Manual Refresh ──
+    // ── Manual Refresh — uses shared fetch_tx, no Scope::new() ──
     let refresh_fn = {
-        let runs_sig = runs;
-        let error_sig = error_msg;
         let loading_sig = loading;
-        let expanded_sig = expanded;
         let owner_repo_ref = Arc::clone(&owner_repo);
+        let tx = fetch_tx.clone();
 
         move || {
             let owner_repo_arc = Arc::clone(&owner_repo_ref);
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |result: Result<Vec<WorkflowRun>, String>| {
-                loading_sig.set(false);
-                match result {
-                    Ok(r) => {
-                        error_sig.set(None);
-                        expanded_sig.set(r.iter().map(|run| (run.id, None)).collect());
-                        runs_sig.set(r);
-                    }
-                    Err(e) => {
-                        error_sig.set(Some(e));
-                    }
-                }
-            });
             loading_sig.set(true);
+            let tx = tx.clone();
             std::thread::spawn(move || {
                 let pair = owner_repo_arc.lock().ok().and_then(|g| g.clone());
                 match pair {
-                    None => send(Err("No owner/repo available".to_string())),
+                    None => {
+                        let _ = tx.send(("No GitHub remote".to_string(), Err("No owner/repo available".to_string())));
+                    }
                     Some((owner, repo)) => {
+                        let label = format!("{}/{}", owner, repo);
                         let token = get_gh_token();
                         let url = format!(
                             "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
                             owner, repo
                         );
-                        send(match fetch_json(&url, token.as_deref()) {
+                        let result = match fetch_json(&url, token.as_deref()) {
                             Ok(v) => Ok(parse_runs(&v)),
                             Err(e) => Err(e),
-                        });
+                        };
+                        let _ = tx.send((label, result));
                     }
                 }
             });
         }
     };
 
-    // ── Job expansion click handler factory ──
+    // ── Job expansion — channel created once, no Scope::new() per click ──
+    let (jobs_tx, jobs_rx) =
+        std::sync::mpsc::sync_channel::<(u64, Vec<WorkflowJob>)>(1);
+    let jobs_result = create_signal_from_channel(jobs_rx);
+    {
+        let expanded_sig = expanded;
+        create_effect(move |_| {
+            if let Some((run_id, job_list)) = jobs_result.get() {
+                expanded_sig.update(|exp| {
+                    for (id, jobs) in exp.iter_mut() {
+                        if *id == run_id {
+                            *jobs = Some(job_list.clone());
+                        }
+                    }
+                });
+            }
+        });
+    }
     let expand_run = {
         let expanded_sig = expanded;
         let owner_repo_ref = Arc::clone(&owner_repo);
@@ -414,31 +405,20 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
             }
 
             let owner_repo_arc = Arc::clone(&owner_repo_ref);
-            let scope = Scope::new();
-            let send = create_ext_action(scope, move |result: Result<Vec<WorkflowJob>, String>| {
-                let job_list = result.unwrap_or_default();
-                expanded_sig.update(|exp| {
-                    for (id, jobs) in exp.iter_mut() {
-                        if *id == run_id {
-                            *jobs = Some(job_list.clone());
-                        }
-                    }
-                });
-            });
+            let tx = jobs_tx.clone();
             std::thread::spawn(move || {
                 let pair = owner_repo_arc.lock().ok().and_then(|g| g.clone());
                 match pair {
-                    None => send(Err("No owner/repo".to_string())),
+                    None => {} // no owner/repo, nothing to do
                     Some((owner, repo)) => {
                         let token = get_gh_token();
                         let url = format!(
                             "https://api.github.com/repos/{}/{}/actions/runs/{}/jobs",
                             owner, repo, run_id
                         );
-                        send(match fetch_json(&url, token.as_deref()) {
-                            Ok(v) => Ok(parse_jobs(&v)),
-                            Err(e) => Err(e),
-                        });
+                        if let Ok(v) = fetch_json(&url, token.as_deref()) {
+                            let _ = tx.send((run_id, parse_jobs(&v)));
+                        }
                     }
                 }
             });

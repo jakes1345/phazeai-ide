@@ -18,8 +18,8 @@ impl ClaudeClient {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
-            model: "claude-sonnet-4-5-20250929".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
+            model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
+            base_url: crate::constants::endpoints::CLAUDE_BASE_URL.to_string(),
             max_tokens: 8192,
         }
     }

@@ -29,11 +29,11 @@ impl IdeDelegate for UiIdeDelegate {
 use floem::{
     action::show_context_menu,
     event::{Event, EventListener},
-    ext_event::{create_ext_action, create_signal_from_channel},
+    ext_event::create_signal_from_channel,
     keyboard::{Key, Modifiers, NamedKey},
     menu::{Menu, MenuItem},
     peniko::kurbo::Size,
-    reactive::{create_effect, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
+    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
     window::WindowConfig,
     Application, IntoView, Renderer,
@@ -564,13 +564,18 @@ pub fn save_settings(theme_name: &str, font_size: u32, tab_size: u32) {
 /// Show a toast notification that auto-dismisses after 3 seconds.
 /// Safe to call from any code that has access to `IdeState`.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
-    use floem::ext_event::create_ext_action;
+    use floem::ext_event::create_signal_from_channel;
     toast.set(Some(msg.into()));
-    let scope = Scope::new();
-    let dismiss = create_ext_action(scope, move |_| toast.set(None));
+    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let dismiss_sig = create_signal_from_channel(rx);
+    create_effect(move |_| {
+        if dismiss_sig.get().is_some() {
+            toast.set(None);
+        }
+    });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
-        dismiss(());
+        let _ = tx.send(());
     });
 }
 
@@ -1322,6 +1327,13 @@ fn file_picker(state: IdeState) -> impl IntoView {
 
     // When picker opens, walk workspace asynchronously (re-walk when root changes)
     let last_root: RwSignal<Option<std::path::PathBuf>> = create_rw_signal(None);
+    let (files_tx, files_rx) = std::sync::mpsc::sync_channel::<Vec<std::path::PathBuf>>(1);
+    let files_sig = floem::ext_event::create_signal_from_channel(files_rx);
+    create_effect(move |_| {
+        if let Some(files) = files_sig.get() {
+            all_files.set(files);
+        }
+    });
     create_effect(move |_| {
         if !state.file_picker_open.get() {
             return;
@@ -1331,10 +1343,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
             return;
         }
         last_root.set(Some(root.clone()));
-        let scope = Scope::new();
-        let send = create_ext_action(scope, move |files: Vec<std::path::PathBuf>| {
-            all_files.set(files);
-        });
+        let tx = files_tx.clone();
         std::thread::spawn(move || {
             let files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(&root)
                 .max_depth(10)
@@ -1352,7 +1361,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
                 .map(|e| e.into_path())
                 .take(2000)
                 .collect();
-            send(files);
+            let _ = tx.send(files);
         });
     });
 
@@ -2146,15 +2155,20 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .on_click_stop({
             let s3 = state.clone();
+            let (branch_tx, branch_rx) =
+                std::sync::mpsc::sync_channel::<Vec<String>>(1);
+            let branch_sig = floem::ext_event::create_signal_from_channel(branch_rx);
+            let picker_open_sig = state.branch_picker_open;
+            let branch_list_sig = state.branch_list;
+            create_effect(move |_| {
+                if let Some(branches) = branch_sig.get() {
+                    branch_list_sig.set(branches);
+                    picker_open_sig.set(true);
+                }
+            });
             move |_| {
                 let root = s3.workspace_root.get();
-                let picker_open = s3.branch_picker_open;
-                let branch_list = s3.branch_list;
-                let scope = Scope::new();
-                let send = create_ext_action(scope, move |branches: Vec<String>| {
-                    branch_list.set(branches);
-                    picker_open.set(true);
-                });
+                let tx = branch_tx.clone();
                 std::thread::spawn(move || {
                     let branches = std::process::Command::new("git")
                         .args(["branch", "--list"])
@@ -2169,7 +2183,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    send(branches);
+                    let _ = tx.send(branches);
                 });
             }
         })
@@ -2997,9 +3011,6 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
 
 /// Git diff viewer — shown in the bottom panel "GIT DIFF" tab.
 fn git_diff_view(state: IdeState) -> impl IntoView {
-    use floem::ext_event::create_ext_action;
-    use floem::reactive::Scope;
-
     let theme = state.theme;
     let open_file = state.open_file;
 
@@ -3011,15 +3022,20 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
     // Whenever the open file changes, run git diff in background.
     {
         let diff_sig = diff_lines;
+        let (diff_tx, diff_rx) =
+            std::sync::mpsc::sync_channel::<Vec<(String, u8)>>(1);
+        let diff_result_sig = floem::ext_event::create_signal_from_channel(diff_rx);
+        floem::reactive::create_effect(move |_| {
+            if let Some(lines) = diff_result_sig.get() {
+                diff_sig.set(lines);
+            }
+        });
         floem::reactive::create_effect(move |_| {
             if let Some(path) = open_file.get() {
-                let scope = Scope::new();
-                let send = create_ext_action(scope, move |lines| {
-                    diff_sig.set(lines);
-                });
+                let tx = diff_tx.clone();
                 std::thread::spawn(move || {
                     let lines = run_git_diff(&path);
-                    send(lines);
+                    let _ = tx.send(lines);
                 });
             } else {
                 diff_sig.set(vec![]);
@@ -4188,6 +4204,28 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
     let workspace = state.workspace_root;
     let toast = state.status_toast;
 
+    // Channel for checkout results — created once, shared across all dyn_stack rows.
+    let (checkout_tx, checkout_rx) =
+        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let checkout_sig = floem::ext_event::create_signal_from_channel(checkout_rx);
+    {
+        let tst = toast;
+        let cur = current;
+        create_effect(move |_| {
+            if let Some(result) = checkout_sig.get() {
+                match result {
+                    Ok(new_branch) => {
+                        cur.set(new_branch.clone());
+                        show_toast(tst, format!("Switched to {new_branch}"));
+                    }
+                    Err(e) => {
+                        show_toast(tst, format!("Checkout failed: {e}"));
+                    }
+                }
+            }
+        });
+    }
+
     let rows =
         scroll(
             dyn_stack(
@@ -4200,8 +4238,8 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                     let is_current = move || current.get() == b_current;
                     let hov = create_rw_signal(false);
                     let ws = workspace;
-                    let cur = current;
-                    let tst = toast;
+                    // Clone sender once per row so the `Fn` closure can call it repeatedly.
+                    let row_tx = checkout_tx.clone();
 
                     container(
                         stack((
@@ -4230,34 +4268,22 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                     })
                     .on_click_stop(move |_| {
                         let branch_name = b_click.clone();
-                        let toast_name = b_click.clone();
                         open.set(false);
                         let root = ws.get();
-                        let scope = Scope::new();
-                        let send =
-                            create_ext_action(scope, move |result: Result<String, String>| {
-                                match result {
-                                    Ok(new_branch) => {
-                                        cur.set(new_branch);
-                                        show_toast(tst, format!("Switched to {toast_name}"));
-                                    }
-                                    Err(e) => {
-                                        show_toast(tst, format!("Checkout failed: {e}"));
-                                    }
-                                }
-                            });
+                        let tx = row_tx.clone();
                         std::thread::spawn(move || {
                             let out = std::process::Command::new("git")
                                 .args(["checkout", &branch_name])
                                 .current_dir(&root)
                                 .output();
-                            match out {
-                                Ok(o) if o.status.success() => send(Ok(branch_name)),
+                            let result = match out {
+                                Ok(o) if o.status.success() => Ok(branch_name),
                                 Ok(o) => {
-                                    send(Err(String::from_utf8_lossy(&o.stderr).trim().to_string()))
+                                    Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
                                 }
-                                Err(e) => send(Err(e.to_string())),
-                            }
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(result);
                         });
                     })
                     .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
