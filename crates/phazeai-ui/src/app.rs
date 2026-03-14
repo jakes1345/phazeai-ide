@@ -605,7 +605,25 @@ fn load_editor_config() -> (u32, u32) {
 impl IdeState {
     pub fn new(settings: &Settings) -> Self {
         let _theme = PhazeTheme::from_name(&settings.editor.theme);
-        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Use the git repository root as the workspace, so all git operations
+        // are correctly scoped to the project root even when launched from a
+        // subdirectory. Fall back to current_dir if not inside a git repo.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    String::from_utf8(out.stdout)
+                        .ok()
+                        .map(|s| PathBuf::from(s.trim()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(cwd);
 
         let git_branch = create_rw_signal("main".to_string());
 
