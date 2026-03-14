@@ -18,6 +18,12 @@ pub mod js;
 pub mod vsix;
 pub mod wasm;
 
+// VSCode extension asset loading (themes, grammars, snippets, language configs)
+pub mod asset_loader;
+pub mod registry;
+pub mod theme_convert;
+pub mod vscode_assets;
+
 pub use phazeai_plugin_api::{
     PhazePlugin, PluginCommand, PluginEvent, PluginHost, PluginManifest, API_VERSION,
 };

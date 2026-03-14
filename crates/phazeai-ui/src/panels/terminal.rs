@@ -557,8 +557,6 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
 const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
-#[allow(dead_code)]
-const DEFAULT_TERM_FONT_SIZE: f32 = 13.0;
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
 
