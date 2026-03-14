@@ -1897,6 +1897,7 @@ fn placeholder_tab(tab_name: &'static str, state: IdeState) -> impl IntoView {
 }
 
 fn left_panel(state: IdeState) -> impl IntoView {
+
     let explorer = explorer_panel(
         state.workspace_root,
         state.open_file,
@@ -4641,6 +4642,7 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
 }
 
 fn ide_root(state: IdeState) -> impl IntoView {
+
     let raw_editor = editor_panel(
         state.open_file,
         state.theme,
@@ -5443,7 +5445,9 @@ pub fn launch_phaze_ide() {
     Application::new()
         .window(
             move |_| {
+
                 let state = IdeState::new(&settings);
+
 
                 // Overlay layers — rendered after IDE content so they paint on top.
                 let palette = command_palette(state.clone());
@@ -5492,6 +5496,7 @@ pub fn launch_phaze_ide() {
                         })
                 };
 
+
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
                 let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
                     .style(|s| s.flex_col().width_full().height_full());
@@ -5503,7 +5508,12 @@ pub fn launch_phaze_ide() {
                     goto_popup,     // z_index(495) — goto line/col (Ctrl+G)
                     drag_overlay,   // z_index(50)  — only shown during resize
                 ))
-                .style(|s| s.absolute().width_full().height_full());
+                .style(|s| {
+                    s.absolute()
+                        .width_full()
+                        .height_full()
+                        .pointer_events(floem::style::PointerEvents::None)
+                });
 
                 stack((
                     cosmic_bg_canvas(state.theme),
