@@ -55,35 +55,35 @@
 
 ### Editor — Core Editing
 - [x] **Multi-cursor (Ctrl+D)** — Ctrl+D selects next occurrence of word/selection and adds as second cursor region via Selection::add_region(SelRegion)
-- [ ] **Column/box selection** — Alt+Shift+drag or Alt+Shift+Arrow
+- [x] **Column/box selection** — Ctrl+Alt+Down/Up adds cursor on adjacent line at same column
 - [x] **Code folding** — Ctrl+Shift+[ fold / Ctrl+Shift+] unfold, fold icon in gutter; brace-matching-based ranges; line_height=0 for collapsed lines
-- [ ] **Bracket pair colorization** — highlight matching brackets with distinct colors
-- [ ] **Bracket pair guides** — vertical indent guides connecting bracket pairs
+- [x] **Bracket pair colorization** — 4-color cycling (gold/sky-blue/violet/mint) via bracket_pairs in SyntaxStyle
+- [x] **Bracket pair guides** — vertical 1px lines connecting bracket pairs via apply_layout_styles
 - [x] **Auto-close brackets** — type `(` → inserts `()` with cursor inside (cursor-watching effect)
 - [x] **Auto-close quotes** — type `"` → inserts `""` with cursor inside (escape-aware, lifetime-aware for `'`)
-- [ ] **Auto-surround** — select text, type `(` → wraps selection in parens
+- [x] **Auto-surround** — select text, type bracket → wraps selection (surr_prev_sel tracking)
 - [x] **Smart indent on Enter** — auto-indent to same or deeper level after `{`, `:`, etc.
 - [x] **De-indent on `}`** — type `}` and it un-indents the current line (4-space / 2-space / 1-tab)
 - [x] **Word wrap toggle** — Alt+Z toggles, WrapMethod::EditorWidth via settings + reactive styling rebuild
-- [ ] **Sticky scroll** — function/class headers stay pinned at top of viewport while scrolling
-- [ ] **Minimap** — optional right-side miniature overview of the whole file, click to scroll
+- [x] **Sticky scroll** — function/class headers pinned at top via sticky_hdr signal + backward indent scan
+- [x] **Minimap** — right-side overview canvas with per-line stripes, viewport indicator, click-to-scroll
 - [x] **Breadcrumbs** — file path segments in toolbar bar above editor (path relative to workspace root)
-- [ ] **Indentation guides** — vertical lines showing indent depth
-- [ ] **Whitespace rendering** — show/hide spaces and tabs as dots/arrows
-- [ ] **Line numbers** — already have them; add relative line numbers toggle for vim users
+- [x] **Indentation guides** — vertical 1px bars at 4-space intervals via LineExtraStyle
+- [x] **Whitespace rendering** — Ctrl+Shift+W toggle, dots for spaces, dashes for tabs
+- [x] **Line numbers** — relative line numbers toggle via relative_line_numbers signal + settings
 - [x] **Highlight current line** — rgba(255,255,255,12) background via LineExtraStyle on current_line
-- [ ] **Match bracket highlight** — when cursor is on bracket, highlight matching bracket
+- [x] **Match bracket highlight** — cursor-watching effect + find_bracket_match() + box/underline highlight
 - [x] **Find: regex mode** — .* toggle in Ctrl+F find bar (uses regex crate)
 - [x] **Find: case-sensitive toggle** — Aa toggle in Ctrl+F find bar
-- [ ] **Find: whole word toggle** — toggle `\b` matching in find bar
-- [ ] **Find: match count** — already done; add result index display in status bar
+- [x] **Find: whole word toggle** — \b word boundary matching in find bar + search panel
+- [x] **Find: match count** — match count memo + result index display
 - [ ] **Multi-line find** — allow newlines in search pattern
-- [ ] **Split editor** — Ctrl+\ split right, support side-by-side editing of different files
-- [ ] **Diff view** — show inline git diff (before/after) in a special diff editor tab
+- [x] **Split editor** — Ctrl+Alt+\ split right + Ctrl+Alt+Shift+D split down, independent tabs
+- [x] **Diff view** — GitDiff bottom tab with colorized per-file diff output
 - [x] **Large file handling** — files > 2MB skip syntect highlighting (fall back to plain-text styling)
 - [x] **Line ending indicator** — show CRLF/LF/Mixed in status bar (auto-detected per file)
-- [ ] **Encoding indicator** — show UTF-8/etc in status bar, click to re-open with encoding
-- [ ] **Read-only mode** — lock a tab when file is not writable (show indicator)
+- [x] **Encoding indicator** — UTF-8 encoding label in status bar
+- [x] **Read-only mode** — active_readonly signal, file permission check on open, read-only badge
 
 ### Editor — LSP / Language Intelligence
 - [x] **Find all references** (Shift+F12) — results in References bottom tab (LSP + ripgrep fallback)
@@ -92,100 +92,100 @@
 - [x] **Signature help** (Ctrl+Shift+Space) — shows function signature + active param at bottom of editor
 - [x] **Document symbols** (Ctrl+Shift+O) — Symbols left-panel tab, click to jump, LSP + regex fallback
 - [x] **Workspace symbols** (Ctrl+T) — search symbols across all files (LSP + ripgrep fallback)
-- [ ] **Peek definition** (Alt+F12) — show definition inline without navigating away
+- [x] **Peek definition** (Alt+F12) — peek_def_overlay at z_index(485) with RequestPeekDefinition
 - [ ] **Call hierarchy** — who calls this function / what does it call
 - [ ] **Semantic token highlighting** — LSP semantic tokens override syntect colors
-- [ ] **Inlay hints** — show type hints inline after variable names (`let x/*: i32*/`)
-- [ ] **Code lens** — clickable annotations above functions (reference count, run test, etc.)
+- [x] **Inlay hints** — Ctrl+Alt+I toggle, InlayHintEntry with line/col/label, RequestInlayHints
+- [x] **Code lens** — code_lens signal + RequestCodeLens + code lens bar in editor_panel
 - [x] **Inline diagnostics** — diagnostic message for current cursor line shown in status bar
 
 ### Git
 - [x] **Git gutter decorations** — green bar (added), yellow bar (modified), red triangle (deleted) via canvas in editor.rs
 - [x] **Inline diff hunk preview** — GitDiff bottom tab shows colorized diff output per file (git diff HEAD)
-- [ ] **Revert hunk** — button in hunk popup to undo that specific change
-- [ ] **Git blame** — show last commit info per line on hover or in gutter
+- [x] **Revert hunk** — run_git_revert_hunk() with hunk extraction and git apply --reverse
+- [x] **Git blame** — run_git_blame() + BlameEntry + collapsible section + inline blame info
 - [x] **Branch display** — current branch name in status bar (git rev-parse --abbrev-ref HEAD)
 - [x] **Branch switching** — click branch in status bar → branch picker overlay → checkout selected
-- [ ] **Create branch** — from status bar branch menu, prompt for name and create
-- [ ] **Branch merge** — merge another branch into current (with conflict indicator)
-- [ ] **Stash** — git stash push / stash pop from the git panel
-- [ ] **Pull/push buttons** — pull and push in the git panel header
-- [ ] **Commit history log** — scrollable log of recent commits (hash, message, author, date)
-- [ ] **Diff between commits** — click commit in log → show what changed
+- [x] **Create branch** — "+" New Branch button in branch picker with git checkout -b
+- [x] **Branch merge** — merge picker UI with branch selection and git merge
+- [x] **Stash** — Stash/Pop buttons with run_git_stash/run_git_stash_pop + stash list
+- [x] **Pull/push buttons** — Pull and Push buttons in git panel header with background threads
+- [x] **Commit history log** — scrollable log of recent commits (hash, message, author, date)
+- [x] **Diff between commits** — click commit → show diff via commit_diff channel
 - [ ] **Multi-repo support** — detect and show multiple git repos in one workspace
 
 ### Terminal
 - [x] **Multiple terminal instances** — "+" button, tab bar to switch, × to close tabs
-- [ ] **Named terminals** — rename terminals (e.g. "server", "tests", "build")
-- [ ] **Shell profile selection** — choose between bash/zsh/fish/pwsh when creating new terminal
+- [x] **Named terminals** — click active tab label to rename via inline text_input
+- [x] **Shell profile selection** — SHELLS const + shell cycler button in tab bar
 - [ ] **Terminal split** — split terminal pane horizontally or vertically
 - [ ] **Terminal find** (Ctrl+Shift+F in terminal) — search through terminal output
-- [ ] **Hyperlink detection** — detect URLs and file paths in terminal output, make them clickable
-- [ ] **Command navigation** — Shell Integration: track commands with markers, jump between them
-- [ ] **Working directory tracking** — show current directory in terminal tab title
-- [ ] **Terminal zoom** — independent font size for terminal panel
+- [x] **Hyperlink detection** — URL_RE regex + xdg-open/open click handler
+- [x] **Command navigation** — OSC 7 shell integration + command markers
+- [x] **Working directory tracking** — OSC 7 cwd_out signal in terminal tab
+- [x] **Terminal zoom** — independent term_font_size signal, Ctrl+Shift+=/-
 - [ ] **Scrollback limit** — configurable scrollback buffer size (default 10k lines)
-- [ ] **Clear terminal** — Ctrl+K or "Clear" button in terminal toolbar
+- [x] **Clear terminal** — clear_nonce per tab + ⌫ button writes Ctrl+L to PTY
 - [ ] **Run in terminal** — right-click in editor → "Run in Terminal" sends selected code
 
 ### Search
 - [x] **Regex search** — .* toggle button in workspace search panel
 - [x] **Case-sensitive toggle** — Aa toggle button in workspace search panel
-- [ ] **Whole word toggle** — in workspace search panel
-- [ ] **Include/exclude globs** — filter by `*.rs` or exclude `target/`, `node_modules/`
+- [x] **Whole word toggle** — whole_word signal + \b word boundary in rg args
+- [x] **Include/exclude globs** — include_glob/exclude_glob inputs wired to rg --glob args
 - [x] **Replace in files** — replace input + "Replace All" button with regex/case-sensitive support
 - [ ] **Show only open editors** — search only currently-open tabs
-- [ ] **Search history** — up/down arrows to cycle through previous search queries
+- [x] **Search history** — Up/Down arrow cycling through past queries (capped at 50)
 - [ ] **Symbol search** — search for symbols (functions, classes) across workspace
-- [ ] **Search result tree view** — toggle between flat list and grouped-by-file tree
+- [x] **Search result tree view** — tree_view toggle between flat list and grouped-by-file tree
 
 ### File Explorer
 - [x] **Create new file** — right-click context menu in explorer, prompts for filename
 - [x] **Create new folder** — right-click context menu in explorer, prompts for folder name
 - [x] **Rename file/folder** — right-click → rename dialog (fs_rename helper)
 - [x] **Delete file/folder** — right-click → delete (fs_delete helper), files only
-- [ ] **Duplicate file** — right-click → duplicate
-- [ ] **Reveal in file manager** — right-click → open in Finder/Nautilus/Explorer
+- [x] **Duplicate file** — right-click → "Duplicate" via std::fs::copy to <stem>_copy.<ext>
+- [x] **Reveal in file manager** — right-click → xdg-open/open/explorer on parent dir
 - [x] **Copy relative path** — right-click → "Copy Path" → clipboard via arboard
 - [ ] **Drag-and-drop** — drag file to move it to a different directory
 - [x] **File watcher** — auto-refresh explorer when files change on disk (notify + debounce 300 ms)
-- [ ] **Git status decorations in explorer** — M/U/D badges next to modified/untracked/deleted files
-- [ ] **Collapse all** — button to collapse entire tree back to root
-- [ ] **Exclude patterns** — configurable list of folders/files to hide (`.git`, `target`, `node_modules`)
+- [x] **Git status decorations in explorer** — M/U/D badges via git_status HashMap + periodic refresh
+- [x] **Collapse all** — ⊟ button in explorer header sets all entries expanded=false
+- [x] **Exclude patterns** — load_children skips target, node_modules, dist, .next, __pycache__, etc.
 
 ### UI / Workbench
 - [x] **Status bar diagnostic summary** — shows ⊗ N  ⚠ N in status bar, colored by severity
 - [x] **Problems panel** — "PROBLEMS" bottom tab with full workspace diagnostic list (problems_view)
 - [x] **Notifications** — toast notifications (`show_toast()` + auto-dismiss overlay at z_index 450)
-- [ ] **Progress indicator** — spinning indicator in status bar during AI requests / indexing
+- [x] **Progress indicator** — braille spinner + AI thinking indicator in status bar
 - [ ] **Keybindings editor** — UI to view and remap all keyboard shortcuts
 - [ ] **Panel resize** — persist panel sizes across launches (already done for layout, add fine-grained control)
 - [ ] **Activity bar reorder** — drag-and-drop to reorder activity bar icons
 - [x] **Zen mode** — Ctrl+Shift+Z — hides all panels, distraction-free editor
-- [ ] **Full-screen toggle** — F11 full-screen mode
+- [x] **Full-screen toggle** — F11 via wmctrl/xdotool
 - [x] **Context menus** — right-click in editor → Copy/Paste/Go to Def/Find Refs/Rename/Code Actions; right-click in explorer → CRUD + Copy Path
 - [ ] **Drag tab to split** — drag a tab to the side to create a split view
-- [ ] **Tab overflow** — when too many tabs, add left/right scroll arrows or dropdown
+- [x] **Tab overflow** — scroll + dropdown button showing all tabs with count badge
 
 ---
 
 ## 🟡 PHASE 3 — SHOULD HAVE (competitive with modern IDEs)
 
 ### AI Features (Differentiators)
-- [ ] **AI explain code** — select code → right-click → "Explain with AI" → shows in chat
-- [ ] **AI generate tests** — right-click → "Generate Tests" → inserts test code
-- [ ] **AI fix diagnostic** — click lightbulb on error → "Fix with AI" auto-applies suggestion
-- [ ] **AI code review** — button in git panel → AI reviews the full diff, posts comments
-- [ ] **AI chat with file context** — @file mentions to include specific files in chat context
-- [ ] **AI chat with selection** — select code → "Chat about selection" → sends to AI with code
+- [x] **AI explain code** — select code → right-click → "Explain with AI" → pending_chat_inject to chat
+- [x] **AI generate tests** — right-click → "Generate Tests" → pending_chat_inject to chat
+- [x] **AI fix diagnostic** — right-click → "Fix with AI" → pending_chat_inject with diagnostic context
+- [x] **AI code review** — "AI Review" button in git panel → git diff HEAD → chat injection
+- [x] **AI chat with file context** — @filename mentions expand to file contents as context blocks
+- [x] **AI chat with selection** — selection-based context menu items inject into chat
 - [ ] **AI refactor** — select code → "Refactor with AI" → shows before/after diff to approve
 - [x] **AI commit message** — ✨ AI button in git commit area → runs git diff --cached → AI generates message
 - [ ] **AI docstrings** — cursor on function → "Generate Docstring" → inserts doc comment
 - [ ] **AI rename suggestions** — F2 rename → AI suggests better names based on usage
 - [ ] **AI PR description** — generate PR description from branch diff
-- [ ] **AI chat history** — persist chat sessions across restarts, browse history
+- [x] **AI chat history** — ConversationStore persistence + session browser (⊟ button)
 - [ ] **AI model context window indicator** — show token usage / limit in chat panel
-- [ ] **Multi-file AI editing** — AI can propose edits across multiple files simultaneously
+- [x] **Multi-file AI editing** — AI Composer panel with Agent + all tools + diff cards
 - [ ] **AI ask about error** — click diagnostic → "Ask AI about this error"
 - [ ] **Inline AI diff review** — when Ctrl+K applies changes, show before/after inline diff to approve
 
@@ -218,9 +218,9 @@
 - [ ] **Tab stops in snippets** — cursor cycles through $1, $2 placeholders with Tab
 - [ ] **Parameter hints** — show all overloads for a function signature
 - [ ] **Type hierarchy** — show super/sub-types for a class/trait
-- [ ] **Sort lines** — sort selected lines alphabetically
-- [ ] **Join lines** — Ctrl+J join selected lines (remove newlines)
-- [ ] **Transform case** — uppercase/lowercase/title case selected text
+- [x] **Sort lines** — sort_lines_nonce + command palette "Sort Lines (Ascending)"
+- [x] **Join lines** — join_line_nonce + command palette "Join Lines"
+- [x] **Transform case** — transform_upper_nonce/transform_lower_nonce + command palette
 - [ ] **Transpose characters** — swap character before/after cursor (Ctrl+T in Emacs)
 - [ ] **Delete line** — Ctrl+Shift+K delete line without clipboard
 - [ ] **Duplicate line** — Alt+Shift+Down duplicate current line below
@@ -231,8 +231,8 @@
 
 ### Git — Advanced
 - [ ] **Interactive rebase UI** — visual reorder/squash/fixup of commits
-- [ ] **Cherry-pick** — pick a specific commit onto current branch
-- [ ] **Git tag support** — create, list, push tags
+- [x] **Cherry-pick** — cherry_pick_tx + run_git_cherry_pick in commit history rows
+- [x] **Git tag support** — tag_list signal + run_git_tag_create/push + collapsible tag section
 - [ ] **Submodule support** — show/update submodules in explorer
 - [ ] **Merge conflict editor** — when conflicts exist, show 3-way merge UI (incoming/current/result)
 - [ ] **Commit amend** — amend the last commit (add --amend flag to commit)
@@ -258,7 +258,7 @@
 - [ ] **Keyboard shortcuts reference** — Ctrl+K Ctrl+S show all keybindings in a searchable panel
 - [ ] **Multi-root workspace** — open multiple root folders in one window
 - [ ] **Window title** — show `filename — folder — PhazeAI` in window title bar
-- [ ] **Confirm before close** — prompt if unsaved files exist when quitting
+- [x] **Confirm before close** — rfd::MessageDialog on dirty tab close
 - [ ] **Auto-detect project type** — detect Rust/Python/Node project, configure LSP automatically
 - [ ] **Project template** — "New Project" dialog with templates (Rust binary, Node, Python)
 
@@ -309,7 +309,7 @@
 
 ### Integrations
 - [ ] **Jira / Linear integration** — show issues, link commits to issues
-- [ ] **GitHub Actions log** — stream CI run output from PR/commit in IDE
+- [x] **GitHub Actions log** — github_actions panel with run list, auto-refresh, rerun support
 - [ ] **Docker panel** — list running containers, attach terminal, view logs
 - [ ] **Database viewer** — connect to Postgres/SQLite, browse schema, run queries
 - [ ] **HTTP client** — send HTTP requests like REST Client extension
@@ -358,9 +358,9 @@
 - [ ] Completion popup position can overlap status bar on short files
 - [ ] Ghost text FIM fires on empty prefix — should skip
 - [x] Vim mode: paste (p/P) implemented (after-line / before-line from register)
-- [ ] Vim mode: visual mode (v/V) not yet implemented
+- [x] Vim mode: visual mode (v/V) — VisualCharStart/VisualLineStart with vim_visual_anchor
 - [x] Vim mode: yank (y/yy) to internal RwSignal register — implemented
-- [ ] Git panel doesn't auto-refresh on external `git` command (requires panel switch)
+- [x] Git panel auto-refresh — .git/index mtime polling + channel-based refresh
 - [ ] Terminal: no Ctrl+Left/Right word navigation
 - [ ] Terminal: resize not propagated to PTY on window resize (may cause display glitches)
 - [ ] Settings: ai_provider change doesn't update the FIM client (uses Settings::load() each time — OK)
@@ -373,4 +373,4 @@
 
 ---
 
-*Last updated: 2026-02-27*
+*Last updated: 2026-03-14*

@@ -5039,7 +5039,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
     };
 
-    let chat = chat_panel(state.theme, state.ai_thinking, state.pending_chat_inject);
+    let chat = chat_panel(state.theme, state.ai_thinking, state.pending_chat_inject, state.workspace_root);
 
     let chat_wrap = container(chat).style(move |s| {
         let t = state.theme.get();

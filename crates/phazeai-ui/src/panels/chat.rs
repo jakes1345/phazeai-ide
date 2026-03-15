@@ -131,10 +131,52 @@ fn send_to_ai(
 ///
 /// Settings are re-loaded from disk on each send so model/provider changes in
 /// the settings panel take effect immediately without restarting.
+/// Expand `@filename` mentions in a chat message into file context blocks.
+///
+/// Scans for `@path/to/file` tokens, resolves each relative to `root`,
+/// reads file contents, and prepends them as context. Returns the expanded prompt.
+fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
+    let re = regex::Regex::new(r"@([\w./\-]+\.\w+)").unwrap();
+    let mut context_blocks = Vec::new();
+    let mut clean_msg = message.to_string();
+
+    for cap in re.captures_iter(message) {
+        let mention = &cap[1];
+        let file_path = root.join(mention);
+        if file_path.is_file() {
+            if let Ok(contents) = std::fs::read_to_string(&file_path) {
+                // Truncate very large files
+                let truncated = if contents.len() > 30_000 {
+                    format!("{}...\n[truncated — {} bytes total]", &contents[..30_000], contents.len())
+                } else {
+                    contents
+                };
+                context_blocks.push(format!(
+                    "<file path=\"{}\">\n{}\n</file>",
+                    mention, truncated
+                ));
+            }
+            // Remove the @mention from the visible message
+            clean_msg = clean_msg.replace(&format!("@{mention}"), &format!("`{mention}`"));
+        }
+    }
+
+    if context_blocks.is_empty() {
+        message.to_string()
+    } else {
+        format!(
+            "I'm providing the following file(s) as context:\n\n{}\n\nUser request: {}",
+            context_blocks.join("\n\n"),
+            clean_msg
+        )
+    }
+}
+
 pub fn chat_panel(
     theme: RwSignal<PhazeTheme>,
     ai_thinking: RwSignal<bool>,
     chat_inject: RwSignal<Option<String>>,
+    workspace_root: RwSignal<std::path::PathBuf>,
 ) -> impl IntoView {
     let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(vec![ChatMessage {
         role: ChatRole::Assistant,
@@ -223,6 +265,11 @@ pub fn chat_panel(
             if trimmed.is_empty() || is_loading.get() {
                 return;
             }
+
+            // Expand @file mentions into context blocks before sending to AI
+            let root = workspace_root.get_untracked();
+            let prompt = expand_file_mentions(&trimmed, &root);
+
             messages.update(|list| {
                 list.push(ChatMessage {
                     role: ChatRole::User,
@@ -241,7 +288,7 @@ pub fn chat_panel(
             // Re-read settings on every send so model/provider changes in the
             // settings panel take effect immediately (no restart needed).
             let live_settings = Settings::load();
-            send_to_ai(trimmed, live_settings, (*update_tx).clone());
+            send_to_ai(prompt, live_settings, (*update_tx).clone());
         }
     });
 

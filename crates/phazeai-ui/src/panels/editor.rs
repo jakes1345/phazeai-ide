@@ -4885,8 +4885,112 @@ fn tab_bar_view(
     )
     .style(|s| s.flex_row().min_width(0.0));
 
+    // Tab overflow dropdown — shows a list of all open tabs when clicked
+    let dropdown_open = create_rw_signal(false);
+    let dropdown_hov = create_rw_signal(false);
+
+    let tab_dropdown_btn = container(label(move || {
+        let count = tabs.get().len();
+        if count > 1 { format!("⋯ {count}") } else { "⋯".to_string() }
+    }).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.0)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(if dropdown_hov.get() { p.accent_hover } else { p.text_muted })
+    }))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.padding_horiz(8.0)
+            .height_full()
+            .items_center()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .border_left(1.0)
+            .border_color(p.border)
+            .background(if dropdown_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+    })
+    .on_click_stop(move |_| dropdown_open.update(|v| *v = !*v))
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| dropdown_hov.set(true))
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| dropdown_hov.set(false));
+
+    // Dropdown panel listing all tabs
+    let tab_dropdown_list = container(
+        scroll(
+            dyn_stack(
+                move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
+                |(i, _)| *i,
+                move |(i, tab)| {
+                    let is_active = active_idx.get() == Some(i);
+                    let name = tab.name.clone();
+                    let dirty = tab.dirty;
+                    let item_hov = create_rw_signal(false);
+                    stack((
+                        container(label(|| "●")).style(move |s| {
+                            s.font_size(6.0)
+                                .color(theme.get().palette.accent)
+                                .margin_right(6.0)
+                                .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
+                        }),
+                        label(move || name.clone()).style(move |s| {
+                            let p = theme.get().palette;
+                            s.font_size(12.0).color(if is_active { p.accent } else { p.text_primary })
+                        }),
+                    ))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.items_center()
+                            .width_full()
+                            .padding_horiz(10.0)
+                            .padding_vert(4.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .background(if is_active {
+                                p.accent_dim
+                            } else if item_hov.get() {
+                                p.bg_elevated
+                            } else {
+                                floem::peniko::Color::TRANSPARENT
+                            })
+                    })
+                    .on_click_stop(move |_| {
+                        active_idx.set(Some(i));
+                        dropdown_open.set(false);
+                    })
+                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| item_hov.set(true))
+                    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| item_hov.set(false))
+                },
+            )
+            .style(|s| s.flex_col().width_full()),
+        )
+        .style(|s| s.max_height(300.0).width_full()),
+    )
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.absolute()
+            .inset_top(35.0)
+            .inset_right(0.0)
+            .width(240.0)
+            .background(p.bg_panel)
+            .border(1.0)
+            .border_color(p.glass_border)
+            .border_radius(6.0)
+            .box_shadow_blur(16.0)
+            .box_shadow_color(p.glow)
+            .z_index(50)
+            .flex_col()
+            .apply_if(!dropdown_open.get(), |s| s.display(floem::style::Display::None))
+    });
+
     // Wrap the tab list in scroll so overflow tabs are scrollable horizontally
-    scroll(tab_list).style(move |s: floem::style::Style| {
+    let tab_scroll = scroll(tab_list).style(move |s: floem::style::Style| {
+        s.height_full()
+            .flex_grow(1.0)
+            .min_width(0.0)
+    });
+
+    container(
+        stack((tab_scroll, tab_dropdown_btn, tab_dropdown_list))
+            .style(|s| s.flex_row().width_full().height_full().position(floem::style::Position::Relative)),
+    )
+    .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         let bar_bg = if t.is_cosmic() { p.glass_bg } else { p.bg_deep };
