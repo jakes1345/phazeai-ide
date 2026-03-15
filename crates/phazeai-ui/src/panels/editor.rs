@@ -74,8 +74,12 @@ struct SyntaxStyle {
     /// Word highlight ranges as byte offsets into the document.
     highlight_ranges: Vec<(usize, usize)>,
     /// Git gutter lines: (0-based line index, status).
-    /// Status: 0 = added (green), 1 = modified (blue), 2 = deleted indicator (red).
+    /// Status: 0 = added, 1 = modified, 2 = deleted.
     git_lines: Vec<(usize, u8)>,
+    /// Git gutter colors from the active theme palette.
+    git_color_added: floem::peniko::Color,
+    git_color_modified: floem::peniko::Color,
+    git_color_deleted: floem::peniko::Color,
     /// 0-based index of the currently active (cursor) line — receives a subtle background highlight.
     current_line: usize,
     /// Foldable regions: `(start_line, end_line)` pairs detected from braces/brackets.
@@ -148,6 +152,9 @@ impl SyntaxStyle {
             diag_lines: Vec::new(),
             highlight_ranges: Vec::new(),
             git_lines: Vec::new(),
+            git_color_added: floem::peniko::Color::from_rgba8(80, 200, 80, 220),
+            git_color_modified: floem::peniko::Color::from_rgba8(80, 160, 255, 220),
+            git_color_deleted: floem::peniko::Color::from_rgba8(220, 60, 60, 220),
             current_line: 0,
             foldable_ranges: Vec::new(),
             folded_starts: HashSet::new(),
@@ -518,9 +525,9 @@ impl Styling for SyntaxStyle {
                 continue;
             }
             let color = match status {
-                0 => floem::peniko::Color::from_rgba8(80, 200, 80, 220), // added   → green
-                1 => floem::peniko::Color::from_rgba8(80, 160, 255, 220), // modified → blue
-                _ => floem::peniko::Color::from_rgba8(220, 60, 60, 220), // deleted  → red
+                0 => self.git_color_added,
+                1 => self.git_color_modified,
+                _ => self.git_color_deleted,
             };
             let line_h = self.inner.line_height(edid, line) as f64;
             layout_line.extra_style.push(LineExtraStyle {
@@ -1126,6 +1133,7 @@ pub fn editor_panel(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string());
+                let new_idx = std::cell::Cell::new(0usize);
                 tabs.update(|list| {
                     list.push(TabState {
                         path: p.clone(),
@@ -1133,8 +1141,9 @@ pub fn editor_panel(
                         dirty: create_rw_signal(false),
                     });
                     disambiguate_tab_names(list);
-                    active_idx.set(Some(list.len() - 1));
+                    new_idx.set(list.len() - 1);
                 });
+                active_idx.set(Some(new_idx.get()));
             }
         }
     });
@@ -3478,15 +3487,13 @@ pub fn editor_panel(
                 {
                     let doc_apply = doc_fs.clone();
                     create_effect(move |_| {
-                        if let Some((result, sel_start, sel_end)) = fmt_result_sig.get() {
-                            if let Some(text) = result {
-                                doc_apply.edit_single(
-                                    Selection::region(sel_start, sel_end),
-                                    &text,
-                                    EditType::InsertChars,
-                                );
-                                dirty.set(true);
-                            }
+                        if let Some((Some(text), sel_start, sel_end)) = fmt_result_sig.get() {
+                            doc_apply.edit_single(
+                                Selection::region(sel_start, sel_end),
+                                &text,
+                                EditType::InsertChars,
+                            );
+                            dirty.set(true);
                         }
                     });
                 }
@@ -3866,6 +3873,10 @@ pub fn editor_panel(
                     new_style.diag_lines = my_diags;
                     new_style.highlight_ranges = hl_ranges;
                     new_style.git_lines = git_chgs;
+                    let pal = &theme.get().palette;
+                    new_style.git_color_added = pal.git_added.with_alpha(0.86);
+                    new_style.git_color_modified = pal.git_modified.with_alpha(0.86);
+                    new_style.git_color_deleted = pal.git_deleted.with_alpha(0.86);
                     new_style.current_line = cur_line;
                     new_style.foldable_ranges = fold_ranges;
                     new_style.folded_starts = folded;

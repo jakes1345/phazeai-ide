@@ -178,4 +178,32 @@ pub mod ui {
     pub const MINIMAP_WIDTH: f32 = 80.0;
     pub const LINE_HEIGHT_OFFSET: f32 = 4.0;
     pub const MONOSPACE_CHAR_WIDTH_RATIO: f32 = 0.601;
+
+    // Popup/dropdown constraints
+    pub const MAX_DROPDOWN_HEIGHT: f64 = 200.0;
+    pub const MAX_LIST_HEIGHT: f64 = 150.0;
+    pub const MAX_DIFF_HEIGHT: f64 = 400.0;
+    pub const COMPLETION_POPUP_WIDTH: f64 = 420.0;
+    pub const COMPLETION_POPUP_MAX_HEIGHT: f64 = 280.0;
+
+    // Text truncation
+    pub const GIT_CONTENT_TRUNCATE: usize = 60;
+    pub const DIFF_LINE_TRUNCATE: usize = 200;
+
+    // Overlay z-index levels (higher = on top)
+    pub const Z_DRAG_OVERLAY: i32 = 50;
+    pub const Z_COMMAND_PALETTE: i32 = 100;
+    pub const Z_FILE_PICKER: i32 = 200;
+    pub const Z_HOVER_TIP: i32 = 250;
+    pub const Z_COMPLETIONS: i32 = 300;
+    pub const Z_CODE_ACTIONS: i32 = 350;
+    pub const Z_SIG_HELP: i32 = 380;
+    pub const Z_INLINE_EDIT: i32 = 400;
+    pub const Z_RENAME: i32 = 420;
+    pub const Z_TOAST: i32 = 450;
+    pub const Z_WS_SYMBOLS: i32 = 460;
+    pub const Z_BRANCH_PICKER: i32 = 470;
+    pub const Z_PEEK_DEF: i32 = 485;
+    pub const Z_VIM_EX: i32 = 490;
+    pub const Z_GOTO: i32 = 495;
 }

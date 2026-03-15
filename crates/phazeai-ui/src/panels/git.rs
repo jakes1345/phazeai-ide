@@ -10,7 +10,7 @@ use floem::{
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
 use crate::{
     app::IdeState,
@@ -47,13 +47,13 @@ impl GitFileEntry {
         }
     }
 
-    fn badge_color(&self) -> floem::peniko::Color {
+    fn badge_color(&self, p: &crate::theme::PhazePalette) -> floem::peniko::Color {
         match self.status {
-            GitFileStatus::Modified => floem::peniko::Color::from_rgb8(255, 200, 60),
-            GitFileStatus::Added => floem::peniko::Color::from_rgb8(72, 230, 150),
-            GitFileStatus::Deleted => floem::peniko::Color::from_rgb8(255, 80, 100),
-            GitFileStatus::Untracked => floem::peniko::Color::from_rgb8(140, 160, 235),
-            GitFileStatus::Renamed => floem::peniko::Color::from_rgb8(255, 160, 60),
+            GitFileStatus::Modified => p.git_modified,
+            GitFileStatus::Added => p.git_added,
+            GitFileStatus::Deleted => p.git_deleted,
+            GitFileStatus::Untracked => p.git_untracked,
+            GitFileStatus::Renamed => p.warning,
         }
     }
 }
@@ -868,7 +868,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 let current_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
                 if current_mtime != last_mtime {
                     last_mtime = current_mtime;
-                    let _ = refresh_tx.try_send(());
+                    if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = refresh_tx.try_send(()) {
+                        break;
+                    }
                 }
             }
         });
@@ -1549,7 +1551,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let del_btn = container(label(|| "×").style(move |s| {
                 let t = theme.get();
                 s.font_size(12.0).color(if del_hov.get() {
-                    floem::peniko::Color::from_rgb8(255, 85, 85)
+                    t.palette.error
                 } else {
                     t.palette.text_muted
                 })
@@ -1629,7 +1631,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let branch_dropdown = container(
         scroll(stack((new_branch_btn, branch_list)).style(|s| s.flex_col().width_full()))
-            .style(|s| s.max_height(200.0).width_full()),
+            .style(|s| s.max_height(ui_const::MAX_DROPDOWN_HEIGHT).width_full()),
     )
     .style(move |s| {
         let t = theme.get();
@@ -2325,7 +2327,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     .style(|s: floem::style::Style| s.flex_col().width_full());
 
     let history_scroll = scroll(commit_rows).style(move |s| {
-        s.max_height(200.0)
+        s.max_height(ui_const::MAX_DROPDOWN_HEIGHT)
             .width_full()
             .apply_if(!history_expanded.get(), |s| {
                 s.display(floem::style::Display::None)
@@ -2472,8 +2474,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let hash = entry.hash.clone();
             let author = entry.author.clone();
             let date = entry.date.clone();
-            let content = if entry.content.len() > 60 {
-                format!("{}…", &entry.content[..60])
+            let content = if entry.content.len() > ui_const::GIT_CONTENT_TRUNCATE {
+                format!("{}…", &entry.content[..ui_const::GIT_CONTENT_TRUNCATE])
             } else {
                 entry.content.clone()
             };
@@ -2540,7 +2542,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     .style(|s: floem::style::Style| s.flex_col().width_full());
 
     let blame_scroll = scroll(blame_rows).style(move |s| {
-        s.max_height(250.0)
+        s.max_height(ui_const::MAX_DROPDOWN_HEIGHT)
             .width_full()
             .apply_if(!blame_expanded.get(), |s| {
                 s.display(floem::style::Display::None)
@@ -2726,8 +2728,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let root_drop = state_stash_drop.workspace_root;
             let stash_apply_tx = stash_apply_tx.clone();
             let stash_drop_tx = stash_drop_tx.clone();
-            let display_text = if label_text.len() > 60 {
-                format!("{}…", &label_text[..60])
+            let display_text = if label_text.len() > ui_const::GIT_CONTENT_TRUNCATE {
+                format!("{}…", &label_text[..ui_const::GIT_CONTENT_TRUNCATE])
             } else {
                 label_text.clone()
             };
@@ -2770,11 +2772,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             let drop_btn = container(label(|| "Drop").style(move |s| {
                 let t = theme.get();
-                s.font_size(10.0).color(if drop_hov.get() {
-                    floem::peniko::Color::from_rgb8(255, 100, 100)
-                } else {
-                    t.palette.error
-                })
+                s.font_size(10.0).color(t.palette.error)
             }))
             .style(move |s| {
                 let t = theme.get();
@@ -2845,7 +2843,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let stash_list_scroll =
         scroll(stack((stash_entries, stash_status_label)).style(|s| s.flex_col().width_full()))
             .style(move |s| {
-                s.max_height(150.0)
+                s.max_height(ui_const::MAX_LIST_HEIGHT)
                     .width_full()
                     .apply_if(!stash_list_expanded.get(), |s| {
                         s.display(floem::style::Display::None)
@@ -2945,7 +2943,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(4.0)
                     .width_full()
             }),
-            scroll(merge_branch_rows).style(|s| s.max_height(150.0).width_full()),
+            scroll(merge_branch_rows).style(|s| s.max_height(ui_const::MAX_LIST_HEIGHT).width_full()),
             merge_status_label,
         ))
         .style(|s| s.flex_col().width_full()),
@@ -3374,7 +3372,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         s.font_size(9.0)
             .font_weight(floem::text::Weight::BOLD)
             .color(if diff_clear_hov.get() {
-                floem::peniko::Color::from_rgb8(255, 80, 100)
+                t.palette.error
             } else {
                 t.palette.text_muted
             })
@@ -3389,7 +3387,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .cursor(floem::style::CursorStyle::Pointer)
             .border(1.0)
             .border_color(if diff_clear_hov.get() {
-                floem::peniko::Color::from_rgb8(255, 80, 100)
+                p.error
             } else {
                 p.border
             })
@@ -3523,8 +3521,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let kind = dl.kind;
             let revert_hunk_tx = revert_hunk_tx.clone();
 
-            let text_display = if dl.text.len() > 200 {
-                format!("{}…", &dl.text[..200])
+            let text_display = if dl.text.len() > ui_const::DIFF_LINE_TRUNCATE {
+                format!("{}…", &dl.text[..ui_const::DIFF_LINE_TRUNCATE])
             } else {
                 dl.text.clone()
             };
@@ -3533,9 +3531,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 let t = theme.get();
                 let p = &t.palette;
                 let col = match kind {
-                    '+' => floem::peniko::Color::from_rgb8(72, 230, 150),
-                    '-' => floem::peniko::Color::from_rgb8(255, 80, 100),
-                    '@' => floem::peniko::Color::from_rgb8(140, 160, 235),
+                    '+' => p.git_added,
+                    '-' => p.git_deleted,
+                    '@' => p.info,
                     'd' => p.text_muted,
                     _ => p.text_primary,
                 };
@@ -3556,7 +3554,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 s.font_size(9.0)
                     .font_weight(floem::text::Weight::BOLD)
                     .color(if revert_hov.get() {
-                        floem::peniko::Color::from_rgb8(255, 80, 100)
+                        t.palette.error
                     } else {
                         t.palette.text_muted
                     })
@@ -3571,7 +3569,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .cursor(floem::style::CursorStyle::Pointer)
                     .border(1.0)
                     .border_color(if revert_hov.get() {
-                        floem::peniko::Color::from_rgb8(255, 80, 100)
+                        p.error
                     } else {
                         p.border
                     })
@@ -3637,7 +3635,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         stack((diff_rows, diff_empty_msg)).style(|s| s.flex_col().width_full()),
     )
     .style(move |s| {
-        s.max_height(400.0)
+        s.max_height(ui_const::MAX_DIFF_HEIGHT)
             .width_full()
             .apply_if(!diff_expanded.get(), |s| {
                 s.display(floem::style::Display::None)
@@ -3875,7 +3873,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     let log_scroll = scroll(stack((log_rows, log_empty_msg)).style(|s| s.flex_col().width_full()))
         .style(move |s| {
-            s.max_height(400.0)
+            s.max_height(ui_const::MAX_DIFF_HEIGHT)
                 .width_full()
                 .apply_if(!log_expanded.get(), |s| {
                     s.display(floem::style::Display::None)
@@ -3900,12 +3898,24 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     )
     .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
 
+    let loading_indicator = label(move || "  Loading...".to_string()).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0)
+            .color(p.text_muted)
+            .padding_horiz(12.0)
+            .padding_vert(4.0)
+            .width_full()
+            .apply_if(!is_loading.get(), |s| s.display(floem::style::Display::None))
+    });
+
     stack((
         header,
         branch_dropdown,
         new_branch_overlay,
         commit_area,
         status_bar_view,
+        loading_indicator,
         body,
     ))
     .style(move |s| {
@@ -4035,7 +4045,7 @@ fn git_section(
             move |entry: GitFileEntry| {
                 let row_hov = create_rw_signal(false);
                 let badge = entry.badge();
-                let badge_col = entry.badge_color();
+                let badge_col = entry.badge_color(&theme.get_untracked().palette);
                 let rel_path = entry.path.clone();
                 let primary_action_tx = primary_action_tx.clone();
                 let discard_action_tx = discard_action_tx.clone();
@@ -4204,5 +4214,28 @@ fn git_section(
     )
     .style(|s: floem::style::Style| s.flex_col().width_full());
 
-    stack((header, rows)).style(|s| s.flex_col().width_full())
+    let empty_label_text = match kind {
+        SectionKind::Staged => "No staged changes",
+        SectionKind::Unstaged => "No unstaged changes",
+        SectionKind::Untracked => "No untracked files",
+    };
+
+    let empty_state = label(move || empty_label_text.to_string()).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let is_empty = match kind {
+            SectionKind::Staged => git_data.get().staged.is_empty(),
+            SectionKind::Unstaged => git_data.get().unstaged.is_empty(),
+            SectionKind::Untracked => git_data.get().untracked.is_empty(),
+        };
+        s.font_size(11.0)
+            .color(p.text_muted)
+            .padding_left(16.0)
+            .padding_vert(4.0)
+            .apply_if(!expanded.get() || !is_empty, |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    stack((header, rows, empty_state)).style(|s| s.flex_col().width_full())
 }

@@ -297,8 +297,13 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                         }
                                         Some(i) => {
                                             let next = i - 1;
-                                            history_idx.set(Some(next));
-                                            query.set(hist[next].clone());
+                                            if next < hist.len() {
+                                                history_idx.set(Some(next));
+                                                query.set(hist[next].clone());
+                                            } else {
+                                                history_idx.set(None);
+                                                query.set(String::new());
+                                            }
                                         }
                                     }
                                 }
@@ -602,6 +607,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             "Searching...".to_string()
         } else if results.get().is_empty() && !query.get().is_empty() {
             "No results found.".to_string()
+        } else if results.get().is_empty() && query.get().is_empty() {
+            "Enter a search query above to find across files.".to_string()
         } else {
             String::new()
         }
@@ -610,12 +617,9 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         s.font_size(12.0)
             .color(theme.get().palette.text_muted)
             .padding(12.0)
-            .apply_if(
-                !is_searching.get()
-                    && (results.get().is_empty() && query.get().is_empty()
-                        || !results.get().is_empty()),
-                |s| s.display(floem::style::Display::None),
-            )
+            .apply_if(!results.get().is_empty() && !is_searching.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
     });
 
     // ── Combine flat + tree into a conditional container ─────────────────────

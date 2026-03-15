@@ -99,6 +99,13 @@ pub struct PhazePalette {
     pub success: Color,
     pub warning: Color,
     pub error: Color,
+    pub info: Color,
+
+    // Git status
+    pub git_added: Color,
+    pub git_modified: Color,
+    pub git_deleted: Color,
+    pub git_untracked: Color,
 
     // Borders
     pub border: Color,
@@ -150,6 +157,12 @@ impl PhazePalette {
             success: Color::from_rgb8(72, 230, 150),
             warning: Color::from_rgb8(255, 200, 60),
             error: Color::from_rgb8(255, 80, 100),
+            info: Color::from_rgb8(104, 184, 255),
+
+            git_added: Color::from_rgb8(72, 230, 150),
+            git_modified: Color::from_rgb8(255, 200, 60),
+            git_deleted: Color::from_rgb8(255, 80, 100),
+            git_untracked: Color::from_rgb8(140, 160, 235),
 
             border: Color::from_rgba8(80, 60, 160, 100),
             border_focus: Color::from_rgba8(120, 90, 255, 200),
@@ -191,6 +204,12 @@ impl PhazePalette {
             success: Color::from_rgb8(78, 201, 140),
             warning: Color::from_rgb8(220, 170, 30),
             error: Color::from_rgb8(244, 71, 71),
+            info: Color::from_rgb8(0, 122, 204),
+
+            git_added: Color::from_rgb8(78, 201, 140),
+            git_modified: Color::from_rgb8(220, 170, 30),
+            git_deleted: Color::from_rgb8(244, 71, 71),
+            git_untracked: Color::from_rgb8(160, 160, 160),
 
             border: Color::from_rgb8(48, 48, 48),
             border_focus: Color::from_rgb8(0, 122, 204),
@@ -232,6 +251,12 @@ impl PhazePalette {
             success: Color::from_rgb8(22, 148, 78),
             warning: Color::from_rgb8(175, 115, 0),
             error: Color::from_rgb8(196, 28, 28),
+            info: Color::from_rgb8(0, 96, 175),
+
+            git_added: Color::from_rgb8(22, 148, 78),
+            git_modified: Color::from_rgb8(175, 115, 0),
+            git_deleted: Color::from_rgb8(196, 28, 28),
+            git_untracked: Color::from_rgb8(140, 140, 158),
 
             border: Color::from_rgb8(210, 210, 222),
             border_focus: Color::from_rgb8(88, 66, 225),
@@ -274,6 +299,12 @@ impl PhazePalette {
             success: Color::from_rgb8(0, 255, 120),
             warning: Color::from_rgb8(255, 240, 0),
             error: Color::from_rgb8(255, 40, 80),
+            info: Color::from_rgb8(0, 200, 255),
+
+            git_added: Color::from_rgb8(0, 255, 120),
+            git_modified: Color::from_rgb8(255, 240, 0),
+            git_deleted: Color::from_rgb8(255, 40, 80),
+            git_untracked: Color::from_rgb8(0, 200, 200),
 
             border: Color::from_rgba8(255, 0, 220, 180),
             border_focus: Color::from_rgba8(255, 240, 0, 220),
@@ -316,6 +347,12 @@ impl PhazePalette {
             success: Color::from_rgb8(114, 240, 170),
             warning: Color::from_rgb8(255, 185, 40),
             error: Color::from_rgb8(255, 60, 100),
+            info: Color::from_rgb8(104, 200, 255),
+
+            git_added: Color::from_rgb8(114, 240, 170),
+            git_modified: Color::from_rgb8(255, 185, 40),
+            git_deleted: Color::from_rgb8(255, 60, 100),
+            git_untracked: Color::from_rgb8(200, 170, 220),
 
             border: Color::from_rgba8(252, 86, 255, 60),
             border_focus: Color::from_rgba8(252, 86, 255, 180),
@@ -358,6 +395,12 @@ impl PhazePalette {
             success: Color::from_rgb8(100, 220, 130),
             warning: Color::from_rgb8(255, 195, 60),
             error: Color::from_rgb8(255, 80, 90),
+            info: Color::from_rgb8(110, 190, 255),
+
+            git_added: Color::from_rgb8(100, 220, 130),
+            git_modified: Color::from_rgb8(255, 195, 60),
+            git_deleted: Color::from_rgb8(255, 80, 90),
+            git_untracked: Color::from_rgb8(155, 158, 200),
 
             border: Color::from_rgba8(100, 80, 200, 120),
             border_focus: Color::from_rgba8(120, 100, 255, 200),
@@ -400,6 +443,12 @@ impl PhazePalette {
             success: Color::from_rgb8(80, 250, 123),
             warning: Color::from_rgb8(255, 184, 108),
             error: Color::from_rgb8(255, 85, 85),
+            info: Color::from_rgb8(139, 233, 253),
+
+            git_added: Color::from_rgb8(80, 250, 123),
+            git_modified: Color::from_rgb8(255, 184, 108),
+            git_deleted: Color::from_rgb8(255, 85, 85),
+            git_untracked: Color::from_rgb8(190, 190, 200),
 
             border: Color::from_rgba8(100, 80, 200, 100),
             border_focus: Color::from_rgba8(189, 147, 249, 200),
@@ -442,6 +491,12 @@ impl PhazePalette {
             success: Color::from_rgb8(115, 218, 162),
             warning: Color::from_rgb8(224, 175, 104),
             error: Color::from_rgb8(247, 118, 142),
+            info: Color::from_rgb8(122, 162, 247),
+
+            git_added: Color::from_rgb8(115, 218, 162),
+            git_modified: Color::from_rgb8(224, 175, 104),
+            git_deleted: Color::from_rgb8(247, 118, 142),
+            git_untracked: Color::from_rgb8(120, 130, 170),
 
             border: Color::from_rgba8(80, 100, 180, 110),
             border_focus: Color::from_rgba8(122, 162, 247, 200),
@@ -484,6 +539,12 @@ impl PhazePalette {
             success: Color::from_rgb8(166, 226, 46),
             warning: Color::from_rgb8(253, 151, 31),
             error: Color::from_rgb8(249, 38, 114),
+            info: Color::from_rgb8(102, 217, 239),
+
+            git_added: Color::from_rgb8(166, 226, 46),
+            git_modified: Color::from_rgb8(253, 151, 31),
+            git_deleted: Color::from_rgb8(249, 38, 114),
+            git_untracked: Color::from_rgb8(190, 192, 180),
 
             border: Color::from_rgba8(100, 100, 80, 110),
             border_focus: Color::from_rgba8(166, 226, 46, 200),
@@ -526,6 +587,12 @@ impl PhazePalette {
             success: Color::from_rgb8(163, 190, 140),
             warning: Color::from_rgb8(235, 203, 139),
             error: Color::from_rgb8(191, 97, 106),
+            info: Color::from_rgb8(136, 192, 208),
+
+            git_added: Color::from_rgb8(163, 190, 140),
+            git_modified: Color::from_rgb8(235, 203, 139),
+            git_deleted: Color::from_rgb8(191, 97, 106),
+            git_untracked: Color::from_rgb8(110, 120, 145),
 
             border: Color::from_rgba8(90, 110, 140, 120),
             border_focus: Color::from_rgba8(136, 192, 208, 200),
@@ -568,6 +635,12 @@ impl PhazePalette {
             success: Color::from_rgb8(0, 255, 120),
             warning: Color::from_rgb8(150, 255, 0),
             error: Color::from_rgb8(255, 0, 0),
+            info: Color::from_rgb8(0, 200, 255),
+
+            git_added: Color::from_rgb8(0, 255, 120),
+            git_modified: Color::from_rgb8(150, 255, 0),
+            git_deleted: Color::from_rgb8(255, 0, 0),
+            git_untracked: Color::from_rgb8(0, 110, 28),
 
             border: Color::from_rgba8(0, 255, 65, 90),
             border_focus: Color::from_rgba8(0, 255, 65, 200),
@@ -610,6 +683,12 @@ impl PhazePalette {
             success: Color::from_rgb8(0, 255, 0),
             warning: Color::from_rgb8(220, 220, 0),
             error: Color::from_rgb8(220, 0, 0),
+            info: Color::from_rgb8(0, 200, 200),
+
+            git_added: Color::from_rgb8(0, 255, 0),
+            git_modified: Color::from_rgb8(220, 220, 0),
+            git_deleted: Color::from_rgb8(220, 0, 0),
+            git_untracked: Color::from_rgb8(0, 100, 0),
 
             border: Color::from_rgba8(0, 180, 0, 90),
             border_focus: Color::from_rgba8(0, 255, 0, 200),

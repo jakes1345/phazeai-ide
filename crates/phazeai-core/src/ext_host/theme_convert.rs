@@ -144,7 +144,11 @@ pub fn extract_syntax_colors(token_colors: &[TokenColorRule]) -> HashMap<String,
 ///
 /// Returns `None` if the string is not a recognised hex color format.
 pub fn parse_hex_color(hex: &str) -> Option<RgbaColor> {
-    let hex = hex.trim().trim_start_matches('#');
+    let trimmed = hex.trim();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let hex = &trimmed[1..];
     match hex.len() {
         3 => {
             // #RGB → expand each nibble to a byte (multiply by 17 = 0x11)

@@ -471,10 +471,7 @@ impl ExtensionManager {
             .iter()
             .find(|p| p.manifest.name == name)
             .ok_or_else(|| format!("No plugin named '{}' to reload", name))
-            .and_then(|_| {
-                // Re-derive from plugin_dir/<name>
-                Ok(self.plugin_dir.join(name))
-            })?;
+            .map(|_| self.plugin_dir.join(name))?;
 
         self.unload_plugin(name);
         self.load_plugin(&dir, host)

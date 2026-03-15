@@ -330,7 +330,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     "Stop",
                     ButtonVariant::Secondary,
                     theme,
-                    move || stop_action(),
+                    stop_action,
                 ),
             ))
             .style(|s| s.gap(8.0).margin_top(8.0)),
@@ -389,9 +389,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         EventKind::Thinking => p.text_muted,
                         EventKind::Text => p.text_primary,
                         EventKind::ToolStart => p.accent,
-                        EventKind::ToolResult => floem::peniko::Color::from_rgb8(100, 200, 120),
-                        EventKind::Done => floem::peniko::Color::from_rgb8(100, 200, 120),
-                        EventKind::Error => floem::peniko::Color::from_rgb8(255, 100, 100),
+                        EventKind::ToolResult => p.success,
+                        EventKind::Done => p.success,
+                        EventKind::Error => p.error,
                         EventKind::Diff => p.text_secondary,
                     };
                     s.width_full()
@@ -405,7 +405,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         )
         .style(|s| s.flex_col().width_full()),
     )
-    .style(|s| s.width_full().flex_grow(1.0).min_height(100.0));
+    .style(|s| s.width_full().flex_grow(1.0).min_height(0.0));
 
     // Agent response text
     let response_view = container(
@@ -427,7 +427,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     .font_family("monospace".to_string())
             }),
         )
-        .style(|s| s.width_full().max_height(200.0)),
+        .style(|s| s.width_full().max_height(phazeai_core::constants::ui::MAX_DROPDOWN_HEIGHT)),
     )
     .style(move |s| {
         let p = theme.get().palette;
@@ -522,7 +522,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     .style(move |s| {
         let has_diffs = !diff_cards.get().is_empty();
         s.width_full()
-            .max_height(300.0)
+            .max_height(phazeai_core::constants::ui::MAX_DIFF_HEIGHT)
             .apply_if(!has_diffs, |s| s.display(floem::style::Display::None))
     });
 
@@ -585,11 +585,9 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
                 .unwrap_or("unknown")
                 .to_string();
             current_diff = String::new();
-        } else {
-            if !current_file.is_empty() {
-                current_diff.push_str(line);
-                current_diff.push('\n');
-            }
+        } else if !current_file.is_empty() {
+            current_diff.push_str(line);
+            current_diff.push('\n');
         }
     }
 

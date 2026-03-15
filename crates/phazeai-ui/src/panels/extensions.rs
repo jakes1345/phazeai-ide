@@ -185,6 +185,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                     .font_size(11.0)
                     .margin_bottom(8.0)
                     .padding(4.0)
+                    .width_full()
             }),
             dyn_stack(
                 move || state.extensions.get(),
@@ -244,13 +245,11 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
             ))
             .style(|s| s.gap(8.0).width_full()),
             h_stack((
-                phaze_button("Plugins Dir", ButtonVariant::Secondary, theme, {
-                    let open = open_plugins_dir.clone();
-                    move || open(())
+                phaze_button("Plugins Dir", ButtonVariant::Secondary, theme, move || {
+                    open_plugins_dir(())
                 }),
-                phaze_button("Extensions Dir", ButtonVariant::Secondary, theme, {
-                    let open = open_extensions_dir.clone();
-                    move || open(())
+                phaze_button("Extensions Dir", ButtonVariant::Secondary, theme, move || {
+                    open_extensions_dir(())
                 }),
             ))
             .style(|s| s.gap(8.0).width_full().margin_top(4.0)),

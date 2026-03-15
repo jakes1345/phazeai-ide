@@ -243,7 +243,10 @@ pub fn explorer_panel(
                     let _ = ev_rx.recv_timeout(std::time::Duration::from_millis(50));
                 }
                 // try_send: skip if the previous refresh hasn't been consumed yet.
-                let _ = refresh_tx.try_send(());
+                // Break on disconnect so thread doesn't leak.
+                if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = refresh_tx.try_send(()) {
+                    break;
+                }
             }
         });
     }

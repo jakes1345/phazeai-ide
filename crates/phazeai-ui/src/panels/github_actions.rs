@@ -314,7 +314,10 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         let owner_repo_timer = Arc::clone(&owner_repo);
         let tx = fetch_tx.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            // Sleep in 1s intervals so we can detect channel disconnect quickly
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
             let pair = owner_repo_timer.lock().ok().and_then(|g| g.clone());
             let Some((owner, repo)) = pair else { continue };
             let token = get_gh_token();
@@ -327,7 +330,9 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                 Ok(v) => Ok(parse_runs(&v)),
                 Err(e) => Err(e),
             };
-            let _ = tx.try_send((label, result));
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = tx.try_send((label, result)) {
+                break;
+            }
         });
     }
 

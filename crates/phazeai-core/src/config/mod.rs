@@ -64,12 +64,35 @@ pub struct ProviderEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EditorSettings {
     pub theme: String,
     pub font_size: f32,
     pub tab_size: u32,
     pub show_line_numbers: bool,
     pub auto_save: bool,
+    pub word_wrap: bool,
+    pub relative_line_numbers: bool,
+    pub inlay_hints: bool,
+    pub code_lens: bool,
+    pub organize_imports_on_save: bool,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            theme: defaults::THEME.to_string(),
+            font_size: defaults::FONT_SIZE,
+            tab_size: defaults::TAB_SIZE,
+            show_line_numbers: true,
+            auto_save: true,
+            word_wrap: false,
+            relative_line_numbers: false,
+            inlay_hints: true,
+            code_lens: true,
+            organize_imports_on_save: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,13 +112,7 @@ impl Default for Settings {
                 base_url: None,
                 max_tokens: defaults::MAX_TOKENS,
             },
-            editor: EditorSettings {
-                theme: defaults::THEME.to_string(),
-                font_size: defaults::FONT_SIZE,
-                tab_size: defaults::TAB_SIZE,
-                show_line_numbers: true,
-                auto_save: true,
-            },
+            editor: EditorSettings::default(),
             sidecar: SidecarSettings {
                 enabled: true,
                 python_path: defaults::PYTHON_PATH.to_string(),

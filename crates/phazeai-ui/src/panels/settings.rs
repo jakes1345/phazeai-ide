@@ -1,11 +1,11 @@
 use floem::{
-    reactive::{create_effect, SignalGet, SignalUpdate},
+    reactive::{SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
 
 use crate::{
-    app::{save_settings, IdeState},
+    app::IdeState,
     components::icon::{icons, phaze_icon},
     theme::{PhazeTheme, ThemeVariant},
 };
@@ -574,17 +574,6 @@ fn keybindings_section(state: IdeState) -> impl IntoView {
 /// persisted to disk via reactive effects wired in IdeState::new().
 pub fn settings_panel(state: IdeState) -> impl IntoView {
     let theme = state.theme;
-    let font_size = state.font_size;
-    let tab_size = state.tab_size;
-
-    // Wire a local save effect so that changes made in the settings panel
-    // (theme tiles, steppers) are flushed to disk immediately.
-    create_effect(move |_| {
-        let theme_name = theme.get().variant.name().to_string();
-        let fs = font_size.get();
-        let ts = tab_size.get();
-        save_settings(&theme_name, fs, ts);
-    });
 
     // Panel header
     let header = container(

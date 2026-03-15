@@ -2,31 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use phazeai_core::ext_host::IdeDelegate;
-
-#[allow(dead_code)]
-struct UiIdeDelegate {
-    toast_tx: std::sync::mpsc::SyncSender<String>,
-    active_text: Arc<std::sync::Mutex<String>>,
-}
-
-impl IdeDelegate for UiIdeDelegate {
-    fn log(&self, msg: &str) {
-        println!("[EXT LOG] {}", msg);
-    }
-
-    fn show_message(&self, msg: &str) {
-        let _ = self.toast_tx.send(msg.to_string());
-    }
-
-    fn get_active_text(&self) -> String {
-        if let Ok(text) = self.active_text.lock() {
-            text.clone()
-        } else {
-            String::new()
-        }
-    }
-}
 use floem::{
     action::show_context_menu,
     event::{Event, EventListener},
@@ -40,6 +15,7 @@ use floem::{
     Application, IntoView, Renderer,
 };
 use phazeai_core::config::LlmProvider;
+use phazeai_core::constants::ui as ui_const;
 use phazeai_core::{Agent, AgentEvent, Settings};
 use phazeai_sidecar::{SidecarClient, SidecarManager};
 
@@ -555,16 +531,12 @@ fn provider_name_to_llm_provider(name: &str) -> LlmProvider {
     }
 }
 
-/// Save editor/theme settings to `~/.config/phazeai/config.toml`.
-pub fn save_settings(theme_name: &str, font_size: u32, tab_size: u32) {
-    let Some(dir) = dirs_next_config() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let content = format!(
-        "[editor]\ntheme = \"{theme_name}\"\nfont_size = {font_size}\ntab_size = {tab_size}\n"
-    );
-    let _ = std::fs::write(dir.join("config.toml"), content);
+/// Save a single editor setting by loading the full Settings, mutating, and writing back.
+/// This preserves all other settings (LLM, sidecar, providers, etc.).
+pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::EditorSettings)) {
+    let mut settings = Settings::load();
+    mutate(&mut settings.editor);
+    let _ = settings.save();
 }
 
 /// Show a toast notification that auto-dismisses after 3 seconds.
@@ -583,29 +555,9 @@ pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
     });
 }
 
-/// Load editor config from `~/.config/phazeai/config.toml`.
-/// Returns `(font_size, tab_size)` with defaults of (14, 4) if missing.
-fn load_editor_config() -> (u32, u32) {
-    let Some(dir) = dirs_next_config() else {
-        return (14, 4);
-    };
-    let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) else {
-        return (14, 4);
-    };
-    let mut font_size = 14u32;
-    let mut tab_size = 4u32;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("font_size = ") {
-            if let Ok(v) = rest.trim().parse::<u32>() {
-                font_size = v;
-            }
-        } else if let Some(rest) = line.strip_prefix("tab_size = ") {
-            if let Ok(v) = rest.trim().parse::<u32>() {
-                tab_size = v;
-            }
-        }
-    }
-    (font_size, tab_size)
+/// Load editor config from Settings (reads `~/.config/phazeai/config.toml` via toml crate).
+fn load_editor_settings() -> phazeai_core::config::EditorSettings {
+    Settings::load().editor
 }
 
 impl IdeState {
@@ -669,8 +621,8 @@ impl IdeState {
         // Restore last session.
         let session = session_load();
 
-        // Load editor config (font_size, tab_size) from ~/.config/phazeai/config.toml.
-        let (saved_font_size, saved_tab_size) = load_editor_config();
+        // Load editor config from ~/.config/phazeai/config.toml via toml crate.
+        let editor_cfg = load_editor_settings();
 
         let open_file: RwSignal<Option<PathBuf>> = create_rw_signal(session.open_file.clone());
         let open_tabs_sig: RwSignal<Vec<PathBuf>> = create_rw_signal(Vec::new());
@@ -840,8 +792,14 @@ impl IdeState {
 
         // Create persistent settings signals before Self so we can wire save effects.
         let theme_signal = create_rw_signal(PhazeTheme::from_name(&session.theme));
-        let font_size_signal = create_rw_signal(saved_font_size);
-        let tab_size_signal = create_rw_signal(saved_tab_size);
+        let font_size_signal = create_rw_signal(editor_cfg.font_size as u32);
+        let tab_size_signal = create_rw_signal(editor_cfg.tab_size);
+        let auto_save_signal = create_rw_signal(editor_cfg.auto_save);
+        let word_wrap_signal = create_rw_signal(editor_cfg.word_wrap);
+        let relative_line_numbers_signal = create_rw_signal(editor_cfg.relative_line_numbers);
+        let inlay_hints_toggle_signal = create_rw_signal(editor_cfg.inlay_hints);
+        let code_lens_visible_signal = create_rw_signal(editor_cfg.code_lens);
+        let organize_imports_signal = create_rw_signal(editor_cfg.organize_imports_on_save);
 
         // Whenever theme, font_size, or tab_size changes, persist to config.toml.
         // Done in a background thread to avoid blocking the UI.
@@ -849,8 +807,24 @@ impl IdeState {
             let theme_name = theme_signal.get().variant.name().to_string();
             let fs = font_size_signal.get();
             let ts = tab_size_signal.get();
+            let auto_save = auto_save_signal.get();
+            let word_wrap = word_wrap_signal.get();
+            let rel_nums = relative_line_numbers_signal.get();
+            let inlay = inlay_hints_toggle_signal.get();
+            let code_lens = code_lens_visible_signal.get();
+            let organize = organize_imports_signal.get();
             std::thread::spawn(move || {
-                save_settings(&theme_name, fs, ts);
+                save_editor_settings(|e| {
+                    e.theme = theme_name;
+                    e.font_size = fs as f32;
+                    e.tab_size = ts;
+                    e.auto_save = auto_save;
+                    e.word_wrap = word_wrap;
+                    e.relative_line_numbers = rel_nums;
+                    e.inlay_hints = inlay;
+                    e.code_lens = code_lens;
+                    e.organize_imports_on_save = organize;
+                });
             });
         });
 
@@ -1048,8 +1022,8 @@ impl IdeState {
             workspace_symbols,
             branch_picker_open: create_rw_signal(false),
             branch_list: create_rw_signal(Vec::new()),
-            auto_save: create_rw_signal(false),
-            word_wrap: create_rw_signal(false),
+            auto_save: auto_save_signal,
+            word_wrap: word_wrap_signal,
             ctrl_d_nonce: create_rw_signal(0u64),
             fold_nonce: create_rw_signal(0u64),
             unfold_nonce: create_rw_signal(0u64),
@@ -1081,7 +1055,7 @@ impl IdeState {
             split_down_file: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             split_down_cursor: create_rw_signal(None),
-            relative_line_numbers: create_rw_signal(false),
+            relative_line_numbers: relative_line_numbers_signal,
             scratch_counter: create_rw_signal(0u32),
             scratch_paths: create_rw_signal(Vec::new()),
             yank_ring: create_rw_signal(Vec::new()),
@@ -1095,15 +1069,15 @@ impl IdeState {
             peek_def_open: peek_def_open_sig,
             code_lens,
             folding_ranges,
-            organize_imports_on_save: create_rw_signal(false),
+            organize_imports_on_save: organize_imports_signal,
             run_in_terminal_text: create_rw_signal(None),
             transform_title_nonce: create_rw_signal(0u64),
             format_selection_nonce: create_rw_signal(0u64),
             save_no_format_nonce: create_rw_signal(0u64),
             fold_all_nonce: create_rw_signal(0u64),
             unfold_all_nonce: create_rw_signal(0u64),
-            code_lens_visible: create_rw_signal(true),
-            inlay_hints_toggle: create_rw_signal(true),
+            code_lens_visible: code_lens_visible_signal,
+            inlay_hints_toggle: inlay_hints_toggle_signal,
             inlay_hints_sig: inlay_hints_lsp,
             sidecar_ready: sidecar_ready_sig,
             sidecar_results: sidecar_results_sig,
@@ -1543,7 +1517,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
                     .justify_center()
                     .padding_top(80.0)
                     .background(floem::peniko::Color::from_rgba8(0, 0, 0, 160))
-                    .z_index(200)
+                    .z_index(ui_const::Z_FILE_PICKER)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
         })
@@ -1685,7 +1659,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
                     .items_center()
                     .justify_center()
                     .background(floem::peniko::Color::from_rgba8(0, 0, 0, 180))
-                    .z_index(100)
+                    .z_index(ui_const::Z_COMMAND_PALETTE)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
         })
@@ -3481,7 +3455,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
         })
         .style(|s| s.flex_col().width_full()),
     )
-    .style(|s| s.width_full().max_height(280.0));
+    .style(|s| s.width_full().max_height(ui_const::COMPLETION_POPUP_MAX_HEIGHT));
 
     let header = stack((
         label(|| "Completions").style(move |s| {
@@ -3550,7 +3524,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
             let t = state.theme.get();
             let p = &t.palette;
             s.flex_col()
-                .width(420.0)
+                .width(ui_const::COMPLETION_POPUP_WIDTH)
                 .background(p.bg_panel)
                 .border(1.0)
                 .border_color(p.glass_border)
@@ -3593,7 +3567,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
                 .items_start()
                 .justify_center()
                 .padding_top(120.0)
-                .z_index(300)
+                .z_index(ui_const::Z_COMPLETIONS)
                 .background(floem::peniko::Color::TRANSPARENT)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -3756,7 +3730,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 .items_start()
                 .justify_center()
                 .padding_top(200.0)
-                .z_index(400)
+                .z_index(ui_const::Z_INLINE_EDIT)
                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 160))
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -3807,7 +3781,7 @@ fn hover_tooltip(state: IdeState) -> impl IntoView {
         s.absolute()
             .inset_bottom(60.0)
             .inset_left(320.0)
-            .z_index(250)
+            .z_index(ui_const::Z_HOVER_TIP)
             .apply_if(!shown, |s| s.display(floem::style::Display::None))
     })
 }
@@ -3990,7 +3964,7 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                 .items_start()
                 .justify_center()
                 .padding_top(150.0)
-                .z_index(350)
+                .z_index(ui_const::Z_CODE_ACTIONS)
                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 100))
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -4083,7 +4057,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
                 .inset(0)
                 .items_center()
                 .justify_center()
-                .z_index(420)
+                .z_index(ui_const::Z_RENAME)
                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 130))
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -4139,7 +4113,7 @@ fn sig_help_overlay(state: IdeState) -> impl IntoView {
                 .items_end()
                 .justify_center()
                 .padding_bottom(80.0)
-                .z_index(380)
+                .z_index(ui_const::Z_SIG_HELP)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| sig_help.set(None))
@@ -4163,7 +4137,7 @@ fn toast_overlay(state: IdeState) -> impl IntoView {
         s.absolute()
             .inset_bottom(40.0)
             .inset_left(320.0)
-            .z_index(450)
+            .z_index(ui_const::Z_TOAST)
             .padding_horiz(18.0)
             .padding_vert(10.0)
             .background(p.bg_elevated)
@@ -4331,7 +4305,7 @@ fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
                 .items_start()
                 .justify_center()
                 .padding_top(80.0)
-                .z_index(460)
+                .z_index(ui_const::Z_WS_SYMBOLS)
                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 140))
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -4479,7 +4453,7 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                 .justify_start()
                 .padding_bottom(30.0)
                 .padding_left(8.0)
-                .z_index(470)
+                .z_index(ui_const::Z_BRANCH_PICKER)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -4583,7 +4557,7 @@ fn vim_ex_overlay(state: IdeState) -> impl IntoView {
             .inset_bottom(32.0) // just above status bar
             .inset_left(0)
             .inset_right(0)
-            .z_index(490)
+            .z_index(ui_const::Z_VIM_EX)
             .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
     })
 }
@@ -4664,7 +4638,7 @@ fn goto_overlay(state: IdeState) -> impl IntoView {
                 .items_start()
                 .justify_center()
                 .padding_top(80.0)
-                .z_index(495)
+                .z_index(ui_const::Z_GOTO)
                 .apply_if(!open.get(), |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -4761,7 +4735,7 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
                 .inset(0)
                 .items_center()
                 .justify_center()
-                .z_index(485)
+                .z_index(ui_const::Z_PEEK_DEF)
                 .background(floem::peniko::Color::from_rgba8(0, 0, 0, 120))
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
@@ -5605,7 +5579,7 @@ pub fn launch_phaze_ide() {
                             let active = style_s.panel_drag_active.get();
                             s.absolute()
                                 .inset(0)
-                                .z_index(50)
+                                .z_index(ui_const::Z_DRAG_OVERLAY)
                                 .cursor(floem::style::CursorStyle::ColResize)
                                 .apply_if(!active, |s| s.display(floem::style::Display::None))
                         })
@@ -5630,10 +5604,10 @@ pub fn launch_phaze_ide() {
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((
-                    peek_def_popup, // z_index(485) — peek definition (Alt+F12)
-                    vim_ex_popup,   // z_index(490) — vim ex command bar
-                    goto_popup,     // z_index(495) — goto line/col (Ctrl+G)
-                    drag_overlay,   // z_index(50)  — only shown during resize
+                    peek_def_popup, // Z_PEEK_DEF(485) — peek definition (Alt+F12)
+                    vim_ex_popup,   // Z_VIM_EX(490) — vim ex command bar
+                    goto_popup,     // Z_GOTO(495) — goto line/col (Ctrl+G)
+                    drag_overlay,   // Z_DRAG_OVERLAY(50) — only shown during resize
                 ))
                 .style(|s| {
                     s.absolute()
@@ -5645,17 +5619,17 @@ pub fn launch_phaze_ide() {
                 stack((
                     cosmic_bg_canvas(state.theme),
                     ide_with_menu,
-                    palette,             // z_index(100)
-                    picker,              // z_index(200) — on top of palette
-                    hover_tip,           // z_index(250) — LSP hover doc
-                    completions_popup,   // z_index(300) — above palette/picker
-                    code_actions_popup,  // z_index(350) — code actions / quick-fix
-                    sig_help_popup,      // z_index(380) — signature help tooltip
-                    inline_edit,         // z_index(400) — highest overlay
-                    rename_popup,        // z_index(420) — rename dialog
-                    toast_popup,         // z_index(450) — toast notifications
-                    ws_syms_popup,       // z_index(460) — workspace symbols (Ctrl+T)
-                    branch_picker_popup, // z_index(470) — branch switcher
+                    palette,             // Z_COMMAND_PALETTE(100)
+                    picker,              // Z_FILE_PICKER(200) — on top of palette
+                    hover_tip,           // Z_HOVER_TIP(250) — LSP hover doc
+                    completions_popup,   // Z_COMPLETIONS(300) — above palette/picker
+                    code_actions_popup,  // Z_CODE_ACTIONS(350) — code actions / quick-fix
+                    sig_help_popup,      // Z_SIG_HELP(380) — signature help tooltip
+                    inline_edit,         // Z_INLINE_EDIT(400) — highest overlay
+                    rename_popup,        // Z_RENAME(420) — rename dialog
+                    toast_popup,         // Z_TOAST(450) — toast notifications
+                    ws_syms_popup,       // Z_WS_SYMBOLS(460) — workspace symbols (Ctrl+T)
+                    branch_picker_popup, // Z_BRANCH_PICKER(470) — branch switcher
                     overlays_b,
                 ))
                 .style(move |s| {
