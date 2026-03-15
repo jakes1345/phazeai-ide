@@ -32,6 +32,7 @@ use crate::{
         settings::settings_panel, terminal::terminal_panel,
     },
     theme::{PhazeTheme, ThemeVariant},
+    util::safe_get,
 };
 
 /// Vim normal-mode motions dispatched to the active editor.
@@ -2423,7 +2424,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
                         DiagSeverity::Hint => "💡 ",
                     };
                     let msg = if d.message.len() > 60 {
-                        format!("{}{}…  ", prefix, &d.message[..60])
+                        let end = d.message.floor_char_boundary(60);
+                        format!("{}{}…  ", prefix, &d.message[..end])
                     } else {
                         format!("{}{}  ", prefix, d.message)
                     };
@@ -2453,7 +2455,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
                 .get()
                 .map(|msg| {
                     if msg.len() > 40 {
-                        format!("{}…  ", &msg[..40])
+                        let end = msg.floor_char_boundary(40);
+                        format!("{}…  ", &msg[..end])
                     } else {
                         format!("{msg}  ")
                     }
@@ -2681,8 +2684,7 @@ fn problems_view(state: IdeState) -> impl IntoView {
     let list = scroll(
         dyn_stack(
             move || {
-                diags
-                    .get()
+                safe_get(diags, Vec::new())
                     .into_iter()
                     .filter(|d| match d.severity {
                         DiagSeverity::Error => show_errors.get(),
@@ -2831,7 +2833,7 @@ fn references_view(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || refs.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(refs, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(idx, _)| *idx,
             {
                 let theme = state.theme;
@@ -2923,7 +2925,7 @@ fn output_view(state: IdeState) -> impl IntoView {
     let theme = state.theme;
     scroll(
         dyn_stack(
-            move || log.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(log, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(idx, _)| *idx,
             move |(_, line): (usize, String)| {
                 let line2 = line.clone();
@@ -3043,7 +3045,7 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || symbols.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(symbols, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             {
                 let theme = state.theme;
@@ -3169,7 +3171,7 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
 
     let diff_scroll = scroll(
         dyn_stack(
-            move || diff_lines.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(diff_lines, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             move |(_, (text, kind)): (usize, (String, u8))| {
                 let color = match kind {
@@ -3648,7 +3650,8 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                         let file_ctx = state.open_file.get()
                             .and_then(|p| std::fs::read_to_string(&p).ok())
                             .unwrap_or_default();
-                        let file_ctx = if file_ctx.len() > 4096 { &file_ctx[..4096] } else { &file_ctx };
+                        let end = file_ctx.floor_char_boundary(4096);
+                        let file_ctx = if file_ctx.len() > 4096 { &file_ctx[..end] } else { &file_ctx };
                         let prompt = format!(
                             "Apply the following edit to the code. \
                              Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
@@ -3845,7 +3848,7 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || actions.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(actions, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(idx, _)| *idx,
             {
                 let state2 = state.clone();
@@ -4347,7 +4350,7 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
     let rows =
         scroll(
             dyn_stack(
-                move || branches.get(),
+                move || safe_get(branches, Vec::new()),
                 |b| b.clone(),
                 move |branch| {
                     let b_label = branch.clone();
@@ -4689,7 +4692,7 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
 
     let content = scroll(
         dyn_stack(
-            move || lines.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(lines, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             move |(_, line_text)| {
                 let is_highlight = line_text.starts_with('>');

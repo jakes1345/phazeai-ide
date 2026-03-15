@@ -5,6 +5,7 @@ use floem::{
 };
 
 use crate::theme::PhazeTheme;
+use crate::util::safe_get;
 
 #[derive(Clone)]
 pub struct TabItem {
@@ -37,7 +38,7 @@ pub fn phaze_tabs(
     let items_signal = create_rw_signal(items);
 
     dyn_stack(
-        move || items_signal.get(),
+        move || safe_get(items_signal, Vec::new()),
         |item| item.id.clone(),
         move |item| {
             let item_id = item.id.clone();

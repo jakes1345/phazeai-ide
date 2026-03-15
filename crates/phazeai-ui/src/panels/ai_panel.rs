@@ -14,6 +14,7 @@ use phazeai_core::{Agent, AgentEvent, Settings};
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
+    util::safe_get,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy)]
@@ -182,7 +183,6 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
     let do_send: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
-        let settings = settings.clone();
         move || {
             let text = input_text.get();
             let trimmed = text.trim().to_string();
@@ -190,6 +190,7 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
                 return;
             }
             let current_mode = mode.get();
+            let settings = Settings::load();
             messages.update(|list| {
                 list.push(Msg {
                     role: MsgRole::User,
@@ -206,7 +207,7 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             is_loading.set(true);
             send_message(
                 trimmed,
-                settings.clone(),
+                settings,
                 current_mode,
                 (*update_tx).clone(),
             );
@@ -430,7 +431,7 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
     // ── Messages ──────────────────────────────────────────────────────────────
     let msg_list = dyn_stack(
-        move || messages.get().into_iter().enumerate().collect::<Vec<_>>(),
+        move || safe_get(messages, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
         |(i, _)| *i,
         move |(_, msg)| {
             let is_user = msg.role == MsgRole::User;

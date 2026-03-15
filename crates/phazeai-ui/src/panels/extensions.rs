@@ -1,6 +1,7 @@
 use crate::app::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::components::input::phaze_input;
+use crate::util::safe_get;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
@@ -188,7 +189,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                     .width_full()
             }),
             dyn_stack(
-                move || state.extensions.get(),
+                move || safe_get(state.extensions, Vec::new()),
                 |ext| ext.clone(),
                 move |ext| {
                     let is_vscode = ext.starts_with("[VSCode]");

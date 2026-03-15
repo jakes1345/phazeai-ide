@@ -6,6 +6,7 @@ use floem::{
 };
 
 use crate::app::{IdeState, SearchResult};
+use crate::util::{safe_get, safe_get_memo};
 
 /// The search panel — workspace search + multi-file replace.
 pub fn search_panel(state: IdeState) -> impl IntoView {
@@ -430,7 +431,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let flat_results_view = {
         let state_flat = state.clone();
         dyn_stack(
-            move || results.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(results, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             move |(i, r)| {
                 let path_str = r
@@ -468,7 +469,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                 .on_click_stop(move |_| {
                     selected_idx.set(Some(i));
                     s.open_file.set(Some(path.clone()));
-                    s.goto_line.set(line as u32 + 1);
+                    s.goto_line.set(line as u32);
                 })
             },
         )
@@ -493,7 +494,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             move || {
                 // Flatten: for each file group, emit a header item then each match item.
                 let mut items: Vec<(String, Option<SearchResult>)> = Vec::new();
-                for (path, matches) in grouped_results.get() {
+                for (path, matches) in safe_get_memo(grouped_results, Vec::new()) {
                     let _fname = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())

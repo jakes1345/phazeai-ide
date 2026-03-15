@@ -474,6 +474,20 @@ fn about_section(state: IdeState) -> impl IntoView {
     })
     .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
         is_link_hovered.set(false);
+    })
+    .on_click_stop(move |_| {
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open")
+            .arg("https://github.com/phazeai/ide")
+            .spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .arg("https://github.com/phazeai/ide")
+            .spawn();
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "https://github.com/phazeai/ide"])
+            .spawn();
     });
 
     stack((section_header("ABOUT", state.clone()), icon_row, link))

@@ -1356,13 +1356,13 @@ pub fn editor_panel(
 
             // ── Auto-detect indentation from first 2000 bytes ─────────────
             {
-                let sample = content.as_bytes();
-                let sample_len = sample.len().min(2000);
+                let sample_len = content.len().min(2000);
+                let sample_end = content.floor_char_boundary(sample_len);
                 let mut tab_count = 0usize;
                 let mut space2 = 0usize;
                 let mut space4 = 0usize;
                 let mut space8 = 0usize;
-                for line in content[..sample_len].lines() {
+                for line in content[..sample_end].lines() {
                     if line.starts_with('\t') {
                         tab_count += 1;
                     } else if line.starts_with("        ") {
@@ -1384,8 +1384,9 @@ pub fn editor_panel(
                 } else {
                     0 // no evidence — keep current
                 };
-                let _ = detected;
-                let _ = sample_len;
+                if detected > 0 {
+                    tab_size.set(detected);
+                }
             }
 
             let tab_ext = tab
@@ -1650,7 +1651,7 @@ pub fn editor_panel(
                 });
                 // Trigger effect: re-runs on every save, spawns background detection.
                 create_effect(move |_| {
-                    let _dirty = dirty.get(); // re-runs when file is saved
+                    let _dirty = safe_get(dirty, false); // re-runs when file is saved
                     let rope = doc_for_fold.rope_text();
                     let len = rope.len();
                     let text = if len == 0 || len > 500_000 {
@@ -1734,7 +1735,7 @@ pub fn editor_panel(
                 });
                 // Trigger effect: re-runs on dirty, spawns background detection.
                 create_effect(move |_| {
-                    let _dirty = dirty.get(); // re-runs on every save
+                    let _dirty = safe_get(dirty, false); // re-runs on every save
                     let rope = doc_for_bp.rope_text();
                     let len = rope.len();
                     let text = if len == 0 || len > 300_000 {
@@ -3690,12 +3691,14 @@ pub fn editor_panel(
 
                             // Trim to reasonable context window sizes.
                             let pre = if prefix.len() > 1500 {
-                                prefix[prefix.len() - 1500..].to_string()
+                                let start = prefix.ceil_char_boundary(prefix.len() - 1500);
+                                prefix[start..].to_string()
                             } else {
                                 prefix
                             };
                             let suf = if suffix.len() > 400 {
-                                suffix[..400].to_string()
+                                let end = suffix.floor_char_boundary(400);
+                                suffix[..end].to_string()
                             } else {
                                 suffix
                             };
@@ -3770,7 +3773,7 @@ pub fn editor_panel(
                 });
                 // Trigger effect: re-runs on save, spawns background git diff.
                 create_effect(move |_| {
-                    let _dirty = dirty.get(); // tracked — re-runs on save
+                    let _dirty = safe_get(dirty, false); // tracked — re-runs on save
                     let p = git_path.clone();
                     let tx = git_tx.clone();
                     std::thread::spawn(move || {
@@ -3796,7 +3799,7 @@ pub fn editor_panel(
                 });
                 // Trigger effect: re-runs on save, spawns background git blame.
                 create_effect(move |_| {
-                    let _dirty = dirty.get();
+                    let _dirty = safe_get(dirty, false);
                     let p = blame_path.clone();
                     let tx = blame_tx.clone();
                     std::thread::spawn(move || {

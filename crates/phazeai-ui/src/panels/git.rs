@@ -16,6 +16,7 @@ use crate::{
     app::IdeState,
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
+    util::safe_get,
 };
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -1550,7 +1551,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             let del_btn = container(label(|| "×").style(move |s| {
                 let t = theme.get();
-                s.font_size(12.0).color(if del_hov.get() {
+                s.font_size(12.0).color(if safe_get(del_hov, false) {
                     t.palette.error
                 } else {
                     t.palette.text_muted
@@ -1560,7 +1561,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 s.padding_horiz(6.0)
                     .padding_vert(2.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 let b = bn_del.clone();
@@ -1605,7 +1606,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .width_full()
                     .items_center()
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -1923,7 +1924,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .unwrap_or_default();
 
             let snippet = if full_diff.len() > 8_000 {
-                format!("{}…(truncated)", &full_diff[..8_000])
+                let end = full_diff.floor_char_boundary(8_000);
+                format!("{}…(truncated)", &full_diff[..end])
             } else {
                 full_diff
             };
@@ -2190,7 +2192,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 label(move || {
                     let text = expanded_diff_text.get();
                     if text.len() > 4000 {
-                        format!("{}…", &text[..4000])
+                        let end = text.floor_char_boundary(4000);
+                        format!("{}…", &text[..end])
                     } else {
                         text
                     }
@@ -2220,7 +2223,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let hash_cp = hash.clone();
             let cherry_pick_btn = container(label(|| "🍒").style(move |s| {
                 let t = theme.get();
-                s.font_size(11.0).color(if cp_hov.get() {
+                s.font_size(11.0).color(if safe_get(cp_hov, false) {
                     t.palette.accent_hover
                 } else {
                     t.palette.text_muted
@@ -2233,12 +2236,12 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if cp_hov.get() {
+                    .background(if safe_get(cp_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 let h = hash_cp.clone();
@@ -2292,7 +2295,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                         .padding_vert(3.0)
                         .border_radius(3.0)
                         .cursor(floem::style::CursorStyle::Pointer)
-                        .background(if row_hov.get() {
+                        .background(if safe_get(row_hov, false) {
                             p.bg_elevated
                         } else {
                             floem::peniko::Color::TRANSPARENT
@@ -2518,7 +2521,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(2.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -2736,7 +2739,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             let apply_btn = container(label(|| "Apply").style(move |s| {
                 let t = theme.get();
-                s.font_size(10.0).color(if apply_hov.get() {
+                s.font_size(10.0).color(if safe_get(apply_hov, false) {
                     t.palette.accent_hover
                 } else {
                     t.palette.accent
@@ -2749,12 +2752,12 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if apply_hov.get() {
+                    .background(if safe_get(apply_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 let root = root_apply.get();
@@ -2781,12 +2784,12 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(2.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if drop_hov.get() {
+                    .background(if safe_get(drop_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 let root = root_drop.get();
@@ -2824,7 +2827,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(3.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -2896,7 +2899,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_horiz(14.0)
                     .padding_vert(5.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -3130,7 +3133,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_horiz(14.0)
                     .padding_vert(3.0)
                     .border_radius(3.0)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -3553,7 +3556,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 let t = theme.get();
                 s.font_size(9.0)
                     .font_weight(floem::text::Weight::BOLD)
-                    .color(if revert_hov.get() {
+                    .color(if safe_get(revert_hov, false) {
                         t.palette.error
                     } else {
                         t.palette.text_muted
@@ -3568,12 +3571,12 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .margin_right(4.0)
                     .cursor(floem::style::CursorStyle::Pointer)
                     .border(1.0)
-                    .border_color(if revert_hov.get() {
+                    .border_color(if safe_get(revert_hov, false) {
                         p.error
                     } else {
                         p.border
                     })
-                    .background(if revert_hov.get() {
+                    .background(if safe_get(revert_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -3783,7 +3786,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let full_hash = entry.hash.clone();
 
             let msg_display = if msg.len() > 80 {
-                format!("{}…", &msg[..80])
+                let end = msg.floor_char_boundary(80);
+                format!("{}…", &msg[..end])
             } else {
                 msg.clone()
             };
@@ -3823,7 +3827,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(3.0)
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .background(if row_hov.get() {
+                    .background(if safe_get(row_hov, false) {
                         p.bg_elevated
                     } else {
                         floem::peniko::Color::TRANSPARENT
@@ -4077,7 +4081,7 @@ fn git_section(
                     let p = &t.palette;
                     s.font_size(12.0)
                         .font_weight(floem::text::Weight::BOLD)
-                        .color(if primary_hov.get() {
+                        .color(if safe_get(primary_hov, false) {
                             p.accent_hover
                         } else {
                             p.accent
@@ -4093,7 +4097,7 @@ fn git_section(
                         .justify_center()
                         .cursor(floem::style::CursorStyle::Pointer)
                         .background(p.bg_elevated)
-                        .apply_if(!row_hov.get(), |s| s.display(floem::style::Display::None))
+                        .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
                 })
                 .on_click_stop(move |_| {
                     let path = rel_path1.clone();
@@ -4122,7 +4126,7 @@ fn git_section(
                 let discard_btn = container(label(|| "↩").style(move |s| {
                     let t = theme.get();
                     let p = &t.palette;
-                    s.font_size(12.0).color(if discard_hov.get() {
+                    s.font_size(12.0).color(if safe_get(discard_hov, false) {
                         p.accent_hover
                     } else {
                         p.warning
@@ -4140,7 +4144,7 @@ fn git_section(
                         .background(p.bg_elevated)
                         .margin_left(2.0)
                         // Only show for Unstaged, and only on hover
-                        .apply_if(kind != SectionKind::Unstaged || !row_hov.get(), |s| {
+                        .apply_if(kind != SectionKind::Unstaged || !safe_get(row_hov, false), |s| {
                             s.display(floem::style::Display::None)
                         })
                 })
@@ -4194,7 +4198,7 @@ fn git_section(
                         .padding_vert(3.0)
                         .border_radius(3.0)
                         .cursor(floem::style::CursorStyle::Pointer)
-                        .background(if row_hov.get() {
+                        .background(if safe_get(row_hov, false) {
                             p.bg_elevated
                         } else {
                             floem::peniko::Color::TRANSPARENT

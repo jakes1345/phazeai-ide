@@ -15,6 +15,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
+    util::safe_get,
 };
 
 /// A single visible row in the file tree.
@@ -340,7 +341,7 @@ pub fn explorer_panel(
     let focused_idx: RwSignal<Option<usize>> = create_rw_signal(None);
 
     let tree = dyn_stack(
-        move || entries.get(),
+        move || safe_get(entries, Vec::new()),
         |entry| entry.id(),
         move |entry| {
             let indent = entry.depth as f64 * 16.0;
@@ -855,7 +856,7 @@ pub fn explorer_panel(
 
         // Rows for each open tab
         let oe_rows = dyn_stack(
-            move || open_tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
+            move || safe_get(open_tabs, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
             |(i, _)| *i,
             move |(_, tab_path)| {
                 let filename = tab_path

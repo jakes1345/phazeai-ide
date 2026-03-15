@@ -1,4 +1,5 @@
 use crate::app::IdeState;
+use crate::util::safe_get;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
@@ -465,7 +466,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         s.width_full()
             .padding_horiz(10.0)
             .padding_vert(6.0)
-            .align_items(floem::taffy::AlignItems::Center)
+            .items_center()
             .border_bottom(1.0)
             .border_color(theme.get().palette.border)
     });
@@ -481,7 +482,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     ));
 
     let runs_list = dyn_stack(
-        move || runs.get(),
+        move || safe_get(runs, Vec::new()),
         |run| run.id,
         move |run| {
             let run_id = run.id;
@@ -498,8 +499,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
 
             let jobs_view = dyn_stack(
                 move || {
-                    expanded
-                        .get()
+                    safe_get(expanded, Vec::new())
                         .into_iter()
                         .find(|(id, _)| *id == run_id)
                         .and_then(|(_, jobs)| jobs)
@@ -555,7 +555,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                     s.width_full()
                         .padding_vert(4.0)
                         .padding_horiz(8.0)
-                        .align_items(floem::taffy::AlignItems::Center)
+                        .items_center()
                         .cursor(floem::style::CursorStyle::Pointer)
                 }),
                 jobs_view,

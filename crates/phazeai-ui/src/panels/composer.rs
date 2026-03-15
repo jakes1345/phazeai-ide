@@ -12,6 +12,7 @@ use phazeai_core::tools::{BashTool, ToolRegistry};
 
 use crate::app::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
+use crate::util::safe_get;
 
 // ── Composer Event Types ─────────────────────────────────────────────────────
 
@@ -84,6 +85,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                             kind: EventKind::Thinking,
                             text: format!("Iteration {}", iter),
                         });
+                        if log.len() > 500 {
+                            log.drain(0..log.len() - 500);
+                        }
                     });
                 }
                 ComposerUpdate::TextDelta(text) => {
@@ -371,7 +375,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     let event_log_view = scroll(
         dyn_stack(
             move || {
-                let log = event_log.get();
+                let log = safe_get(event_log, Vec::new());
                 (0..log.len()).collect::<Vec<_>>()
             },
             |idx| *idx,
@@ -442,7 +446,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     let diff_section = scroll(
         dyn_stack(
             move || {
-                let cards = diff_cards.get();
+                let cards = safe_get(diff_cards, Vec::new());
                 (0..cards.len()).collect::<Vec<_>>()
             },
             |idx| *idx,

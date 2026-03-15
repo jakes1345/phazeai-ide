@@ -769,7 +769,8 @@ pub fn start_lsp_bridge(
                                     let _ = progress_tx.try_send(None);
                                 } else if let Some(text) = msg.strip_prefix("__progress__") {
                                     let label = if text.len() > 40 {
-                                        format!("{}…", &text[..40])
+                                        let end = text.floor_char_boundary(40);
+                                        format!("{}…", &text[..end])
                                     } else {
                                         text.to_string()
                                     };

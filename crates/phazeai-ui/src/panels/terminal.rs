@@ -846,7 +846,7 @@ fn single_terminal(
     // ── Output list ───────────────────────────────────────────────────────
     let output_list = dyn_stack(
         move || {
-            let all = lines.get();
+            let all = safe_get(lines, Vec::new());
             let total = all.len();
             let start = total.saturating_sub(MAX_RENDER_LINES);
             all.into_iter().enumerate().skip(start).collect::<Vec<_>>()
@@ -1670,8 +1670,7 @@ pub fn terminal_panel(
     // ── Terminal instances (one per tab, hidden when not active) ──────────
     let instances = dyn_stack(
         move || {
-            tab_data
-                .get()
+            safe_get(tab_data, Vec::new())
                 .into_iter()
                 .map(|(id, _, cs, shell, cwd, pw_sig, pp_sig)| (id, cs, shell, cwd, pw_sig, pp_sig))
                 .collect::<Vec<_>>()

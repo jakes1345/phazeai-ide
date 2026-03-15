@@ -14,6 +14,7 @@ use phazeai_core::{Agent, AgentEvent, Settings};
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
+    util::safe_get,
 };
 
 // ── Chat Types ────────────────────────────────────────────────────────────────
@@ -147,7 +148,8 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
             if let Ok(contents) = std::fs::read_to_string(&file_path) {
                 // Truncate very large files
                 let truncated = if contents.len() > 30_000 {
-                    format!("{}...\n[truncated — {} bytes total]", &contents[..30_000], contents.len())
+                    let end = contents.floor_char_boundary(30_000);
+                    format!("{}...\n[truncated — {} bytes total]", &contents[..end], contents.len())
                 } else {
                     contents
                 };
@@ -340,7 +342,7 @@ pub fn chat_panel(
     // ── Message bubbles ───────────────────────────────────────────────────────
 
     let msg_list = dyn_stack(
-        move || messages.get().into_iter().enumerate().collect::<Vec<_>>(),
+        move || safe_get(messages, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
         |(i, _)| *i,
         move |(_, msg)| {
             let is_user = msg.role == ChatRole::User;
