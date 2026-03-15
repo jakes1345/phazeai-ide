@@ -37,6 +37,7 @@ use floem::{
 };
 
 use crate::lsp_bridge::DiagSeverity;
+use crate::util::safe_get;
 use lazy_static::lazy_static;
 use syntect::{
     highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator, ThemeSet},
@@ -4784,7 +4785,7 @@ fn tab_bar_view(
                         s.font_size(8.0)
                             .color(theme.get().palette.accent)
                             .margin_right(4.0)
-                            .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
+                            .apply_if(!safe_get(dirty, false), |s| s.display(floem::style::Display::None))
                     }),
                     container(label(|| "●")).style(move |s| {
                         let color = diag_color();
@@ -4928,7 +4929,7 @@ fn tab_bar_view(
                             s.font_size(6.0)
                                 .color(theme.get().palette.accent)
                                 .margin_right(6.0)
-                                .apply_if(!dirty.get(), |s| s.display(floem::style::Display::None))
+                                .apply_if(!safe_get(dirty, false), |s| s.display(floem::style::Display::None))
                         }),
                         label(move || name.clone()).style(move |s| {
                             let p = theme.get().palette;

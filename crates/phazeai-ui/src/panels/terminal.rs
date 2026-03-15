@@ -18,6 +18,7 @@ use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySyste
 use vte::{Params, Perform};
 
 use phazeai_core::constants::terminal as term_consts;
+use crate::util::safe_get;
 
 use crate::theme::PhazeTheme;
 
@@ -1304,8 +1305,8 @@ pub fn terminal_panel(
 
                 // Label shown when not renaming (shows cwd basename when available)
                 let title = label(move || {
-                    let name = name_sig.get();
-                    let cwd = cwd_sig.get();
+                    let name = safe_get(name_sig, String::from("Terminal"));
+                    let cwd = safe_get(cwd_sig, String::new());
                     if cwd.is_empty() {
                         name
                     } else {
