@@ -21,7 +21,7 @@ autobenches = false
 description = "PhazeAI fork of ollama-rs with native tool calling support"
 readme = "README.md"
 license-file = "LICENSE.md"
-repository = "https://github.com/pepperoni21/ollama-rs"
+repository = "https://github.com/jakes1345/phazeai-ide"
 
 [package.metadata.docs.rs]
 all-features = true

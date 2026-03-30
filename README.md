@@ -24,58 +24,59 @@ PhazeAI IDE is a next-generation code editor designed from the ground up for AI-
 
 ### Desktop IDE (Recommended)
 ```bash
-# Clone the repository
-git clone https://github.com/phazeai/ide.git
-cd ide
-
-# Build and run (requires Rust 1.70+)
+git clone https://github.com/jakes1345/phazeai-ide.git
+cd phazeai-ide
 cargo run -p phazeai-ui --release
 ```
 
-Binary releases coming soon to crates.io and GitHub Releases.
-
 ### Terminal UI
 ```bash
-# Install from source
 cargo install --path crates/phazeai-cli
-
-# Or from crates.io (coming soon)
-cargo install phazeai-cli
-
-# Run TUI
 phazeai
 ```
+
+Binary releases coming soon to crates.io and GitHub Releases.
 
 ---
 
 ## Features
 
 ### Editor Core
-- **Syntax highlighting** for 25+ languages (Rust, Python, JavaScript, Go, TypeScript, etc.)
-- **Rope-based text buffer** with O(log n) edits and efficient undo/redo
-- **Multi-cursor editing** — Alt+Click to add cursors, Ctrl+D to select next occurrence
-- **Find & Replace** with regex support (Ctrl+H)
-- **LSP integration** — Autocomplete (Ctrl+Space), diagnostics with inline squiggle underlines
-- **Code folding** and bracket matching
-- **File explorer** with git status badges (modified, added, deleted, untracked)
-- **Command palette** (Ctrl+P for file quick-open, Ctrl+G for goto line)
-- **Tab management** with persistent open files and scroll positions
-- **Persistent session** — Remember open tabs, panel layout, scroll positions across restarts
+- **Syntax highlighting** for 25+ languages via syntect
+- **Multi-tab editing** with persistent session across restarts
+- **Multi-cursor editing** — Ctrl+D selects next occurrence, Alt+Click adds cursors
+- **Find & Replace** with regex support (Ctrl+F / Ctrl+H)
+- **Code folding** — Ctrl+Shift+[ / Ctrl+Shift+]
+- **Bracket matching** with auto-close
+- **LSP integration** — Autocomplete (Ctrl+Space), go-to-definition (F12), hover docs (Ctrl+F1)
+- **File explorer** with git status badges
+- **Command palette** (Ctrl+P) and quick file picker (Ctrl+Shift+P)
+- **Vim mode** — Normal/Insert modes, motions h/j/k/l/w/b/0/$, dd, x, o, and more
 
 ### AI Integration
-- **Inline AI edit** (Ctrl+K): Select code, describe what you want, AI rewrites it in place with diff preview
+- **Inline AI edit** (Ctrl+K): Select code, describe what you want, AI rewrites it in place
 - **Streaming chat panel**: Real-time responses from Claude, GPT-4, or local models
-- **Ghost text completions**: Tab to accept AI suggestions (FIM fill-in-the-middle)
+- **Multi-agent pipeline**: Planner → Coder → Reviewer with approval gates
+- **Cancel/retry**: Stop a running AI request, retry from the last message
+- **Conversation persistence**: Chat history saved to disk, survives restarts
+- **Chat modes**: Chat, Ask, Debug, Plan, Edit — each with tailored system prompts
 - **Terminal integration**: Agent runs shell commands, output streams into terminal
-- **Inline diff approval**: Accept/reject AI suggestions per hunk
-- **Agent history**: View previous AI runs and results
+- **Ghost text completions**: Tab to accept AI suggestions (FIM fill-in-the-middle)
 
 ### Terminals & Tools
-- **Terminal emulation**: Full PTY support with 256-color, scrollback buffer
-- **Git panel**: View status, stage/unstage files, commit with editor
-- **Problems panel**: LSP diagnostics with error/warning badges and counts
-- **Search panel**: Workspace search with ripgrep, regex support, replace-in-files
-- **Settings panel**: Theme, font size, AI provider configuration (persisted)
+- **Terminal emulation**: Full PTY with 256-color, multiple tabs, named terminals
+- **Shell profile selection**: bash, zsh, fish — auto-detected
+- **Clipboard integration**: Ctrl+Shift+C/V copy/paste
+- **Hyperlink detection**: Click URLs to open in browser
+- **Working directory tracking**: Auto-detects shell CWD via OSC 7
+- **Git panel**: Status, stage/unstage, discard, commit with message editor
+- **Git gutter decorations**: Green/yellow/red indicators in editor margin
+- **Git blame**: Per-line commit attribution with hover info
+- **Branch operations**: Switch, create, merge, stash via UI
+- **Pull/push**: One-click Git pull and push buttons
+- **Problems panel**: LSP diagnostics with error/warning badges
+- **Search panel**: Workspace search with ripgrep, regex, replace-in-files
+- **Settings panel**: Theme, font size, tab size, AI provider/model — all persisted
 
 ### Built-in Themes
 MidnightBlue, Cyberpunk, Dracula, Tokyo Night, Material, Nord, Catppuccin, Solarized, Gruvbox, Monokai, One Dark, GitHub Light.
@@ -86,7 +87,8 @@ MidnightBlue, Cyberpunk, Dracula, Tokyo Night, Material, Nord, Catppuccin, Solar
 
 | Action | Windows/Linux | macOS |
 |--------|---------------|-------|
-| Open file (Quick open) | Ctrl+P | Cmd+P |
+| Command palette | Ctrl+Shift+P | Cmd+Shift+P |
+| Quick open (file picker) | Ctrl+P | Cmd+P |
 | Find in file | Ctrl+F | Cmd+F |
 | Find and replace | Ctrl+H | Cmd+H |
 | Go to line | Ctrl+G | Cmd+G |
@@ -102,6 +104,7 @@ MidnightBlue, Cyberpunk, Dracula, Tokyo Night, Material, Nord, Catppuccin, Solar
 | Comment line | Ctrl+/ | Cmd+/ |
 | Format document | Shift+Alt+F | Shift+Cmd+F |
 | Go to definition | F12 | F12 |
+| Rename symbol | F2 | F2 |
 
 ---
 
@@ -146,10 +149,6 @@ sudo pacman -S base-devel libxcb xorg-x11-util-macros
 
 ### Build Commands
 ```bash
-# Clone repository
-git clone https://github.com/phazeai/ide.git
-cd ide
-
 # Desktop GUI (Floem-based, GPU-accelerated)
 cargo build -p phazeai-ui --release
 ./target/release/phazeai-ui
@@ -193,13 +192,10 @@ tab_size = 4
 # IDE
 [ide]
 auto_save = true
-show_breadcrumbs = true
-show_minimap = false
 ```
 
 ### Cloud Provider API Keys
 ```bash
-# Set environment variables for cloud providers
 export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 export GROQ_API_KEY="gsk_..."
@@ -218,111 +214,37 @@ crates/
 ├── phazeai-cli/         # Terminal UI (ratatui)
 ├── phazeai-cloud/       # Optional: paid cloud client
 ├── phazeai-sidecar/     # Optional: Python semantic search
-└── ollama-rs/           # Custom fork with streaming support
+├── phazeai-plugin-api/  # Plugin API for native extensions
+├── ollama-rs/           # Custom fork with streaming + chat history
+└── ext-host/wasm-extension/  # WASM plugin host
 ```
 
 All crates are optional except `phazeai-core`. Use what you need.
 
 ---
 
-## Monetization & Pricing
-
-### Free Forever (Self-Hosted)
-- Full IDE with all features
-- CLI with all slash commands
-- Local models (Ollama, LM Studio) with unlimited inference
-- Bring your own OpenAI/Claude/Groq keys
-- No telemetry, no license servers, no data collection
-
-### PhazeAI Cloud ($15/month)
-- Hosted phaze-beast model (fine-tuned for coding)
-- 500,000 tokens/month included
-- Priority queue for faster inference
-- One-click setup (no API keys needed)
-- Same free IDE + CLI available
-
-### Team ($35/seat/month)
-- Everything in Cloud
-- Shared conversation history
-- Agent audit logs
-- Shared workspace context
-- Team Modelfile sharing
-
-### Enterprise (Custom)
-- On-premise deployment
-- SSO/SAML authentication
-- VPC model hosting
-- SLA + dedicated support
-
-**No account required** to use the IDE with local models or your own API keys.
-
----
-
 ## Contributing
 
-PhazeAI is open-source and community-driven. We welcome:
-- Bug reports and feature requests (GitHub Issues)
-- Pull requests (fork → branch → PR)
-- Documentation improvements
-- New provider integrations
-- Translations
-
-**Getting started as a contributor:**
-```bash
-# 1. Fork and clone
-git clone https://github.com/YOUR_USERNAME/ide.git
-cd ide
-
-# 2. Create a feature branch
-git checkout -b feature/my-feature
-
-# 3. Make changes and test
-cargo test --workspace
-cargo fmt --all
-cargo clippy --workspace -- -D warnings
-
-# 4. Commit and push
-git commit -m "Add feature: X"
-git push origin feature/my-feature
-
-# 5. Open a pull request on GitHub
-```
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
+PhazeAI is open-source and community-driven. See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## Roadmap
 
-### Phase 2: Ship (Current - 4-6 weeks)
-- Critical editor features (undo/redo, find & replace, completions)
-- Session persistence (remember open tabs & layout)
-- Terminal improvements (multiple tabs, scrollbar, cursor)
-- Git panel (stage/unstage, inline diff)
-- Panel resizing (drag dividers)
-- Testing infrastructure (snapshot tests, integration tests)
-- Release packaging (AppImage, DMG, MSI, crates.io)
+### Phase 2/3: Ship ✅ (Mostly complete)
+Core editor, LSP, terminal, git panel, AI chat, session persistence, Vim mode, and all major IDE features are implemented. See [TODO.md](./TODO.md) for the full feature checklist.
 
-### Phase 3: Growth
-- Go-to-definition and symbol rename (LSP)
-- Hover popups with type info and documentation
-- Symbol outline panel (tree of functions/structs)
-- Split editor views (Ctrl+\ for side-by-side)
-- Format on save (rustfmt, prettier, black)
-- Zen mode (F11 for distraction-free coding)
-- Breadcrumb navigation
-- Minimap
-
-### Phase 4: Scale (6+ months)
+### Coming Soon
+- Multi-line find in editor
+- Terminal split views
+- Scrollback buffer limit configuration
+- Multi-repo workspace support
+- LSP call hierarchy
+- Semantic token highlighting
 - Real-time collaboration (CRDT sync)
 - Remote SSH development
 - Integrated debugger (DAP)
 - Plugin system (WASM sandbox)
-- Browser-based version (Floem WASM)
-- Voice control (Whisper model)
-- Mobile companion app
-
-See [TODO.md](./TODO.md) for detailed tracking by phase and block.
 
 ---
 
@@ -330,14 +252,14 @@ See [TODO.md](./TODO.md) for detailed tracking by phase and block.
 
 PhazeAI IDE is licensed under the **MIT License**. See [LICENSE](./LICENSE) for details.
 
-All dependencies are either MIT or Apache-2.0 licensed (verified on each release).
+All dependencies are either MIT or Apache-2.0 licensed.
 
 ---
 
 ## FAQ
 
 **Q: Is PhazeAI production-ready?**
-A: We're in active development (Phase 2). The IDE is usable daily for coding, but some advanced features are still coming. CLI is production-ready.
+A: The IDE is usable daily for coding. Phase 2/3 features (core editor, LSP, terminal, AI chat, git) are complete. Advanced features (debugger, collaboration) are planned for Phase 4.
 
 **Q: Can I use my own OpenAI API key?**
 A: Yes. Set `OPENAI_API_KEY` env var and configure the provider in settings.
@@ -351,9 +273,6 @@ A: Rust gives us native performance (3-5x faster startup) without the 400MB memo
 **Q: Can I run PhazeAI offline?**
 A: Yes. Use with Ollama or LM Studio. Cloud tier requires internet for model inference only.
 
-**Q: What about VS Code extensions?**
-A: Not supported yet, but exploring plugin systems for Phase 4.
-
 **Q: How do I report a bug?**
 A: Open a GitHub Issue with reproduction steps. Include `rustc --version`, `cargo --version`, and your OS.
 
@@ -361,13 +280,10 @@ A: Open a GitHub Issue with reproduction steps. Include `rustc --version`, `carg
 
 ## Community
 
-- **Discord**: [Join our server](https://discord.gg/phazeai) for live chat and support
+- **Discord**: [Join our server](https://discord.gg/phazeai)
 - **GitHub Issues**: Bug reports and feature requests
 - **GitHub Discussions**: Ask questions and share ideas
-- **Twitter**: [@phazeai](https://twitter.com/phazeai) for updates
 
 ---
 
 **Built with love by the PhazeAI team and community.**
-
-Have feedback? Open an issue or join our [Discord](https://discord.gg/phazeai).
