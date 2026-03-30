@@ -4095,7 +4095,9 @@ name = "phazeai-cloud"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "dirs",
+ "futures",
  "phazeai-core",
  "reqwest",
  "serde",
@@ -4178,6 +4180,7 @@ dependencies = [
  "libc",
  "lsp-types",
  "notify",
+ "phazeai-cloud",
  "phazeai-core",
  "phazeai-sidecar",
  "portable-pty",
