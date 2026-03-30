@@ -90,6 +90,8 @@ enum ChatUpdate {
     ToolResult { name: String, summary: String },
     /// An error occurred.
     Err(String),
+    /// The user cancelled generation via the Stop button.
+    Cancelled(String),
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -247,7 +249,12 @@ fn send_to_ai(
                             break;
                         }
                         AgentEvent::Error(e) => {
-                            let _ = update_tx.send(ChatUpdate::Err(e));
+                            // Cancellation is a normal user action — don't treat it as an error.
+                            if e == "Cancelled" {
+                                let _ = update_tx.send(ChatUpdate::Cancelled(accumulated.clone()));
+                            } else {
+                                let _ = update_tx.send(ChatUpdate::Err(e));
+                            }
                             break;
                         }
                         _ => {}
@@ -430,23 +437,48 @@ pub fn chat_panel(
                 }
                 ChatUpdate::Err(e) => {
                     messages.update(|list| {
+                        // Remove any in-flight loading assistant message so the
+                        // error bubble appears cleanly (no empty ghost bubble).
+                        if let Some(last) = list.last() {
+                            if last.loading && last.role == ChatRole::Assistant {
+                                list.pop();
+                            }
+                        }
+                        list.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: format!("Error: {}", e),
+                            loading: false,
+                            is_error: true,
+                        });
+                    });
+                    is_loading.set(false);
+                    ai_thinking.set(false);
+                    let msgs = messages.get_untracked();
+                    save_conversation(
+                        &msgs,
+                        &conversation_id.get_untracked(),
+                        &Settings::load().llm.model,
+                        &workspace_root.get_untracked(),
+                    );
+                }
+                ChatUpdate::Cancelled(partial) => {
+                    messages.update(|list| {
+                        // Finalise the loading assistant message (may be empty or partial).
                         if let Some(last) = list.last_mut() {
-                            if last.loading {
-                                last.content = format!("Error: {}", e);
+                            if last.role == ChatRole::Assistant && last.loading {
+                                last.content = if partial.is_empty() {
+                                    "(generation stopped)".to_string()
+                                } else {
+                                    partial
+                                };
                                 last.loading = false;
-                                last.is_error = true;
-                            } else {
-                                list.push(ChatMessage {
-                                    role: ChatRole::Assistant,
-                                    content: format!("Error: {}", e),
-                                    loading: false,
-                                    is_error: true,
-                                });
+                                last.is_error = false;
                             }
                         }
                     });
                     is_loading.set(false);
                     ai_thinking.set(false);
+                    current_cancel_token.set(None);
                     let msgs = messages.get_untracked();
                     save_conversation(
                         &msgs,
@@ -699,10 +731,15 @@ pub fn chat_panel(
             };
             let is_typing = loading && text_content.starts_with('●');
             let is_tool = msg.role == ChatRole::Tool;
-            let show_retry = !is_user && is_last && !is_loading.get();
+            // Error messages always show retry; other AI messages only on the last one.
+            // Use a signal read inside the style closure so it stays reactive.
+            let show_retry_for_error = is_error && !is_user;
+            let show_retry_for_last = !is_user && is_last && !is_tool;
             let do_retry_btn = do_retry.clone();
+            let do_retry_btn2 = do_retry.clone();
 
-            let retry_btn = container(phaze_icon(
+            // Icon-only retry button shown at the trailing edge of normal AI messages.
+            let icon_retry_btn = container(phaze_icon(
                 icons::REFRESH,
                 12.0,
                 move |p| p.text_secondary,
@@ -711,46 +748,84 @@ pub fn chat_panel(
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
+                // Reactive: re-evaluate is_loading every render pass.
+                let should_show = show_retry_for_last && !is_loading.get() && !is_error;
                 s.padding(4.0)
                     .border_radius(4.0)
                     .cursor(floem::style::CursorStyle::Pointer)
                     .hover(|s| s.background(p.bg_elevated))
-                    .apply_if(!show_retry, |s| s.display(floem::style::Display::None))
+                    .apply_if(!should_show, |s| s.display(floem::style::Display::None))
             })
             .on_click_stop(move |_| {
                 (do_retry_btn)();
             });
 
+            // "Retry" text button shown inside error bubbles.
+            let error_retry_btn = container(
+                stack((
+                    phaze_icon(icons::REFRESH, 11.0, move |p| p.error, theme),
+                    label(|| " Retry")
+                        .style(move |s| s.font_size(11.0).color(theme.get().palette.error)),
+                ))
+                .style(|s| s.items_center()),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .border_radius(6.0)
+                    .border(1.0)
+                    .border_color(p.error.with_alpha(0.4))
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .margin_top(8.0)
+                    .hover(|s| s.background(p.error.with_alpha(0.15)))
+                    .apply_if(!show_retry_for_error, |s| {
+                        s.display(floem::style::Display::None)
+                    })
+            })
+            .on_click_stop(move |_| {
+                (do_retry_btn2)();
+            });
+
             container(
                 stack((
+                    // Row: tool-chip + message text + icon retry button (non-error AI messages)
                     stack((
-                        phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
-                            move |s: floem::style::Style| {
-                                s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
-                            },
-                        ),
-                        label(move || text_content.clone()).style(move |s| {
-                            let t = theme.get();
-                            let p = &t.palette;
-                            s.font_size(if is_tool { 11.0 } else { 13.0 })
-                                .color(if is_user {
-                                    p.text_primary
-                                } else if is_error {
-                                    p.error
-                                } else if is_typing || is_tool {
-                                    p.accent
-                                } else {
-                                    p.text_secondary
-                                })
-                                .max_width_pct(100.0)
-                                .line_height(1.5)
-                                .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
-                        }),
+                        stack((
+                            phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
+                                move |s: floem::style::Style| {
+                                    s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
+                                },
+                            ),
+                            label(move || text_content.clone()).style(move |s| {
+                                let t = theme.get();
+                                let p = &t.palette;
+                                s.font_size(if is_tool { 11.0 } else { 13.0 })
+                                    .color(if is_user {
+                                        p.text_primary
+                                    } else if is_error {
+                                        p.error
+                                    } else if is_typing || is_tool {
+                                        p.accent
+                                    } else {
+                                        p.text_secondary
+                                    })
+                                    .max_width_pct(100.0)
+                                    .line_height(1.5)
+                                    .apply_if(is_tool, |s| {
+                                        s.font_weight(floem::text::Weight::MEDIUM)
+                                    })
+                            }),
+                        ))
+                        .style(|s| s.items_center().flex_grow(1.0)),
+                        icon_retry_btn,
                     ))
-                    .style(|s| s.items_center().flex_grow(1.0)),
-                    retry_btn,
+                    .style(|s| s.items_center().justify_between().width_full()),
+                    // Error retry button below the error text (only for error bubbles)
+                    error_retry_btn,
                 ))
-                .style(|s| s.items_center().justify_between().width_full()),
+                .style(|s| s.flex_col().width_full()),
             )
             .style(move |s| {
                 let t = theme.get();
@@ -817,13 +892,23 @@ pub fn chat_panel(
 
     let send_btn = container(
         stack((
+            // Send state: enter arrow
             label(|| "↵").style(move |s| {
                 s.font_size(14.0)
                     .color(theme.get().palette.bg_base)
                     .apply_if(is_loading.get(), |s| s.display(floem::style::Display::None))
             }),
-            phaze_icon(icons::STOP, 14.0, move |p| p.text_primary, theme).style(move |s| {
-                s.apply_if(!is_loading.get(), |s| {
+            // Stop state: stop icon + "Stop" text
+            stack((
+                phaze_icon(icons::STOP, 12.0, move |p| p.text_primary, theme),
+                label(|| " Stop").style(move |s| {
+                    s.font_size(11.0)
+                        .color(theme.get().palette.text_primary)
+                        .font_weight(floem::text::Weight::MEDIUM)
+                }),
+            ))
+            .style(move |s| {
+                s.items_center().apply_if(!is_loading.get(), |s| {
                     s.display(floem::style::Display::None)
                 })
             }),
@@ -834,17 +919,20 @@ pub fn chat_panel(
         let t = theme.get();
         let p = &t.palette;
         let loading = is_loading.get();
-        s.width(32.0)
-            .height(32.0)
+        s.height(32.0)
+            .padding_horiz(if loading { 10.0 } else { 0.0 })
+            .min_width(32.0)
             .background(if loading { p.bg_elevated } else { p.accent })
             .border_radius(8.0)
+            .apply_if(loading, |s| s.border(1.0).border_color(p.glass_border))
             .items_center()
             .justify_center()
             .cursor(floem::style::CursorStyle::Pointer)
             .margin_left(8.0)
-            // Glow on the send button when active
+            // Glow on the send button when not loading
             .apply_if(!loading, |s| {
-                s.box_shadow_blur(10.0)
+                s.width(32.0)
+                    .box_shadow_blur(10.0)
                     .box_shadow_color(p.glow)
                     .box_shadow_spread(0.0)
                     .box_shadow_h_offset(0.0)

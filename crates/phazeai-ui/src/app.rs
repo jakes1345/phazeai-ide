@@ -25,7 +25,7 @@ use crate::lsp_bridge::{
 };
 
 use crate::{
-    commands::{match_global_shortcut, GlobalShortcut},
+    commands::{execute_command, match_global_shortcut},
     components::icon::{icons, phaze_icon},
     panels::{
         chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
@@ -106,7 +106,6 @@ pub enum Tab {
     Explorer,
     Search,
     Git,
-    AI,
     Composer,
     Settings,
     Terminal,
@@ -409,23 +408,63 @@ impl std::fmt::Debug for IdeState {
     }
 }
 
+impl IdeState {
+    /// Build a `GlobalCommandState` snapshot from this `IdeState`.
+    ///
+    /// The returned struct can be passed to `execute_command` in any context
+    /// where `IdeState` is available.  The `on_persist` callback captures the
+    /// current signal values and writes them to `session.toml` via
+    /// `session_update`.
+    pub fn as_global_command_state(&self) -> crate::commands::GlobalCommandState {
+        let show_left = self.show_left_panel;
+        let left_width = self.left_panel_width;
+        let show_bottom = self.show_bottom_panel;
+        let show_right = self.show_right_panel;
+        crate::commands::GlobalCommandState {
+            show_left_panel: self.show_left_panel,
+            left_panel_width: self.left_panel_width,
+            show_bottom_panel: self.show_bottom_panel,
+            show_right_panel: self.show_right_panel,
+            file_picker_open: self.file_picker_open,
+            file_picker_query: self.file_picker_query,
+            command_palette_open: self.command_palette_open,
+            zen_mode: self.zen_mode,
+            split_editor: self.split_editor,
+            primary_open_file: self.open_file,
+            split_open_file: self.split_open_file,
+            status_toast: self.status_toast,
+            // on_persist is a no-op: all signal mutations are observed by the unified
+            // debounced-save effect in IdeState::new(), so no explicit write needed.
+            on_persist: std::rc::Rc::new(move || {
+                // Suppress dead-code warnings for captured signals.
+                let _ = (show_left, left_width, show_bottom, show_right);
+            }),
+        }
+    }
+}
+
 /// Persisted layout state from ~/.config/phazeai/session.toml.
 /// Uses serde + toml for reliable serialization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct SessionState {
-    /// All open tab paths.
+    /// All open tab paths (files that no longer exist are filtered out on load).
     open_tabs: Vec<PathBuf>,
     /// Index of the active (focused) tab, if any.
     active_tab_index: Option<usize>,
     left_panel_width: f64,
+    /// Whether the left panel (explorer) is open.
     show_left_panel: bool,
+    /// Whether the right panel (chat/AI) is open.
     show_right_panel: bool,
+    /// Whether the bottom panel (terminal/output) is open.
     show_bottom_panel: bool,
     split_editor: bool,
     split_editor_down: bool,
     vim_mode: bool,
     theme: String,
+    /// Zen mode — hides all chrome for distraction-free editing.
+    zen_mode: bool,
 }
 
 impl Default for SessionState {
@@ -441,6 +480,7 @@ impl Default for SessionState {
             split_editor_down: false,
             vim_mode: false,
             theme: "Midnight Blue".to_string(),
+            zen_mode: false,
         }
     }
 }
@@ -454,7 +494,9 @@ impl SessionState {
 }
 
 /// Load session from `~/.config/phazeai/session.toml`.
-fn session_load() -> SessionState {
+/// Returns graceful defaults for missing or corrupt files.
+/// Tabs for files that no longer exist on disk are silently dropped.
+fn load_session() -> SessionState {
     let Some(dir) = dirs_next_config() else {
         return SessionState::default();
     };
@@ -462,7 +504,7 @@ fn session_load() -> SessionState {
         return SessionState::default();
     };
     let mut state: SessionState = toml::from_str(&text).unwrap_or_default();
-    // Filter out tabs for files that no longer exist on disk.
+    // Drop tabs for files that no longer exist on disk.
     state.open_tabs.retain(|p| p.exists());
     // Clamp active_tab_index to the surviving tab list.
     if let Some(idx) = state.active_tab_index {
@@ -475,8 +517,9 @@ fn session_load() -> SessionState {
     state
 }
 
-/// Save session to `~/.config/phazeai/session.toml`.
-fn session_save(state: &SessionState) {
+/// Save session to `~/.config/phazeai/session.toml` (synchronous, direct write).
+/// Callers that need debounced writes should use `session_save_debounced` instead.
+fn save_session(state: &SessionState) {
     let Some(dir) = dirs_next_config() else {
         return;
     };
@@ -486,10 +529,58 @@ fn session_save(state: &SessionState) {
     }
 }
 
-fn session_update(mutate: impl FnOnce(&mut SessionState)) {
-    let mut current = session_load();
-    mutate(&mut current);
-    session_save(&current);
+/// Schedule a debounced session save. Cancels any pending save and schedules a new
+/// one 1 second later so that rapid signal changes (e.g. resizing, typing) collapse
+/// into a single disk write.
+///
+/// `gen` is a shared `Arc<AtomicU64>` cancel token: we increment it to cancel the
+/// previous pending write, then check it again after the sleep.
+fn session_save_debounced(gen: std::sync::Arc<std::sync::atomic::AtomicU64>, ss: SessionState) {
+    use std::sync::atomic::Ordering;
+    let ticket = gen.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        // Only write if no newer save has been requested since we started.
+        if gen.load(Ordering::Relaxed) == ticket {
+            save_session(&ss);
+        }
+    });
+}
+
+/// Build a `SessionState` snapshot from the live `IdeState` signals and schedule a
+/// debounced write. Designed to be called from a reactive `create_effect`.
+#[allow(clippy::too_many_arguments)]
+fn session_commit(
+    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    open_tabs: Vec<PathBuf>,
+    active_file: Option<PathBuf>,
+    left_panel_width: f64,
+    show_left_panel: bool,
+    show_right_panel: bool,
+    show_bottom_panel: bool,
+    split_editor: bool,
+    split_editor_down: bool,
+    vim_mode: bool,
+    theme: String,
+    zen_mode: bool,
+) {
+    let active_tab_index = active_file
+        .as_ref()
+        .and_then(|f| open_tabs.iter().position(|t| t == f));
+    let ss = SessionState {
+        open_tabs,
+        active_tab_index,
+        left_panel_width,
+        show_left_panel,
+        show_right_panel,
+        show_bottom_panel,
+        split_editor,
+        split_editor_down,
+        vim_mode,
+        theme,
+        zen_mode,
+    };
+    session_save_debounced(gen, ss);
 }
 
 fn dirs_next_config() -> Option<PathBuf> {
@@ -686,7 +777,7 @@ impl IdeState {
         });
 
         // Restore last session.
-        let session = session_load();
+        let session = load_session();
 
         // Load editor config from ~/.config/phazeai/config.toml via toml crate.
         let editor_cfg = load_editor_settings();
@@ -744,16 +835,15 @@ impl IdeState {
         }
 
         // Wire: whenever the active file changes, send did_open to the LSP server
-        // and persist the session (including all open tabs).
+        // Wire: send LSP did_open when the active file changes.
+        // Session persistence is now handled entirely by the unified debounced effect below.
         {
             let lsp_tx = lsp_cmd.clone();
-            let tabs_for_save = open_tabs_sig;
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    // Read file + send LSP did_open + save session in background
-                    // to avoid blocking the UI thread with synchronous I/O.
+                    // Read file + send LSP did_open in a background thread to avoid
+                    // blocking the UI thread with synchronous I/O.
                     let lsp = lsp_tx.clone();
-                    let all_tabs = tabs_for_save.get_untracked();
                     let p = path.clone();
                     std::thread::spawn(move || {
                         if let Ok(text) = std::fs::read_to_string(&p) {
@@ -762,11 +852,6 @@ impl IdeState {
                                 text,
                             });
                         }
-                        let _current = session_load();
-                        session_update(|s| {
-                            s.open_tabs = all_tabs;
-                            s.active_tab_index = s.open_tabs.iter().position(|t| t == &p);
-                        });
                     });
                 }
             });
@@ -887,15 +972,6 @@ impl IdeState {
                     e.code_lens = code_lens;
                     e.organize_imports_on_save = organize;
                 });
-            });
-        });
-
-        // Also persist theme name to session.toml whenever it changes.
-        create_effect(move |_| {
-            let theme_name = theme_signal.get().variant.name().to_string();
-            std::thread::spawn(move || {
-                let _current = session_load();
-                session_update(|s| s.theme = theme_name);
             });
         });
 
@@ -1184,17 +1260,65 @@ impl IdeState {
             });
         });
 
+        // ── Session-persisted layout signals ─────────────────────────────────
+        // Create these before `Self {}` so the debounced-save effect can capture them.
+        let show_left_panel_sig = create_rw_signal(session.show_left_panel);
+        let show_right_panel_sig = create_rw_signal(session.show_right_panel);
+        let show_bottom_panel_sig = create_rw_signal(session.show_bottom_panel);
+        let split_editor_sig = create_rw_signal(session.split_editor);
+        let split_editor_down_sig = create_rw_signal(session.split_editor_down);
+        let vim_mode_sig = create_rw_signal(session.vim_mode);
+        let zen_mode_sig = create_rw_signal(session.zen_mode);
+        let left_panel_width_sig = create_rw_signal(session.left_panel_width);
+
+        // Debounce cancel token: shared between the effect and spawned threads.
+        let session_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        // Unified debounced session persistence effect.
+        // Subscribes to all session-relevant signals; collapses rapid changes into a
+        // single disk write 1 second after the last change.
+        {
+            let gen = session_gen.clone();
+            create_effect(move |_| {
+                let open_tabs = open_tabs_sig.get();
+                let active_file = open_file.get();
+                let left_panel_width = left_panel_width_sig.get();
+                let show_left_panel = show_left_panel_sig.get();
+                let show_right_panel = show_right_panel_sig.get();
+                let show_bottom_panel = show_bottom_panel_sig.get();
+                let split_editor = split_editor_sig.get();
+                let split_editor_down = split_editor_down_sig.get();
+                let vim_mode = vim_mode_sig.get();
+                let theme = theme_signal.get().variant.name().to_string();
+                let zen_mode = zen_mode_sig.get();
+                session_commit(
+                    gen.clone(),
+                    open_tabs,
+                    active_file,
+                    left_panel_width,
+                    show_left_panel,
+                    show_right_panel,
+                    show_bottom_panel,
+                    split_editor,
+                    split_editor_down,
+                    vim_mode,
+                    theme,
+                    zen_mode,
+                );
+            });
+        }
+
         Self {
             theme: theme_signal,
             left_panel_tab: create_rw_signal(Tab::Explorer),
             bottom_panel_tab: create_rw_signal(Tab::Terminal),
-            show_left_panel: create_rw_signal(session.show_left_panel),
-            show_right_panel: create_rw_signal(session.show_right_panel),
-            show_bottom_panel: create_rw_signal(session.show_bottom_panel),
+            show_left_panel: show_left_panel_sig,
+            show_right_panel: show_right_panel_sig,
+            show_bottom_panel: show_bottom_panel_sig,
             open_file,
             workspace_root: create_rw_signal(workspace),
             ai_thinking: create_rw_signal(false),
-            left_panel_width: create_rw_signal(session.left_panel_width),
+            left_panel_width: left_panel_width_sig,
             git_branch,
             command_palette_open: create_rw_signal(false),
             command_palette_query: create_rw_signal(String::new()),
@@ -1211,12 +1335,12 @@ impl IdeState {
             active_cursor: create_rw_signal(None),
             panel_drag_active: create_rw_signal(false),
             panel_drag_start_x: create_rw_signal(0.0),
-            panel_drag_start_width: create_rw_signal(session.left_panel_width),
+            panel_drag_start_width: left_panel_width_sig,
             pending_completion: create_rw_signal(None::<(String, usize)>),
             inline_edit_open: create_rw_signal(false),
             inline_edit_query: create_rw_signal(String::new()),
             completion_filter_text: create_rw_signal(String::new()),
-            vim_mode: create_rw_signal(session.vim_mode),
+            vim_mode: vim_mode_sig,
             font_size: font_size_signal,
             tab_size: tab_size_signal,
             goto_definition,
@@ -1242,7 +1366,7 @@ impl IdeState {
             sig_help,
             doc_symbols,
             status_toast: status_toast_sig,
-            zen_mode: create_rw_signal(false),
+            zen_mode: zen_mode_sig,
             line_ending: line_ending_sig,
             ws_syms_open: create_rw_signal(false),
             ws_syms_query: create_rw_signal(String::new()),
@@ -1259,7 +1383,7 @@ impl IdeState {
             duplicate_line_nonce: create_rw_signal(0u64),
             delete_line_nonce: create_rw_signal(0u64),
             active_blame: create_rw_signal(String::new()),
-            split_editor: create_rw_signal(false),
+            split_editor: split_editor_sig,
             split_open_file: create_rw_signal(None),
             split_open_tabs: create_rw_signal(Vec::new()),
             split_active_cursor: create_rw_signal(None),
@@ -1278,7 +1402,7 @@ impl IdeState {
             vim_ex_input: create_rw_signal(String::new()),
             expand_selection_nonce: create_rw_signal(0u64),
             shrink_selection_nonce: create_rw_signal(0u64),
-            split_editor_down: create_rw_signal(false),
+            split_editor_down: split_editor_down_sig,
             split_down_file: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             split_down_cursor: create_rw_signal(None),
@@ -1374,14 +1498,6 @@ fn all_commands() -> Vec<PaletteCommand> {
             label: "Toggle AI Chat",
             action: |s| {
                 s.show_right_panel.update(|v| *v = !*v);
-            },
-        },
-        PaletteCommand {
-            label: "Show AI Panel",
-            action: |s| {
-                s.left_panel_tab.set(Tab::AI);
-                s.show_left_panel.set(true);
-                s.left_panel_width.set(260.0);
             },
         },
         // ── All 12 themes ────────────────────────────────────────────────────
@@ -2014,7 +2130,6 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::SEARCH, Tab::Search, state.clone()),
         activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
-        activity_bar_btn(icons::AI, Tab::AI, state.clone()),
         activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
         activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
         activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
@@ -2256,17 +2371,6 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let ai_wrap = container(crate::panels::ai_panel::ai_panel(state.theme)).style({
-        let state = state.clone();
-        move |s| {
-            s.width_full()
-                .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::AI, |s| {
-                    s.display(floem::style::Display::None)
-                })
-        }
-    });
-
     let composer_wrap = container(crate::panels::composer::composer_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
@@ -2317,7 +2421,6 @@ fn left_panel(state: IdeState) -> impl IntoView {
             container_wrap,
             makefile_wrap,
             github_wrap,
-            ai_wrap,
             composer_wrap,
             settings_wrap,
             account_wrap,
@@ -2571,9 +2674,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
             } else {
                 s2.vim_normal_mode.set(false);
             }
-            session_update(|s| {
-                s.vim_mode = s2.vim_mode.get();
-            });
+            // Session is persisted by the unified debounced effect watching vim_mode.
         })
     };
 
@@ -3553,11 +3654,7 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             stack((
                 container(terminal_panel(
                     state.theme,
-                    state.show_bottom_panel,
-                    state.show_left_panel,
-                    state.show_right_panel,
-                    state.file_picker_open,
-                    state.command_palette_open,
+                    state.as_global_command_state(),
                     state.run_in_terminal_text,
                 ))
                 .style(move |s| {
@@ -5905,46 +6002,10 @@ pub fn launch_phaze_ide() {
                             let shift = key_event.modifiers.contains(Modifiers::SHIFT);
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
 
-                            if ctrl && !alt {
-                                if let Some(cmd) = match_global_shortcut(key_event) {
-                                    match cmd {
-                                        GlobalShortcut::ToggleLeftPanel => {
-                                            state.show_left_panel.update(|v| *v = !*v);
-                                            let now_open = state.show_left_panel.get();
-                                            let new_w = if now_open { 260.0 } else { 0.0 };
-                                            state.left_panel_width.set(new_w);
-                                            session_update(|s| {
-                                                s.left_panel_width = new_w;
-                                                s.show_left_panel = now_open;
-                                            });
-                                            return;
-                                        }
-                                        GlobalShortcut::ToggleBottomPanel => {
-                                            state.show_bottom_panel.update(|v| *v = !*v);
-                                            session_update(|s| {
-                                                s.show_bottom_panel = state.show_bottom_panel.get();
-                                            });
-                                            return;
-                                        }
-                                        GlobalShortcut::ToggleRightPanel => {
-                                            state.show_right_panel.update(|v| *v = !*v);
-                                            return;
-                                        }
-                                        GlobalShortcut::ToggleFilePicker => {
-                                            let open = state.file_picker_open.get();
-                                            state.file_picker_open.set(!open);
-                                            if !open {
-                                                state.file_picker_query.set(String::new());
-                                            }
-                                            return;
-                                        }
-                                        GlobalShortcut::ToggleCommandPalette => {
-                                            let open = state.command_palette_open.get();
-                                            state.command_palette_open.set(!open);
-                                            return;
-                                        }
-                                    }
-                                }
+                            // ── Global shortcut dispatch (unified via execute_command) ──
+                            if let Some(cmd) = match_global_shortcut(key_event) {
+                                execute_command(cmd, &state.as_global_command_state());
+                                return;
                             }
 
                             // ── Named keys ───────────────────────────────────────
@@ -6341,16 +6402,6 @@ pub fn launch_phaze_ide() {
                                     return;
                                 }
 
-                                // Ctrl+Alt+\ — toggle split editor pane
-                                if ctrl && alt && !shift && ch.as_str() == "\\" {
-                                    let was_open = state.split_editor.get();
-                                    state.split_editor.update(|v| *v = !*v);
-                                    if !was_open && state.split_open_file.get().is_none() {
-                                        state.split_open_file.set(state.open_file.get());
-                                    }
-                                    return;
-                                }
-
                                 if ctrl && !shift && !alt {
                                     match ch.as_str() {
                                         // Ctrl+= / Ctrl++ — zoom in editor font
@@ -6399,18 +6450,8 @@ pub fn launch_phaze_ide() {
                                     }
                                 }
 
-                                // Ctrl+Shift+Z → toggle zen mode
+                                // Ctrl+Shift+Z is handled above by match_global_shortcut → execute_command.
                                 if ctrl && shift && !alt {
-                                    if ch.as_str() == "z" {
-                                        state.zen_mode.update(|v| *v = !*v);
-                                        let toast_msg = if state.zen_mode.get() {
-                                            "Zen mode on — Ctrl+Shift+Z to exit"
-                                        } else {
-                                            "Zen mode off"
-                                        };
-                                        show_toast(state.status_toast, toast_msg);
-                                        return;
-                                    }
                                     // Ctrl+Shift+[ → fold block at cursor
                                     if ch.as_str() == "[" {
                                         state.fold_nonce.update(|v| *v += 1);
@@ -6710,17 +6751,25 @@ pub fn launch_phaze_ide() {
                                 }
                             }
                         }
-                        // Save session state on close.
-                        let open = state.open_file.get();
-                        let theme_name = state.theme.get().variant.name();
-                        session_update(|s| {
-                            if let Some(f) = open {
-                                s.active_tab_index = s.open_tabs.iter().position(|t| t == &f);
-                            }
-                            s.left_panel_width = state.left_panel_width.get();
-                            s.show_bottom_panel = state.show_bottom_panel.get();
-                            s.vim_mode = state.vim_mode.get();
-                            s.theme = theme_name.to_string();
+                        // Save complete session state synchronously on close so the
+                        // 1-second debounce timer cannot miss the final state.
+                        let open_tabs = state.open_tabs.get_untracked();
+                        let active_file = state.open_file.get_untracked();
+                        let active_tab_index = active_file
+                            .as_ref()
+                            .and_then(|f| open_tabs.iter().position(|t| t == f));
+                        save_session(&SessionState {
+                            open_tabs,
+                            active_tab_index,
+                            left_panel_width: state.left_panel_width.get_untracked(),
+                            show_left_panel: state.show_left_panel.get_untracked(),
+                            show_right_panel: state.show_right_panel.get_untracked(),
+                            show_bottom_panel: state.show_bottom_panel.get_untracked(),
+                            split_editor: state.split_editor.get_untracked(),
+                            split_editor_down: state.split_editor_down.get_untracked(),
+                            vim_mode: state.vim_mode.get_untracked(),
+                            theme: state.theme.get_untracked().variant.name().to_string(),
+                            zen_mode: state.zen_mode.get_untracked(),
                         });
                     }
                 })
