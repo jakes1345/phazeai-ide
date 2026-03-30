@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Returns the browser URL for OAuth sign-in.
+pub fn login_url() -> &'static str {
+    "https://app.phazeai.com/signin"
+}
+
 /// Stored credentials (persisted to ~/.config/phazeai/cloud.toml).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CloudCredentials {
@@ -32,6 +37,13 @@ impl CloudCredentials {
             .as_ref()
             .map(|t| !t.is_empty())
             .unwrap_or(false)
+    }
+
+    /// Clear the stored token and persist the change.
+    pub fn logout(&mut self) -> anyhow::Result<()> {
+        self.api_token = None;
+        self.email = None;
+        self.save()
     }
 }
 

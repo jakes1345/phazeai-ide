@@ -188,13 +188,13 @@ fn test_conversation_history_estimate_tokens_basic() {
     history.add_user_message("test"); // 4 chars
 
     let tokens = history.estimate_tokens();
-    // Should be ~1 token (4 chars / 4)
-    assert_eq!(tokens, 1);
+    // Should be ~2 tokens (4 chars / 3, rounded up)
+    assert_eq!(tokens, 2);
 
-    history.add_user_message("test message with more content"); // 31 chars
+    history.add_user_message("test message with more content"); // 30 chars
     let tokens = history.estimate_tokens();
-    // Should be ~9 tokens ( (4+3)/4 + (31+3)/4 ) = 1 + 8 = 9
-    assert_eq!(tokens, 9);
+    // Should be ~12 tokens ( ceil(4/3) + ceil(30/3) ) = 2 + 10 = 12
+    assert_eq!(tokens, 12);
 }
 
 #[test]
@@ -851,7 +851,8 @@ fn test_estimate_tokens_includes_system_prompt() {
     history.add_user_message("a".repeat(400).as_str()); // 100 more
 
     let tokens = history.estimate_tokens();
-    assert_eq!(tokens, 200);
+    // ceil(400/3) + ceil(400/3) = 134 + 134 = 268
+    assert_eq!(tokens, 268);
 }
 
 // ========================================================================

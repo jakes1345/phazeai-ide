@@ -50,8 +50,13 @@ impl Tool for MemoryTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("memory", "Missing required parameter: action"))?;
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let memory_dir = cwd.join(".phazeai");
+        let memory_dir = if let Some(home) = dirs::home_dir() {
+            home.join(".phazeai")
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".phazeai")
+        };
         let memory_file = memory_dir.join("memory.json");
 
         if !memory_dir.exists() {

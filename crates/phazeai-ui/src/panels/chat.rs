@@ -359,7 +359,8 @@ pub fn chat_panel(
     let input_text = create_rw_signal(String::new());
     let is_loading = create_rw_signal(false);
     let mode = create_rw_signal(AiMode::Chat);
-    let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> = create_rw_signal(None);
+    let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> =
+        create_rw_signal(None);
 
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<ChatUpdate>(256);
     let update_signal = create_signal_from_channel(update_rx);
@@ -492,15 +493,22 @@ pub fn chat_panel(
             input_text.set(String::new());
             is_loading.set(true);
             ai_thinking.set(true);
-            
+
             let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
             current_cancel_token.set(Some(token.clone()));
-            
+
             // Re-read settings on every send so model/provider changes in the
             // settings panel take effect immediately (no restart needed).
             let live_settings = Settings::load();
             let hint = mode.get_untracked().system_hint();
-            send_to_ai(prompt, live_settings, root, hint, (*update_tx).clone(), token);
+            send_to_ai(
+                prompt,
+                live_settings,
+                root,
+                hint,
+                (*update_tx).clone(),
+                token,
+            );
         }
     });
 
@@ -617,7 +625,7 @@ pub fn chat_panel(
             if is_loading.get() {
                 return;
             }
-            
+
             let msgs = messages.get_untracked();
             let mut last_user_msg = None;
             for msg in msgs.iter().rev() {
@@ -626,7 +634,7 @@ pub fn chat_panel(
                     break;
                 }
             }
-            
+
             if let Some(user_msg) = last_user_msg {
                 messages.update(|list| {
                     while let Some(last) = list.last() {
@@ -643,18 +651,25 @@ pub fn chat_panel(
                         is_error: false,
                     });
                 });
-                
+
                 is_loading.set(true);
                 ai_thinking.set(true);
-                
+
                 let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 current_cancel_token.set(Some(token.clone()));
-                
+
                 let root = workspace_root.get_untracked();
                 let prompt = expand_file_mentions(&user_msg, &root);
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
-                send_to_ai(prompt, live_settings, root, hint, (*update_tx).clone(), token);
+                send_to_ai(
+                    prompt,
+                    live_settings,
+                    root,
+                    hint,
+                    (*update_tx).clone(),
+                    token,
+                );
             }
         }
     });
@@ -687,9 +702,12 @@ pub fn chat_panel(
             let show_retry = !is_user && is_last && !is_loading.get();
             let do_retry_btn = do_retry.clone();
 
-            let retry_btn = container(
-                phaze_icon(icons::REFRESH, 12.0, move |p| p.text_secondary, theme)
-            )
+            let retry_btn = container(phaze_icon(
+                icons::REFRESH,
+                12.0,
+                move |p| p.text_secondary,
+                theme,
+            ))
             .style(move |s| {
                 let t = theme.get();
                 let p = &t.palette;
@@ -728,7 +746,8 @@ pub fn chat_panel(
                                 .line_height(1.5)
                                 .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
                         }),
-                    )).style(|s| s.items_center().flex_grow(1.0)),
+                    ))
+                    .style(|s| s.items_center().flex_grow(1.0)),
                     retry_btn,
                 ))
                 .style(|s| s.items_center().justify_between().width_full()),
@@ -804,10 +823,12 @@ pub fn chat_panel(
                     .apply_if(is_loading.get(), |s| s.display(floem::style::Display::None))
             }),
             phaze_icon(icons::STOP, 14.0, move |p| p.text_primary, theme).style(move |s| {
-                s.apply_if(!is_loading.get(), |s| s.display(floem::style::Display::None))
+                s.apply_if(!is_loading.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
             }),
         ))
-        .style(|s| s.items_center().justify_center())
+        .style(|s| s.items_center().justify_center()),
     )
     .style(move |s| {
         let t = theme.get();

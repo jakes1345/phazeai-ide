@@ -159,9 +159,7 @@ macro_rules! declare_plugin {
         /// `plugin` must be a pointer returned by `_phazeai_plugin_create`
         /// from the same library and must not have been destroyed already.
         #[no_mangle]
-        pub unsafe extern "C" fn _phazeai_plugin_destroy(
-            plugin: *mut dyn $crate::PhazePlugin,
-        ) {
+        pub unsafe extern "C" fn _phazeai_plugin_destroy(plugin: *mut dyn $crate::PhazePlugin) {
             if !plugin.is_null() {
                 let _ = Box::from_raw(plugin);
             }

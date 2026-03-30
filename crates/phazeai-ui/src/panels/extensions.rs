@@ -22,8 +22,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
 
     // ── Channel for all extension scan/install results ────────────────────────
 
-    let (result_tx, result_rx) =
-        std::sync::mpsc::sync_channel::<Result<Vec<String>, String>>(4);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<Result<Vec<String>, String>>(4);
     let result_signal = create_signal_from_channel(result_rx);
     {
         let state = state.clone();
@@ -60,9 +59,8 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                 // 1. Scan native Rust plugins
                 if let Ok(mut mgr) = manager.lock() {
                     let host = phazeai_core::ext_host::DummyDelegate;
-                    let host = phazeai_core::ext_host::IdeDelegateHost::new(
-                        std::sync::Arc::new(host),
-                    );
+                    let host =
+                        phazeai_core::ext_host::IdeDelegateHost::new(std::sync::Arc::new(host));
                     mgr.scan_plugins(&host);
                     for p in mgr.get_plugins() {
                         all_names.push(format!(
@@ -217,14 +215,12 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
 
     v_stack((
         // Header
-        container(
-            label(|| "EXTENSIONS".to_string()).style(move |s| {
-                let p = theme.get().palette;
-                s.font_size(11.0)
-                    .font_weight(floem::text::Weight::BOLD)
-                    .color(p.text_muted)
-            }),
-        )
+        container(label(|| "EXTENSIONS".to_string()).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0)
+                .font_weight(floem::text::Weight::BOLD)
+                .color(p.text_muted)
+        }))
         .style(move |s| {
             let p = theme.get().palette;
             s.padding(10.0)
@@ -249,17 +245,16 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                 phaze_button("Plugins Dir", ButtonVariant::Secondary, theme, move || {
                     open_plugins_dir(())
                 }),
-                phaze_button("Extensions Dir", ButtonVariant::Secondary, theme, move || {
-                    open_extensions_dir(())
-                }),
+                phaze_button(
+                    "Extensions Dir",
+                    ButtonVariant::Secondary,
+                    theme,
+                    move || open_extensions_dir(()),
+                ),
             ))
             .style(|s| s.gap(8.0).width_full().margin_top(4.0)),
         ))
-        .style(|s| {
-            s.padding_horiz(10.0)
-                .padding_vert(8.0)
-                .width_full()
-        }),
+        .style(|s| s.padding_horiz(10.0).padding_vert(8.0).width_full()),
         // Search filter
         container(
             phaze_input(search_query, "Filter extensions...", theme).style(|s| s.width_full()),
@@ -268,16 +263,16 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
         // Info
         container(
             v_stack((
-                label(|| "[Plugin] = Native Rust (.so/.dylib)".to_string())
-                    .style(move |s| {
-                        let p = theme.get().palette;
-                        s.font_size(9.5).color(p.text_muted)
-                    }),
-                label(|| "[VSCode] = Themes, grammars, snippets (no JS)".to_string())
-                    .style(move |s| {
+                label(|| "[Plugin] = Native Rust (.so/.dylib)".to_string()).style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(9.5).color(p.text_muted)
+                }),
+                label(|| "[VSCode] = Themes, grammars, snippets (no JS)".to_string()).style(
+                    move |s| {
                         let p = theme.get().palette;
                         s.font_size(9.5).color(p.accent)
-                    }),
+                    },
+                ),
             ))
             .style(|s| s.gap(2.0)),
         )

@@ -43,8 +43,8 @@ impl Tool for WebSearchTool {
             .unwrap_or(10) as usize;
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent("PhazeAI/1.0")
+            .timeout(std::time::Duration::from_secs(20))
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
             .build()
             .map_err(|e| PhazeError::tool("web_search", format!("HTTP client error: {e}")))?;
 
@@ -78,8 +78,14 @@ impl Tool for WebSearchTool {
 fn parse_ddg_results(html: &str, max_results: usize) -> Vec<Value> {
     let mut results = Vec::new();
 
-    // DuckDuckGo HTML lite uses class="result__a" for links and class="result__snippet" for snippets
-    for segment in html.split("class=\"result__a\"").skip(1) {
+    // Try double-quote variant first, then single-quote variant
+    let segments: Vec<&str> = if html.contains("class=\"result__a\"") {
+        html.split("class=\"result__a\"").skip(1).collect()
+    } else {
+        html.split("class='result__a'").skip(1).collect()
+    };
+
+    for segment in &segments {
         if results.len() >= max_results {
             break;
         }
@@ -117,7 +123,6 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<Value> {
             url.clone()
         };
 
-        // Strip HTML tags from title and snippet
         let clean_title = strip_html_tags(&title);
         let clean_snippet = strip_html_tags(&snippet);
 
@@ -126,6 +131,26 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<Value> {
             "url": clean_url,
             "snippet": clean_snippet,
         }));
+    }
+
+    // Fallback: extract any <a href="http..."> links if primary parsing found nothing
+    if results.is_empty() {
+        for segment in html.split("<a href=\"http").skip(1) {
+            if results.len() >= max_results {
+                break;
+            }
+            let raw = extract_between(segment, "", "\"").unwrap_or_default();
+            if raw.is_empty() {
+                continue;
+            }
+            let url = format!("http{raw}");
+            let title = extract_between(segment, ">", "</a>").unwrap_or_default();
+            results.push(serde_json::json!({
+                "title": strip_html_tags(&title),
+                "url": url,
+                "snippet": "",
+            }));
+        }
     }
 
     results

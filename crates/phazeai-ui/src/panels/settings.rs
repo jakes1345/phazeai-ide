@@ -3,12 +3,83 @@ use floem::{
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
+use phazeai_core::{llm::provider::ProviderId, Settings};
 
 use crate::{
     app::IdeState,
     components::icon::{icons, phaze_icon},
     theme::{PhazeTheme, ThemeVariant},
 };
+
+#[derive(Clone)]
+struct ProviderUiStatus {
+    available: bool,
+    summary: String,
+    detail: String,
+}
+
+fn provider_name_to_id(name: &str) -> Option<ProviderId> {
+    match name {
+        "Claude (Anthropic)" => Some(ProviderId::Claude),
+        "OpenAI" => Some(ProviderId::OpenAI),
+        "Google Gemini" => Some(ProviderId::Gemini),
+        "Groq" => Some(ProviderId::Groq),
+        "Together.ai" => Some(ProviderId::Together),
+        "OpenRouter" => Some(ProviderId::OpenRouter),
+        "Ollama (Local)" => Some(ProviderId::Ollama),
+        "LM Studio (Local)" => Some(ProviderId::LmStudio),
+        _ => None,
+    }
+}
+
+fn provider_status(name: &str) -> ProviderUiStatus {
+    let Some(provider_id) = provider_name_to_id(name) else {
+        return ProviderUiStatus {
+            available: false,
+            summary: "Unknown provider".into(),
+            detail: "This provider name does not map to a configured backend.".into(),
+        };
+    };
+
+    let settings = Settings::load();
+    let registry = settings.build_provider_registry();
+    let Some(config) = registry.get_config(&provider_id) else {
+        return ProviderUiStatus {
+            available: false,
+            summary: "Not configured".into(),
+            detail: "No provider configuration is available for this backend.".into(),
+        };
+    };
+
+    if !config.enabled {
+        return ProviderUiStatus {
+            available: false,
+            summary: "Disabled".into(),
+            detail: "This provider is disabled in settings.toml.".into(),
+        };
+    }
+
+    if provider_id.needs_api_key() {
+        if config.api_key().is_some() {
+            return ProviderUiStatus {
+                available: true,
+                summary: "Ready".into(),
+                detail: format!("Configured via {}", config.api_key_env),
+            };
+        }
+        return ProviderUiStatus {
+            available: false,
+            summary: "Missing API key".into(),
+            detail: format!("Set {} in the environment.", config.api_key_env),
+        };
+    }
+
+    ProviderUiStatus {
+        available: true,
+        summary: "Ready".into(),
+        detail: format!("Local endpoint: {}", config.base_url),
+    }
+}
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -301,20 +372,46 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
     let provider = state.ai_provider;
     let is_hovered = create_rw_signal(false);
 
-    container(label(move || name).style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        let active = provider.get() == name;
-        let color = if active { p.accent } else { p.text_secondary };
-        s.font_size(11.0).color(color)
-    }))
+    container(
+        stack((
+            label(move || name).style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let active = provider.get() == name;
+                let status = provider_status(name);
+                let color = if active {
+                    p.accent
+                } else if status.available {
+                    p.text_primary
+                } else {
+                    p.text_secondary
+                };
+                s.font_size(11.0).color(color)
+            }),
+            label(move || provider_status(name).summary).style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let status = provider_status(name);
+                let color = if status.available {
+                    p.success
+                } else {
+                    p.warning
+                };
+                s.font_size(10.0).color(color)
+            }),
+        ))
+        .style(|s| s.flex_col().items_center().gap(2.0)),
+    )
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         let active = provider.get() == name;
         let hovered = is_hovered.get();
+        let status = provider_status(name);
         let border_color = if active {
             p.accent
+        } else if !status.available {
+            p.warning
         } else if hovered {
             p.border_focus
         } else {
@@ -322,6 +419,8 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
         };
         let bg = if active {
             p.accent_dim
+        } else if !status.available {
+            p.bg_panel
         } else if hovered {
             p.bg_elevated
         } else {
@@ -329,6 +428,7 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
         };
         s.padding_vert(5.0)
             .padding_horiz(8.0)
+            .min_width(118.0)
             .background(bg)
             .border(if active { 2.0 } else { 1.0 })
             .border_color(border_color)
@@ -350,6 +450,7 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
 
 fn ai_section(state: IdeState) -> impl IntoView {
     let theme = state.theme;
+    let ai_provider = state.ai_provider;
     let ai_model = state.ai_model;
 
     // Provider tiles
@@ -390,6 +491,25 @@ fn ai_section(state: IdeState) -> impl IntoView {
             let t = theme.get();
             let p = &t.palette;
             s.font_size(12.0).color(p.text_muted).margin_bottom(6.0)
+        }),
+        label(move || {
+            let selected = ai_provider.get();
+            provider_status(&selected).detail
+        })
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let selected = ai_provider.get();
+            let status = provider_status(&selected);
+            let color = if status.available {
+                p.text_muted
+            } else {
+                p.warning
+            };
+            s.font_size(11.0)
+                .color(color)
+                .margin_bottom(6.0)
+                .line_height(1.3)
         }),
         provider_tiles,
     ))

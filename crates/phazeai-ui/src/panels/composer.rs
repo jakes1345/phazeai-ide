@@ -7,7 +7,9 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, text_input, v_stack, Decorators},
     IntoView,
 };
-use phazeai_core::tools::{BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry};
+use phazeai_core::tools::{
+    BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry,
+};
 use phazeai_core::{Agent, AgentEvent, Settings};
 use serde_json::Value;
 
@@ -185,8 +187,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     let update_signal = create_signal_from_channel(update_rx);
 
     // Approval response channel — the UI sends back decisions here.
-    let (approval_tx, approval_rx) =
-        std::sync::mpsc::sync_channel::<ApprovalResponse>(4);
+    let (approval_tx, approval_rx) = std::sync::mpsc::sync_channel::<ApprovalResponse>(4);
     let approval_tx = Arc::new(approval_tx);
     let approval_rx_arc = Arc::new(std::sync::Mutex::new(approval_rx));
 
@@ -345,8 +346,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     let client = match settings.build_llm_client() {
                         Ok(c) => c,
                         Err(e) => {
-                            let _ =
-                                tx.send(ComposerUpdate::Err(format!("LLM init error: {e}")));
+                            let _ = tx.send(ComposerUpdate::Err(format!("LLM init error: {e}")));
                             return;
                         }
                     };
@@ -363,9 +363,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     if !mcp_configs.is_empty() {
                         let mut mcp_manager = phazeai_core::mcp::McpManager::new();
                         mcp_manager.connect_all(&mcp_configs);
-                        agent.register_mcp_tools(Arc::new(std::sync::Mutex::new(
-                            mcp_manager,
-                        )));
+                        agent.register_mcp_tools(Arc::new(std::sync::Mutex::new(mcp_manager)));
                     }
 
                     // Wire approval function when mode is not AutoAll.
@@ -382,22 +380,21 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                         return true;
                                     }
                                     // Send approval request to UI.
-                                    let _ = tx_inner.send(
-                                        ComposerUpdate::ToolApprovalRequest {
-                                            name: tool_name.clone(),
-                                            params: params.clone(),
-                                        },
-                                    );
+                                    let _ = tx_inner.send(ComposerUpdate::ToolApprovalRequest {
+                                        name: tool_name.clone(),
+                                        params: params.clone(),
+                                    });
                                     // Block this async task on the sync response channel.
                                     // Use spawn_blocking so we don't starve the runtime.
-                                    let result: ApprovalResponse = tokio::task::spawn_blocking(move || {
-                                        let lock = rx_inner.lock().unwrap();
-                                        // Wait up to 5 minutes for user response.
-                                        lock.recv_timeout(std::time::Duration::from_secs(300))
-                                            .unwrap_or(ApprovalResponse::Denied)
-                                    })
-                                    .await
-                                    .unwrap_or(ApprovalResponse::Denied);
+                                    let result: ApprovalResponse =
+                                        tokio::task::spawn_blocking(move || {
+                                            let lock = rx_inner.lock().unwrap();
+                                            // Wait up to 5 minutes for user response.
+                                            lock.recv_timeout(std::time::Duration::from_secs(300))
+                                                .unwrap_or(ApprovalResponse::Denied)
+                                        })
+                                        .await
+                                        .unwrap_or(ApprovalResponse::Denied);
 
                                     matches!(result, ApprovalResponse::Approved)
                                 })
@@ -419,9 +416,8 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                 }
                                 AgentEvent::TextDelta(text) => {
                                     accumulated.push_str(&text);
-                                    let _ = tx2.send(ComposerUpdate::TextDelta(
-                                        accumulated.clone(),
-                                    ));
+                                    let _ =
+                                        tx2.send(ComposerUpdate::TextDelta(accumulated.clone()));
                                 }
                                 AgentEvent::ToolStart { name } => {
                                     // We don't have params here — use empty.
@@ -442,10 +438,8 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                     });
                                 }
                                 AgentEvent::ToolApprovalRequest { name, params } => {
-                                    let _ = tx2.send(ComposerUpdate::ToolApprovalRequest {
-                                        name,
-                                        params,
-                                    });
+                                    let _ = tx2
+                                        .send(ComposerUpdate::ToolApprovalRequest { name, params });
                                 }
                                 AgentEvent::Complete { iterations } => {
                                     let _ = tx2.send(ComposerUpdate::Done { iterations });
@@ -469,8 +463,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         .output()
                     {
                         if output.status.success() {
-                            let diff_text =
-                                String::from_utf8_lossy(&output.stdout).to_string();
+                            let diff_text = String::from_utf8_lossy(&output.stdout).to_string();
                             let cards = parse_diff_cards(&diff_text);
                             if !cards.is_empty() {
                                 let _ = tx.send(ComposerUpdate::DiffOutput(cards));
@@ -537,7 +530,13 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 approval_mode.update(|m| *m = m.next());
             }),
         ))
-        .style(|s| s.width_full().items_center().gap(8.0).padding_horiz(12.0).padding_vert(8.0)),
+        .style(|s| {
+            s.width_full()
+                .items_center()
+                .gap(8.0)
+                .padding_horiz(12.0)
+                .padding_vert(8.0)
+        }),
     )
     .style(move |s| {
         let p = theme.get().palette;
@@ -551,14 +550,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         h_stack((
             label(|| "CWD:".to_string()).style(move |s| {
                 let p = theme.get().palette;
-                s.font_size(10.0)
-                    .color(p.text_muted)
-                    .min_width(30.0)
+                s.font_size(10.0).color(p.text_muted).min_width(30.0)
             }),
-            label(move || {
-                state.workspace_root.get().display().to_string()
-            })
-            .style(move |s| {
+            label(move || state.workspace_root.get().display().to_string()).style(move |s| {
                 let p = theme.get().palette;
                 s.font_size(10.0)
                     .color(p.text_secondary)
@@ -740,18 +734,16 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 let path_opt = entry.path.clone();
 
                 // Two-part row: main label + optional path label.
-                let path_label = container(label(move || {
-                    path_opt.clone().unwrap_or_default()
-                }))
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    let has_path = entry.path.is_some();
-                    s.font_size(10.0)
-                        .color(p.text_muted)
-                        .font_family("monospace".to_string())
-                        .margin_left(8.0)
-                        .apply_if(!has_path, |s| s.display(floem::style::Display::None))
-                });
+                let path_label = container(label(move || path_opt.clone().unwrap_or_default()))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        let has_path = entry.path.is_some();
+                        s.font_size(10.0)
+                            .color(p.text_muted)
+                            .font_family("monospace".to_string())
+                            .margin_left(8.0)
+                            .apply_if(!has_path, |s| s.display(floem::style::Display::None))
+                    });
 
                 container(
                     h_stack((
@@ -776,9 +768,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     ))
                     .style(|s| s.items_center().width_full()),
                 )
-                .style(move |s| {
-                    s.width_full().padding_horiz(12.0).padding_vert(3.0)
-                })
+                .style(move |s| s.width_full().padding_horiz(12.0).padding_vert(3.0))
             },
         )
         .style(|s| s.flex_col().width_full()),
@@ -945,23 +935,20 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 /// Extract a file path from tool parameters for prominent display.
 fn extract_path_from_params(tool_name: &str, params: &Value) -> Option<String> {
     match tool_name {
-        "read_file" | "write_file" | "edit_file" | "delete_path" | "copy_path"
-        | "move_path" | "open" => params
+        "read_file" | "write_file" | "edit_file" | "delete_path" | "copy_path" | "move_path"
+        | "open" => params
             .get("path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        "bash" => params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|cmd| {
-                // Show a truncated version of the command as the "path".
-                let trimmed = cmd.trim();
-                if trimmed.len() > 80 {
-                    format!("{}...", &trimmed[..80])
-                } else {
-                    trimmed.to_string()
-                }
-            }),
+        "bash" => params.get("command").and_then(|v| v.as_str()).map(|cmd| {
+            // Show a truncated version of the command as the "path".
+            let trimmed = cmd.trim();
+            if trimmed.len() > 80 {
+                format!("{}...", &trimmed[..80])
+            } else {
+                trimmed.to_string()
+            }
+        }),
         "grep" => params
             .get("path")
             .and_then(|v| v.as_str())
@@ -979,24 +966,15 @@ fn extract_path_from_params(tool_name: &str, params: &Value) -> Option<String> {
 fn format_tool_display(tool_name: &str, params: &Value) -> String {
     match tool_name {
         "read_file" => {
-            let path = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             format!("read_file  {}", path)
         }
         "write_file" => {
-            let path = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             format!("write_file  {}", path)
         }
         "edit_file" => {
-            let path = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("?");
             format!("edit_file  {}", path)
         }
         "bash" => {
@@ -1026,10 +1004,7 @@ fn format_tool_display(tool_name: &str, params: &Value) -> String {
             format!("glob  {}", pat)
         }
         "list_files" => {
-            let path = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             format!("list_files  {}", path)
         }
         _ => tool_name.to_string(),

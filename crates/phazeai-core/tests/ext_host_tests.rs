@@ -6,7 +6,7 @@
 // present on disk.
 
 use phazeai_core::ext_host::{
-    DummyDelegate, ExtensionManager, IdeDelegateHost, IdeDelegate, PluginEvent,
+    DummyDelegate, ExtensionManager, IdeDelegate, IdeDelegateHost, PluginEvent,
 };
 use std::sync::{Arc, Mutex};
 
@@ -90,7 +90,10 @@ fn test_load_plugin_missing_dir_returns_error() {
         std::path::Path::new("/tmp/phazeai_no_such_plugin_dir"),
         &host,
     );
-    assert!(result.is_err(), "Loading from a non-existent dir should fail");
+    assert!(
+        result.is_err(),
+        "Loading from a non-existent dir should fail"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("plugin.toml"),
@@ -221,7 +224,10 @@ fn test_dummy_delegate_does_not_panic() {
     delegate.log("a log line");
     delegate.show_message("a message");
     let text = delegate.get_active_text();
-    assert!(text.is_empty(), "DummyDelegate.get_active_text should return empty string");
+    assert!(
+        text.is_empty(),
+        "DummyDelegate.get_active_text should return empty string"
+    );
 }
 
 #[test]

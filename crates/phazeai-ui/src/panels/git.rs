@@ -13,7 +13,7 @@ use floem::{
 use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
 use crate::{
-    app::IdeState,
+    app::{show_toast, IdeState},
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
     util::safe_get,
@@ -194,7 +194,7 @@ fn run_git_reset(root: &std::path::Path, path: &str) -> Result<(), String> {
 
 fn run_git_discard(root: &std::path::Path, path: &str) -> Result<(), String> {
     let out = std::process::Command::new("git")
-        .args(["checkout", "--", path])
+        .args(["restore", "--worktree", "--", path])
         .current_dir(root)
         .output()
         .map_err(|e| e.to_string())?;
@@ -796,8 +796,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let tag_status: RwSignal<String> = create_rw_signal(String::new());
 
     // ── Shared refresh channels (created once, reused by all actions) ────────
-    let (status_refresh_tx, status_refresh_rx) =
-        std::sync::mpsc::sync_channel::<GitStatusData>(1);
+    let (status_refresh_tx, status_refresh_rx) = std::sync::mpsc::sync_channel::<GitStatusData>(1);
     let status_refresh_sig = create_signal_from_channel(status_refresh_rx);
     create_effect(move |_| {
         if let Some(data) = status_refresh_sig.get() {
@@ -837,17 +836,23 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 is_loading.set(true);
                 let r2 = r.clone();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&r2)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&r2));
+                });
             }
             {
                 let r2 = r.clone();
                 let tx = b_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&r2)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_branches(&r2));
+                });
             }
             {
                 let r2 = r.clone();
                 let tx = c_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&r2)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_log(&r2));
+                });
             }
         }
     };
@@ -869,7 +874,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 let current_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
                 if current_mtime != last_mtime {
                     last_mtime = current_mtime;
-                    if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = refresh_tx.try_send(()) {
+                    if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
+                        refresh_tx.try_send(())
+                    {
                         break;
                     }
                 }
@@ -949,12 +956,16 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     is_loading.set(true);
                     let root = state_pull2.workspace_root.get();
                     let tx = s_tx.clone();
-                    std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                    std::thread::spawn(move || {
+                        let _ = tx.try_send(run_git_status(&root));
+                    });
                 }
                 {
                     let root = state_pull2.workspace_root.get();
                     let tx = c_tx.clone();
-                    std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&root)); });
+                    std::thread::spawn(move || {
+                        let _ = tx.try_send(run_git_log(&root));
+                    });
                 }
             }
         });
@@ -1088,7 +1099,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             // Refresh branch list and toggle picker
             let root = state_br.workspace_root.get();
             let tx = b_tx.clone();
-            std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&root)); });
+            std::thread::spawn(move || {
+                let _ = tx.try_send(run_git_branches(&root));
+            });
             branch_picker_open.update(|v| *v = !*v);
         }
     })
@@ -1129,7 +1142,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         move |_| {
             let root = state_merge.workspace_root.get();
             let tx = b_tx.clone();
-            std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&root)); });
+            std::thread::spawn(move || {
+                let _ = tx.try_send(run_git_branches(&root));
+            });
             merge_picker_open.update(|v| *v = !*v);
         }
     })
@@ -1156,13 +1171,16 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             if let Some(result) = stash_result_sig.get() {
                 match result {
                     Ok(_) => status_msg.set("Stashed WIP.".to_string()),
-                    Err(e) => status_msg
-                        .set(format!("Stash error: {}", e.lines().next().unwrap_or("?"))),
+                    Err(e) => {
+                        status_msg.set(format!("Stash error: {}", e.lines().next().unwrap_or("?")))
+                    }
                 }
                 is_loading.set(true);
                 let root = state_stash2.workspace_root.get();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&root));
+                });
             }
         });
     }
@@ -1176,13 +1194,16 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             if let Some(result) = stash_pop_result_sig.get() {
                 match result {
                     Ok(_) => status_msg.set("Stash popped.".to_string()),
-                    Err(e) => status_msg
-                        .set(format!("Pop error: {}", e.lines().next().unwrap_or("?"))),
+                    Err(e) => {
+                        status_msg.set(format!("Pop error: {}", e.lines().next().unwrap_or("?")))
+                    }
                 }
                 is_loading.set(true);
                 let root = state_stashp2.workspace_root.get();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&root));
+                });
             }
         });
     }
@@ -1328,7 +1349,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 is_loading.set(true);
                 let root = state_sa2.workspace_root.get();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&root));
+                });
             }
         });
     }
@@ -1403,9 +1426,27 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         move |_| {
             is_loading.set(true);
             let root = state_r.workspace_root.get();
-            { let r = root.clone(); let tx = s_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&r)); }); }
-            { let r = root.clone(); let tx = b_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&r)); }); }
-            { let r = root.clone(); let tx = c_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&r)); }); }
+            {
+                let r = root.clone();
+                let tx = s_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&r));
+                });
+            }
+            {
+                let r = root.clone();
+                let tx = b_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_branches(&r));
+                });
+            }
+            {
+                let r = root.clone();
+                let tx = c_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_log(&r));
+                });
+            }
         }
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -1486,8 +1527,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     });
 
     // Shared channels for branch delete and checkout results
-    let (branch_del_tx, branch_del_rx) =
-        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let (branch_del_tx, branch_del_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let branch_del_result_sig = create_signal_from_channel(branch_del_rx);
     {
         let b_tx = branches_refresh_tx.clone();
@@ -1501,7 +1541,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 }
                 let root = state_checkout.workspace_root.get();
                 let tx = b_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_branches(&root));
+                });
             }
         });
     }
@@ -1518,9 +1560,28 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 match result {
                     Ok(()) => {
                         let root = state_checkout.workspace_root.get();
-                        { let r = root.clone(); let tx = b_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&r)); }); }
-                        { is_loading.set(true); let r = root.clone(); let tx = s_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&r)); }); }
-                        { let r = root.clone(); let tx = c_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&r)); }); }
+                        {
+                            let r = root.clone();
+                            let tx = b_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_branches(&r));
+                            });
+                        }
+                        {
+                            is_loading.set(true);
+                            let r = root.clone();
+                            let tx = s_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_status(&r));
+                            });
+                        }
+                        {
+                            let r = root.clone();
+                            let tx = c_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_log(&r));
+                            });
+                        }
                         status_msg.set(format!("Switched to branch '{}'", current_branch.get()));
                     }
                     Err(e) => {
@@ -1561,7 +1622,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 s.padding_horiz(6.0)
                     .padding_vert(2.0)
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 let b = bn_del.clone();
@@ -1666,9 +1729,28 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 match result {
                     Ok(()) => {
                         let root = state_nb.workspace_root.get();
-                        { let r = root.clone(); let tx = b_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_branches(&r)); }); }
-                        { is_loading.set(true); let r = root.clone(); let tx = s_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&r)); }); }
-                        { let r = root.clone(); let tx = c_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&r)); }); }
+                        {
+                            let r = root.clone();
+                            let tx = b_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_branches(&r));
+                            });
+                        }
+                        {
+                            is_loading.set(true);
+                            let r = root.clone();
+                            let tx = s_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_status(&r));
+                            });
+                        }
+                        {
+                            let r = root.clone();
+                            let tx = c_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_log(&r));
+                            });
+                        }
                         status_msg.set(format!("Created and switched to '{attempted_name}'"));
                         new_branch_name.set(String::new());
                     }
@@ -1816,12 +1898,16 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                             is_loading.set(true);
                             let root = state_commit.workspace_root.get();
                             let tx = s_tx.clone();
-                            std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_status(&root));
+                            });
                         }
                         {
                             let root = state_commit.workspace_root.get();
                             let tx = c_tx.clone();
-                            std::thread::spawn(move || { let _ = tx.try_send(run_git_log(&root)); });
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_log(&root));
+                            });
                         }
                     }
                     Err(e) => {
@@ -2241,7 +2327,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 let h = hash_cp.clone();
@@ -2757,7 +2845,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 let root = root_apply.get();
@@ -2789,7 +2879,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     } else {
                         floem::peniko::Color::TRANSPARENT
                     })
-                    .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
+                    .apply_if(!safe_get(row_hov, false), |s| {
+                        s.display(floem::style::Display::None)
+                    })
             })
             .on_click_stop(move |_| {
                 let root = root_drop.get();
@@ -2946,7 +3038,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     .padding_vert(4.0)
                     .width_full()
             }),
-            scroll(merge_branch_rows).style(|s| s.max_height(ui_const::MAX_LIST_HEIGHT).width_full()),
+            scroll(merge_branch_rows)
+                .style(|s| s.max_height(ui_const::MAX_LIST_HEIGHT).width_full()),
             merge_status_label,
         ))
         .style(|s| s.flex_col().width_full()),
@@ -2981,8 +3074,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let (tag_create_tx, tag_create_rx) =
-        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let (tag_create_tx, tag_create_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let tag_create_result_sig = create_signal_from_channel(tag_create_rx);
     {
         let root_tc = state_tag_create.workspace_root;
@@ -3000,8 +3092,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                         });
                     }
                     Err(e) => {
-                        tag_status
-                            .set(format!("Tag error: {}", e.lines().next().unwrap_or("?")))
+                        tag_status.set(format!("Tag error: {}", e.lines().next().unwrap_or("?")))
                     }
                 }
             }
@@ -3498,7 +3589,13 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 match result {
                     Ok(msg) => {
                         status_msg.set(msg);
-                        { is_loading.set(true); let tx = s_tx.clone(); std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); }); }
+                        {
+                            is_loading.set(true);
+                            let tx = s_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.try_send(run_git_status(&root));
+                            });
+                        }
                         load_diff_for_revert();
                     }
                     Err(e) => {
@@ -3656,8 +3753,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let state_log = state.clone();
 
     // Shared channel for commit log loading
-    let (commit_log_tx, commit_log_rx) =
-        std::sync::mpsc::sync_channel::<Vec<CommitLogEntry>>(1);
+    let (commit_log_tx, commit_log_rx) = std::sync::mpsc::sync_channel::<Vec<CommitLogEntry>>(1);
     let commit_log_result_sig = create_signal_from_channel(commit_log_rx);
     create_effect(move |_| {
         if let Some(entries) = commit_log_result_sig.get() {
@@ -3910,7 +4006,9 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .padding_horiz(12.0)
             .padding_vert(4.0)
             .width_full()
-            .apply_if(!is_loading.get(), |s| s.display(floem::style::Display::None))
+            .apply_if(!is_loading.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
     });
 
     stack((
@@ -4011,7 +4109,9 @@ fn git_section(
                 is_loading.set(true);
                 let root = state.workspace_root.get();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&root));
+                });
             }
         });
     }
@@ -4026,7 +4126,9 @@ fn git_section(
                 is_loading.set(true);
                 let root = state.workspace_root.get();
                 let tx = s_tx.clone();
-                std::thread::spawn(move || { let _ = tx.try_send(run_git_status(&root)); });
+                std::thread::spawn(move || {
+                    let _ = tx.try_send(run_git_status(&root));
+                });
             }
         });
     }
@@ -4097,7 +4199,9 @@ fn git_section(
                         .justify_center()
                         .cursor(floem::style::CursorStyle::Pointer)
                         .background(p.bg_elevated)
-                        .apply_if(!safe_get(row_hov, false), |s| s.display(floem::style::Display::None))
+                        .apply_if(!safe_get(row_hov, false), |s| {
+                            s.display(floem::style::Display::None)
+                        })
                 })
                 .on_click_stop(move |_| {
                     let path = rel_path1.clone();
@@ -4121,17 +4225,23 @@ fn git_section(
 
                 // Discard button (↩) — only for Unstaged section
                 let discard_hov = create_rw_signal(false);
+                let discard_confirm = create_rw_signal(false);
                 let rel_path2 = rel_path.clone();
                 let root2 = root.clone();
-                let discard_btn = container(label(|| "↩").style(move |s| {
-                    let t = theme.get();
-                    let p = &t.palette;
-                    s.font_size(12.0).color(if safe_get(discard_hov, false) {
-                        p.accent_hover
-                    } else {
-                        p.warning
-                    })
-                }))
+                let state_discard = state.clone();
+                let discard_btn = container(
+                    label(move || if discard_confirm.get() { "!" } else { "↩" }).style(move |s| {
+                        let t = theme.get();
+                        let p = &t.palette;
+                        s.font_size(12.0).color(if discard_confirm.get() {
+                            p.warning
+                        } else if safe_get(discard_hov, false) {
+                            p.accent_hover
+                        } else {
+                            p.warning
+                        })
+                    }),
+                )
                 .style(move |s| {
                     let t = theme.get();
                     let p = &t.palette;
@@ -4144,11 +4254,21 @@ fn git_section(
                         .background(p.bg_elevated)
                         .margin_left(2.0)
                         // Only show for Unstaged, and only on hover
-                        .apply_if(kind != SectionKind::Unstaged || !safe_get(row_hov, false), |s| {
-                            s.display(floem::style::Display::None)
-                        })
+                        .apply_if(
+                            kind != SectionKind::Unstaged || !safe_get(row_hov, false),
+                            |s| s.display(floem::style::Display::None),
+                        )
                 })
                 .on_click_stop(move |_| {
+                    if !discard_confirm.get_untracked() {
+                        discard_confirm.set(true);
+                        show_toast(
+                            state_discard.status_toast,
+                            format!("Click discard again to restore {path}", path = rel_path2),
+                        );
+                        return;
+                    }
+                    discard_confirm.set(false);
                     let path = rel_path2.clone();
                     let r = root2.clone();
                     let tx = discard_action_tx.clone();
@@ -4159,9 +4279,13 @@ fn git_section(
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                     discard_hov.set(true)
                 })
-                .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-                    discard_hov.set(false)
-                });
+                .on_event_stop(
+                    floem::event::EventListener::PointerLeave,
+                    move |_| {
+                        discard_hov.set(false);
+                        discard_confirm.set(false);
+                    },
+                );
 
                 container(
                     stack((

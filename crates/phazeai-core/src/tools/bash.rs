@@ -92,12 +92,17 @@ impl Tool for BashTool {
                 .unwrap_or(stdout.len());
             let new_pwd = stdout[pwd_start..pwd_end].trim().to_string();
             // Strip the PWD line (and the preceding newline if present)
-            let strip_from = if pwd_line_pos > 0 && stdout.as_bytes().get(pwd_line_pos - 1) == Some(&b'\n') {
-                pwd_line_pos - 1
+            let strip_from =
+                if pwd_line_pos > 0 && stdout.as_bytes().get(pwd_line_pos - 1) == Some(&b'\n') {
+                    pwd_line_pos - 1
+                } else {
+                    pwd_line_pos
+                };
+            let strip_to = if pwd_end < stdout.len() {
+                pwd_end + 1
             } else {
-                pwd_line_pos
+                pwd_end
             };
-            let strip_to = if pwd_end < stdout.len() { pwd_end + 1 } else { pwd_end };
             stdout = format!("{}{}", &stdout[..strip_from], &stdout[strip_to..]);
             if !new_pwd.is_empty() {
                 *self.cwd.lock().await = PathBuf::from(new_pwd);

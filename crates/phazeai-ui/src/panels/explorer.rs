@@ -245,7 +245,8 @@ pub fn explorer_panel(
                 }
                 // try_send: skip if the previous refresh hasn't been consumed yet.
                 // Break on disconnect so thread doesn't leak.
-                if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = refresh_tx.try_send(()) {
+                if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = refresh_tx.try_send(())
+                {
                     break;
                 }
             }
@@ -856,7 +857,12 @@ pub fn explorer_panel(
 
         // Rows for each open tab
         let oe_rows = dyn_stack(
-            move || safe_get(open_tabs, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(open_tabs, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(i, _)| *i,
             move |(_, tab_path)| {
                 let filename = tab_path

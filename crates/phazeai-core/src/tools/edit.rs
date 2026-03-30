@@ -66,9 +66,7 @@ impl Tool for EditTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let context = params
-            .get("context")
-            .and_then(|v| v.as_str());
+        let context = params.get("context").and_then(|v| v.as_str());
 
         let content = tokio::fs::read_to_string(path).await.map_err(|e| {
             PhazeError::tool("edit_file", format!("Failed to read '{}': {}", path, e))

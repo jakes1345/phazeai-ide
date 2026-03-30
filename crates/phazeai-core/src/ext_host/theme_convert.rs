@@ -59,10 +59,18 @@ pub fn extract_syntax_colors(token_colors: &[TokenColorRule]) -> HashMap<String,
     // when they map to the same field.
     let scope_mappings: &[(&[&str], &str)] = &[
         (
-            &["keyword", "keyword.control", "storage.type", "storage.modifier"],
+            &[
+                "keyword",
+                "keyword.control",
+                "storage.type",
+                "storage.modifier",
+            ],
             "syn_keyword",
         ),
-        (&["string", "string.quoted", "string.template"], "syn_string"),
+        (
+            &["string", "string.quoted", "string.template"],
+            "syn_string",
+        ),
         (&["comment", "comment.line", "comment.block"], "syn_comment"),
         (
             &[
@@ -73,7 +81,11 @@ pub fn extract_syntax_colors(token_colors: &[TokenColorRule]) -> HashMap<String,
             "syn_function",
         ),
         (
-            &["constant.numeric", "constant.language", "constant.character"],
+            &[
+                "constant.numeric",
+                "constant.language",
+                "constant.character",
+            ],
             "syn_number",
         ),
         (
@@ -86,7 +98,11 @@ pub fn extract_syntax_colors(token_colors: &[TokenColorRule]) -> HashMap<String,
             "syn_type",
         ),
         (
-            &["keyword.operator", "punctuation.separator", "punctuation.accessor"],
+            &[
+                "keyword.operator",
+                "punctuation.separator",
+                "punctuation.accessor",
+            ],
             "syn_operator",
         ),
         (
@@ -99,17 +115,10 @@ pub fn extract_syntax_colors(token_colors: &[TokenColorRule]) -> HashMap<String,
             "syn_macro",
         ),
         (
-            &[
-                "variable",
-                "variable.other",
-                "variable.parameter",
-            ],
+            &["variable", "variable.other", "variable.parameter"],
             "syn_variable",
         ),
-        (
-            &["string.regexp", "constant.regexp"],
-            "syn_string",
-        ),
+        (&["string.regexp", "constant.regexp"], "syn_string"),
     ];
 
     for rule in token_colors {

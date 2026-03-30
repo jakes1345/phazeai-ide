@@ -173,8 +173,7 @@ impl ExtensionRegistry {
                 for lang in &contributes.languages {
                     for file_ext in &lang.extensions {
                         let normalized = file_ext.trim_start_matches('.').to_lowercase();
-                        self.ext_to_language
-                            .insert(normalized, lang.id.clone());
+                        self.ext_to_language.insert(normalized, lang.id.clone());
                     }
                 }
             }

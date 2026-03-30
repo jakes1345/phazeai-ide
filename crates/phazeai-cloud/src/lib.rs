@@ -13,7 +13,7 @@ pub mod auth;
 pub mod client;
 pub mod subscription;
 
-pub use auth::{CloudCredentials, CloudSession};
+pub use auth::{login_url, CloudCredentials, CloudSession};
 pub use client::CloudClient;
 pub use subscription::Tier;
 

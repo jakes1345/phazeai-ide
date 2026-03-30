@@ -241,7 +241,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     let owner_repo_fetch = Arc::clone(&owner_repo);
 
     // ── Shared channel for fetch results (initial + refresh + manual) ──
-    let (fetch_tx, fetch_rx) = std::sync::mpsc::sync_channel::<(String, Result<Vec<WorkflowRun>, String>)>(1);
+    let (fetch_tx, fetch_rx) =
+        std::sync::mpsc::sync_channel::<(String, Result<Vec<WorkflowRun>, String>)>(1);
     let fetch_result = create_signal_from_channel(fetch_rx);
     {
         let runs_sig = runs;
@@ -331,7 +332,9 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                 Ok(v) => Ok(parse_runs(&v)),
                 Err(e) => Err(e),
             };
-            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = tx.try_send((label, result)) {
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
+                tx.try_send((label, result))
+            {
                 break;
             }
         });
@@ -351,7 +354,10 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                 let pair = owner_repo_arc.lock().ok().and_then(|g| g.clone());
                 match pair {
                     None => {
-                        let _ = tx.send(("No GitHub remote".to_string(), Err("No owner/repo available".to_string())));
+                        let _ = tx.send((
+                            "No GitHub remote".to_string(),
+                            Err("No owner/repo available".to_string()),
+                        ));
                     }
                     Some((owner, repo)) => {
                         let label = format!("{}/{}", owner, repo);
@@ -372,8 +378,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     };
 
     // ── Job expansion — channel created once, no Scope::new() per click ──
-    let (jobs_tx, jobs_rx) =
-        std::sync::mpsc::sync_channel::<(u64, Vec<WorkflowJob>)>(1);
+    let (jobs_tx, jobs_rx) = std::sync::mpsc::sync_channel::<(u64, Vec<WorkflowJob>)>(1);
     let jobs_result = create_signal_from_channel(jobs_rx);
     {
         let expanded_sig = expanded;

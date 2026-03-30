@@ -424,10 +424,97 @@ pub fn start_lsp_bridge(
                                 }
                             }
                             Some(LspCommand::RequestCodeActions { path, line, col }) => {
-                                // Generate quick-fix suggestions locally (no LSP codeAction yet).
                                 let actions_tx2 = actions_tx.clone();
                                 let path2 = path.clone();
+                                let client_opt = manager.client_for_file(&path).cloned();
                                 tokio::spawn(async move {
+                                    // Try LSP textDocument/codeAction first
+                                    if let Some(client) = client_opt {
+                                        let uri_str = format!("file://{}", path2.display());
+                                        if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+                                            let params = lsp_types::CodeActionParams {
+                                                text_document: lsp_types::TextDocumentIdentifier { uri },
+                                                range: lsp_types::Range {
+                                                    start: lsp_types::Position { line, character: col },
+                                                    end: lsp_types::Position { line, character: col },
+                                                },
+                                                context: lsp_types::CodeActionContext {
+                                                    diagnostics: vec![],
+                                                    only: None,
+                                                    trigger_kind: None,
+                                                },
+                                                work_done_progress_params: Default::default(),
+                                                partial_result_params: Default::default(),
+                                            };
+                                            if let Ok(lsp_actions) = client.code_action(params).await {
+                                                if !lsp_actions.is_empty() {
+                                                    let actions: Vec<CodeAction> = lsp_actions
+                                                        .into_iter()
+                                                        .map(|a| match a {
+                                                            lsp_types::CodeActionOrCommand::CodeAction(ca) => {
+                                                                let edit = ca.edit.map(|we| {
+                                                                    // Flatten workspace edit into (path, content) pairs
+                                                                    let mut edits = Vec::new();
+                                                                    if let Some(changes) = we.changes {
+                                                                        for (uri, text_edits) in changes {
+                                                                            let uri_str = uri.to_string();
+                                                                            let fpath = uri_str
+                                                                                .strip_prefix("file://")
+                                                                                .map(std::path::PathBuf::from)
+                                                                                .unwrap_or_else(|| std::path::PathBuf::from(&uri_str));
+                                                                            if let Ok(content) = std::fs::read_to_string(&fpath) {
+                                                                                let mut new_content = content;
+                                                                                // Apply edits in reverse order
+                                                                                let mut sorted = text_edits;
+                                                                                sorted.sort_by(|a, b| b.range.start.line.cmp(&a.range.start.line));
+                                                                                for te in sorted {
+                                                                                    let lines: Vec<&str> = new_content.lines().collect();
+                                                                                    let sl = te.range.start.line as usize;
+                                                                                    let sc = te.range.start.character as usize;
+                                                                                    let el = te.range.end.line as usize;
+                                                                                    let ec = te.range.end.character as usize;
+                                                                                    if sl < lines.len() {
+                                                                                        let mut result_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                                                                                        if sl == el {
+                                                                                            let line_str = &result_lines[sl];
+                                                                                            let sc = sc.min(line_str.len());
+                                                                                            let ec = ec.min(line_str.len());
+                                                                                            let mut l = result_lines[sl].clone();
+                                                                                            l.replace_range(sc..ec, &te.new_text);
+                                                                                            result_lines[sl] = l;
+                                                                                        }
+                                                                                        new_content = result_lines.join("\n");
+                                                                                    }
+                                                                                }
+                                                                                edits.push((fpath, new_content));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    edits
+                                                                });
+                                                                CodeAction {
+                                                                    title: ca.title,
+                                                                    kind: ca.kind.map(|k| k.as_str().to_string()).unwrap_or_default(),
+                                                                    edit,
+                                                                }
+                                                            }
+                                                            lsp_types::CodeActionOrCommand::Command(cmd) => CodeAction {
+                                                                title: cmd.title,
+                                                                kind: "command".to_string(),
+                                                                edit: None,
+                                                            },
+                                                        })
+                                                        .collect();
+                                                    // Merge with local fallback actions
+                                                    let mut all = actions;
+                                                    all.extend(generate_code_actions(&path2, line, col));
+                                                    let _ = actions_tx2.send(all);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Fallback: local code actions only
                                     let actions = generate_code_actions(&path2, line, col);
                                     let _ = actions_tx2.send(actions);
                                 });

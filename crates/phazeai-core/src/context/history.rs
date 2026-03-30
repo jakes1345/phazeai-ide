@@ -116,16 +116,16 @@ impl ConversationHistory {
     pub fn estimate_tokens(&self) -> usize {
         let mut total = 0;
 
-        // System prompt tokens
+        // System prompt tokens — use chars/3 for code-heavy content
         if let Some(ref system) = self.system_prompt {
-            total += system.len().div_ceil(4);
+            total += system.len().div_ceil(3);
         }
 
-        // Message tokens
+        // Message tokens — use chars/3 (code is denser than prose, ~3 chars/token)
         total += self
             .messages
             .iter()
-            .map(|m| m.content.len().div_ceil(4))
+            .map(|m| m.content.len().div_ceil(3))
             .sum::<usize>();
 
         total

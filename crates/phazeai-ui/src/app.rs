@@ -5859,8 +5859,8 @@ pub fn launch_phaze_ide() {
                 };
 
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
-    let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
-        .style(|s| s.flex_col().width_full().height_full().padding(16.0));
+                let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
+                    .style(|s| s.flex_col().width_full().height_full().padding(16.0));
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((

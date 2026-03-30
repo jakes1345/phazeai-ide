@@ -152,10 +152,7 @@ impl NativePlugin {
     /// Forward a command execution to the plugin.
     pub fn execute_command(&mut self, cmd: &str, args: &str) -> Result<String, String> {
         if !self.active {
-            return Err(format!(
-                "Plugin '{}' is not active",
-                self.manifest.name
-            ));
+            return Err(format!("Plugin '{}' is not active", self.manifest.name));
         }
         // SAFETY: pointer is valid while active.
         unsafe { (*self.plugin).execute_command(cmd, args) }
@@ -257,17 +254,14 @@ impl ExtensionManager {
         // 1. Read and parse the manifest.
         let manifest_path = dir.join("plugin.toml");
         if !manifest_path.exists() {
-            return Err(format!(
-                "No plugin.toml found in {}",
-                dir.display()
-            ));
+            return Err(format!("No plugin.toml found in {}", dir.display()));
         }
 
         let manifest_str = std::fs::read_to_string(&manifest_path)
             .map_err(|e| format!("Failed to read plugin.toml: {}", e))?;
 
-        let manifest: PluginManifest = toml::from_str(&manifest_str)
-            .map_err(|e| format!("Invalid plugin.toml: {}", e))?;
+        let manifest: PluginManifest =
+            toml::from_str(&manifest_str).map_err(|e| format!("Invalid plugin.toml: {}", e))?;
 
         // 2. Resolve the library path.
         let lib_path = match &manifest.library {
@@ -276,10 +270,7 @@ impl ExtensionManager {
         };
 
         if !lib_path.exists() {
-            return Err(format!(
-                "Plugin library not found: {}",
-                lib_path.display()
-            ));
+            return Err(format!("Plugin library not found: {}", lib_path.display()));
         }
 
         // SAFETY: We are loading an untrusted shared library.  The caller is
@@ -437,10 +428,7 @@ impl ExtensionManager {
             if !plugin.active {
                 continue;
             }
-            let has_cmd = plugin
-                .commands()
-                .iter()
-                .any(|c| c.id == cmd);
+            let has_cmd = plugin.commands().iter().any(|c| c.id == cmd);
             if has_cmd {
                 return plugin.execute_command(cmd, args);
             }

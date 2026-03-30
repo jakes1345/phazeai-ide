@@ -176,9 +176,23 @@ fn detect_screenshot_command(
 }
 
 fn which_exists(command: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(command)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // Try `{command} --version` first, then `-v` as fallback.
+    // This avoids relying on `which` (Unix-only) or `where` (Windows-only).
+    for flag in &["--version", "-v"] {
+        match std::process::Command::new(command).arg(flag).output() {
+            Ok(o) => {
+                // Exit 0 means the binary exists and understood the flag.
+                // Some tools exit non-zero for --version but still exist; treat
+                // any successful spawn (even non-zero exit) as "found" unless
+                // the OS itself couldn't find the binary (NotFound error).
+                let _ = o;
+                return true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => {
+                // Other OS error — binary may still exist, try next flag.
+            }
+        }
+    }
+    false
 }

@@ -28,10 +28,10 @@ fn extensions_dir() -> PathBuf {
 
 /// Install a .vsix file by extracting it and parsing its manifest.
 pub fn install_vsix(vsix_path: &Path) -> Result<InstalledExtension, String> {
-    let file = std::fs::File::open(vsix_path)
-        .map_err(|e| format!("Failed to open VSIX file: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Failed to read VSIX ZIP: {}", e))?;
+    let file =
+        std::fs::File::open(vsix_path).map_err(|e| format!("Failed to open VSIX file: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read VSIX ZIP: {}", e))?;
 
     // Read package.json from the archive
     let manifest = read_manifest_from_zip(&mut archive)?;
@@ -89,8 +89,8 @@ pub fn load_extension(dir: &Path) -> Result<InstalledExtension, String> {
     let manifest_path = dir.join("package.json");
     let manifest_str = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Failed to read package.json: {}", e))?;
-    let manifest: VsixManifest = serde_json::from_str(&manifest_str)
-        .map_err(|e| format!("Invalid package.json: {}", e))?;
+    let manifest: VsixManifest =
+        serde_json::from_str(&manifest_str).map_err(|e| format!("Invalid package.json: {}", e))?;
 
     let contributes = manifest.contributes.as_ref();
 
@@ -105,11 +105,9 @@ pub fn load_extension(dir: &Path) -> Result<InstalledExtension, String> {
                         Ok(config) => {
                             language_configs.insert(lang.id.clone(), config);
                         }
-                        Err(e) => tracing::warn!(
-                            "Failed to load language config for {}: {}",
-                            lang.id,
-                            e
-                        ),
+                        Err(e) => {
+                            tracing::warn!("Failed to load language config for {}: {}", lang.id, e)
+                        }
                     }
                 }
             }
@@ -126,11 +124,9 @@ pub fn load_extension(dir: &Path) -> Result<InstalledExtension, String> {
                     Ok(theme) => {
                         themes.insert(theme_contrib.label.clone(), theme);
                     }
-                    Err(e) => tracing::warn!(
-                        "Failed to load theme '{}': {}",
-                        theme_contrib.label,
-                        e
-                    ),
+                    Err(e) => {
+                        tracing::warn!("Failed to load theme '{}': {}", theme_contrib.label, e)
+                    }
                 }
             }
         }
@@ -181,8 +177,7 @@ fn read_manifest_from_zip(
             entry
                 .read_to_string(&mut buf)
                 .map_err(|e| format!("Failed to read {}: {}", path, e))?;
-            return serde_json::from_str(&buf)
-                .map_err(|e| format!("Invalid package.json: {}", e));
+            return serde_json::from_str(&buf).map_err(|e| format!("Invalid package.json: {}", e));
         }
     }
 
@@ -191,8 +186,8 @@ fn read_manifest_from_zip(
 
 /// Parse a VSCode theme JSON file (supports JSONC with comments).
 pub fn load_theme_file(path: &Path) -> Result<VscodeThemeFile, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read theme file: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read theme file: {}", e))?;
 
     // VSCode theme files often have comments (JSONC). Strip them.
     let cleaned = strip_json_comments(&content);
@@ -210,11 +205,11 @@ pub fn load_language_config(path: &Path) -> Result<LanguageConfiguration, String
 
 /// Parse a VSCode snippets JSON file (supports JSONC with comments).
 pub fn load_snippet_file(path: &Path) -> Result<Vec<SnippetEntry>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read snippet file: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read snippet file: {}", e))?;
     let cleaned = strip_json_comments(&content);
-    let map: HashMap<String, SnippetEntry> = serde_json::from_str(&cleaned)
-        .map_err(|e| format!("Invalid snippet JSON: {}", e))?;
+    let map: HashMap<String, SnippetEntry> =
+        serde_json::from_str(&cleaned).map_err(|e| format!("Invalid snippet JSON: {}", e))?;
     Ok(map.into_values().collect())
 }
 
@@ -232,11 +227,9 @@ pub fn scan_installed_extensions() -> Vec<InstalledExtension> {
             if path.is_dir() && path.join("package.json").exists() {
                 match load_extension(&path) {
                     Ok(ext) => extensions.push(ext),
-                    Err(e) => tracing::warn!(
-                        "Failed to load extension from {}: {}",
-                        path.display(),
-                        e
-                    ),
+                    Err(e) => {
+                        tracing::warn!("Failed to load extension from {}: {}", path.display(), e)
+                    }
                 }
             }
         }

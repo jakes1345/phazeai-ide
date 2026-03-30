@@ -236,6 +236,10 @@ impl Agent {
             let mut current_tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, arguments)
 
             while let Some(event) = stream.next().await {
+                if self.is_cancelled() {
+                    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                    return Err(PhazeError::Cancelled);
+                }
                 match event {
                     StreamEvent::TextDelta(delta) => {
                         content.push_str(&delta);
@@ -288,6 +292,10 @@ impl Agent {
 
                 // Execute each tool call
                 for tool_call in &tool_calls {
+                    if self.is_cancelled() {
+                        let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                        return Err(PhazeError::Cancelled);
+                    }
                     let tool_name = &tool_call.function.name;
 
                     // Check if approval is needed

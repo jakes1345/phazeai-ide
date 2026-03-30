@@ -4,11 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 /// JSON-RPC client that communicates with the Python sidecar over stdio.
 pub struct SidecarClient {
     stdin: Mutex<tokio::process::ChildStdin>,
     stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
+    process: Mutex<Child>,
     next_id: AtomicU64,
 }
 
@@ -26,8 +28,18 @@ impl SidecarClient {
         Ok(Self {
             stdin: Mutex::new(stdin),
             stdout: Mutex::new(BufReader::new(stdout)),
+            process: Mutex::new(process),
             next_id: AtomicU64::new(1),
         })
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
+        let mut process = self.process.lock().await;
+        match process.kill().await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+            Err(e) => Err(format!("Failed to stop sidecar: {e}")),
+        }
     }
 
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
@@ -101,5 +113,15 @@ impl SidecarClient {
 
     pub async fn health_check(&self) -> bool {
         self.call("ping", None).await.is_ok()
+    }
+}
+
+impl Drop for SidecarClient {
+    fn drop(&mut self) {
+        if let Ok(mut process) = self.process.try_lock() {
+            let _ = process.start_kill();
+        } else {
+            warn!("Sidecar client dropped while process lock was held");
+        }
     }
 }

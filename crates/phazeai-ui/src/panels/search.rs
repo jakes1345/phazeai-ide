@@ -13,6 +13,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let theme = state.theme;
     let query = state.search_query;
     let results = state.search_results;
+    let sidecar_ready = state.sidecar_ready;
+    let sidecar_status = state.sidecar_status;
+    let sidecar_building = state.sidecar_building;
+    let sidecar_results = state.sidecar_results;
     let is_searching = create_rw_signal(false);
     let replace_text = create_rw_signal(String::new());
     let replace_open = create_rw_signal(false);
@@ -276,6 +280,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                         include_glob,
                                         exclude_glob,
                                     );
+                                    if !q.trim().is_empty() {
+                                        state2.sidecar_query.set(q.trim().to_string());
+                                        state2.sidecar_search_nonce.update(|n| *n += 1);
+                                    }
                                 }
                                 Key::Named(NamedKey::ArrowUp) => {
                                     let hist = search_history.get_untracked();
@@ -360,6 +368,152 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     )
     .style(|s| s.padding_horiz(8.0).padding_bottom(4.0).width_full());
 
+    // ── Semantic search controls ─────────────────────────────────────────────
+    let semantic_bar = {
+        let semantic_state = state.clone();
+        let semantic_state2 = state.clone();
+        container(
+            stack((
+                label(|| "Semantic").style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(11.0)
+                        .color(p.accent)
+                        .font_weight(floem::text::Weight::BOLD)
+                        .padding_right(8.0)
+                }),
+                label(move || sidecar_status.get()).style(move |s| {
+                    let p = theme.get().palette;
+                    s.flex_grow(1.0).min_width(0.0).font_size(11.0).color(
+                        if sidecar_building.get() {
+                            p.warning
+                        } else if sidecar_ready.get() {
+                            p.text_secondary
+                        } else {
+                            p.text_muted
+                        },
+                    )
+                }),
+                container(label(|| "Search Semantically"))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.padding_horiz(8.0)
+                            .padding_vert(4.0)
+                            .border_radius(4.0)
+                            .font_size(11.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .color(p.bg_base)
+                            .background(p.accent)
+                            .apply_if(sidecar_building.get(), |s| s.background(p.bg_elevated))
+                    })
+                    .on_click_stop(move |_| {
+                        let q = query.get();
+                        if q.trim().is_empty() {
+                            return;
+                        }
+                        semantic_state.sidecar_query.set(q.trim().to_string());
+                        semantic_state.sidecar_search_nonce.update(|n| *n += 1);
+                    }),
+                container(label(move || {
+                    if sidecar_building.get() {
+                        "Reindexing..."
+                    } else {
+                        "Reindex"
+                    }
+                }))
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.padding_horiz(8.0)
+                        .padding_vert(4.0)
+                        .border_radius(4.0)
+                        .font_size(11.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .color(p.text_primary)
+                        .background(p.bg_elevated)
+                        .border(1.0)
+                        .border_color(p.border)
+                })
+                .on_click_stop(move |_| {
+                    semantic_state2.sidecar_build_nonce.update(|n| *n += 1);
+                }),
+            ))
+            .style(|s| s.flex_row().items_center().gap(6.0).width_full()),
+        )
+        .style(|s| s.padding_horiz(8.0).padding_bottom(4.0).width_full())
+    };
+
+    let semantic_results_view = {
+        let semantic_state = state.clone();
+        container(
+            dyn_stack(
+                move || {
+                    safe_get(sidecar_results, Vec::new())
+                        .into_iter()
+                        .enumerate()
+                        .collect::<Vec<_>>()
+                },
+                |(i, _)| *i,
+                move |(_, (file, snippet))| {
+                    let file_path = std::path::PathBuf::from(file.clone());
+                    let file_label = file_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| file.clone());
+                    let hovered = create_rw_signal(false);
+                    let semantic_state2 = semantic_state.clone();
+                    container(
+                        stack((
+                            label(move || file_label.clone()).style(move |s| {
+                                let p = theme.get().palette;
+                                s.font_size(10.0).color(p.accent).padding_right(6.0)
+                            }),
+                            label(move || snippet.clone()).style(move |s| {
+                                let p = theme.get().palette;
+                                s.font_size(11.0).color(p.text_primary).flex_grow(1.0)
+                            }),
+                        ))
+                        .style(|s| s.flex_row().items_center().width_full()),
+                    )
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.padding_horiz(8.0)
+                            .padding_vert(4.0)
+                            .width_full()
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .background(if hovered.get() {
+                                p.bg_elevated
+                            } else {
+                                floem::peniko::Color::TRANSPARENT
+                            })
+                    })
+                    .on_click_stop(move |_| {
+                        semantic_state2.open_file.set(Some(file_path.clone()));
+                        semantic_state2.goto_line.set(1);
+                    })
+                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                        hovered.set(true);
+                    })
+                    .on_event_stop(
+                        floem::event::EventListener::PointerLeave,
+                        move |_| {
+                            hovered.set(false);
+                        },
+                    )
+                },
+            )
+            .style(|s| s.flex_col().width_full()),
+        )
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.width_full()
+                .padding_bottom(4.0)
+                .border_bottom(1.0)
+                .border_color(p.border.with_alpha(0.25))
+                .apply_if(sidecar_results.get().is_empty(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        })
+    };
+
     // ── Replace input (shown when replace_open) ───────────────────────────────
     let replace_bar = {
         let state3 = state.clone();
@@ -431,7 +585,12 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let flat_results_view = {
         let state_flat = state.clone();
         dyn_stack(
-            move || safe_get(results, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(results, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(i, _)| *i,
             move |(i, r)| {
                 let path_str = r
@@ -687,6 +846,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         count_label,
         search_bar,
         glob_bar,
+        semantic_bar,
+        semantic_results_view,
         replace_bar,
         status_label,
         results_area,

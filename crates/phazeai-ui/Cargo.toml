@@ -17,6 +17,7 @@ path = "src/bin/phazeai-ui.rs"
 floem = { workspace = true }
 floem-editor-core = { workspace = true }
 phazeai-core = { path = "../phazeai-core" }
+phazeai-cloud = { path = "../phazeai-cloud" }
 phazeai-sidecar = { path = "../phazeai-sidecar" }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -33,9 +34,9 @@ lazy_static = "1.5"
 lsp-types = { workspace = true }
 notify = { workspace = true }
 libc = "0.2"
+toml = { workspace = true }
 
 [dev-dependencies]
 image = "0.25"
 tempfile = "3.10"
 serde = { workspace = true }
-toml = { workspace = true }

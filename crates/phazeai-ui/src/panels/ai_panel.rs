@@ -205,12 +205,7 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
             });
             input_text.set(String::new());
             is_loading.set(true);
-            send_message(
-                trimmed,
-                settings,
-                current_mode,
-                (*update_tx).clone(),
-            );
+            send_message(trimmed, settings, current_mode, (*update_tx).clone());
         }
     });
 
@@ -431,7 +426,12 @@ pub fn ai_panel(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
     // ── Messages ──────────────────────────────────────────────────────────────
     let msg_list = dyn_stack(
-        move || safe_get(messages, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+        move || {
+            safe_get(messages, Vec::new())
+                .into_iter()
+                .enumerate()
+                .collect::<Vec<_>>()
+        },
         |(i, _)| *i,
         move |(_, msg)| {
             let is_user = msg.role == MsgRole::User;

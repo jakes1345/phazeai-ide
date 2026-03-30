@@ -61,6 +61,10 @@ impl SidecarManager {
         }
     }
 
+    pub fn into_process(mut self) -> Option<Child> {
+        self.process.take()
+    }
+
     pub fn take_process(&mut self) -> Option<Child> {
         self.process.take()
     }

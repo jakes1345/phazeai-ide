@@ -1628,8 +1628,7 @@ pub fn editor_panel(
             {
                 let doc_for_fold = doc.clone();
                 // Use sync_channel + create_signal_from_channel to avoid Scope leak.
-                let (fold_tx, fold_rx) =
-                    std::sync::mpsc::sync_channel::<Vec<(usize, usize)>>(1);
+                let (fold_tx, fold_rx) = std::sync::mpsc::sync_channel::<Vec<(usize, usize)>>(1);
                 let fold_result_sig = create_signal_from_channel(fold_rx);
                 // Receive effect: merges brace-based and LSP ranges when result arrives.
                 create_effect(move |_| {
@@ -1724,8 +1723,7 @@ pub fn editor_panel(
             {
                 let doc_for_bp = doc.clone();
                 // Use sync_channel + create_signal_from_channel to avoid Scope leak.
-                let (bp_tx, bp_rx) =
-                    std::sync::mpsc::sync_channel::<Vec<(usize, usize, usize)>>(1);
+                let (bp_tx, bp_rx) = std::sync::mpsc::sync_channel::<Vec<(usize, usize, usize)>>(1);
                 let bp_result_sig = create_signal_from_channel(bp_rx);
                 // Receive effect: applies bracket pairs when result arrives.
                 create_effect(move |_| {
@@ -3762,8 +3760,7 @@ pub fn editor_panel(
             let git_changes: RwSignal<Vec<(usize, u8)>> = create_rw_signal(vec![]);
             {
                 let git_path = tab.path.clone();
-                let (git_tx, git_rx) =
-                    std::sync::mpsc::sync_channel::<Vec<(usize, u8)>>(1);
+                let (git_tx, git_rx) = std::sync::mpsc::sync_channel::<Vec<(usize, u8)>>(1);
                 let git_result_sig = create_signal_from_channel(git_rx);
                 // Receive effect: applies git change markers when result arrives.
                 create_effect(move |_| {
@@ -4686,42 +4683,17 @@ pub fn editor_panel(
             .height_full()
             .background(bg)
     })
-    .on_event_stop(EventListener::KeyDown, move |event| {
+    .on_event_cont(EventListener::KeyDown, move |event| {
+        // Editor-specific shortcuts only. Global shortcuts (Ctrl+B/J/P/\/Shift+P,
+        // font zoom, Alt+Up/Down, etc.) bubble to the root handler in app.rs.
         if let Event::KeyDown(e) = event {
             let ctrl = e.modifiers.contains(Modifiers::CONTROL);
             let shift = e.modifiers.contains(Modifiers::SHIFT);
-            let alt = e.modifiers.contains(Modifiers::ALT);
-
-            // Alt+Up — move line up
-            if alt && !ctrl && !shift {
-                if let Key::Named(floem::keyboard::NamedKey::ArrowUp) = e.key.logical_key {
-                    move_line_up_nonce.update(|n| *n += 1);
-                    return;
-                }
-                if let Key::Named(floem::keyboard::NamedKey::ArrowDown) = e.key.logical_key {
-                    move_line_down_nonce.update(|n| *n += 1);
-                    return;
-                }
-            }
-            // Alt+Shift+Down — duplicate line
-            if alt && shift && !ctrl {
-                if let Key::Named(floem::keyboard::NamedKey::ArrowDown) = e.key.logical_key {
-                    duplicate_line_nonce.update(|n| *n += 1);
-                    return;
-                }
-            }
 
             if ctrl && !shift {
                 if let Key::Character(ref ch) = e.key.logical_key {
                     match ch.as_str() {
                         "s" => save_fn_key(),
-                        "=" | "+" => font_size.update(|s| *s = (*s + 1).min(32)),
-                        "-" => font_size.update(|s| {
-                            if *s > 8 {
-                                *s -= 1;
-                            }
-                        }),
-                        "0" => font_size.set(14),
                         "f" => {
                             find_open.set(true);
                             replace_open.set(false);
@@ -4731,10 +4703,6 @@ pub fn editor_panel(
                             find_open.set(true);
                             replace_open.set(true);
                             find_cur_match.set(0);
-                        }
-                        "g" => {
-                            goto_open.set(true);
-                            goto_query.set(String::new());
                         }
                         _ => {}
                     }
@@ -4788,7 +4756,9 @@ fn tab_bar_view(
                         s.font_size(8.0)
                             .color(theme.get().palette.accent)
                             .margin_right(4.0)
-                            .apply_if(!safe_get(dirty, false), |s| s.display(floem::style::Display::None))
+                            .apply_if(!safe_get(dirty, false), |s| {
+                                s.display(floem::style::Display::None)
+                            })
                     }),
                     container(label(|| "●")).style(move |s| {
                         let color = diag_color();
@@ -4893,15 +4863,26 @@ fn tab_bar_view(
     let dropdown_open = create_rw_signal(false);
     let dropdown_hov = create_rw_signal(false);
 
-    let tab_dropdown_btn = container(label(move || {
-        let count = tabs.get().len();
-        if count > 1 { format!("⋯ {count}") } else { "⋯".to_string() }
-    }).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(11.0)
-            .font_weight(floem::text::Weight::BOLD)
-            .color(if dropdown_hov.get() { p.accent_hover } else { p.text_muted })
-    }))
+    let tab_dropdown_btn = container(
+        label(move || {
+            let count = tabs.get().len();
+            if count > 1 {
+                format!("⋯ {count}")
+            } else {
+                "⋯".to_string()
+            }
+        })
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0)
+                .font_weight(floem::text::Weight::BOLD)
+                .color(if dropdown_hov.get() {
+                    p.accent_hover
+                } else {
+                    p.text_muted
+                })
+        }),
+    )
     .style(move |s| {
         let p = theme.get().palette;
         s.padding_horiz(8.0)
@@ -4910,11 +4891,19 @@ fn tab_bar_view(
             .cursor(floem::style::CursorStyle::Pointer)
             .border_left(1.0)
             .border_color(p.border)
-            .background(if dropdown_hov.get() { p.bg_elevated } else { floem::peniko::Color::TRANSPARENT })
+            .background(if dropdown_hov.get() {
+                p.bg_elevated
+            } else {
+                floem::peniko::Color::TRANSPARENT
+            })
     })
     .on_click_stop(move |_| dropdown_open.update(|v| *v = !*v))
-    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| dropdown_hov.set(true))
-    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| dropdown_hov.set(false));
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+        dropdown_hov.set(true)
+    })
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+        dropdown_hov.set(false)
+    });
 
     // Dropdown panel listing all tabs
     let tab_dropdown_list = container(
@@ -4932,11 +4921,17 @@ fn tab_bar_view(
                             s.font_size(6.0)
                                 .color(theme.get().palette.accent)
                                 .margin_right(6.0)
-                                .apply_if(!safe_get(dirty, false), |s| s.display(floem::style::Display::None))
+                                .apply_if(!safe_get(dirty, false), |s| {
+                                    s.display(floem::style::Display::None)
+                                })
                         }),
                         label(move || name.clone()).style(move |s| {
                             let p = theme.get().palette;
-                            s.font_size(12.0).color(if is_active { p.accent } else { p.text_primary })
+                            s.font_size(12.0).color(if is_active {
+                                p.accent
+                            } else {
+                                p.text_primary
+                            })
                         }),
                     ))
                     .style(move |s| {
@@ -4958,8 +4953,12 @@ fn tab_bar_view(
                         active_idx.set(Some(i));
                         dropdown_open.set(false);
                     })
-                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| item_hov.set(true))
-                    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| item_hov.set(false))
+                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                        item_hov.set(true)
+                    })
+                    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                        item_hov.set(false)
+                    })
                 },
             )
             .style(|s| s.flex_col().width_full()),
@@ -4980,19 +4979,22 @@ fn tab_bar_view(
             .box_shadow_color(p.glow)
             .z_index(50)
             .flex_col()
-            .apply_if(!dropdown_open.get(), |s| s.display(floem::style::Display::None))
+            .apply_if(!dropdown_open.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
     });
 
     // Wrap the tab list in scroll so overflow tabs are scrollable horizontally
-    let tab_scroll = scroll(tab_list).style(move |s: floem::style::Style| {
-        s.height_full()
-            .flex_grow(1.0)
-            .min_width(0.0)
-    });
+    let tab_scroll = scroll(tab_list)
+        .style(move |s: floem::style::Style| s.height_full().flex_grow(1.0).min_width(0.0));
 
     container(
-        stack((tab_scroll, tab_dropdown_btn, tab_dropdown_list))
-            .style(|s| s.flex_row().width_full().height_full().position(floem::style::Position::Relative)),
+        stack((tab_scroll, tab_dropdown_btn, tab_dropdown_list)).style(|s| {
+            s.flex_row()
+                .width_full()
+                .height_full()
+                .position(floem::style::Position::Relative)
+        }),
     )
     .style(move |s| {
         let t = theme.get();
