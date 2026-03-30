@@ -66,8 +66,11 @@ impl Tool for BashTool {
 
         let cwd = self.cwd.lock().await.clone();
 
+        // Capture pwd after command so we can track cwd changes (only on success)
+        let wrapped_command = format!("{command} && echo \"PWD:$(pwd)\"");
+
         let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg("-c").arg(command).current_dir(&cwd);
+        cmd.arg("-c").arg(&wrapped_command).current_dir(&cwd);
 
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
@@ -79,6 +82,27 @@ impl Tool for BashTool {
 
         let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // Parse and strip the PWD line, then update stored cwd
+        if let Some(pwd_line_pos) = stdout.rfind("PWD:") {
+            let pwd_start = pwd_line_pos + 4; // skip "PWD:"
+            let pwd_end = stdout[pwd_start..]
+                .find('\n')
+                .map(|i| pwd_start + i)
+                .unwrap_or(stdout.len());
+            let new_pwd = stdout[pwd_start..pwd_end].trim().to_string();
+            // Strip the PWD line (and the preceding newline if present)
+            let strip_from = if pwd_line_pos > 0 && stdout.as_bytes().get(pwd_line_pos - 1) == Some(&b'\n') {
+                pwd_line_pos - 1
+            } else {
+                pwd_line_pos
+            };
+            let strip_to = if pwd_end < stdout.len() { pwd_end + 1 } else { pwd_end };
+            stdout = format!("{}{}", &stdout[..strip_from], &stdout[strip_to..]);
+            if !new_pwd.is_empty() {
+                *self.cwd.lock().await = PathBuf::from(new_pwd);
+            }
+        }
 
         // Truncate if too long
         if stdout.len() > MAX_OUTPUT_CHARS {
