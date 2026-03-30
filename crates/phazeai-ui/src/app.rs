@@ -140,7 +140,7 @@ pub struct IdeState {
     /// Set to `true` while the AI chat panel is processing a request.
     /// Shared with the editor's sentient gutter so it glows during inference.
     pub ai_thinking: RwSignal<bool>,
-    /// Rendered width of the left sidebar (260.0 when open, 0.0 when closed).
+    /// Rendered width of the left sidebar (300.0 when open, 0.0 when closed).
     /// Note: This snaps immediately. In the future, this could use a smooth animation loop
     /// when Floem exposes a stable `create_animation` / `spring` API.
     pub left_panel_width: RwSignal<f64>,
@@ -433,7 +433,7 @@ impl Default for SessionState {
         Self {
             open_tabs: Vec::new(),
             active_tab_index: None,
-            left_panel_width: 300.0,
+            left_panel_width: 260.0,
             show_left_panel: true,
             show_right_panel: true,
             show_bottom_panel: false,
@@ -5488,12 +5488,12 @@ fn menu_bar(state: IdeState) -> impl IntoView {
             .style(move |sty| {
                 let t = theme.get();
                 let p = &t.palette;
-                sty.padding_horiz(12.0)
-                    .height(24.0)
+                sty.padding_horiz(16.0)
+                    .height(28.0)
                     .items_center()
                     .justify_center()
                     .cursor(floem::style::CursorStyle::Pointer)
-                    .font_size(12.0)
+                    .font_size(13.0)
                     .color(p.text_secondary)
                     .apply_if(hovered.get(), |s| {
                         s.background(p.bg_elevated).color(p.text_primary)
@@ -5859,8 +5859,8 @@ pub fn launch_phaze_ide() {
                 };
 
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
-                let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
-                    .style(|s| s.flex_col().width_full().height_full());
+    let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
+        .style(|s| s.flex_col().width_full().height_full().padding(16.0));
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((
