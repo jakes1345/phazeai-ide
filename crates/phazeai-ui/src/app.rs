@@ -5766,7 +5766,16 @@ fn menu_bar(state: IdeState) -> impl IntoView {
                 )
                 .separator()
                 .entry(MenuItem::new("About PhazeAI IDE").action(|| {
-                    // Note: about dialog is not yet implemented
+                    rfd::MessageDialog::new()
+                        .set_title("About PhazeAI IDE")
+                        .set_description(
+                            "PhazeAI IDE v0.1.0\n\n\
+                            AI-native code editor built in Rust.\n\n\
+                            MIT License\n\n\
+                            https://github.com/jakes1345/phazeai-ide",
+                        )
+                        .set_buttons(rfd::MessageButtons::Ok)
+                        .show();
                 }));
             show_context_menu(menu, None);
         })
