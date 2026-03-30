@@ -9,13 +9,54 @@ use floem::{
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::{
+    Agent, AgentEvent, ConversationMetadata, ConversationStore, SavedConversation, SavedMessage,
+    Settings,
+};
 
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
     util::safe_get,
 };
+
+// ── AI Mode ───────────────────────────────────────────────────────────────────
+
+/// Selects the conversational role / system-prompt variant used when sending
+/// a message to the AI. Previously this lived in the now-removed `ai_panel`;
+/// it has been merged here so there is a single AI surface in the IDE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiMode {
+    Chat,
+    Ask,
+    Debug,
+    Plan,
+    Edit,
+}
+
+impl AiMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AiMode::Chat => "Chat",
+            AiMode::Ask => "Ask",
+            AiMode::Debug => "Debug",
+            AiMode::Plan => "Plan",
+            AiMode::Edit => "Edit",
+        }
+    }
+
+    /// Returns a brief system-prompt prefix injected before the user message.
+    /// Empty string for the default Chat mode so no prefix is added.
+    pub fn system_hint(self) -> &'static str {
+        match self {
+            AiMode::Chat => "",
+            AiMode::Ask => "Answer concisely and precisely. No extra prose.\n\n",
+            AiMode::Debug => "You are a debugging expert. Focus on root causes and fixes.\n\n",
+            AiMode::Plan => "You are a software architect. Produce clear step-by-step plans.\n\n",
+            AiMode::Edit => "You are a code editor. Produce only code changes, no commentary.\n\n",
+        }
+    }
+}
 
 // ── Chat Types ────────────────────────────────────────────────────────────────
 
@@ -33,6 +74,7 @@ pub struct ChatMessage {
     pub content: String,
     /// True while AI is still generating this message.
     pub loading: bool,
+    pub is_error: bool,
 }
 
 /// What the background AI thread sends to the Floem UI thread.
@@ -52,10 +94,100 @@ enum ChatUpdate {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+fn now_str() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // RFC3339-ish: YYYY-MM-DDTHH:MM:SSZ
+    let secs = now;
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hours = rem / 3600;
+    let mins = (rem % 3600) / 60;
+    let s = rem % 60;
+    let a = days.saturating_sub(32044);
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = (e - (153 * m + 2) / 5) + 1;
+    let month = (m + 3) % 12 + 1;
+    let year = 2000 + b * 100 + d - 4800 + (m >= 10) as u64;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, mins, s
+    )
+}
+
+fn save_conversation(
+    messages: &[ChatMessage],
+    conversation_id: &str,
+    model_name: &str,
+    workspace_root: &std::path::Path,
+) {
+    let store = ConversationStore::new().unwrap_or_else(|_| ConversationStore::default());
+
+    let saved_messages: Vec<SavedMessage> = messages
+        .iter()
+        .map(|m| SavedMessage {
+            role: match m.role {
+                ChatRole::User => "user".into(),
+                ChatRole::Assistant => "assistant".into(),
+                ChatRole::Tool => "tool".into(),
+            },
+            content: m.content.clone(),
+            timestamp: now_str(),
+            tool_name: None,
+        })
+        .collect();
+
+    let title = messages
+        .iter()
+        .find_map(|m| {
+            if m.role == ChatRole::User {
+                let t = m.content.chars().take(80).collect::<String>();
+                Some(if m.content.len() > 80 {
+                    format!("{}...", t)
+                } else {
+                    t
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "Untitled".into());
+
+    let cwd = Some(workspace_root.display().to_string());
+
+    let metadata = ConversationMetadata {
+        id: conversation_id.to_string(),
+        title,
+        created_at: now_str(),
+        updated_at: now_str(),
+        message_count: saved_messages.len(),
+        model: model_name.to_string(),
+        project_dir: cwd,
+    };
+
+    let conversation = SavedConversation {
+        metadata,
+        messages: saved_messages,
+        system_prompt: None,
+    };
+
+    let _ = store.save(&conversation);
+}
+
 fn send_to_ai(
     user_message: String,
     settings: Settings,
+    workspace_root: std::path::PathBuf,
+    mode_hint: &'static str,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
+    cancel_token: Arc<std::sync::atomic::AtomicBool>,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -77,11 +209,10 @@ fn send_to_ai(
                     return;
                 }
             };
-            let mut agent = Agent::new(client);
+            let mut agent = Agent::new(client).with_cancel_token(cancel_token);
 
             // Connect to MCP servers
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let mcp_configs = phazeai_core::mcp::McpManager::load_config(&cwd);
+            let mcp_configs = phazeai_core::mcp::McpManager::load_config(&workspace_root);
             if !mcp_configs.is_empty() {
                 let mut mcp_manager = phazeai_core::mcp::McpManager::new();
                 mcp_manager.connect_all(&mcp_configs);
@@ -90,7 +221,13 @@ fn send_to_ai(
 
             let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-            let run_fut = agent.run_with_events(&user_message, agent_tx);
+            // Prepend the mode system hint (empty for default Chat mode).
+            let full_prompt = if mode_hint.is_empty() {
+                user_message.clone()
+            } else {
+                format!("{}{}", mode_hint, user_message)
+            };
+            let run_fut = agent.run_with_events(&full_prompt, agent_tx);
             let drain_fut = async {
                 let mut accumulated = String::new();
                 while let Some(event) = agent_rx.recv().await {
@@ -149,7 +286,11 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
                 // Truncate very large files
                 let truncated = if contents.len() > 30_000 {
                     let end = contents.floor_char_boundary(30_000);
-                    format!("{}...\n[truncated — {} bytes total]", &contents[..end], contents.len())
+                    format!(
+                        "{}...\n[truncated — {} bytes total]",
+                        &contents[..end],
+                        contents.len()
+                    )
                 } else {
                     contents
                 };
@@ -180,13 +321,45 @@ pub fn chat_panel(
     chat_inject: RwSignal<Option<String>>,
     workspace_root: RwSignal<std::path::PathBuf>,
 ) -> impl IntoView {
-    let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(vec![ChatMessage {
+    let mut initial_messages = vec![ChatMessage {
         role: ChatRole::Assistant,
         content: "Welcome to PhazeAI. How can I help you?".to_string(),
         loading: false,
-    }]);
+        is_error: false,
+    }];
+    let mut initial_id = ConversationStore::generate_id();
+
+    if let Ok(store) = ConversationStore::new() {
+        if let Ok(recent) = store.list_recent(1) {
+            if let Some(meta) = recent.first() {
+                if let Ok(conv) = store.load(&meta.id) {
+                    initial_id = meta.id.clone();
+                    initial_messages.clear();
+                    for m in conv.messages {
+                        #[allow(clippy::wildcard_in_or_patterns)]
+                        let role = match m.role.as_str() {
+                            "user" => ChatRole::User,
+                            "assistant" => ChatRole::Assistant,
+                            "tool" | "system" | _ => ChatRole::Tool,
+                        };
+                        initial_messages.push(ChatMessage {
+                            role,
+                            content: m.content,
+                            loading: false,
+                            is_error: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let conversation_id = create_rw_signal(initial_id);
+    let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(initial_messages);
     let input_text = create_rw_signal(String::new());
     let is_loading = create_rw_signal(false);
+    let mode = create_rw_signal(AiMode::Chat);
+    let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> = create_rw_signal(None);
 
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<ChatUpdate>(256);
     let update_signal = create_signal_from_channel(update_rx);
@@ -209,6 +382,7 @@ pub fn chat_panel(
                             role: ChatRole::Tool,
                             content: format!("Running tool: {}...", name),
                             loading: true,
+                            is_error: false,
                         });
                     });
                 }
@@ -221,6 +395,13 @@ pub fn chat_panel(
                             }
                         }
                     });
+                    let msgs = messages.get_untracked();
+                    save_conversation(
+                        &msgs,
+                        &conversation_id.get_untracked(),
+                        &Settings::load().llm.model,
+                        &workspace_root.get_untracked(),
+                    );
                 }
                 ChatUpdate::Done(text) => {
                     messages.update(|list| {
@@ -238,6 +419,13 @@ pub fn chat_panel(
                     });
                     is_loading.set(false);
                     ai_thinking.set(false);
+                    let msgs = messages.get_untracked();
+                    save_conversation(
+                        &msgs,
+                        &conversation_id.get_untracked(),
+                        &Settings::load().llm.model,
+                        &workspace_root.get_untracked(),
+                    );
                 }
                 ChatUpdate::Err(e) => {
                     messages.update(|list| {
@@ -245,11 +433,26 @@ pub fn chat_panel(
                             if last.loading {
                                 last.content = format!("Error: {}", e);
                                 last.loading = false;
+                                last.is_error = true;
+                            } else {
+                                list.push(ChatMessage {
+                                    role: ChatRole::Assistant,
+                                    content: format!("Error: {}", e),
+                                    loading: false,
+                                    is_error: true,
+                                });
                             }
                         }
                     });
                     is_loading.set(false);
                     ai_thinking.set(false);
+                    let msgs = messages.get_untracked();
+                    save_conversation(
+                        &msgs,
+                        &conversation_id.get_untracked(),
+                        &Settings::load().llm.model,
+                        &workspace_root.get_untracked(),
+                    );
                 }
             }
         }
@@ -277,20 +480,27 @@ pub fn chat_panel(
                     role: ChatRole::User,
                     content: trimmed.clone(),
                     loading: false,
+                    is_error: false,
                 });
                 list.push(ChatMessage {
                     role: ChatRole::Assistant,
                     content: String::new(),
                     loading: true,
+                    is_error: false,
                 });
             });
             input_text.set(String::new());
             is_loading.set(true);
             ai_thinking.set(true);
+            
+            let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            current_cancel_token.set(Some(token.clone()));
+            
             // Re-read settings on every send so model/provider changes in the
             // settings panel take effect immediately (no restart needed).
             let live_settings = Settings::load();
-            send_to_ai(prompt, live_settings, (*update_tx).clone());
+            let hint = mode.get_untracked().system_hint();
+            send_to_ai(prompt, live_settings, root, hint, (*update_tx).clone(), token);
         }
     });
 
@@ -339,15 +549,133 @@ pub fn chat_panel(
 
     let header = stack((neon_strip, header_content)).style(|s| s.flex_col().width_full());
 
+    // ── Mode tabs (Chat / Ask / Debug / Plan / Edit) ──────────────────────────
+
+    let all_modes = [
+        AiMode::Chat,
+        AiMode::Ask,
+        AiMode::Debug,
+        AiMode::Plan,
+        AiMode::Edit,
+    ];
+
+    let mode_tab = |m: AiMode| {
+        let is_hov = create_rw_signal(false);
+        container(label(move || m.label()))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let active = mode.get() == m;
+                s.padding_horiz(9.0)
+                    .padding_vert(4.0)
+                    .font_size(11.0)
+                    .color(if active { p.accent } else { p.text_muted })
+                    .background(if active {
+                        p.accent_dim
+                    } else if is_hov.get() {
+                        p.bg_elevated
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    })
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .apply_if(active, |s| s.border_bottom(2.0).border_color(p.accent))
+            })
+            .on_click_stop(move |_| {
+                mode.set(m);
+            })
+            .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                is_hov.set(true);
+            })
+            .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+                is_hov.set(false);
+            })
+    };
+
+    let mode_tabs = stack((
+        mode_tab(all_modes[0]),
+        mode_tab(all_modes[1]),
+        mode_tab(all_modes[2]),
+        mode_tab(all_modes[3]),
+        mode_tab(all_modes[4]),
+    ))
+    .style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.width_full()
+            .background(p.glass_bg)
+            .border_bottom(1.0)
+            .border_color(p.glass_border)
+            .items_center()
+            .padding_horiz(4.0)
+            .padding_vert(4.0)
+    });
+
+    let do_retry: Rc<dyn Fn()> = Rc::new({
+        let update_tx = update_tx.clone();
+        move || {
+            if is_loading.get() {
+                return;
+            }
+            
+            let msgs = messages.get_untracked();
+            let mut last_user_msg = None;
+            for msg in msgs.iter().rev() {
+                if msg.role == ChatRole::User {
+                    last_user_msg = Some(msg.content.clone());
+                    break;
+                }
+            }
+            
+            if let Some(user_msg) = last_user_msg {
+                messages.update(|list| {
+                    while let Some(last) = list.last() {
+                        if last.role != ChatRole::User {
+                            list.pop();
+                        } else {
+                            break;
+                        }
+                    }
+                    list.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: String::new(),
+                        loading: true,
+                        is_error: false,
+                    });
+                });
+                
+                is_loading.set(true);
+                ai_thinking.set(true);
+                
+                let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                current_cancel_token.set(Some(token.clone()));
+                
+                let root = workspace_root.get_untracked();
+                let prompt = expand_file_mentions(&user_msg, &root);
+                let live_settings = Settings::load();
+                let hint = mode.get_untracked().system_hint();
+                send_to_ai(prompt, live_settings, root, hint, (*update_tx).clone(), token);
+            }
+        }
+    });
+
     // ── Message bubbles ───────────────────────────────────────────────────────
 
     let msg_list = dyn_stack(
-        move || safe_get(messages, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
-        |(i, _)| *i,
-        move |(_, msg)| {
+        move || {
+            let list = safe_get(messages, Vec::new());
+            let len = list.len();
+            list.into_iter()
+                .enumerate()
+                .map(|(i, msg)| (i, msg, i == len - 1))
+                .collect::<Vec<_>>()
+        },
+        |(i, _, _)| *i,
+        move |(_, msg, is_last)| {
             let is_user = msg.role == ChatRole::User;
             let content = msg.content.clone();
             let loading = msg.loading;
+            let is_error = msg.is_error;
 
             let text_content = if loading && content.is_empty() {
                 "●●●".to_string()
@@ -356,32 +684,54 @@ pub fn chat_panel(
             };
             let is_typing = loading && text_content.starts_with('●');
             let is_tool = msg.role == ChatRole::Tool;
+            let show_retry = !is_user && is_last && !is_loading.get();
+            let do_retry_btn = do_retry.clone();
+
+            let retry_btn = container(
+                phaze_icon(icons::REFRESH, 12.0, move |p| p.text_secondary, theme)
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding(4.0)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .hover(|s| s.background(p.bg_elevated))
+                    .apply_if(!show_retry, |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                (do_retry_btn)();
+            });
 
             container(
                 stack((
-                    // Icon/Label for Tool cards
-                    phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
-                        move |s: floem::style::Style| {
-                            s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
-                        },
-                    ),
-                    label(move || text_content.clone()).style(move |s| {
-                        let t = theme.get();
-                        let p = &t.palette;
-                        s.font_size(if is_tool { 11.0 } else { 13.0 })
-                            .color(if is_user {
-                                p.text_primary
-                            } else if is_typing || is_tool {
-                                p.accent
-                            } else {
-                                p.text_secondary
-                            })
-                            .max_width_pct(100.0)
-                            .line_height(1.5)
-                            .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
-                    }),
+                    stack((
+                        phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
+                            move |s: floem::style::Style| {
+                                s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
+                            },
+                        ),
+                        label(move || text_content.clone()).style(move |s| {
+                            let t = theme.get();
+                            let p = &t.palette;
+                            s.font_size(if is_tool { 11.0 } else { 13.0 })
+                                .color(if is_user {
+                                    p.text_primary
+                                } else if is_error {
+                                    p.error
+                                } else if is_typing || is_tool {
+                                    p.accent
+                                } else {
+                                    p.text_secondary
+                                })
+                                .max_width_pct(100.0)
+                                .line_height(1.5)
+                                .apply_if(is_tool, |s| s.font_weight(floem::text::Weight::MEDIUM))
+                        }),
+                    )).style(|s| s.items_center().flex_grow(1.0)),
+                    retry_btn,
                 ))
-                .style(|s| s.items_center()),
+                .style(|s| s.items_center().justify_between().width_full()),
             )
             .style(move |s| {
                 let t = theme.get();
@@ -413,6 +763,15 @@ pub fn chat_panel(
                         .border_radius(6.0)
                         .margin_bottom(6.0)
                         .margin_horiz(20.0) // Indent tool calls
+                } else if is_error {
+                    s.width_full()
+                        .padding_horiz(14.0)
+                        .padding_vert(10.0)
+                        .background(p.error.with_alpha(0.1))
+                        .border(1.0)
+                        .border_color(p.error.with_alpha(0.3))
+                        .border_radius(10.0)
+                        .margin_bottom(8.0)
                 } else {
                     // Assistant bubble: darker glass for better readability
                     s.width_full()
@@ -437,13 +796,19 @@ pub fn chat_panel(
     let do_send_key = do_send.clone();
     let _ = do_send;
 
-    let send_btn = container(label(|| "↵").style(move |s| {
-        s.font_size(14.0).color(if is_loading.get() {
-            theme.get().palette.text_disabled
-        } else {
-            theme.get().palette.bg_base
-        })
-    }))
+    let send_btn = container(
+        stack((
+            label(|| "↵").style(move |s| {
+                s.font_size(14.0)
+                    .color(theme.get().palette.bg_base)
+                    .apply_if(is_loading.get(), |s| s.display(floem::style::Display::None))
+            }),
+            phaze_icon(icons::STOP, 14.0, move |p| p.text_primary, theme).style(move |s| {
+                s.apply_if(!is_loading.get(), |s| s.display(floem::style::Display::None))
+            }),
+        ))
+        .style(|s| s.items_center().justify_center())
+    )
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
@@ -466,7 +831,13 @@ pub fn chat_panel(
             })
     })
     .on_click_stop(move |_| {
-        (do_send_btn)();
+        if is_loading.get() {
+            if let Some(token) = current_cancel_token.get() {
+                token.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        } else {
+            (do_send_btn)();
+        }
     });
 
     let input_widget = text_input(input_text)
@@ -512,7 +883,7 @@ pub fn chat_panel(
 
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, messages_scroll, input_bar)).style(move |s| {
+    stack((header, mode_tabs, messages_scroll, input_bar)).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.flex_col()

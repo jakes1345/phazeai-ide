@@ -1,4 +1,5 @@
 pub mod app;
+pub mod commands;
 pub mod components;
 pub mod lsp_bridge;
 pub mod panels;

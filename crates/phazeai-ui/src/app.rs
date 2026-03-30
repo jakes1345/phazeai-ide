@@ -25,9 +25,10 @@ use crate::lsp_bridge::{
 };
 
 use crate::{
+    commands::{match_global_shortcut, GlobalShortcut},
     components::icon::{icons, phaze_icon},
     panels::{
-        ai_panel::ai_panel, chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
+        chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
         extensions::extensions_panel, git::git_panel, github_actions::github_actions_panel, search,
         settings::settings_panel, terminal::terminal_panel,
     },
@@ -368,10 +369,18 @@ pub struct IdeState {
     pub inlay_hints_toggle: RwSignal<bool>,
     /// Inlay hint entries from LSP or regex fallback for the active file.
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
+    /// Shared handle to the sidecar client for explicit shutdown on IDE exit.
+    pub sidecar_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
     /// Whether the semantic search sidecar is running.
     pub sidecar_ready: RwSignal<bool>,
+    /// Human-readable sidecar/indexing status shown in the UI.
+    pub sidecar_status: RwSignal<String>,
+    /// True while the semantic index is being built or rebuilt.
+    pub sidecar_building: RwSignal<bool>,
     /// Semantic search results (file path + snippet pairs).
     pub sidecar_results: RwSignal<Vec<(String, String)>>,
+    /// Semantic index rebuild nonce — increment to trigger a rebuild.
+    pub sidecar_build_nonce: RwSignal<u64>,
     /// Semantic search query nonce — increment to trigger a search.
     pub sidecar_search_nonce: RwSignal<u64>,
     /// Current semantic search query text.
@@ -400,114 +409,87 @@ impl std::fmt::Debug for IdeState {
     }
 }
 
-/// Persisted layout state from ~/.config/phazeai/session.toml
-struct SessionData {
-    /// All open tab paths (replaces the old single open_file).
+/// Persisted layout state from ~/.config/phazeai/session.toml.
+/// Uses serde + toml for reliable serialization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct SessionState {
+    /// All open tab paths.
     open_tabs: Vec<PathBuf>,
-    /// The active (focused) tab path, if any.
-    open_file: Option<PathBuf>,
+    /// Index of the active (focused) tab, if any.
+    active_tab_index: Option<usize>,
     left_panel_width: f64,
+    show_left_panel: bool,
+    show_right_panel: bool,
     show_bottom_panel: bool,
+    split_editor: bool,
+    split_editor_down: bool,
     vim_mode: bool,
     theme: String,
 }
 
-impl Default for SessionData {
+impl Default for SessionState {
     fn default() -> Self {
         Self {
             open_tabs: Vec::new(),
-            open_file: None,
+            active_tab_index: None,
             left_panel_width: 300.0,
+            show_left_panel: true,
+            show_right_panel: true,
             show_bottom_panel: false,
+            split_editor: false,
+            split_editor_down: false,
             vim_mode: false,
             theme: "Midnight Blue".to_string(),
         }
     }
 }
 
+impl SessionState {
+    /// Returns the active file path based on active_tab_index, filtered to existing files.
+    fn active_file(&self) -> Option<PathBuf> {
+        let idx = self.active_tab_index?;
+        self.open_tabs.get(idx).cloned()
+    }
+}
+
 /// Load session from `~/.config/phazeai/session.toml`.
-fn session_load() -> SessionData {
+fn session_load() -> SessionState {
     let Some(dir) = dirs_next_config() else {
-        return SessionData::default();
+        return SessionState::default();
     };
     let Ok(text) = std::fs::read_to_string(dir.join("session.toml")) else {
-        return SessionData::default();
+        return SessionState::default();
     };
-    let mut data = SessionData::default();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("open_file = ") {
-            let path = PathBuf::from(rest.trim().trim_matches('"'));
-            if path.exists() {
-                data.open_file = Some(path);
-            }
-        } else if let Some(rest) = line.strip_prefix("open_tab = ") {
-            let path = PathBuf::from(rest.trim().trim_matches('"'));
-            if path.exists() {
-                data.open_tabs.push(path);
-            }
-        } else if let Some(rest) = line.strip_prefix("left_panel_width = ") {
-            if let Ok(v) = rest.trim().parse::<f64>() {
-                data.left_panel_width = v;
-            }
-        } else if let Some(rest) = line.strip_prefix("show_bottom_panel = ") {
-            data.show_bottom_panel = rest.trim() == "true";
-        } else if let Some(rest) = line.strip_prefix("vim_mode = ") {
-            data.vim_mode = rest.trim() == "true";
-        } else if let Some(rest) = line.strip_prefix("theme = ") {
-            data.theme = rest.trim().trim_matches('"').to_string();
+    let mut state: SessionState = toml::from_str(&text).unwrap_or_default();
+    // Filter out tabs for files that no longer exist on disk.
+    state.open_tabs.retain(|p| p.exists());
+    // Clamp active_tab_index to the surviving tab list.
+    if let Some(idx) = state.active_tab_index {
+        if state.open_tabs.is_empty() {
+            state.active_tab_index = None;
+        } else if idx >= state.open_tabs.len() {
+            state.active_tab_index = Some(state.open_tabs.len().saturating_sub(1));
         }
     }
-    data
+    state
 }
 
 /// Save session to `~/.config/phazeai/session.toml`.
-fn session_save_full(
-    open_file: Option<&PathBuf>,
-    left_panel_width: f64,
-    show_bottom_panel: bool,
-    vim_mode: bool,
-    theme: &str,
-) {
+fn session_save(state: &SessionState) {
     let Some(dir) = dirs_next_config() else {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
-    let file_str = open_file
-        .map(|p| format!("{:?}", p.to_string_lossy()))
-        .unwrap_or_default();
-    let content = format!(
-        "open_file = {file_str}\nleft_panel_width = {left_panel_width}\n\
-         show_bottom_panel = {show_bottom_panel}\nvim_mode = {vim_mode}\n\
-         theme = \"{theme}\"\n"
-    );
-    let _ = std::fs::write(dir.join("session.toml"), content);
+    if let Ok(content) = toml::to_string_pretty(state) {
+        let _ = std::fs::write(dir.join("session.toml"), content);
+    }
 }
 
-/// Save the full set of open tabs plus the active file.
-fn session_save_tabs(
-    tabs: &[PathBuf],
-    active: Option<&PathBuf>,
-    left_panel_width: f64,
-    show_bottom_panel: bool,
-    vim_mode: bool,
-    theme: &str,
-) {
-    let Some(dir) = dirs_next_config() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let file_str = active
-        .map(|p| format!("{:?}", p.to_string_lossy()))
-        .unwrap_or_default();
-    let mut content = format!(
-        "open_file = {file_str}\nleft_panel_width = {left_panel_width}\n\
-         show_bottom_panel = {show_bottom_panel}\nvim_mode = {vim_mode}\n\
-         theme = \"{theme}\"\n"
-    );
-    for tab in tabs {
-        content.push_str(&format!("open_tab = {:?}\n", tab.to_string_lossy()));
-    }
-    let _ = std::fs::write(dir.join("session.toml"), content);
+fn session_update(mutate: impl FnOnce(&mut SessionState)) {
+    let mut current = session_load();
+    mutate(&mut current);
+    session_save(&current);
 }
 
 fn dirs_next_config() -> Option<PathBuf> {
@@ -519,16 +501,17 @@ fn dirs_next_config() -> Option<PathBuf> {
 }
 
 /// Convert a provider display name back to LlmProvider enum.
-fn provider_name_to_llm_provider(name: &str) -> LlmProvider {
+fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
     match name {
-        "Claude (Anthropic)" => LlmProvider::Claude,
-        "OpenAI" => LlmProvider::OpenAI,
-        "Google Gemini" => LlmProvider::Gemini,
-        "Groq" => LlmProvider::Groq,
-        "Together.ai" => LlmProvider::Together,
-        "OpenRouter" => LlmProvider::OpenRouter,
-        "LM Studio (Local)" => LlmProvider::LmStudio,
-        _ => LlmProvider::Ollama, // Ollama (Local) + default
+        "Claude (Anthropic)" => Some(LlmProvider::Claude),
+        "OpenAI" => Some(LlmProvider::OpenAI),
+        "Google Gemini" => Some(LlmProvider::Gemini),
+        "Groq" => Some(LlmProvider::Groq),
+        "Together.ai" => Some(LlmProvider::Together),
+        "OpenRouter" => Some(LlmProvider::OpenRouter),
+        "LM Studio (Local)" => Some(LlmProvider::LmStudio),
+        "Ollama (Local)" => Some(LlmProvider::Ollama),
+        _ => None,
     }
 }
 
@@ -559,6 +542,89 @@ pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
 /// Load editor config from Settings (reads `~/.config/phazeai/config.toml` via toml crate).
 fn load_editor_settings() -> phazeai_core::config::EditorSettings {
     Settings::load().editor
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_sidecar_start(
+    python_path: String,
+    script: PathBuf,
+    workspace_root: PathBuf,
+    shared_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
+    ready_tx: std::sync::mpsc::SyncSender<bool>,
+    status_tx: std::sync::mpsc::SyncSender<String>,
+    build_tx: std::sync::mpsc::SyncSender<bool>,
+    build_after_start: bool,
+) {
+    std::thread::spawn(move || {
+        if shared_client.lock().ok().and_then(|g| g.clone()).is_some() {
+            let _ = ready_tx.send(true);
+            if build_after_start {
+                let _ = build_tx.send(true);
+            }
+            return;
+        }
+
+        let _ = status_tx.send(format!(
+            "Starting semantic search sidecar with {}...",
+            python_path
+        ));
+
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = status_tx.send(format!("Semantic search runtime error: {e}"));
+                let _ = ready_tx.send(false);
+                return;
+            }
+        };
+
+        rt.block_on(async move {
+            let mut mgr = SidecarManager::new(python_path.clone(), script.clone());
+            match mgr.start().await {
+                Ok(()) => {
+                    if let Some(process) = mgr.into_process() {
+                        match SidecarClient::from_process(process) {
+                            Ok(client) => {
+                                if client.health_check().await {
+                                    let client = Arc::new(client);
+                                    if let Ok(mut slot) = shared_client.lock() {
+                                        *slot = Some(client);
+                                    }
+                                    let _ = ready_tx.send(true);
+                                    let _ = status_tx.send(format!(
+                                        "Semantic search ready for {}",
+                                        workspace_root.display()
+                                    ));
+                                    if build_after_start {
+                                        let _ = build_tx.send(true);
+                                    }
+                                } else {
+                                    let _ = ready_tx.send(false);
+                                    let _ = status_tx
+                                        .send("Semantic search sidecar failed health check".into());
+                                }
+                            }
+                            Err(e) => {
+                                let _ = ready_tx.send(false);
+                                let _ = status_tx
+                                    .send(format!("Semantic search connection error: {e}"));
+                            }
+                        }
+                    } else {
+                        let _ = ready_tx.send(false);
+                        let _ = status_tx.send("Semantic search process handle missing".into());
+                    }
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(false);
+                    let _ = status_tx.send(format!("Semantic search failed to start: {e}"));
+                }
+            }
+        });
+    });
 }
 
 impl IdeState {
@@ -625,7 +691,7 @@ impl IdeState {
         // Load editor config from ~/.config/phazeai/config.toml via toml crate.
         let editor_cfg = load_editor_settings();
 
-        let open_file: RwSignal<Option<PathBuf>> = create_rw_signal(session.open_file.clone());
+        let open_file: RwSignal<Option<PathBuf>> = create_rw_signal(session.active_file());
         let open_tabs_sig: RwSignal<Vec<PathBuf>> = create_rw_signal(Vec::new());
         let initial_tabs = session.open_tabs.clone();
 
@@ -696,15 +762,11 @@ impl IdeState {
                                 text,
                             });
                         }
-                        let current = session_load();
-                        session_save_tabs(
-                            &all_tabs,
-                            Some(&p),
-                            current.left_panel_width,
-                            current.show_bottom_panel,
-                            current.vim_mode,
-                            &current.theme,
-                        );
+                        let _current = session_load();
+                        session_update(|s| {
+                            s.open_tabs = all_tabs;
+                            s.active_tab_index = s.open_tabs.iter().position(|t| t == &p);
+                        });
                     });
                 }
             });
@@ -770,8 +832,7 @@ impl IdeState {
                         let style = std::fs::read(&path)
                             .ok()
                             .map(|bytes| {
-                                let crlf_count =
-                                    bytes.windows(2).filter(|w| *w == b"\r\n").count();
+                                let crlf_count = bytes.windows(2).filter(|w| *w == b"\r\n").count();
                                 let lf_count = bytes.iter().filter(|&&b| b == b'\n').count();
                                 if crlf_count > 0 && lf_count > crlf_count {
                                     "Mixed"
@@ -833,14 +894,8 @@ impl IdeState {
         create_effect(move |_| {
             let theme_name = theme_signal.get().variant.name().to_string();
             std::thread::spawn(move || {
-                let current = session_load();
-                session_save_full(
-                    current.open_file.as_ref(),
-                    current.left_panel_width,
-                    current.show_bottom_panel,
-                    current.vim_mode,
-                    &theme_name,
-                );
+                let _current = session_load();
+                session_update(|s| s.theme = theme_name);
             });
         });
 
@@ -848,7 +903,14 @@ impl IdeState {
         // Locate server.py: first try <exe_dir>/sidecar/server.py, then
         // the repo-relative path, then ~/.config/phazeai/sidecar/server.py.
         let sidecar_ready_sig = create_rw_signal(false);
+        let sidecar_status_sig = create_rw_signal(if !settings.sidecar.enabled {
+            "Semantic search disabled in settings.".to_string()
+        } else {
+            "Semantic search not started.".to_string()
+        });
+        let sidecar_building_sig = create_rw_signal(false);
         let sidecar_results_sig: RwSignal<Vec<(String, String)>> = create_rw_signal(Vec::new());
+        let sidecar_build_nonce_sig = create_rw_signal(0u64);
         let sidecar_search_nonce_sig = create_rw_signal(0u64);
         let sidecar_query_sig = create_rw_signal(String::new());
 
@@ -872,9 +934,19 @@ impl IdeState {
         };
         let sidecar_script = script_candidates.into_iter().find(|p| p.exists());
 
-        if let Some(script) = sidecar_script {
+        // Shared sidecar client — always created so IdeState can reference it
+        // for clean shutdown. Will be None when sidecar is disabled or unavailable.
+        let shared_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        if !settings.sidecar.enabled {
+            sidecar_ready_sig.set(false);
+        } else if let Some(script) = sidecar_script {
             let sidecar_ready2 = sidecar_ready_sig;
+            let sidecar_status2 = sidecar_status_sig;
+            let sidecar_building2 = sidecar_building_sig;
             let sidecar_results2 = sidecar_results_sig;
+            let sidecar_build_nonce = sidecar_build_nonce_sig;
             let sidecar_nonce = sidecar_search_nonce_sig;
             let sidecar_query2 = sidecar_query_sig;
             let (sc_tx, sc_rx) = std::sync::mpsc::sync_channel::<Vec<(String, String)>>(4);
@@ -891,49 +963,198 @@ impl IdeState {
                     sidecar_ready2.set(ok);
                 }
             });
+            let (status_tx, status_rx) = std::sync::mpsc::sync_channel::<String>(8);
+            let status_signal = create_signal_from_channel(status_rx);
+            create_effect(move |_| {
+                if let Some(status) = status_signal.get() {
+                    sidecar_status2.set(status);
+                }
+            });
+            let (building_tx, building_rx) = std::sync::mpsc::sync_channel::<bool>(8);
+            let building_signal = create_signal_from_channel(building_rx);
+            create_effect(move |_| {
+                if let Some(is_building) = building_signal.get() {
+                    sidecar_building2.set(is_building);
+                }
+            });
+            let (build_tx, build_rx) = std::sync::mpsc::sync_channel::<bool>(8);
+            let build_signal = create_signal_from_channel(build_rx);
+            let workspace_root = workspace.clone();
+            let python_path = settings.sidecar.python_path.clone();
+            let script_for_build = script.clone();
+            let shared_client_for_build = shared_client.clone();
+            let ready_tx_for_build = ready_tx.clone();
+            let status_tx_for_build = status_tx.clone();
+            let build_tx_for_build = build_tx.clone();
+            create_effect(move |_| {
+                if build_signal.get().is_none() {
+                    return;
+                }
+
+                let root = workspace_root.clone();
+                let client = shared_client_for_build.lock().ok().and_then(|g| g.clone());
+                if client.is_none() {
+                    let _ = building_tx.send(true);
+                    spawn_sidecar_start(
+                        python_path.clone(),
+                        script_for_build.clone(),
+                        root,
+                        shared_client_for_build.clone(),
+                        ready_tx_for_build.clone(),
+                        status_tx_for_build.clone(),
+                        build_tx_for_build.clone(),
+                        true,
+                    );
+                    return;
+                }
+
+                let client = client.unwrap();
+                let tx = status_tx_for_build.clone();
+                let building_tx2 = building_tx.clone();
+                let root_str = root.display().to_string();
+                std::thread::spawn(move || {
+                    let _ = building_tx2.send(true);
+                    let _ = tx.send(format!("Building semantic index for {root_str}..."));
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            let _ = tx.send(format!("Semantic index runtime error: {e}"));
+                            let _ = building_tx2.send(false);
+                            return;
+                        }
+                    };
+
+                    let result = rt.block_on(async move {
+                        client
+                            .build_index(std::slice::from_ref(&root_str))
+                            .await
+                            .map(|value| {
+                                let indexed =
+                                    value.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let total = value
+                                    .get("total_files")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(indexed);
+                                format!(
+                                    "Semantic index ready: {indexed} files indexed ({total} total)"
+                                )
+                            })
+                            .unwrap_or_else(|e| format!("Semantic index build failed: {e}"))
+                    });
+
+                    let _ = tx.send(result);
+                    let _ = building_tx2.send(false);
+                });
+            });
             // Watch nonce: when incremented, send search request to sidecar
             let sc_tx2 = sc_tx.clone();
+            let shared_client_for_search = shared_client.clone();
+            let status_tx_for_search = status_tx.clone();
             create_effect(move |_| {
                 let _nonce = sidecar_nonce.get();
                 let query = sidecar_query2.get();
                 if !query.is_empty() {
                     let tx = sc_tx2.clone();
+                    let client_cell = shared_client_for_search.clone();
+                    let status_tx3 = status_tx_for_search.clone();
                     std::thread::spawn(move || {
-                        // Sidecar search via the running process — handled below
-                        let _ = tx.send(vec![("searching...".to_string(), query)]);
+                        let client = client_cell.lock().ok().and_then(|g| g.clone());
+                        let Some(client) = client else {
+                            let _ = status_tx3.send(
+                                "Semantic search unavailable. Build the index to start the sidecar."
+                                    .to_string(),
+                            );
+                            let _ = tx.send(vec![(
+                                "sidecar unavailable".to_string(),
+                                "semantic search is not connected".to_string(),
+                            )]);
+                            return;
+                        };
+
+                        let rt = match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(rt) => rt,
+                            Err(e) => {
+                                let _ = tx.send(vec![(
+                                    "sidecar error".to_string(),
+                                    format!("failed to create runtime: {e}"),
+                                )]);
+                                return;
+                            }
+                        };
+
+                        let results = rt.block_on(async move {
+                            match client.search_embeddings(&query, 8).await {
+                                Ok(value) => value
+                                    .get("matches")
+                                    .and_then(|v| v.as_array())
+                                    .map(|matches| {
+                                        matches
+                                            .iter()
+                                            .map(|m| {
+                                                let file = m
+                                                    .get("file")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown")
+                                                    .to_string();
+                                                let snippet = m
+                                                    .get("snippet")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                (file, snippet)
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default(),
+                                Err(e) => vec![(
+                                    "sidecar error".to_string(),
+                                    if e.contains("Index not built") {
+                                        "semantic index not built yet — click Reindex".to_string()
+                                    } else {
+                                        format!("semantic search failed: {e}")
+                                    },
+                                )],
+                            }
+                        });
+
+                        let _ = tx.send(results);
                     });
                 }
             });
-            std::thread::spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("[sidecar] failed to create runtime: {e}");
-                        let _ = ready_tx.send(false);
-                        return;
-                    }
-                };
-                rt.block_on(async move {
-                    let mut mgr = SidecarManager::new("python3", script);
-                    match mgr.start().await {
-                        Ok(()) => {
-                            let _ = ready_tx.send(true);
-                            if let Some(process) = mgr.take_process() {
-                                if let Ok(client) = SidecarClient::from_process(process) {
-                                    let _ = client.health_check().await;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[sidecar] failed to start: {e}");
-                            let _ = ready_tx.send(false);
-                        }
-                    }
-                });
+            let build_tx_for_nonce = build_tx.clone();
+            create_effect(move |_| {
+                let nonce = sidecar_build_nonce.get();
+                if nonce == 0 {
+                    return;
+                }
+                let _ = build_tx_for_nonce.send(true);
             });
+
+            if settings.sidecar.auto_start {
+                sidecar_status_sig.set("Starting semantic search...".to_string());
+                spawn_sidecar_start(
+                    settings.sidecar.python_path.clone(),
+                    script,
+                    workspace.clone(),
+                    shared_client.clone(),
+                    ready_tx.clone(),
+                    status_tx.clone(),
+                    build_tx.clone(),
+                    true,
+                );
+            } else {
+                sidecar_status_sig.set(
+                    "Semantic search idle. Click Reindex to start and build the index.".into(),
+                );
+            }
+        } else {
+            sidecar_status_sig.set("Semantic search sidecar script not found.".to_string());
         }
 
         // AI provider / model signals — initialized from current settings file.
@@ -944,7 +1165,9 @@ impl IdeState {
         let status_toast_sig = create_rw_signal(None);
 
         // Extension Manager — native plugin system
-        let ext_manager = Arc::new(std::sync::Mutex::new(phazeai_core::ext_host::ExtensionManager::new()));
+        let ext_manager = Arc::new(std::sync::Mutex::new(
+            phazeai_core::ext_host::ExtensionManager::new(),
+        ));
 
         // Persist provider + model changes to settings.toml whenever they change.
         create_effect(move |_| {
@@ -952,7 +1175,10 @@ impl IdeState {
             let model = ai_model_sig.get();
             std::thread::spawn(move || {
                 let mut s = Settings::load();
-                s.llm.provider = provider_name_to_llm_provider(&provider_name);
+                let Some(provider) = provider_name_to_llm_provider(&provider_name) else {
+                    return;
+                };
+                s.llm.provider = provider;
                 s.llm.model = model;
                 let _ = s.save();
             });
@@ -962,8 +1188,8 @@ impl IdeState {
             theme: theme_signal,
             left_panel_tab: create_rw_signal(Tab::Explorer),
             bottom_panel_tab: create_rw_signal(Tab::Terminal),
-            show_left_panel: create_rw_signal(true),
-            show_right_panel: create_rw_signal(true),
+            show_left_panel: create_rw_signal(session.show_left_panel),
+            show_right_panel: create_rw_signal(session.show_right_panel),
             show_bottom_panel: create_rw_signal(session.show_bottom_panel),
             open_file,
             workspace_root: create_rw_signal(workspace),
@@ -1080,8 +1306,12 @@ impl IdeState {
             code_lens_visible: code_lens_visible_signal,
             inlay_hints_toggle: inlay_hints_toggle_signal,
             inlay_hints_sig: inlay_hints_lsp,
+            sidecar_client: shared_client.clone(),
             sidecar_ready: sidecar_ready_sig,
+            sidecar_status: sidecar_status_sig,
+            sidecar_building: sidecar_building_sig,
             sidecar_results: sidecar_results_sig,
+            sidecar_build_nonce: sidecar_build_nonce_sig,
             sidecar_search_nonce: sidecar_search_nonce_sig,
             sidecar_query: sidecar_query_sig,
             pending_chat_inject: create_rw_signal(None),
@@ -1822,16 +2052,14 @@ fn coming_soon_panel(
     description: &'static str,
     theme: RwSignal<PhazeTheme>,
 ) -> impl IntoView {
-    let header = container(
-        label(move || name.to_uppercase()).style(move |s| {
-            let p = theme.get().palette;
-            s.font_size(11.0)
-                .font_weight(floem::text::Weight::BOLD)
-                .color(p.text_muted)
-                .padding_horiz(12.0)
-                .padding_vert(8.0)
-        }),
-    )
+    let header = container(label(move || name.to_uppercase()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.0)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(p.text_muted)
+            .padding_horiz(12.0)
+            .padding_vert(8.0)
+    }))
     .style(move |s| {
         let p = theme.get().palette;
         s.width_full()
@@ -1839,12 +2067,10 @@ fn coming_soon_panel(
             .border_color(p.glass_border)
     });
 
-    let icon = container(
-        label(move || "◇".to_string()).style(move |s| {
-            let p = theme.get().palette;
-            s.font_size(32.0).color(p.accent).margin_bottom(12.0)
-        }),
-    );
+    let icon = container(label(move || "◇".to_string()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(32.0).color(p.accent).margin_bottom(12.0)
+    }));
 
     let title = label(move || name.to_string()).style(move |s| {
         let p = theme.get().palette;
@@ -1861,26 +2087,21 @@ fn coming_soon_panel(
             .margin_bottom(16.0)
     });
 
-    let badge = container(
-        label(|| "Coming Soon".to_string()).style(move |s| {
-            let p = theme.get().palette;
-            s.font_size(10.0)
-                .font_weight(floem::text::Weight::BOLD)
-                .color(p.accent)
-                .padding_horiz(10.0)
-                .padding_vert(4.0)
-        }),
-    )
+    let badge = container(label(|| "Coming Soon".to_string()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(10.0)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(p.accent)
+            .padding_horiz(10.0)
+            .padding_vert(4.0)
+    }))
     .style(move |s| {
         let p = theme.get().palette;
-        s.border(1.0)
-            .border_color(p.accent)
-            .border_radius(12.0)
+        s.border(1.0).border_color(p.accent).border_radius(12.0)
     });
 
     let body = container(
-        stack((icon, title, desc, badge))
-            .style(|s| s.flex_col().items_center().gap(0.0)),
+        stack((icon, title, desc, badge)).style(|s| s.flex_col().items_center().gap(0.0)),
     )
     .style(|s| {
         s.flex_grow(1.0)
@@ -1889,15 +2110,15 @@ fn coming_soon_panel(
             .justify_center()
     });
 
-    container(stack((header, body)).style(|s| s.flex_col().width_full().height_full()))
-        .style(move |s| {
+    container(stack((header, body)).style(|s| s.flex_col().width_full().height_full())).style(
+        move |s| {
             let t = theme.get();
             s.width_full().height_full().background(t.palette.glass_bg)
-        })
+        },
+    )
 }
 
 fn left_panel(state: IdeState) -> impl IntoView {
-
     let explorer = explorer_panel(
         state.workspace_root,
         state.open_file,
@@ -2035,7 +2256,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let ai_wrap = container(ai_panel(state.theme)).style({
+    let ai_wrap = container(crate::panels::ai_panel::ai_panel(state.theme)).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -2046,17 +2267,16 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let composer_wrap =
-        container(crate::panels::composer::composer_panel(state.clone())).style({
-            let state = state.clone();
-            move |s| {
-                s.width_full()
-                    .height_full()
-                    .apply_if(state.left_panel_tab.get() != Tab::Composer, |s| {
-                        s.display(floem::style::Display::None)
-                    })
-            }
-        });
+    let composer_wrap = container(crate::panels::composer::composer_panel(state.clone())).style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.left_panel_tab.get() != Tab::Composer, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
 
     let settings_wrap = container(settings_panel(state.clone())).style({
         let state = state.clone();
@@ -2201,36 +2421,36 @@ where
 
 fn status_bar(state: IdeState) -> impl IntoView {
     // Cloud sign-in indicator (left-most element)
-    let cloud_btn = container(label(|| "☁ Sign in"))
-        .style(move |s| {
-            let p = state.theme.get().palette;
-            s.font_size(10.0)
-                .padding_horiz(8.0)
-                .padding_vert(2.0)
-                .margin_right(8.0)
-                .border_radius(3.0)
-                .cursor(floem::style::CursorStyle::Pointer)
-                .color(p.accent)
-                .background(p.accent_dim)
-        })
-        .on_click_stop(|_| {
-            // Open PhazeAI cloud sign-in in the system browser.
-            let url = "https://phazeai.dev/signin";
-            let opener = if cfg!(target_os = "macos") {
-                "open"
-            } else if cfg!(target_os = "windows") {
-                "cmd"
-            } else {
-                "xdg-open"
-            };
-            let mut cmd = std::process::Command::new(opener);
-            if cfg!(target_os = "windows") {
-                cmd.args(["/C", "start", "", url]);
-            } else {
-                cmd.arg(url);
-            }
-            let _ = cmd.spawn();
-        });
+    // let cloud_btn = container(label(|| "☁ Sign in"))
+    //     .style(move |s| {
+    //         let p = state.theme.get().palette;
+    //         s.font_size(10.0)
+    //             .padding_horiz(8.0)
+    //             .padding_vert(2.0)
+    //             .margin_right(8.0)
+    //             .border_radius(3.0)
+    //             .cursor(floem::style::CursorStyle::Pointer)
+    //             .color(p.accent)
+    //             .background(p.accent_dim)
+    //     })
+    //     .on_click_stop(|_| {
+    //         // Open PhazeAI cloud sign-in in the system browser.
+    //         let url = phazeai_cloud::auth::login_url();
+    //         let opener = if cfg!(target_os = "macos") {
+    //             "open"
+    //         } else if cfg!(target_os = "windows") {
+    //             "cmd"
+    //         } else {
+    //             "xdg-open"
+    //         };
+    //         let mut cmd = std::process::Command::new(opener);
+    //         if cfg!(target_os = "windows") {
+    //             cmd.args(["/C", "start", "", url]);
+    //         } else {
+    //             cmd.arg(url);
+    //         }
+    //         let _ = cmd.spawn();
+    //     });
 
     // Branch clickable button — click to open branch picker overlay
     let branch_btn = {
@@ -2261,8 +2481,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .on_click_stop({
             let s3 = state.clone();
-            let (branch_tx, branch_rx) =
-                std::sync::mpsc::sync_channel::<Vec<String>>(1);
+            let (branch_tx, branch_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(1);
             let branch_sig = floem::ext_event::create_signal_from_channel(branch_rx);
             let picker_open_sig = state.branch_picker_open;
             let branch_list_sig = state.branch_list;
@@ -2298,14 +2517,10 @@ fn status_bar(state: IdeState) -> impl IntoView {
     };
 
     let left = stack((
-        cloud_btn,
         branch_btn,
         label(|| "   ").style(|s| s.font_size(11.0)),
         phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.theme),
-        label(move || {
-            format!(" {}", state.ai_model.get())
-        })
-        .style(move |s| {
+        label(move || format!(" {}", state.ai_model.get())).style(move |s| {
             s.color(state.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
@@ -2356,13 +2571,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
             } else {
                 s2.vim_normal_mode.set(false);
             }
-            session_save_full(
-                s2.open_file.get().as_ref(),
-                s2.left_panel_width.get(),
-                s2.show_bottom_panel.get(),
-                s2.vim_mode.get(),
-                s2.theme.get().variant.name(),
-            );
+            session_update(|s| {
+                s.vim_mode = s2.vim_mode.get();
+            });
         })
     };
 
@@ -2833,7 +3044,12 @@ fn references_view(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || safe_get(refs, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(refs, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(idx, _)| *idx,
             {
                 let theme = state.theme;
@@ -2925,7 +3141,12 @@ fn output_view(state: IdeState) -> impl IntoView {
     let theme = state.theme;
     scroll(
         dyn_stack(
-            move || safe_get(log, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(log, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(idx, _)| *idx,
             move |(_, line): (usize, String)| {
                 let line2 = line.clone();
@@ -3045,7 +3266,12 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || safe_get(symbols, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(symbols, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(i, _)| *i,
             {
                 let theme = state.theme;
@@ -3128,8 +3354,7 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
     // Whenever the open file changes, run git diff in background.
     {
         let diff_sig = diff_lines;
-        let (diff_tx, diff_rx) =
-            std::sync::mpsc::sync_channel::<Vec<(String, u8)>>(1);
+        let (diff_tx, diff_rx) = std::sync::mpsc::sync_channel::<Vec<(String, u8)>>(1);
         let diff_result_sig = floem::ext_event::create_signal_from_channel(diff_rx);
         floem::reactive::create_effect(move |_| {
             if let Some(lines) = diff_result_sig.get() {
@@ -3171,7 +3396,12 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
 
     let diff_scroll = scroll(
         dyn_stack(
-            move || safe_get(diff_lines, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(diff_lines, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(i, _)| *i,
             move |(_, (text, kind)): (usize, (String, u8))| {
                 let color = match kind {
@@ -3321,15 +3551,22 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             }),
             // Content
             stack((
-                container(terminal_panel(state.theme, state.run_in_terminal_text)).style(
-                    move |s| {
-                        s.width_full()
-                            .height_full()
-                            .apply_if(current_tab.get() != Tab::Terminal, |s| {
-                                s.display(floem::style::Display::None)
-                            })
-                    },
-                ),
+                container(terminal_panel(
+                    state.theme,
+                    state.show_bottom_panel,
+                    state.show_left_panel,
+                    state.show_right_panel,
+                    state.file_picker_open,
+                    state.command_palette_open,
+                    state.run_in_terminal_text,
+                ))
+                .style(move |s| {
+                    s.width_full()
+                        .height_full()
+                        .apply_if(current_tab.get() != Tab::Terminal, |s| {
+                            s.display(floem::style::Display::None)
+                        })
+                }),
                 container(problems_view(state.clone())).style(move |s| {
                     s.width_full()
                         .height_full()
@@ -3457,7 +3694,10 @@ fn completion_popup(state: IdeState) -> impl IntoView {
         })
         .style(|s| s.flex_col().width_full()),
     )
-    .style(|s| s.width_full().max_height(ui_const::COMPLETION_POPUP_MAX_HEIGHT));
+    .style(|s| {
+        s.width_full()
+            .max_height(ui_const::COMPLETION_POPUP_MAX_HEIGHT)
+    });
 
     let header = stack((
         label(|| "Completions").style(move |s| {
@@ -3848,7 +4088,12 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
 
     let list = scroll(
         dyn_stack(
-            move || safe_get(actions, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(actions, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(idx, _)| *idx,
             {
                 let state2 = state.clone();
@@ -4326,8 +4571,7 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
     let toast = state.status_toast;
 
     // Channel for checkout results — created once, shared across all dyn_stack rows.
-    let (checkout_tx, checkout_rx) =
-        std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+    let (checkout_tx, checkout_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let checkout_sig = floem::ext_event::create_signal_from_channel(checkout_rx);
     {
         let tst = toast;
@@ -4347,73 +4591,71 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
         });
     }
 
-    let rows =
-        scroll(
-            dyn_stack(
-                move || safe_get(branches, Vec::new()),
-                |b| b.clone(),
-                move |branch| {
-                    let b_label = branch.clone();
-                    let b_current = branch.clone();
-                    let b_click = branch.clone();
-                    let is_current = move || current.get() == b_current;
-                    let hov = create_rw_signal(false);
-                    let ws = workspace;
-                    // Clone sender once per row so the `Fn` closure can call it repeatedly.
-                    let row_tx = checkout_tx.clone();
+    let rows = scroll(
+        dyn_stack(
+            move || safe_get(branches, Vec::new()),
+            |b| b.clone(),
+            move |branch| {
+                let b_label = branch.clone();
+                let b_current = branch.clone();
+                let b_click = branch.clone();
+                let is_current = move || current.get() == b_current;
+                let hov = create_rw_signal(false);
+                let ws = workspace;
+                // Clone sender once per row so the `Fn` closure can call it repeatedly.
+                let row_tx = checkout_tx.clone();
 
-                    container(
-                        stack((
-                            label(move || if is_current() { "✓ " } else { "  " }.to_string())
-                                .style(move |s| {
-                                    s.font_size(12.0)
-                                        .color(theme.get().palette.success)
-                                        .width(20.0)
-                                }),
-                            label(move || b_label.clone()).style(move |s| {
-                                s.font_size(13.0).color(theme.get().palette.text_primary)
-                            }),
-                        ))
-                        .style(|s| s.items_center()),
-                    )
-                    .style(move |s| {
-                        let p = theme.get().palette;
-                        s.padding_horiz(12.0)
-                            .padding_vert(6.0)
-                            .cursor(floem::style::CursorStyle::Pointer)
-                            .background(if hov.get() {
-                                p.bg_elevated
-                            } else {
-                                floem::peniko::Color::TRANSPARENT
-                            })
-                    })
-                    .on_click_stop(move |_| {
-                        let branch_name = b_click.clone();
-                        open.set(false);
-                        let root = ws.get();
-                        let tx = row_tx.clone();
-                        std::thread::spawn(move || {
-                            let out = std::process::Command::new("git")
-                                .args(["checkout", &branch_name])
-                                .current_dir(&root)
-                                .output();
-                            let result = match out {
-                                Ok(o) if o.status.success() => Ok(branch_name),
-                                Ok(o) => {
-                                    Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
-                                }
-                                Err(e) => Err(e.to_string()),
-                            };
-                            let _ = tx.send(result);
-                        });
-                    })
-                    .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
-                    .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
-                },
-            )
-            .style(|s| s.flex_col().width_full()),
+                container(
+                    stack((
+                        label(move || if is_current() { "✓ " } else { "  " }.to_string()).style(
+                            move |s| {
+                                s.font_size(12.0)
+                                    .color(theme.get().palette.success)
+                                    .width(20.0)
+                            },
+                        ),
+                        label(move || b_label.clone()).style(move |s| {
+                            s.font_size(13.0).color(theme.get().palette.text_primary)
+                        }),
+                    ))
+                    .style(|s| s.items_center()),
+                )
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.padding_horiz(12.0)
+                        .padding_vert(6.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .background(if hov.get() {
+                            p.bg_elevated
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                })
+                .on_click_stop(move |_| {
+                    let branch_name = b_click.clone();
+                    open.set(false);
+                    let root = ws.get();
+                    let tx = row_tx.clone();
+                    std::thread::spawn(move || {
+                        let out = std::process::Command::new("git")
+                            .args(["checkout", &branch_name])
+                            .current_dir(&root)
+                            .output();
+                        let result = match out {
+                            Ok(o) if o.status.success() => Ok(branch_name),
+                            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = tx.send(result);
+                    });
+                })
+                .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+                .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            },
         )
-        .style(|s| s.max_height(320.0).width_full());
+        .style(|s| s.flex_col().width_full()),
+    )
+    .style(|s| s.max_height(320.0).width_full());
 
     let dialog = stack((
         label(|| "Switch Branch").style(move |s| {
@@ -4692,7 +4934,12 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
 
     let content = scroll(
         dyn_stack(
-            move || safe_get(lines, Vec::new()).into_iter().enumerate().collect::<Vec<_>>(),
+            move || {
+                safe_get(lines, Vec::new())
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
             |(i, _)| *i,
             move |(_, line_text)| {
                 let is_highlight = line_text.starts_with('>');
@@ -4746,7 +4993,6 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
 }
 
 fn ide_root(state: IdeState) -> impl IntoView {
-
     let raw_editor = editor_panel(
         state.open_file,
         state.theme,
@@ -4984,9 +5230,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
-                                        s_fix.pending_chat_inject.set(Some(
-                                            format!("Fix this error: {}", d.message),
-                                        ));
+                                        s_fix
+                                            .pending_chat_inject
+                                            .set(Some(format!("Fix this error: {}", d.message)));
                                         s_fix.show_right_panel.set(true);
                                     } else {
                                         show_toast(
@@ -5042,7 +5288,12 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
     };
 
-    let chat = chat_panel(state.theme, state.ai_thinking, state.pending_chat_inject, state.workspace_root);
+    let chat = chat_panel(
+        state.theme,
+        state.ai_thinking,
+        state.pending_chat_inject,
+        state.workspace_root,
+    );
 
     let chat_wrap = container(chat).style(move |s| {
         let t = state.theme.get();
@@ -5549,9 +5800,7 @@ pub fn launch_phaze_ide() {
     Application::new()
         .window(
             move |_| {
-
                 let state = IdeState::new(&settings);
-
 
                 // Overlay layers — rendered after IDE content so they paint on top.
                 let palette = command_palette(state.clone());
@@ -5600,7 +5849,6 @@ pub fn launch_phaze_ide() {
                         })
                 };
 
-
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
                 let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
                     .style(|s| s.flex_col().width_full().height_full());
@@ -5647,6 +5895,48 @@ pub fn launch_phaze_ide() {
                             let ctrl = key_event.modifiers.contains(Modifiers::CONTROL);
                             let shift = key_event.modifiers.contains(Modifiers::SHIFT);
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
+
+                            if ctrl && !alt {
+                                if let Some(cmd) = match_global_shortcut(key_event) {
+                                    match cmd {
+                                        GlobalShortcut::ToggleLeftPanel => {
+                                            state.show_left_panel.update(|v| *v = !*v);
+                                            let now_open = state.show_left_panel.get();
+                                            let new_w = if now_open { 260.0 } else { 0.0 };
+                                            state.left_panel_width.set(new_w);
+                                            session_update(|s| {
+                                                s.left_panel_width = new_w;
+                                                s.show_left_panel = now_open;
+                                            });
+                                            return;
+                                        }
+                                        GlobalShortcut::ToggleBottomPanel => {
+                                            state.show_bottom_panel.update(|v| *v = !*v);
+                                            session_update(|s| {
+                                                s.show_bottom_panel = state.show_bottom_panel.get();
+                                            });
+                                            return;
+                                        }
+                                        GlobalShortcut::ToggleRightPanel => {
+                                            state.show_right_panel.update(|v| *v = !*v);
+                                            return;
+                                        }
+                                        GlobalShortcut::ToggleFilePicker => {
+                                            let open = state.file_picker_open.get();
+                                            state.file_picker_open.set(!open);
+                                            if !open {
+                                                state.file_picker_query.set(String::new());
+                                            }
+                                            return;
+                                        }
+                                        GlobalShortcut::ToggleCommandPalette => {
+                                            let open = state.command_palette_open.get();
+                                            state.command_palette_open.set(!open);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
 
                             // ── Named keys ───────────────────────────────────────
                             if let Key::Named(ref named) = key_event.key.logical_key {
@@ -6027,24 +6317,6 @@ pub fn launch_phaze_ide() {
                                 return;
                             }
 
-                            // Ctrl+P → file picker; Ctrl+Shift+P → command palette
-                            if ctrl && key_event.key.logical_key == Key::Character("p".into()) {
-                                if shift {
-                                    // Ctrl+Shift+P: command palette
-                                    let open = state.command_palette_open.get();
-                                    state.command_palette_open.set(!open);
-                                } else {
-                                    // Ctrl+P: file picker
-                                    let open = state.file_picker_open.get();
-                                    state.file_picker_open.set(!open);
-                                    if !open {
-                                        state.file_picker_query.set(String::new());
-                                    }
-                                }
-                                return;
-                            }
-
-                            // ── Character key combos ─────────────────────────────
                             if let Key::Character(ref ch) = key_event.key.logical_key {
                                 let ch = ch.clone();
 
@@ -6104,35 +6376,6 @@ pub fn launch_phaze_ide() {
                                                 state.vim_motion.set(Some(VimMotion::HalfPageUp));
                                                 return;
                                             }
-                                        }
-                                        // Ctrl+B — toggle left sidebar
-                                        "b" => {
-                                            state.show_left_panel.update(|v| *v = !*v);
-                                            let now_open = state.show_left_panel.get();
-                                            let new_w = if now_open { 260.0 } else { 0.0 };
-                                            state.left_panel_width.set(new_w);
-                                            session_save_full(
-                                                state.open_file.get().as_ref(),
-                                                new_w,
-                                                state.show_bottom_panel.get(),
-                                                state.vim_mode.get(),
-                                                state.theme.get().variant.name(),
-                                            );
-                                        }
-                                        // Ctrl+J — toggle bottom terminal panel
-                                        "j" => {
-                                            state.show_bottom_panel.update(|v| *v = !*v);
-                                            session_save_full(
-                                                state.open_file.get().as_ref(),
-                                                state.left_panel_width.get(),
-                                                state.show_bottom_panel.get(),
-                                                state.vim_mode.get(),
-                                                state.theme.get().variant.name(),
-                                            );
-                                        }
-                                        // Ctrl+\ — toggle right chat panel
-                                        "\\" => {
-                                            state.show_right_panel.update(|v| *v = !*v);
                                         }
                                         // Ctrl+K — open inline AI edit overlay
                                         "k" => {
@@ -6440,6 +6683,36 @@ pub fn launch_phaze_ide() {
                                 }
                             }
                         }
+                    }
+                })
+                .on_event_stop(EventListener::WindowClosed, {
+                    let state = state.clone();
+                    move |_| {
+                        // Kill sidecar process cleanly on IDE exit.
+                        if let Ok(guard) = state.sidecar_client.lock() {
+                            if let Some(client) = guard.as_ref() {
+                                // Build a small runtime just for the shutdown call.
+                                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                {
+                                    let client = client.clone();
+                                    let _ = rt.block_on(client.shutdown());
+                                }
+                            }
+                        }
+                        // Save session state on close.
+                        let open = state.open_file.get();
+                        let theme_name = state.theme.get().variant.name();
+                        session_update(|s| {
+                            if let Some(f) = open {
+                                s.active_tab_index = s.open_tabs.iter().position(|t| t == &f);
+                            }
+                            s.left_panel_width = state.left_panel_width.get();
+                            s.show_bottom_panel = state.show_bottom_panel.get();
+                            s.vim_mode = state.vim_mode.get();
+                            s.theme = theme_name.to_string();
+                        });
                     }
                 })
             },

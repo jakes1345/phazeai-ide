@@ -17,8 +17,9 @@ use floem::{
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use vte::{Params, Perform};
 
-use phazeai_core::constants::terminal as term_consts;
+use crate::commands::{match_global_shortcut, GlobalShortcut};
 use crate::util::safe_get;
+use phazeai_core::constants::terminal as term_consts;
 
 use crate::theme::PhazeTheme;
 
@@ -626,6 +627,11 @@ fn single_terminal(
     clear_nonce: RwSignal<u64>,
     shell: String,
     cwd_out: RwSignal<String>,
+    show_bottom_panel: RwSignal<bool>,
+    show_left_panel: RwSignal<bool>,
+    show_right_panel: RwSignal<bool>,
+    file_picker_open: RwSignal<bool>,
+    command_palette_open: RwSignal<bool>,
     term_font_size: RwSignal<u32>,
     find_open: RwSignal<bool>,
     find_query: RwSignal<String>,
@@ -975,12 +981,39 @@ fn single_terminal(
                 let ctrl = e.modifiers.contains(Modifiers::CONTROL);
                 let shift = e.modifiers.contains(Modifiers::SHIFT);
 
-                // Ctrl+F — toggle find bar
+                if let Some(cmd) = match_global_shortcut(e) {
+                    match cmd {
+                        GlobalShortcut::ToggleLeftPanel => {
+                            show_left_panel.update(|v| *v = !*v);
+                            return;
+                        }
+                        GlobalShortcut::ToggleBottomPanel => {
+                            show_bottom_panel.update(|v| *v = !*v);
+                            return;
+                        }
+                        GlobalShortcut::ToggleRightPanel => {
+                            show_right_panel.update(|v| *v = !*v);
+                            return;
+                        }
+                        GlobalShortcut::ToggleFilePicker => {
+                            file_picker_open.update(|v| *v = !*v);
+                            return;
+                        }
+                        GlobalShortcut::ToggleCommandPalette => {
+                            command_palette_open.update(|v| *v = !*v);
+                            return;
+                        }
+                    }
+                }
+
                 if ctrl && !shift {
                     if let Key::Character(ref ch) = e.key.logical_key {
-                        if ch.as_str() == "f" || ch.as_str() == "F" {
-                            find_open.update(|v| *v = !*v);
-                            return;
+                        match ch.as_str() {
+                            "f" | "F" => {
+                                find_open.update(|v| *v = !*v);
+                                return;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1198,6 +1231,11 @@ fn single_terminal(
 /// resets the signal to `None`.
 pub fn terminal_panel(
     theme: RwSignal<PhazeTheme>,
+    show_bottom_panel: RwSignal<bool>,
+    show_left_panel: RwSignal<bool>,
+    show_right_panel: RwSignal<bool>,
+    file_picker_open: RwSignal<bool>,
+    command_palette_open: RwSignal<bool>,
     run_in_terminal_text: RwSignal<Option<String>>,
 ) -> impl IntoView {
     // Shell selector index (cycles through SHELLS)
@@ -1660,6 +1698,11 @@ pub fn terminal_panel(
         split_clear,
         "bash".to_string(),
         split_cwd,
+        show_bottom_panel,
+        show_left_panel,
+        show_right_panel,
+        file_picker_open,
+        command_palette_open,
         term_font_size,
         term_find_open,
         term_find_query,
@@ -1682,6 +1725,11 @@ pub fn terminal_panel(
                 clear_sig,
                 shell,
                 cwd_sig,
+                show_bottom_panel,
+                show_left_panel,
+                show_right_panel,
+                file_picker_open,
+                command_palette_open,
                 term_font_size,
                 term_find_open,
                 term_find_query,
