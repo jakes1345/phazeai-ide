@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/jakes1345/phazeai-ide/actions/workflows/ci.yml/badge.svg)](https://github.com/jakes1345/phazeai-ide/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org/)
 [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/phazeai)
 
 **The AI-native IDE built entirely in Rust. GPU-rendered, local-first, open-source core.**

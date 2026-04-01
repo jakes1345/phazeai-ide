@@ -934,7 +934,7 @@ fn single_terminal(
         let y = 0.0;
         cx.fill(
             &floem::kurbo::Rect::new(x, y, x + 7.0, y + 16.0),
-            floem::peniko::Color::from_rgba8(200, 200, 200, 180),
+            theme.get().palette.text_primary.with_alpha(0.7),
             0.0,
         );
     })

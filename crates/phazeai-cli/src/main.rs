@@ -22,7 +22,7 @@ struct Cli {
     #[arg(long)]
     provider: Option<String>,
 
-    /// Color theme (dark, tokyo-night, dracula)
+    /// Color theme (dark, tokyo-night, dracula, catppuccin, gruvbox, nord, one-dark)
     #[arg(long, default_value = "dark")]
     theme: String,
 

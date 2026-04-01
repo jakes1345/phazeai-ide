@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -33,7 +33,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
         with:
           components: clippy
       - uses: actions/cache@v4
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --quiet
       - name: Run security audit (warn only — deno_core/wasmtime may have advisories)
@@ -76,7 +76,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -103,7 +103,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -134,7 +134,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -164,7 +164,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -206,7 +206,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -231,7 +231,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -260,7 +260,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -284,7 +284,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -294,7 +294,7 @@ jobs:
           key: ${{ runner.os }}-cloud-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cloud-
       - name: Test phazeai-cloud
-        run: cargo test -p phazeai-cloud || true
+        run: cargo test -p phazeai-cloud
 
   test-plugin-api:
     name: Test / phazeai-plugin-api
@@ -302,7 +302,7 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |
@@ -312,7 +312,7 @@ jobs:
           key: ${{ runner.os }}-plugin-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-plugin-
       - name: Test phazeai-plugin-api
-        run: cargo test -p phazeai-plugin-api || true
+        run: cargo test -p phazeai-plugin-api
 
   # ─────────────────────────────────────────────
   build-gate:
@@ -321,7 +321,7 @@ jobs:
     needs: [ test-core, test-cli, test-ui, test-agent, test-git, test-mcp, test-sidecar, clippy, test-cloud, test-plugin-api ]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93
       - uses: actions/cache@v4
         with:
           path: |

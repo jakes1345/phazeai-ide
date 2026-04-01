@@ -12,7 +12,7 @@ use phazeai_cli::commands::{handle_command, CommandResult};
 #[test]
 fn test_help_command() {
     let result = handle_command("/help");
-    matches!(result, CommandResult::Message(_));
+    assert!(matches!(result, CommandResult::Message(_)));
 
     if let CommandResult::Message(msg) = result {
         assert!(msg.contains("PhazeAI CLI Commands"));
@@ -23,7 +23,7 @@ fn test_help_command() {
 #[test]
 fn test_help_command_short_alias() {
     let result = handle_command("/h");
-    matches!(result, CommandResult::Message(_));
+    assert!(matches!(result, CommandResult::Message(_)));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn test_save_conversation_command() {
 #[test]
 fn test_version_command() {
     let result = handle_command("/version");
-    matches!(result, CommandResult::Message(_));
+    assert!(matches!(result, CommandResult::Message(_)));
 
     if let CommandResult::Message(msg) = result {
         assert!(msg.contains("PhazeAI CLI"));
@@ -459,7 +459,7 @@ fn test_command_with_extra_leading_whitespace() {
 #[test]
 fn test_command_with_trailing_whitespace() {
     let result = handle_command("/help   ");
-    matches!(result, CommandResult::Message(_));
+    assert!(matches!(result, CommandResult::Message(_)));
 }
 
 #[test]

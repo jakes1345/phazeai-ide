@@ -4,47 +4,53 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag (e.g., v0.1.0)'
-        required: true
-        type: string
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  build-release:
-    name: Build ${{ matrix.artifact }}
+  # ─────────────────────────────────────────────
+  # BUILD RELEASE BINARIES (matrix)
+  # ─────────────────────────────────────────────
+  build:
+    name: Build / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: phazeai-linux-x86_64
-            ext: tar.gz
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: phazeai-macos-aarch64
-            ext: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: phazeai-macos-x86_64
-            ext: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: phazeai-windows-x86_64
-            ext: zip
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cli_bin: phazeai
+            ui_bin: phazeai-ui
+            archive_ext: tar.gz
+
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cli_bin: phazeai
+            ui_bin: phazeai-ui
+            archive_ext: tar.gz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cli_bin: phazeai
+            ui_bin: phazeai-ui
+            archive_ext: tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cli_bin: phazeai.exe
+            ui_bin: phazeai-ui.exe
+            archive_ext: zip
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (channel from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: '1.93'
           targets: ${{ matrix.target }}
 
       - uses: actions/cache@v4
@@ -53,60 +59,96 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-release-${{ matrix.target }}-
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-release-
+            ${{ runner.os }}-${{ matrix.target }}-
 
-      - name: Install Linux dependencies
+      # ── Linux system deps (matches ci.yml exactly) ──
+      - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libssl-dev \
-            libwayland-dev libxkbcommon-x11-dev \
+            libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3
 
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install python3 || true
-
-      - name: Run tests (Linux only — headless)
-        if: runner.os == 'Linux'
-        run: cargo test -p phazeai-core -p phazeai-cli
-
+      # ── Build ──────────────────────────────────────
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p phazeai-ui -p phazeai-cli
+        run: cargo build --release -p phazeai-cli -p phazeai-ui --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      # ── Extract version from tag ───────────────────
+      - name: Extract version
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # ── Package: Linux / macOS (tar.gz) ───────────
+      - name: Package binaries (tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/phazeai-ui dist/
-          cp target/${{ matrix.target }}/release/phazeai dist/
-          chmod +x dist/phazeai-ui dist/phazeai
-          cp -r assets/branding dist/ 2>/dev/null || true
-          cp README.md dist/ 2>/dev/null || true
-          tar czf ${{ matrix.artifact }}.${{ matrix.ext }} -C dist .
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TARGET="${{ matrix.target }}"
+          BIN_DIR="target/$TARGET/release"
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
+          mkdir -p dist
+
+          # phazeai-cli
+          CLI_NAME="phazeai-cli-${VERSION}-${TARGET}"
+          mkdir -p "dist/${CLI_NAME}"
+          cp "${BIN_DIR}/${{ matrix.cli_bin }}" "dist/${CLI_NAME}/"
+          tar -C dist -czf "dist/${CLI_NAME}.tar.gz" "${CLI_NAME}"
+          rm -rf "dist/${CLI_NAME}"
+
+          # phazeai-ui (IDE)
+          IDE_NAME="phazeai-ide-${VERSION}-${TARGET}"
+          mkdir -p "dist/${IDE_NAME}"
+          cp "${BIN_DIR}/${{ matrix.ui_bin }}" "dist/${IDE_NAME}/"
+          tar -C dist -czf "dist/${IDE_NAME}.tar.gz" "${IDE_NAME}"
+          rm -rf "dist/${IDE_NAME}"
+
+      # ── Package: Windows (zip) ────────────────────
+      - name: Package binaries (zip)
+        if: matrix.archive_ext == 'zip'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/${{ matrix.target }}/release/phazeai-ui.exe" dist/
-          Copy-Item "target/${{ matrix.target }}/release/phazeai.exe" dist/
-          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.${{ matrix.ext }}"
+          $VERSION = "${{ steps.version.outputs.VERSION }}"
+          $TARGET  = "${{ matrix.target }}"
+          $BIN_DIR = "target\$TARGET\release"
 
-      - name: Upload artifact
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          # phazeai-cli
+          $CLI_NAME = "phazeai-cli-${VERSION}-${TARGET}"
+          New-Item -ItemType Directory -Force "dist\${CLI_NAME}" | Out-Null
+          Copy-Item "${BIN_DIR}\${{ matrix.cli_bin }}" "dist\${CLI_NAME}\"
+          Compress-Archive -Path "dist\${CLI_NAME}" -DestinationPath "dist\${CLI_NAME}.zip" -Force
+          Remove-Item -Recurse -Force "dist\${CLI_NAME}"
+
+          # phazeai-ui (IDE)
+          $IDE_NAME = "phazeai-ide-${VERSION}-${TARGET}"
+          New-Item -ItemType Directory -Force "dist\${IDE_NAME}" | Out-Null
+          Copy-Item "${BIN_DIR}\${{ matrix.ui_bin }}" "dist\${IDE_NAME}\"
+          Compress-Archive -Path "dist\${IDE_NAME}" -DestinationPath "dist\${IDE_NAME}.zip" -Force
+          Remove-Item -Recurse -Force "dist\${IDE_NAME}"
+
+      # ── Upload artifacts for release job ──────────
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.${{ matrix.ext }}
+          name: binaries-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
 
-  create-release:
+  # ─────────────────────────────────────────────
+  # CREATE GITHUB RELEASE
+  # ─────────────────────────────────────────────
+  release:
     name: Create GitHub Release
-    needs: build-release
     runs-on: ubuntu-latest
+    needs: build
     permissions:
       contents: write
     steps:
@@ -115,36 +157,18 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist/
+          merge-multiple: true
 
-      - name: List artifacts
-        run: find artifacts -type f | sort
+      - name: List release assets
+        run: find dist -type f | sort
 
-      - name: Create release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version || github.ref_name }}
-          name: PhazeAI IDE ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          name: PhazeAI ${{ github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
-          body: |
-            ## PhazeAI IDE
-
-            AI-native, local-first IDE built in Rust with Floem GPU-accelerated UI.
-
-            ### Downloads
-            | Platform | Binary |
-            |----------|--------|
-            | Linux x86_64 | `phazeai-linux-x86_64.tar.gz` |
-            | macOS ARM (M1/M2/M3) | `phazeai-macos-aarch64.tar.gz` |
-            | macOS Intel | `phazeai-macos-x86_64.tar.gz` |
-            | Windows x86_64 | `phazeai-windows-x86_64.zip` |
-
-            ### Quick Start
-            ```bash
-            tar xzf phazeai-*.tar.gz
-            ./phazeai-ui   # GPU-accelerated desktop IDE
-            ./phazeai      # Terminal CLI
-            ```
-          files: artifacts/**/*
+          files: dist/**

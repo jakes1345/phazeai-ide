@@ -293,11 +293,12 @@ async fn test_event_channel_receives_all_events() {
 
     handle.await.unwrap();
 
-    // Check we got: Thinking, TextDelta, TextDelta, Complete
+    // Check we got: Thinking, TextDelta, TextDelta, TokenUsage, Complete
     assert!(matches!(events[0], AgentEvent::Thinking { iteration: 1 }));
     assert!(matches!(events[1], AgentEvent::TextDelta(_)));
     assert!(matches!(events[2], AgentEvent::TextDelta(_)));
-    assert!(matches!(events[3], AgentEvent::Complete { iterations: 1 }));
+    assert!(matches!(events[3], AgentEvent::TokenUsage { .. }));
+    assert!(matches!(events[4], AgentEvent::Complete { iterations: 1 }));
 }
 
 #[tokio::test]

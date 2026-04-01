@@ -1863,7 +1863,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
                     .items_start()
                     .justify_center()
                     .padding_top(80.0)
-                    .background(floem::peniko::Color::from_rgba8(0, 0, 0, 160))
+                    .background(state.theme.get().palette.overlay_bg)
                     .z_index(ui_const::Z_FILE_PICKER)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
@@ -2005,7 +2005,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
                     .inset(0)
                     .items_center()
                     .justify_center()
-                    .background(floem::peniko::Color::from_rgba8(0, 0, 0, 180))
+                    .background(state.theme.get().palette.overlay_bg)
                     .z_index(ui_const::Z_COMMAND_PALETTE)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
@@ -2030,11 +2030,7 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
         let h = size.height;
 
         // 1. Deep blue-black base fill — slight blue tint, not pure black
-        cx.fill(
-            &floem::kurbo::Rect::ZERO.with_size(size),
-            floem::peniko::Color::from_rgb8(8, 8, 22),
-            0.0,
-        );
+        cx.fill(&floem::kurbo::Rect::ZERO.with_size(size), p.bg_deep, 0.0);
 
         if !t.is_cosmic() {
             return;
@@ -3383,14 +3379,15 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
                     let line_no = sym.line;
                     let indent = sym.depth * 12;
 
+                    let pal = &theme.get().palette;
                     let kind_color = match kind.as_str() {
-                        "fn" => floem::peniko::Color::from_rgb8(86, 156, 214),
-                        "struct" => floem::peniko::Color::from_rgb8(78, 201, 176),
-                        "enum" => floem::peniko::Color::from_rgb8(197, 134, 192),
-                        "trait" => floem::peniko::Color::from_rgb8(220, 220, 170),
-                        "impl" => floem::peniko::Color::from_rgb8(150, 200, 150),
-                        "mod" => floem::peniko::Color::from_rgb8(200, 200, 100),
-                        _ => floem::peniko::Color::from_rgb8(180, 180, 180),
+                        "fn" => pal.syn_keyword,
+                        "struct" => pal.syn_type,
+                        "enum" => pal.syn_macro,
+                        "trait" => pal.syn_function,
+                        "impl" => pal.syn_string,
+                        "mod" => pal.syn_number,
+                        _ => pal.text_muted,
                     };
 
                     container(
@@ -3505,16 +3502,17 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
             },
             |(i, _)| *i,
             move |(_, (text, kind)): (usize, (String, u8))| {
+                let pal = &theme.get().palette;
                 let color = match kind {
-                    1 => floem::peniko::Color::from_rgba8(80, 200, 80, 255), // added
-                    2 => floem::peniko::Color::from_rgba8(220, 60, 60, 255), // removed
-                    3 => floem::peniko::Color::from_rgba8(100, 160, 255, 255), // header
-                    _ => theme.get().palette.text_secondary,                 // context
+                    1 => pal.diff_added_fg,
+                    2 => pal.diff_removed_fg,
+                    3 => pal.diff_header_fg,
+                    _ => pal.text_secondary,
                 };
                 let bg = match kind {
-                    1 => floem::peniko::Color::from_rgba8(40, 80, 40, 120),
-                    2 => floem::peniko::Color::from_rgba8(80, 20, 20, 120),
-                    3 => floem::peniko::Color::from_rgba8(20, 40, 80, 100),
+                    1 => pal.diff_added_bg,
+                    2 => pal.diff_removed_bg,
+                    3 => pal.diff_header_bg,
                     _ => floem::peniko::Color::TRANSPARENT,
                 };
                 container(label(move || text.clone()).style(move |s| {
@@ -4071,7 +4069,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 .justify_center()
                 .padding_top(200.0)
                 .z_index(ui_const::Z_INLINE_EDIT)
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 160))
+                .background(state.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| {
@@ -4310,7 +4308,7 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                 .justify_center()
                 .padding_top(150.0)
                 .z_index(ui_const::Z_CODE_ACTIONS)
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 100))
+                .background(state.theme.get().palette.overlay_bg_light)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| state.code_actions_open.set(false))
@@ -4333,11 +4331,12 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
     let confirm = {
         let lsp_cmd2 = lsp_cmd.clone();
         label(|| "Rename".to_string())
-            .style(|s| {
+            .style(move |s| {
+                let pal = &state.theme.get().palette;
                 s.padding_horiz(16.0)
                     .padding_vert(6.0)
-                    .background(floem::peniko::Color::from_rgb8(80, 160, 255))
-                    .color(floem::peniko::Color::WHITE)
+                    .background(pal.button_primary_bg)
+                    .color(pal.button_primary_fg)
                     .border_radius(4.0)
                     .cursor(floem::style::CursorStyle::Pointer)
             })
@@ -4358,10 +4357,11 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
     };
 
     let cancel = label(|| "Cancel".to_string())
-        .style(|s| {
+        .style(move |s| {
+            let pal = &state.theme.get().palette;
             s.padding_horiz(16.0)
                 .padding_vert(6.0)
-                .background(floem::peniko::Color::from_rgba8(255, 255, 255, 30))
+                .background(pal.button_hover_bg)
                 .border_radius(4.0)
                 .cursor(floem::style::CursorStyle::Pointer)
         })
@@ -4369,9 +4369,9 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
             open.set(false);
         });
 
-    let title = label(move || format!("Rename '{}'", target.get())).style(|s| {
+    let title = label(move || format!("Rename '{}'", target.get())).style(move |s| {
         s.font_size(13.0)
-            .color(floem::peniko::Color::from_rgb8(180, 200, 230))
+            .color(state.theme.get().palette.text_secondary)
             .margin_bottom(8.0)
     });
 
@@ -4403,7 +4403,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .z_index(ui_const::Z_RENAME)
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 130))
+                .background(state.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -4434,9 +4434,9 @@ fn sig_help_overlay(state: IdeState) -> impl IntoView {
                 String::new()
             }
         })
-        .style(|s| {
+        .style(move |s| {
             s.font_size(12.0)
-                .color(floem::peniko::Color::from_rgb8(200, 220, 255))
+                .color(state.theme.get().palette.text_secondary)
         }),
     )
     .style(move |s| {
@@ -4651,7 +4651,7 @@ fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
                 .justify_center()
                 .padding_top(80.0)
                 .z_index(ui_const::Z_WS_SYMBOLS)
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 140))
+                .background(state.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -5083,7 +5083,7 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .z_index(ui_const::Z_PEEK_DEF)
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 120))
+                .background(state.theme.get().palette.overlay_bg_light)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -5865,12 +5865,13 @@ fn menu_bar(state: IdeState) -> impl IntoView {
                 .entry(MenuItem::new("About PhazeAI IDE").action(|| {
                     rfd::MessageDialog::new()
                         .set_title("About PhazeAI IDE")
-                        .set_description(
-                            "PhazeAI IDE v0.1.0\n\n\
+                        .set_description(format!(
+                            "PhazeAI IDE v{}\n\n\
                             AI-native code editor built in Rust.\n\n\
                             MIT License\n\n\
                             https://github.com/jakes1345/phazeai-ide",
-                        )
+                            env!("CARGO_PKG_VERSION")
+                        ))
                         .set_buttons(rfd::MessageButtons::Ok)
                         .show();
                 }));

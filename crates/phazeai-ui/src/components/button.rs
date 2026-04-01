@@ -34,7 +34,7 @@ pub fn phaze_button(
                     } else {
                         p.accent
                     },
-                    floem::peniko::Color::WHITE,
+                    p.button_primary_fg,
                     p.accent,
                 ),
                 ButtonVariant::Secondary => (

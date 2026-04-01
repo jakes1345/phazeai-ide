@@ -15,8 +15,8 @@ name = "phazeai"
 path = "src/main.rs"
 
 [dependencies]
-phazeai-core = { path = "../phazeai-core" }
-phazeai-sidecar = { path = "../phazeai-sidecar" }
+phazeai-core = { path = "../phazeai-core", version = "0.1.0" }
+phazeai-sidecar = { path = "../phazeai-sidecar", version = "0.1.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,8 +26,11 @@ tracing-subscriber = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 clap = { workspace = true }
-syntect = { workspace = true }
 dirs = "5.0"
-tui-textarea = { workspace = true }
-tui-tree-widget = { workspace = true }
+chrono = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
 arboard = { workspace = true }
+syntect = { workspace = true }
+syntect-tui = { workspace = true }
+pulldown-cmark = { workspace = true }

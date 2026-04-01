@@ -50,12 +50,16 @@ fn status_icon(status: &str, conclusion: Option<&str>) -> &'static str {
     }
 }
 
-fn status_color(status: &str, conclusion: Option<&str>) -> floem::peniko::Color {
+fn status_color(
+    status: &str,
+    conclusion: Option<&str>,
+    p: &crate::theme::PhazePalette,
+) -> floem::peniko::Color {
     match (status, conclusion) {
-        ("completed", Some("success")) => floem::peniko::Color::from_rgb8(80, 200, 120),
-        ("completed", Some("failure")) => floem::peniko::Color::from_rgb8(220, 80, 80),
-        ("in_progress", _) => floem::peniko::Color::from_rgb8(230, 200, 60),
-        _ => floem::peniko::Color::from_rgb8(160, 160, 160),
+        ("completed", Some("success")) => p.success,
+        ("completed", Some("failure")) => p.error,
+        ("in_progress", _) => p.warning,
+        _ => p.text_muted,
     }
 }
 
@@ -480,7 +484,7 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         move |s| {
             let show = error_msg.get().is_some();
             s.font_size(11.0)
-                .color(floem::peniko::Color::from_rgb8(220, 80, 80))
+                .color(theme.get().palette.error)
                 .padding(8.0)
                 .apply_if(!show, |s| s.display(floem::style::Display::None))
         },
@@ -492,7 +496,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         move |run| {
             let run_id = run.id;
             let icon = status_icon(&run.status, run.conclusion.as_deref());
-            let icon_color = status_color(&run.status, run.conclusion.as_deref());
+            let icon_color =
+                status_color(&run.status, run.conclusion.as_deref(), &theme.get().palette);
             let time_str = time_ago(&run.updated_at);
             let msg_short: String = run.head_commit_message.chars().take(40).collect();
 
@@ -513,7 +518,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                 |job| job.name.clone(),
                 move |job| {
                     let j_icon = status_icon(&job.status, job.conclusion.as_deref());
-                    let j_color = status_color(&job.status, job.conclusion.as_deref());
+                    let j_color =
+                        status_color(&job.status, job.conclusion.as_deref(), &theme.get().palette);
                     let dur = format_duration(job.duration_secs);
                     let job_label = if dur.is_empty() {
                         format!("    {} {}", j_icon, job.name)

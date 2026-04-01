@@ -33,6 +33,10 @@ pub enum AgentEvent {
     Complete {
         iterations: usize,
     },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     Error(String),
     // Browser Integration
     BrowserFetchStart {
@@ -166,6 +170,10 @@ impl Agent {
         manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
     ) {
         self.tools.register_mcp_tools(manager);
+    }
+
+    pub fn swap_llm(&mut self, new_llm: Box<dyn LlmClient>) {
+        self.llm = new_llm;
     }
 
     /// Run the agent loop, returning the final response.
@@ -369,6 +377,10 @@ impl Agent {
             }
 
             // No tool calls - this is the final response
+            let _ = event_tx.send(AgentEvent::TokenUsage {
+                input_tokens: total_input_tokens,
+                output_tokens: total_output_tokens,
+            });
             let _ = event_tx.send(AgentEvent::Complete { iterations });
 
             {

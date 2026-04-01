@@ -12,16 +12,25 @@ use phazeai_core::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
     Terminal,
 };
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+use pulldown_cmark::{Event as MdEvent, Options as MdOptions, Parser as MdParser, Tag, TagEnd};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
 
 use crate::commands::{self, CommandResult};
 use crate::theme::Theme;
@@ -118,6 +127,12 @@ struct PendingApproval {
     description: String,
 }
 
+enum WorkerCommand {
+    UserMessage(String),
+    ClearHistory,
+    SwapModel { settings: Box<Settings> },
+}
+
 struct AppState {
     // Input
     input: String,
@@ -165,11 +180,9 @@ struct AppState {
     /// Last user message sent, used by /retry
     last_user_input: String,
 
-    /// Handle to the running agent task — aborted on /cancel
     agent_task: Option<tokio::task::JoinHandle<()>>,
+    cancel_token: Arc<AtomicBool>,
 
-    /// Oneshot sender used to respond to the pending approval callback.
-    /// When the user presses y/n/a/s, we send true/false through this channel.
     approval_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
 }
 
@@ -191,9 +204,17 @@ impl AppState {
             messages: vec![ChatItem::Message(ChatMessage {
                 role: MessageRole::System,
                 content: format!(
-                    "PhazeAI v0.1.0 | {} | {} | {}\n\
-                     Type a message and press Enter. Ctrl+C to quit. /help for commands.",
-                    provider_name, settings.llm.model, cwd
+                    "Welcome to PhazeAI v{}\n\n\
+                     Provider: {}  Model: {}\n\
+                     Directory: {}\n\n\
+                     Enter    Send message       Ctrl+C  Cancel/Quit\n\
+                     Ctrl+B   Toggle file tree   Ctrl+N  New conversation\n\
+                     Ctrl+O   Load session       Ctrl+E  External editor\n\
+                     /help    All commands        /mode   Switch AI mode",
+                    env!("CARGO_PKG_VERSION"),
+                    provider_name,
+                    settings.llm.model,
+                    cwd
                 ),
                 timestamp: now_str(),
             })],
@@ -227,6 +248,7 @@ impl AppState {
             last_user_input: String::new(),
 
             agent_task: None,
+            cancel_token: Arc::new(AtomicBool::new(false)),
             approval_tx: Arc::new(Mutex::new(None)),
         }
     }
@@ -506,7 +528,7 @@ pub async fn run_tui(
     };
 
     let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<String>();
+    let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<WorkerCommand>();
 
     // Agent worker task
     if let Some(llm) = llm {
@@ -551,10 +573,12 @@ pub async fn run_tui(
             })
         });
 
+        let cancel_token = state.cancel_token.clone();
         let handle = tokio::spawn(async move {
             let mut agent = Agent::new(llm)
                 .with_system_prompt(system_prompt)
-                .with_approval(approval_fn);
+                .with_approval(approval_fn)
+                .with_cancel_token(cancel_token.clone());
 
             // Connect to MCP servers
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -579,7 +603,24 @@ pub async fn run_tui(
                 agent.load_history(restore_msgs).await;
             }
 
-            while let Some(input) = user_input_rx.recv().await {
+            while let Some(cmd) = user_input_rx.recv().await {
+                let input = match cmd {
+                    WorkerCommand::ClearHistory => {
+                        agent.clear_conversation().await;
+                        continue;
+                    }
+                    WorkerCommand::SwapModel {
+                        settings: new_settings,
+                    } => {
+                        if let Ok(new_llm) = new_settings.build_llm_client() {
+                            agent.swap_llm(new_llm);
+                        }
+                        continue;
+                    }
+                    WorkerCommand::UserMessage(msg) => msg,
+                };
+                cancel_token.store(false, Ordering::Relaxed);
+
                 let local_tx = event_tx.clone();
                 let (inner_tx, mut inner_rx) = mpsc::unbounded_channel();
 
@@ -594,7 +635,10 @@ pub async fn run_tui(
                 });
 
                 if let Err(e) = agent_fut.await {
-                    let _ = event_tx.send(AgentEvent::Error(e.to_string()));
+                    let err_str = e.to_string();
+                    if err_str != "Cancelled" {
+                        let _ = event_tx.send(AgentEvent::Error(err_str));
+                    }
                 }
 
                 forward.abort();
@@ -699,7 +743,7 @@ fn build_system_prompt(extra_instructions: Option<&str>) -> String {
 fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let theme = &state.theme;
 
-    // Main vertical layout: chat + input + status
+    // Main vertical layout: header + chat + input + status
     let input_height = if state.pending_approval.is_some() {
         5
     } else {
@@ -709,23 +753,27 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),            // header bar
             Constraint::Min(5),               // chat
             Constraint::Length(input_height), // input (or approval prompt)
             Constraint::Length(1),            // status
         ])
         .split(f.area());
 
+    // Header bar
+    draw_header_bar(f, main_chunks[0], state, theme);
+
     // Optionally split chat area for file tree
     let chat_area = if state.show_files {
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(30), Constraint::Min(40)])
-            .split(main_chunks[0]);
+            .constraints([Constraint::Length(28), Constraint::Min(40)])
+            .split(main_chunks[1]);
 
         draw_file_tree(f, h_chunks[0], theme);
         h_chunks[1]
     } else {
-        main_chunks[0]
+        main_chunks[1]
     };
 
     // Chat messages
@@ -750,8 +798,8 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let chat = Paragraph::new(Text::from(chat_lines))
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .title(" PhazeAI ")
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.border)),
         )
         .wrap(Wrap { trim: false })
@@ -763,8 +811,10 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
         let mut scrollbar_state = ScrollbarState::new(max_scroll).position(state.scroll_offset);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("^"))
-                .end_symbol(Some("v")),
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .track_symbol(Some("│"))
+                .thumb_symbol("█"),
             chat_area,
             &mut scrollbar_state,
         );
@@ -772,83 +822,156 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
 
     // Input or approval prompt
     if let Some(ref approval) = state.pending_approval {
-        draw_approval_prompt(f, main_chunks[1], approval, theme);
+        draw_approval_prompt(f, main_chunks[2], approval, theme);
     } else {
-        draw_input(f, main_chunks[1], state, theme);
+        draw_input(f, main_chunks[2], state, theme);
     }
 
     // Status bar
-    draw_status_bar(f, main_chunks[2], state, theme);
+    draw_status_bar(f, main_chunks[3], state, theme);
+
+    // Session picker overlay
+    if state.show_session_picker {
+        draw_session_picker(f, f.area(), state);
+    }
+}
+
+fn draw_header_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Theme) {
+    let mode_label = state.ai_mode.to_uppercase();
+    let width = area.width as usize;
+
+    // Build header spans
+    let mut spans = vec![
+        Span::styled(
+            " PhazeAI ",
+            Style::default()
+                .fg(theme.header_fg)
+                .bg(theme.header_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {} ", state.provider_name),
+            Style::default().fg(theme.accent).bg(theme.surface),
+        ),
+        Span::styled(
+            format!(" {} ", state.model_name),
+            Style::default().fg(theme.fg).bg(theme.surface),
+        ),
+        Span::styled(" ", Style::default().bg(theme.surface)),
+        Span::styled(
+            format!(" {} ", mode_label),
+            Style::default()
+                .fg(theme.header_fg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    // Calculate used width (approximate)
+    let used: usize =
+        10 + state.provider_name.len() + 2 + state.model_name.len() + 2 + 1 + mode_label.len() + 2;
+    let remaining = width.saturating_sub(used);
+    if remaining > 0 {
+        spans.push(Span::styled(
+            " ".repeat(remaining),
+            Style::default().bg(theme.surface),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
+        .map(|p| {
+            let s = p.display().to_string();
+            // Show just the last path component
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(s)
+        })
         .unwrap_or_else(|_| ".".into());
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Header: show the working directory path.
-    lines.push(Line::from(Span::styled(
-        format!(" {cwd}"),
-        Style::default().fg(theme.accent),
-    )));
-    lines.push(Line::raw(""));
-
     if let Ok(entries) = std::fs::read_dir(".") {
         let mut entries: Vec<_> = entries.flatten().collect();
-        // Directories first, then files; both sorted alphabetically.
         entries.sort_by_key(|e| {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             (!is_dir, e.file_name())
         });
 
+        let filtered: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                !name.starts_with('.') && name != "target" && name != "node_modules"
+            })
+            .collect();
+
+        let total = filtered.len();
         let mut count = 0usize;
-        for entry in &entries {
+
+        for (i, entry) in filtered.iter().enumerate() {
             if count >= 50 {
                 break;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            // Skip hidden entries and common noise dirs.
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
-                continue;
-            }
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let icon = if is_dir { "▸ " } else { "  " };
+            let is_last = i == total - 1;
+            let connector = if is_last { "└─" } else { "├─" };
             let color = if is_dir { theme.accent } else { theme.fg };
-            lines.push(Line::from(Span::styled(
-                format!(" {icon}{name}"),
-                Style::default().fg(color),
-            )));
+
+            let dir_marker = if is_dir { "/ " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {connector} "), Style::default().fg(theme.dim)),
+                Span::styled(name, Style::default().fg(color)),
+                Span::styled(dir_marker, Style::default().fg(theme.dim)),
+            ]));
             count += 1;
 
-            // Show immediate children of directories (depth 1).
+            // Show immediate children of directories
             if is_dir {
                 if let Ok(sub) = std::fs::read_dir(entry.path()) {
                     let mut sub: Vec<_> = sub.flatten().collect();
                     sub.sort_by_key(|e| e.file_name());
-                    let mut sub_count = 0usize;
-                    for sub_entry in &sub {
-                        if sub_count >= 20 || count >= 50 {
+                    let sub_filtered: Vec<_> = sub
+                        .iter()
+                        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                        .collect();
+                    let sub_total = sub_filtered.len().min(12);
+                    let prefix = if is_last { "   " } else { " │ " };
+
+                    for (j, sub_entry) in sub_filtered.iter().take(12).enumerate() {
+                        if count >= 50 {
                             break;
                         }
                         let sub_name = sub_entry.file_name().to_string_lossy().to_string();
-                        if sub_name.starts_with('.') {
-                            continue;
-                        }
                         let sub_is_dir = sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let sub_icon = if sub_is_dir { "▸ " } else { "  " };
+                        let sub_last = j == sub_total - 1;
+                        let sub_conn = if sub_last { "└─" } else { "├─" };
                         let sub_color = if sub_is_dir {
                             theme.accent
                         } else {
                             theme.muted
                         };
-                        lines.push(Line::from(Span::styled(
-                            format!("   {sub_icon}{sub_name}"),
-                            Style::default().fg(sub_color),
-                        )));
-                        sub_count += 1;
+                        let sub_dir_marker = if sub_is_dir { "/ " } else { "  " };
+
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{prefix}{sub_conn} "),
+                                Style::default().fg(theme.dim),
+                            ),
+                            Span::styled(sub_name, Style::default().fg(sub_color)),
+                            Span::styled(sub_dir_marker, Style::default().fg(theme.dim)),
+                        ]));
                         count += 1;
+                    }
+                    if sub_filtered.len() > 12 {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}  +{} more", sub_filtered.len() - 12),
+                            Style::default().fg(theme.dim),
+                        )));
                     }
                 }
             }
@@ -857,8 +980,15 @@ fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
 
     let files_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Files ")
-        .border_style(Style::default().fg(theme.border));
+        .border_type(BorderType::Rounded)
+        .title(format!(" {} ", cwd))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .border_style(Style::default().fg(theme.border))
+        .padding(Padding::new(0, 0, 0, 0));
 
     let paragraph = Paragraph::new(lines)
         .block(files_block)
@@ -867,173 +997,364 @@ fn draw_file_tree(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     f.render_widget(paragraph, area);
 }
 
-fn render_message_lines<'a>(msg: &'a ChatMessage, theme: &'a Theme) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line> = Vec::new();
+fn render_message_lines(msg: &ChatMessage, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let (prefix, color) = match msg.role {
-        MessageRole::User => ("You > ", theme.user_color),
-        MessageRole::Assistant => ("AI > ", theme.assistant_color),
-        MessageRole::System => ("", theme.system_color),
-        MessageRole::Tool => ("  ", theme.tool_color),
-        MessageRole::DiffAdd => ("  ", theme.success),
-        MessageRole::DiffRemove => ("  ", theme.error),
-        MessageRole::DiffHeader => ("  ", theme.accent),
+    let (role_label, role_color, role_icon) = match msg.role {
+        MessageRole::User => (" You ", theme.user_color, "›"),
+        MessageRole::Assistant => (" AI ", theme.assistant_color, "›"),
+        MessageRole::System => (" System ", theme.system_color, "·"),
+        MessageRole::Tool => (" Tool ", theme.tool_color, "·"),
+        MessageRole::DiffAdd => ("", theme.success, "+"),
+        MessageRole::DiffRemove => ("", theme.error, "-"),
+        MessageRole::DiffHeader => ("", theme.accent, ""),
     };
 
-    // For assistant messages, do code-block detection.
-    // For all others, render plainly.
-    let do_code_detection = msg.role == MessageRole::Assistant;
-
-    let mut in_code_block = false;
-    for (i, raw_line) in msg.content.lines().enumerate() {
-        let is_fence = raw_line.starts_with("```");
-
-        if do_code_detection {
-            if is_fence {
-                // Toggle code block state; render the fence line distinctly
-                let was_in = in_code_block;
-                in_code_block = !in_code_block;
-                let lang = if !was_in {
-                    raw_line.trim_start_matches('`').trim()
-                } else {
-                    ""
-                };
-                let label = if !lang.is_empty() {
-                    format!("  ```{lang}")
-                } else {
-                    "  ```".to_string()
-                };
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            prefix,
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(label, Style::default().fg(theme.muted)),
-                    ]));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        label,
-                        Style::default().fg(theme.muted),
-                    )));
-                }
-                continue;
-            }
-
-            if in_code_block {
-                let indent = " ".repeat(prefix.len());
-                lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(raw_line, Style::default().fg(theme.code_fg)),
-                ]));
-                continue;
-            }
-        }
-
-        // Regular line rendering
-        if i == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    prefix,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(raw_line, Style::default().fg(color)),
-            ]));
-        } else {
-            let indent = " ".repeat(prefix.len());
-            lines.push(Line::from(vec![
-                Span::raw(indent),
-                Span::styled(raw_line, Style::default().fg(color)),
-            ]));
-        }
-    }
-
-    lines
-}
-
-fn render_tool_card_lines<'a>(
-    name: &'a str,
-    _args: &'a str,
-    output: &'a str,
-    success: Option<bool>,
-    theme: &'a Theme,
-) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Choose border color based on state
-    let (border_color, status_icon, status_text) = match success {
-        None => (theme.warning, "⟳", "running..."),
-        Some(true) => (theme.success, "✓", "completed"),
-        Some(false) => (theme.error, "✗", "failed"),
-    };
-
-    // Top border with tool name in title
-    let title_str = format!("─ {name} ");
-    let top_line = format!("  ┌{title_str}");
-    // Pad to a reasonable width; we'll just render the border open-ended
-    lines.push(Line::from(vec![
-        Span::styled(top_line, Style::default().fg(border_color)),
-        Span::styled(
-            "─".repeat(40usize.saturating_sub(title_str.len() + 4)),
-            Style::default().fg(border_color),
-        ),
-        Span::styled("┐", Style::default().fg(border_color)),
-    ]));
-
-    // Output lines (up to 8 lines to avoid flooding)
-    let content_lines: Vec<&str> = if output.is_empty() {
-        vec![]
-    } else {
-        output.lines().take(8).collect()
-    };
-
-    for content_line in &content_lines {
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(border_color)),
-            Span::styled(*content_line, Style::default().fg(theme.fg)),
-        ]));
-    }
-
-    if content_lines.is_empty() && success.is_none() {
-        // Show "running" placeholder
-        lines.push(Line::from(vec![
-            Span::styled("  │ ", Style::default().fg(border_color)),
+    if !role_label.is_empty() {
+        let header_spans = vec![
+            Span::styled(format!(" {role_icon}"), Style::default().fg(role_color)),
             Span::styled(
-                "  waiting for output...",
-                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+                role_label.to_string(),
+                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
             ),
-        ]));
+            Span::styled(
+                format!(" {}", msg.timestamp),
+                Style::default().fg(theme.dim),
+            ),
+        ];
+        lines.push(Line::from(header_spans));
     }
 
-    // Status line
-    lines.push(Line::from(vec![
-        Span::styled("  │ ", Style::default().fg(border_color)),
-        Span::styled(
-            format!("{status_icon} {status_text}"),
-            Style::default().fg(border_color),
-        ),
-    ]));
+    if msg.role == MessageRole::Assistant {
+        lines.extend(render_markdown_lines(&msg.content, theme));
+    } else {
+        for raw_line in msg.content.lines() {
+            let indent = match msg.role {
+                MessageRole::DiffAdd | MessageRole::DiffRemove | MessageRole::DiffHeader => {
+                    "    ".to_string()
+                }
+                _ => "   ".to_string(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{raw_line}"),
+                Style::default().fg(role_color),
+            )));
+        }
+    }
 
-    // Bottom border
-    lines.push(Line::from(Span::styled(
-        "  └".to_string() + &"─".repeat(44),
-        Style::default().fg(border_color),
-    )));
-
-    lines.push(Line::raw(""));
     lines
 }
 
-fn build_chat_lines<'a>(
-    messages: &'a [ChatItem],
-    is_processing: bool,
-    theme: &'a Theme,
-) -> Vec<Line<'a>> {
-    let mut chat_lines: Vec<Line> = Vec::new();
+fn render_markdown_lines(content: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let ss = SyntaxSet::load_defaults_newlines();
+    let ts = ThemeSet::load_defaults();
+    let syntect_theme_name = match theme.name {
+        "tokyo-night" | "dracula" | "one-dark" => "base16-ocean.dark",
+        "gruvbox" => "base16-eighties.dark",
+        "nord" => "base16-ocean.dark",
+        "catppuccin" => "base16-mocha.dark",
+        _ => "base16-ocean.dark",
+    };
+    let highlight_theme = ts
+        .themes
+        .get(syntect_theme_name)
+        .unwrap_or_else(|| &ts.themes["base16-ocean.dark"]);
 
-    for item in messages {
+    let opts = MdOptions::ENABLE_STRIKETHROUGH | MdOptions::ENABLE_TABLES;
+    let parser = MdParser::new_ext(content, opts);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut bold = false;
+    let mut italic = false;
+    let mut in_code_block = false;
+    let mut code_lang = String::new();
+    let mut code_buffer = String::new();
+    let mut in_heading = false;
+
+    let mut list_depth: usize = 0;
+    let mut ordered_index: Option<u64> = None;
+
+    for event in parser {
+        match event {
+            MdEvent::Start(Tag::Heading { level, .. }) => {
+                flush_line(&mut lines, &mut current_spans);
+                in_heading = true;
+                let marker = match level {
+                    pulldown_cmark::HeadingLevel::H1 => "━━ ",
+                    pulldown_cmark::HeadingLevel::H2 => "── ",
+                    pulldown_cmark::HeadingLevel::H3 => "─ ",
+                    _ => "· ",
+                };
+                current_spans.push(Span::styled(
+                    format!("   {marker}"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            MdEvent::End(TagEnd::Heading(_)) => {
+                in_heading = false;
+                flush_line(&mut lines, &mut current_spans);
+            }
+            MdEvent::Start(Tag::Strong) => bold = true,
+            MdEvent::End(TagEnd::Strong) => bold = false,
+            MdEvent::Start(Tag::Emphasis) => italic = true,
+            MdEvent::End(TagEnd::Emphasis) => italic = false,
+            MdEvent::Start(Tag::CodeBlock(kind)) => {
+                flush_line(&mut lines, &mut current_spans);
+                in_code_block = true;
+                code_buffer.clear();
+                code_lang = match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(lang) => lang.to_string(),
+                    pulldown_cmark::CodeBlockKind::Indented => String::new(),
+                };
+                let lang_display = if code_lang.is_empty() {
+                    "code".to_string()
+                } else {
+                    code_lang.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   ╭─".to_string(), Style::default().fg(theme.dim)),
+                    Span::styled(
+                        format!(" {} ", lang_display),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("─".repeat(40), Style::default().fg(theme.dim)),
+                ]));
+            }
+            MdEvent::End(TagEnd::CodeBlock) => {
+                let syntax = ss
+                    .find_syntax_by_token(&code_lang)
+                    .unwrap_or_else(|| ss.find_syntax_plain_text());
+                let mut h = HighlightLines::new(syntax, highlight_theme);
+
+                let code_snapshot = code_buffer.clone();
+                let code_lines_vec: Vec<&str> = code_snapshot.lines().collect();
+                let line_num_width = code_lines_vec.len().to_string().len();
+
+                for (i, code_line) in code_lines_vec.iter().enumerate() {
+                    let line_num = format!("{:>width$}", i + 1, width = line_num_width);
+                    let mut spans: Vec<Span<'static>> = vec![
+                        Span::styled("   │".to_string(), Style::default().fg(theme.dim)),
+                        Span::styled(format!("{line_num} "), Style::default().fg(theme.dim)),
+                    ];
+                    if let Ok(ranges) = h.highlight_line(code_line, &ss) {
+                        for (style, text) in ranges {
+                            if let Ok(span) = syntect_tui::into_span((style, text)) {
+                                spans.push(Span::styled(span.content.to_string(), span.style));
+                            }
+                        }
+                    } else {
+                        spans.push(Span::styled(
+                            code_line.to_string(),
+                            Style::default().fg(theme.code_fg),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("   ╰─{}", "─".repeat(40)),
+                    Style::default().fg(theme.dim),
+                )));
+                in_code_block = false;
+                code_buffer.clear();
+            }
+            MdEvent::Start(Tag::List(start)) => {
+                flush_line(&mut lines, &mut current_spans);
+                list_depth += 1;
+                ordered_index = start;
+            }
+            MdEvent::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                if list_depth == 0 {
+                    ordered_index = None;
+                }
+            }
+            MdEvent::Start(Tag::Item) => {
+                flush_line(&mut lines, &mut current_spans);
+                let indent = "  ".repeat(list_depth);
+                let bullet = if let Some(ref mut idx) = ordered_index {
+                    let s = format!("{}. ", idx);
+                    *idx += 1;
+                    s
+                } else {
+                    "• ".to_string()
+                };
+                current_spans.push(Span::styled(
+                    format!("   {indent}{bullet}"),
+                    Style::default().fg(theme.fg),
+                ));
+            }
+            MdEvent::End(TagEnd::Item) => {
+                flush_line(&mut lines, &mut current_spans);
+            }
+            MdEvent::Start(Tag::Paragraph) => {
+                if !in_heading && list_depth == 0 {
+                    flush_line(&mut lines, &mut current_spans);
+                    if current_spans.is_empty() {
+                        current_spans.push(Span::raw("   ".to_string()));
+                    }
+                }
+            }
+            MdEvent::End(TagEnd::Paragraph) => {
+                flush_line(&mut lines, &mut current_spans);
+            }
+            MdEvent::Code(code) => {
+                current_spans.push(Span::styled(
+                    format!(" {code} "),
+                    Style::default().fg(theme.code_fg).bg(theme.code_bg),
+                ));
+            }
+            MdEvent::Text(text) => {
+                if in_code_block {
+                    code_buffer.push_str(&text);
+                } else {
+                    let style = if in_heading {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else if bold && italic {
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                    } else if bold {
+                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
+                    } else if italic {
+                        Style::default().fg(theme.fg).add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default().fg(theme.fg)
+                    };
+                    if current_spans.is_empty() && list_depth == 0 && !in_heading {
+                        current_spans.push(Span::raw("   ".to_string()));
+                    }
+                    current_spans.push(Span::styled(text.to_string(), style));
+                }
+            }
+            MdEvent::SoftBreak | MdEvent::HardBreak => {
+                flush_line(&mut lines, &mut current_spans);
+            }
+            MdEvent::Rule => {
+                flush_line(&mut lines, &mut current_spans);
+                lines.push(Line::from(Span::styled(
+                    format!("   {}", "─".repeat(50)),
+                    Style::default().fg(theme.dim),
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    flush_line(&mut lines, &mut current_spans);
+    lines
+}
+
+fn flush_line(lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>) {
+    if !spans.is_empty() {
+        lines.push(Line::from(std::mem::take(spans)));
+    }
+}
+
+fn render_tool_card_lines(
+    name: &str,
+    args: &str,
+    output: &str,
+    success: Option<bool>,
+    collapsed: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let (status_color, status_icon, status_text) = match success {
+        None => (theme.warning, "◌", "running"),
+        Some(true) => (theme.success, "●", "done"),
+        Some(false) => (theme.error, "●", "failed"),
+    };
+
+    let collapse_icon = if collapsed { "▸" } else { "▾" };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("   {collapse_icon} "),
+            Style::default().fg(theme.dim),
+        ),
+        Span::styled(format!("{status_icon} "), Style::default().fg(status_color)),
+        Span::styled(
+            name.to_string(),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {status_text}"), Style::default().fg(theme.dim)),
+    ]));
+
+    if !collapsed {
+        // Show tool arguments (truncated)
+        if !args.is_empty() {
+            let display_args = if args.len() > 100 {
+                format!("{}…", &args[..99])
+            } else {
+                args.to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("     │ ".to_string(), Style::default().fg(theme.dim)),
+                Span::styled(display_args, Style::default().fg(theme.muted)),
+            ]));
+        }
+
+        let content_lines: Vec<&str> = if output.is_empty() {
+            vec![]
+        } else {
+            output.lines().take(10).collect()
+        };
+
+        for content_line in &content_lines {
+            lines.push(Line::from(vec![
+                Span::styled("     │ ".to_string(), Style::default().fg(theme.dim)),
+                Span::styled(content_line.to_string(), Style::default().fg(theme.fg)),
+            ]));
+        }
+
+        let total_output_lines = output.lines().count();
+        if total_output_lines > 10 {
+            lines.push(Line::from(Span::styled(
+                format!("     │ +{} more lines", total_output_lines - 10),
+                Style::default().fg(theme.dim),
+            )));
+        }
+
+        if content_lines.is_empty() && success.is_none() {
+            let spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let tick = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 80) as usize;
+            let frame = spinners[tick % spinners.len()];
+            lines.push(Line::from(Span::styled(
+                format!("     │ {frame} executing..."),
+                Style::default().fg(theme.muted),
+            )));
+        }
+    }
+
+    lines
+}
+
+fn build_chat_lines(
+    messages: &[ChatItem],
+    is_processing: bool,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut chat_lines: Vec<Line<'static>> = Vec::new();
+
+    for (idx, item) in messages.iter().enumerate() {
         match item {
             ChatItem::Message(msg) => {
+                // Add a subtle separator between conversation turns (not before first, not for system)
+                if idx > 0 && matches!(msg.role, MessageRole::User | MessageRole::Assistant) {
+                    chat_lines.push(Line::raw(""));
+                }
                 chat_lines.extend(render_message_lines(msg, theme));
                 chat_lines.push(Line::raw(""));
             }
@@ -1042,20 +1363,32 @@ fn build_chat_lines<'a>(
                 args,
                 output,
                 success,
-                collapsed: _,
+                collapsed,
             } => {
-                chat_lines.extend(render_tool_card_lines(name, args, output, *success, theme));
+                chat_lines.extend(render_tool_card_lines(
+                    name, args, output, *success, *collapsed, theme,
+                ));
             }
         }
     }
 
     if is_processing {
-        chat_lines.push(Line::from(Span::styled(
-            "  Thinking...",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::DIM),
-        )));
+        let spinners = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+        let tick = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 100) as usize;
+        let frame = spinners[tick % spinners.len()];
+        chat_lines.push(Line::from(vec![
+            Span::styled(format!("  {frame} "), Style::default().fg(theme.accent)),
+            Span::styled(
+                "Thinking...".to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
     }
 
     chat_lines
@@ -1067,25 +1400,51 @@ fn draw_approval_prompt(
     approval: &PendingApproval,
     theme: &Theme,
 ) {
+    let truncated_desc = if approval.description.len() > 80 {
+        format!("{}…", &approval.description[..79])
+    } else {
+        approval.description.clone()
+    };
+
     let text = vec![
         Line::from(vec![
             Span::styled(
-                format!(" Tool: {} ", approval.tool_name),
+                " ⚠ ",
                 Style::default()
                     .fg(theme.warning)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(&approval.description, Style::default().fg(theme.fg)),
+            Span::styled(
+                format!("{} ", approval.tool_name),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(truncated_desc, Style::default().fg(theme.muted)),
         ]),
-        Line::from(vec![Span::styled(
-            " [y] Allow  [n] Deny  [a] Allow all  [s] Allow session ",
-            Style::default().fg(theme.accent),
-        )]),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(
+                " y ",
+                Style::default().fg(theme.header_fg).bg(theme.success),
+            ),
+            Span::styled(" Allow  ", Style::default().fg(theme.fg)),
+            Span::styled(" n ", Style::default().fg(theme.header_fg).bg(theme.error)),
+            Span::styled(" Deny  ", Style::default().fg(theme.fg)),
+            Span::styled(" a ", Style::default().fg(theme.header_fg).bg(theme.accent)),
+            Span::styled(" All  ", Style::default().fg(theme.fg)),
+            Span::styled(" s ", Style::default().fg(theme.header_fg).bg(theme.accent)),
+            Span::styled(" Session", Style::default().fg(theme.fg)),
+        ]),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Approve? ")
+        .border_type(BorderType::Rounded)
+        .title(" Approve Tool ")
+        .title_style(
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        )
         .border_style(Style::default().fg(theme.warning));
 
     f.render_widget(Paragraph::new(text).block(block), area);
@@ -1098,24 +1457,35 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Them
         Style::default().fg(theme.fg)
     };
 
-    let title = if state.is_processing {
-        " Input (processing...) "
+    let (border_color, title_style) = if state.is_processing {
+        (theme.dim, Style::default().fg(theme.muted))
     } else if state.input.starts_with('/') {
-        " Command "
+        (
+            theme.accent,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        " Input  Shift+Enter for newline "
+        (theme.input_active, Style::default().fg(theme.input_active))
+    };
+
+    let title = if state.is_processing {
+        " processing... ".to_string()
+    } else if state.input.starts_with('/') {
+        " / command ".to_string()
+    } else {
+        " message ".to_string()
     };
 
     let input = Paragraph::new(state.input.as_str())
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .title(title)
-                .border_style(Style::default().fg(if state.input.starts_with('/') {
-                    theme.accent
-                } else {
-                    theme.border
-                })),
+                .title_style(title_style)
+                .border_style(Style::default().fg(border_color)),
         )
         .style(input_style);
     f.render_widget(input, area);
@@ -1123,7 +1493,6 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Them
     // Set cursor position in input area
     if !state.is_processing && state.pending_approval.is_none() {
         let cursor_x = area.x + state.cursor_pos as u16 + 1;
-        // Clamp cursor to area width
         let max_x = area.x + area.width.saturating_sub(2);
         f.set_cursor_position((cursor_x.min(max_x), area.y + 1));
     }
@@ -1133,7 +1502,6 @@ fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: 
     let cwd = std::env::current_dir()
         .map(|p| {
             let s = p.display().to_string();
-            // Shorten home dir
             if let Ok(home) = std::env::var("HOME") {
                 if s.starts_with(&home) {
                     return format!("~{}", &s[home.len()..]);
@@ -1143,56 +1511,135 @@ fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: 
         })
         .unwrap_or_else(|_| ".".into());
 
-    let tokens_str = if state.total_tokens_in > 0 || state.total_tokens_out > 0 {
-        format!(
-            "{}in/{}out ",
-            format_tokens(state.total_tokens_in),
-            format_tokens(state.total_tokens_out),
-        )
-    } else {
-        String::new()
-    };
-
-    let cost_str = if state.estimated_cost > 0.0 {
-        format!("${:.4} ", state.estimated_cost)
-    } else {
-        String::new()
-    };
-
-    let approval_str = match state.approval_manager.mode() {
+    let approval_label = match state.approval_manager.mode() {
         ToolApprovalMode::AutoApprove => "auto",
         ToolApprovalMode::AlwaysAsk => "ask",
-        ToolApprovalMode::AskOnce => "ask-once",
+        ToolApprovalMode::AskOnce => "once",
     };
 
-    let status_spans = vec![
-        Span::styled(
-            format!(" {} ", state.provider_name),
+    let sep = Span::styled(" · ", Style::default().fg(theme.dim));
+
+    let mut spans = vec![Span::styled(" ", Style::default().bg(theme.surface))];
+
+    // Status/activity indicator
+    if state.is_processing {
+        let spinners = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+        let tick = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 100) as usize;
+        let frame = spinners[tick % spinners.len()];
+        spans.push(Span::styled(
+            format!("{frame} {}", state.status_text),
+            Style::default().fg(theme.accent),
+        ));
+    } else {
+        spans.push(Span::styled(
+            state.status_text.clone(),
+            Style::default().fg(theme.muted),
+        ));
+    }
+
+    // Token usage
+    if state.total_tokens_in > 0 || state.total_tokens_out > 0 {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!(
+                "↑{} ↓{}",
+                format_tokens(state.total_tokens_in),
+                format_tokens(state.total_tokens_out),
+            ),
+            Style::default().fg(theme.muted),
+        ));
+    }
+
+    // Cost
+    if state.estimated_cost > 0.0 {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!("${:.4}", state.estimated_cost),
+            Style::default().fg(theme.warning),
+        ));
+    }
+
+    // Approval mode
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        approval_label.to_string(),
+        Style::default().fg(theme.dim),
+    ));
+
+    // CWD (right-aligned via padding)
+    spans.push(sep);
+    spans.push(Span::styled(cwd, Style::default().fg(theme.dim)));
+
+    let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.surface));
+    f.render_widget(status, area);
+}
+
+fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let theme = &state.theme;
+    let popup_width = area.width.clamp(40, 72);
+    let popup_height = area.height.clamp(6, 22);
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, meta) in state.session_picker_list.iter().enumerate() {
+        let is_selected = i == state.session_picker_index;
+        let indicator = if is_selected { " › " } else { "   " };
+        let id_short = &meta.id[..8.min(meta.id.len())];
+        let title: String = meta.title.chars().take(36).collect();
+
+        let (title_style, meta_style) = if is_selected {
+            (
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.muted),
+            )
+        } else {
+            (
+                Style::default().fg(theme.fg),
+                Style::default().fg(theme.dim),
+            )
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(indicator, Style::default().fg(theme.accent)),
+            Span::styled(title, title_style),
+            Span::styled(
+                format!("  {id_short}  {} msgs", meta.message_count),
+                meta_style,
+            ),
+        ]));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "   No saved conversations.",
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Sessions ")
+        .title_style(
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("| {} ", state.model_name),
-            Style::default().fg(theme.accent),
-        ),
-        Span::styled(
-            format!("| {} ", state.ai_mode),
-            Style::default().fg(theme.accent),
-        ),
-        Span::styled(
-            format!("| {} ", approval_str),
-            Style::default().fg(theme.muted),
-        ),
-        Span::styled(&tokens_str, Style::default().fg(theme.muted)),
-        Span::styled(&cost_str, Style::default().fg(theme.warning)),
-        Span::styled("| ", Style::default().fg(theme.muted)),
-        Span::styled(&state.status_text, Style::default().fg(theme.muted)),
-        // Right-align cwd and keybindings
-        Span::styled(format!("  {} ", cwd), Style::default().fg(theme.muted)),
-    ];
-    let status = Paragraph::new(Line::from(status_spans));
-    f.render_widget(status, area);
+        )
+        .title_bottom(Line::from(" Enter load · Esc close ").alignment(Alignment::Center))
+        .border_style(Style::default().fg(theme.border_focused));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, popup_area);
 }
 
 fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
@@ -1202,7 +1649,6 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.status_text = format!("Thinking... (step {iteration})");
         }
         AgentEvent::ToolApprovalRequest { name, params } => {
-            // Handle tool approval request if needed
             let desc = format!("{}: {}", name, params);
             state.pending_approval = Some(PendingApproval {
                 tool_name: name,
@@ -1210,7 +1656,6 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             });
         }
         AgentEvent::TextDelta(text) => {
-            // Append to existing assistant message or create new one
             if let Some(ChatItem::Message(m)) = state.messages.last_mut() {
                 if m.role == MessageRole::Assistant {
                     m.content.push_str(&text);
@@ -1221,22 +1666,6 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.add_message(MessageRole::Assistant, text);
         }
         AgentEvent::ToolStart { name } => {
-            // Check if tool needs approval
-            let needs_approval = state
-                .approval_manager
-                .needs_approval(&name, &serde_json::Value::Null);
-
-            if needs_approval {
-                let desc = state
-                    .approval_manager
-                    .format_approval_prompt(&name, &serde_json::Value::Null);
-                state.pending_approval = Some(PendingApproval {
-                    tool_name: name.clone(),
-                    description: desc,
-                });
-            }
-
-            // Per-tool status text
             state.status_text = match name.as_str() {
                 "bash" => "Running bash...".into(),
                 "read_file" => "Reading file...".into(),
@@ -1257,11 +1686,23 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.finish_tool_card(&name, summary, success);
             state.pending_approval = None;
         }
+        AgentEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+        } => {
+            state.total_tokens_in += input_tokens;
+            state.total_tokens_out += output_tokens;
+            state.estimated_cost += estimate_cost(
+                &state.provider_name,
+                &state.model_name,
+                input_tokens,
+                output_tokens,
+            );
+        }
         AgentEvent::Complete { iterations } => {
             state.is_processing = false;
             state.status_text = format!("Done ({iterations} steps)");
             state.scroll_to_bottom();
-            // Auto-save periodically
             if state.messages.len().is_multiple_of(10) {
                 state.save_conversation();
             }
@@ -1277,7 +1718,11 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     }
 }
 
-fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::UnboundedSender<String>) {
+fn handle_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    user_input_tx: &mpsc::UnboundedSender<WorkerCommand>,
+) {
     // Handle approval prompt first
     if state.pending_approval.is_some() {
         handle_approval_key(state, key);
@@ -1321,11 +1766,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         // Quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if state.is_processing {
-                // First Ctrl+C aborts the running agent task.
-                if let Some(handle) = state.agent_task.take() {
-                    handle.abort();
-                }
-                // Unblock any pending approval.
+                state.cancel_token.store(true, Ordering::Relaxed);
                 let sender = state
                     .approval_tx
                     .lock()
@@ -1383,6 +1824,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
             }
             state.messages.clear();
             state.conversation_id = ConversationStore::generate_id();
+            let _ = user_input_tx.send(WorkerCommand::ClearHistory);
             state.add_message(MessageRole::System, "New conversation started.".into());
             state.scroll_offset = 0;
             state.iterations = 0;
@@ -1395,6 +1837,14 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
             state.save_conversation();
             state.add_message(MessageRole::System, "Conversation saved.".into());
+        }
+
+        // Multi-line input
+        (KeyModifiers::SHIFT, KeyCode::Enter) => {
+            if !state.is_processing {
+                state.input.insert(state.cursor_pos, '\n');
+                state.cursor_pos += 1;
+            }
         }
 
         // Submit input
@@ -1419,7 +1869,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
             state.status_text = "Sending...".into();
             state.last_user_input = input.clone();
             let agent_input = apply_mode_prefix(&state.ai_mode, &input);
-            let _ = user_input_tx.send(agent_input);
+            let _ = user_input_tx.send(WorkerCommand::UserMessage(agent_input));
         }
 
         // Input editing
@@ -1545,7 +1995,15 @@ fn handle_key(state: &mut AppState, key: KeyEvent, user_input_tx: &mpsc::Unbound
             }
         }
 
-        // Tab completion for commands
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            for item in state.messages.iter_mut().rev() {
+                if let ChatItem::ToolCard { collapsed, .. } = item {
+                    *collapsed = !*collapsed;
+                    break;
+                }
+            }
+        }
+
         (_, KeyCode::Tab) => {
             if state.input.starts_with('/') {
                 if let Some(completion) = complete_command(&state.input) {
@@ -1624,7 +2082,7 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
 fn handle_command_result(
     state: &mut AppState,
     result: CommandResult,
-    user_input_tx: &mpsc::UnboundedSender<String>,
+    user_input_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
     match result {
         CommandResult::Message(msg) => {
@@ -1639,8 +2097,13 @@ fn handle_command_result(
             state.should_quit = true;
         }
         CommandResult::ModelChanged(model) => {
+            let mut new_settings = Settings::load();
+            new_settings.llm.model = model.clone();
+            let _ = user_input_tx.send(WorkerCommand::SwapModel {
+                settings: Box::new(new_settings),
+            });
             state.model_name = model.clone();
-            state.add_message(MessageRole::System, format!("Model changed to: {model}"));
+            state.add_message(MessageRole::System, format!("Model switched to: {model}"));
         }
         CommandResult::ThemeChanged(name) => {
             state.theme = Theme::by_name(&name);
@@ -1653,10 +2116,29 @@ fn handle_command_result(
             state.show_files = !state.show_files;
         }
         CommandResult::ProviderChanged(provider) => {
+            let mut new_settings = Settings::load();
+            let provider_enum = match provider.to_lowercase().as_str() {
+                "claude" | "anthropic" => phazeai_core::config::LlmProvider::Claude,
+                "openai" | "gpt" => phazeai_core::config::LlmProvider::OpenAI,
+                "ollama" | "local" => phazeai_core::config::LlmProvider::Ollama,
+                "groq" => phazeai_core::config::LlmProvider::Groq,
+                "together" => phazeai_core::config::LlmProvider::Together,
+                "openrouter" | "or" => phazeai_core::config::LlmProvider::OpenRouter,
+                "lmstudio" | "lm-studio" => phazeai_core::config::LlmProvider::LmStudio,
+                "gemini" => phazeai_core::config::LlmProvider::Gemini,
+                _ => {
+                    state.add_message(MessageRole::System, format!("Unknown provider: {provider}"));
+                    return;
+                }
+            };
+            new_settings.llm.provider = provider_enum;
+            let _ = user_input_tx.send(WorkerCommand::SwapModel {
+                settings: Box::new(new_settings),
+            });
             state.provider_name = provider.clone();
             state.add_message(
                 MessageRole::System,
-                format!("Provider changed to: {provider}. Restart to take effect."),
+                format!("Provider switched to: {provider}"),
             );
         }
         CommandResult::Compact => {
@@ -1739,10 +2221,40 @@ fn handle_command_result(
             // Replace the messages
             state.messages = new_messages;
 
+            let _ = user_input_tx.send(WorkerCommand::ClearHistory);
+
+            let mut replay = String::new();
+            for item in &state.messages {
+                if let ChatItem::Message(m) = item {
+                    match m.role {
+                        MessageRole::User => {
+                            replay.push_str(&format!("[Previous user message]: {}\n", m.content));
+                        }
+                        MessageRole::Assistant => {
+                            replay.push_str(&format!(
+                                "[Previous assistant response]: {}\n",
+                                m.content.chars().take(300).collect::<String>()
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !replay.is_empty() && !state.is_processing {
+                let _ = user_input_tx.send(WorkerCommand::UserMessage(format!(
+                    "Here is a summary of our conversation so far for context. Do not respond, just acknowledge with 'OK'.\n\n{replay}"
+                )));
+                state.is_processing = true;
+                state.status_text = "Replaying compact context...".into();
+            }
+
             state.add_message(
                 MessageRole::System,
-                format!("Conversation compacted: {} messages reduced to {}. Token savings will apply on next request.",
-                    msg_count, state.messages.len() - 1), // -1 to exclude this message we just added
+                format!(
+                    "Conversation compacted: {} messages reduced to {}.",
+                    msg_count,
+                    state.messages.len()
+                ),
             );
         }
         CommandResult::SaveConversation => {
@@ -1811,6 +2323,11 @@ fn handle_command_result(
             }
             state.messages.clear();
             state.conversation_id = ConversationStore::generate_id();
+            state.total_tokens_in = 0;
+            state.total_tokens_out = 0;
+            state.estimated_cost = 0.0;
+            state.iterations = 0;
+            let _ = user_input_tx.send(WorkerCommand::ClearHistory);
             state.add_message(MessageRole::System, "New conversation started.".into());
             state.scroll_offset = 0;
         }
@@ -1934,14 +2451,14 @@ fn handle_command_result(
                     let status_code = &line[..2];
                     let path = line[3..].trim();
 
-                    let (label, _color) = match status_code {
-                        "M " | " M" | "MM" => ("M", "modified"),
-                        "A " | " A" | "AM" => ("A", "added"),
-                        "D " | " D" => ("D", "deleted"),
-                        "R " | " R" => ("R", "renamed"),
-                        "??" => ("?", "untracked"),
-                        "UU" | "AA" | "DD" => ("U", "conflicted"),
-                        _ => ("M", "modified"),
+                    let label = match status_code {
+                        "M " | " M" | "MM" => "M",
+                        "A " | " A" | "AM" => "A",
+                        "D " | " D" => "D",
+                        "R " | " R" => "R",
+                        "??" => "?",
+                        "UU" | "AA" | "DD" => "U",
+                        _ => "M",
                     };
 
                     formatted.push_str(&format!("  {} {}\n", label, path));
@@ -1963,17 +2480,45 @@ fn handle_command_result(
             );
         }
         CommandResult::SearchFiles(pattern) => {
-            let result = std::process::Command::new("find")
-                .args([".", "-name", &pattern, "-not", "-path", "./.git/*"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_else(|| "Search failed".into());
-            let lines: Vec<&str> = result.lines().take(50).collect();
-            state.add_message(
-                MessageRole::System,
-                format!("Files matching '{}':\n{}", pattern, lines.join("\n")),
-            );
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let mut results = Vec::new();
+            if let Ok(glob_matcher) = globset::GlobBuilder::new(&pattern)
+                .literal_separator(false)
+                .build()
+                .map(|g| g.compile_matcher())
+            {
+                let walker = ignore::WalkBuilder::new(&root)
+                    .hidden(true)
+                    .git_ignore(true)
+                    .build();
+                for entry in walker.flatten() {
+                    if results.len() >= 50 {
+                        break;
+                    }
+                    if let Ok(rel) = entry.path().strip_prefix(&root) {
+                        if glob_matcher.is_match(rel) {
+                            results.push(rel.display().to_string());
+                        }
+                    }
+                }
+            }
+            if results.is_empty() {
+                state.add_message(
+                    MessageRole::System,
+                    format!("No files matching '{pattern}'"),
+                );
+            } else {
+                let count = results.len();
+                state.add_message(
+                    MessageRole::System,
+                    format!(
+                        "Files matching '{}' ({} results):\n{}",
+                        pattern,
+                        count,
+                        results.join("\n")
+                    ),
+                );
+            }
         }
         CommandResult::NotACommand => {}
         CommandResult::ListModels => {
@@ -2165,9 +2710,9 @@ fn handle_command_result(
                     );
                     // Send file contents as a context message to the agent
                     if !state.is_processing {
-                        let _ = user_input_tx.send(format!(
+                        let _ = user_input_tx.send(WorkerCommand::UserMessage(format!(
                             "I'm providing the contents of `{name}` for context. You don't need to respond yet, just acknowledge briefly.\n\n{context_msg}"
-                        ));
+                        )));
                         state.is_processing = true;
                         state.status_text = "Loading file context...".into();
                     }
@@ -2194,15 +2739,11 @@ fn handle_command_result(
                 state.is_processing = true;
                 state.status_text = "Retrying...".into();
                 let agent_input = apply_mode_prefix(&state.ai_mode, &last);
-                let _ = user_input_tx.send(agent_input);
+                let _ = user_input_tx.send(WorkerCommand::UserMessage(agent_input));
             }
         }
         CommandResult::Cancel => {
-            // Abort the running agent task immediately.
-            if let Some(handle) = state.agent_task.take() {
-                handle.abort();
-            }
-            // Also unblock any pending approval by sending false.
+            state.cancel_token.store(true, Ordering::Relaxed);
             let sender = state
                 .approval_tx
                 .lock()
@@ -2214,7 +2755,7 @@ fn handle_command_result(
             state.pending_approval = None;
             state.is_processing = false;
             state.status_text = "Cancelled".into();
-            state.add_message(MessageRole::System, "Agent task aborted.".into());
+            state.add_message(MessageRole::System, "Request cancelled.".into());
         }
         CommandResult::Grep(pattern) => {
             let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2299,7 +2840,7 @@ fn handle_command_result(
                         state.status_text = format!("Running skill {name}...");
                         state.last_user_input = text.clone();
                         let agent_input = apply_mode_prefix(&state.ai_mode, &text);
-                        let _ = user_input_tx.send(agent_input);
+                        let _ = user_input_tx.send(WorkerCommand::UserMessage(agent_input));
                     } else {
                         state.add_message(
                             MessageRole::System,
@@ -2350,7 +2891,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           provider: "anthropic"  # Options: anthropic, openai, ollama
-          model: "claude-sonnet-4-5-20250929" # Options: any supported model by provider
+          model: "claude-sonnet-4-20250514" # Options: any supported model by provider
 "#;
             match std::fs::write(&workflow_path, workflow_content) {
                 Ok(_) => {
@@ -2367,6 +2908,43 @@ jobs:
                 }
             }
         }
+        CommandResult::Undo => {
+            let output = std::process::Command::new("git")
+                .args(["diff", "--stat", "HEAD"])
+                .output();
+            match output {
+                Ok(o) => {
+                    let diff_stat = String::from_utf8_lossy(&o.stdout);
+                    if diff_stat.trim().is_empty() {
+                        state.add_message(
+                            MessageRole::System,
+                            "Nothing to undo — no uncommitted changes.".into(),
+                        );
+                    } else {
+                        let result = std::process::Command::new("git")
+                            .args(["checkout", "--", "."])
+                            .output();
+                        match result {
+                            Ok(_) => {
+                                state.add_message(
+                                    MessageRole::System,
+                                    format!("Reverted all uncommitted changes:\n{diff_stat}"),
+                                );
+                            }
+                            Err(e) => {
+                                state.add_message(
+                                    MessageRole::System,
+                                    format!("Failed to undo: {e}"),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.add_message(MessageRole::System, format!("Git not available: {e}"));
+                }
+            }
+        }
     }
 }
 
@@ -2376,39 +2954,65 @@ fn word_boundary_left(s: &str, pos: usize) -> usize {
     if pos == 0 {
         return 0;
     }
-    let bytes = s.as_bytes();
-    let mut i = pos - 1;
-    // Skip whitespace
-    while i > 0 && bytes[i] == b' ' {
+    let chars: Vec<char> = s.chars().collect();
+    let char_pos = s[..pos].chars().count();
+    if char_pos == 0 {
+        return 0;
+    }
+    let mut i = char_pos - 1;
+    while i > 0 && chars[i].is_whitespace() {
         i -= 1;
     }
-    // Skip word characters
-    while i > 0 && bytes[i] != b' ' {
+    while i > 0 && !chars[i - 1].is_whitespace() {
         i -= 1;
     }
-    if bytes[i] == b' ' && i > 0 {
-        i + 1
-    } else {
-        i
-    }
+    chars[..i].iter().collect::<String>().len()
 }
 
 fn word_boundary_right(s: &str, pos: usize) -> usize {
-    let len = s.len();
-    if pos >= len {
-        return len;
+    let chars: Vec<char> = s.chars().collect();
+    let char_pos = s[..pos].chars().count();
+    let len = chars.len();
+    if char_pos >= len {
+        return s.len();
     }
-    let bytes = s.as_bytes();
-    let mut i = pos;
-    // Skip current word
-    while i < len && bytes[i] != b' ' {
+    let mut i = char_pos;
+    while i < len && !chars[i].is_whitespace() {
         i += 1;
     }
-    // Skip whitespace
-    while i < len && bytes[i] == b' ' {
+    while i < len && chars[i].is_whitespace() {
         i += 1;
     }
-    i
+    chars[..i].iter().collect::<String>().len()
+}
+
+fn estimate_cost(provider: &str, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    let p = provider.to_lowercase();
+    let m = model.to_lowercase();
+    let (input_rate, output_rate) = if p.contains("claude") || p.contains("anthropic") {
+        if m.contains("opus") {
+            (15.0, 75.0)
+        } else if m.contains("haiku") {
+            (0.25, 1.25)
+        } else {
+            (3.0, 15.0) // sonnet default
+        }
+    } else if p.contains("openai") {
+        if m.contains("gpt-4o-mini") {
+            (0.15, 0.60)
+        } else if m.contains("gpt-4o") || m.contains("gpt-4") {
+            (2.50, 10.0)
+        } else if m.contains("o1") {
+            (15.0, 60.0)
+        } else {
+            (2.50, 10.0)
+        }
+    } else if p.contains("groq") {
+        (0.05, 0.08)
+    } else {
+        (0.0, 0.0) // local models
+    };
+    (input_tokens as f64 * input_rate + output_tokens as f64 * output_rate) / 1_000_000.0
 }
 
 fn complete_command(input: &str) -> Option<String> {
@@ -2599,14 +3203,7 @@ fn build_compaction_summary(items: &[ChatItem]) -> String {
 }
 
 fn now_str() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    format!("{:02}:{:02}", h, m)
+    chrono::Local::now().format("%H:%M").to_string()
 }
 
 /// Attempt to start the Python sidecar for semantic search.

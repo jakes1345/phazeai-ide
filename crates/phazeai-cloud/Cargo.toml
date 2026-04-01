@@ -7,7 +7,7 @@ license.workspace = true
 description = "PhazeAI Cloud client — authentication, hosted AI, and team features"
 
 [dependencies]
-phazeai-core = { path = "../phazeai-core" }
+phazeai-core = { path = "../phazeai-core", version = "0.1.0" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -4036,8 +4036,12 @@ pub fn editor_panel(
             let bar_w = 2.0 + frac * (w - 4.0);
 
             // Base color: slightly brighter for non-empty lines
-            let alpha = if line.trim().is_empty() { 15 } else { 45 };
-            let bar_color = floem::peniko::Color::from_rgba8(180, 190, 210, alpha);
+            let alpha_f = if line.trim().is_empty() {
+                15.0_f32 / 255.0
+            } else {
+                45.0_f32 / 255.0
+            };
+            let bar_color = p.minimap_bar.with_alpha(alpha_f);
 
             cx.fill(
                 &floem::kurbo::Rect::new(2.0, y, 2.0 + bar_w, y + line_h),
@@ -4486,12 +4490,13 @@ pub fn editor_panel(
         container(box_view)
             .style(move |s| {
                 let shown = goto_open.get();
+                let p = theme.get().palette;
                 s.absolute()
                     .inset(0)
                     .items_start()
                     .justify_center()
                     .padding_top(60.0)
-                    .background(floem::peniko::Color::from_rgba8(0, 0, 0, 140))
+                    .background(p.overlay_bg)
                     .z_index(50)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             })
@@ -4606,10 +4611,11 @@ pub fn editor_panel(
         )
         .style(move |s| {
             let visible = code_lens_visible.get() && !code_lens_sig.get().is_empty();
+            let p = theme.get().palette;
             s.flex_row()
                 .flex_wrap(floem::style::FlexWrap::Wrap)
                 .width_full()
-                .background(floem::peniko::Color::from_rgba8(0, 0, 0, 40))
+                .background(p.overlay_bg_light.with_alpha(40.0 / 255.0))
                 .border_bottom(1.0)
                 .apply_if(!visible, |s| s.display(floem::style::Display::None))
         })
@@ -4654,9 +4660,10 @@ pub fn editor_panel(
                     .unwrap_or(0);
                 inlay_hints.get().iter().any(|h| h.line == cur_line)
             };
+            let p = theme.get().palette;
             s.flex_row()
                 .width_full()
-                .background(floem::peniko::Color::from_rgba8(80, 80, 160, 25))
+                .background(p.inlay_hint.with_alpha(25.0 / 255.0))
                 .border_bottom(1.0)
                 .apply_if(!visible, |s| s.display(floem::style::Display::None))
         })

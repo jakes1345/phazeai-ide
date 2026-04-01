@@ -124,6 +124,44 @@ pub struct PhazePalette {
     pub syn_operator: Color,
     pub syn_macro: Color,
 
+    // Diagnostics
+    pub diag_error: Color,
+    pub diag_warning: Color,
+    pub diag_info: Color,
+    pub diag_hint: Color,
+
+    // Diff
+    pub diff_added_fg: Color,
+    pub diff_added_bg: Color,
+    pub diff_removed_fg: Color,
+    pub diff_removed_bg: Color,
+    pub diff_header_fg: Color,
+    pub diff_header_bg: Color,
+
+    // Bracket pairs (cycling)
+    pub bracket_1: Color,
+    pub bracket_2: Color,
+    pub bracket_3: Color,
+    pub bracket_4: Color,
+
+    // Editor extras
+    pub find_match_bg: Color,
+    pub find_match_border: Color,
+    pub indent_guide: Color,
+    pub inlay_hint: Color,
+    pub matching_bracket_bg: Color,
+    pub cursor_line_bg: Color,
+    pub minimap_bar: Color,
+
+    // Overlay
+    pub overlay_bg: Color,
+    pub overlay_bg_light: Color,
+
+    // Button
+    pub button_primary_bg: Color,
+    pub button_primary_fg: Color,
+    pub button_hover_bg: Color,
+
     // Glass effect helpers
     pub glass_bg: Color,
     pub glass_border: Color,
@@ -132,6 +170,45 @@ pub struct PhazePalette {
 }
 
 impl PhazePalette {
+    /// Derive sensible defaults for the new semantic fields from existing base
+    /// palette colors.  Each theme constructor should call this at the end so
+    /// only truly custom overrides need to be set per-theme.
+    fn with_derived_defaults(mut self) -> Self {
+        self.diag_error = Color::from_rgba8(255, 85, 85, 230);
+        self.diag_warning = Color::from_rgba8(255, 200, 50, 200);
+        self.diag_info = Color::from_rgba8(80, 150, 255, 180);
+        self.diag_hint = Color::from_rgba8(120, 180, 120, 160);
+
+        self.diff_added_fg = self.git_added;
+        self.diff_added_bg = self.git_added.with_alpha(0.15);
+        self.diff_removed_fg = self.git_deleted;
+        self.diff_removed_bg = self.git_deleted.with_alpha(0.15);
+        self.diff_header_fg = self.info;
+        self.diff_header_bg = self.info.with_alpha(0.12);
+
+        self.bracket_1 = Color::from_rgba8(255, 215, 0, 50); // gold
+        self.bracket_2 = Color::from_rgba8(86, 182, 194, 50); // sky blue
+        self.bracket_3 = Color::from_rgba8(198, 120, 221, 50); // violet
+        self.bracket_4 = Color::from_rgba8(152, 195, 121, 50); // mint
+
+        self.find_match_bg = Color::from_rgba8(255, 230, 0, 55);
+        self.find_match_border = Color::from_rgba8(255, 255, 160, 200);
+        self.indent_guide = Color::from_rgba8(255, 255, 255, 12);
+        self.inlay_hint = Color::from_rgba8(100, 180, 255, 220);
+        self.matching_bracket_bg = Color::from_rgba8(120, 120, 140, 35);
+        self.cursor_line_bg = Color::from_rgba8(255, 255, 255, 12);
+        self.minimap_bar = Color::from_rgba8(180, 190, 210, 60);
+
+        self.overlay_bg = Color::from_rgba8(0, 0, 0, 160);
+        self.overlay_bg_light = Color::from_rgba8(0, 0, 0, 100);
+
+        self.button_primary_bg = self.accent;
+        self.button_primary_fg = Color::WHITE;
+        self.button_hover_bg = Color::from_rgba8(255, 255, 255, 30);
+
+        self
+    }
+
     /// Cosmic glassmorphism palette — the hero theme.
     /// Electric purple accent on a deep space background.
     pub fn midnight_blue() -> Self {
@@ -178,10 +255,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(140, 160, 235),
             syn_macro: Color::from_rgb8(255, 136, 80),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(8, 5, 20, 165), // Deep purple tint
             glass_border: Color::from_rgba8(80, 60, 160, 200), // Visible purple border
             glow: Color::from_rgba8(100, 60, 255, 80),  // Violet/indigo glow
         }
+        .with_derived_defaults()
     }
 
     pub fn dark() -> Self {
@@ -225,10 +331,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(212, 212, 212),
             syn_macro: Color::from_rgb8(86, 156, 214),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(18, 18, 18, 220),
             glass_border: Color::from_rgba8(80, 80, 80, 185),
             glow: Color::from_rgba8(0, 122, 204, 60),
         }
+        .with_derived_defaults()
     }
 
     pub fn light() -> Self {
@@ -272,10 +407,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(28, 28, 32),
             syn_macro: Color::from_rgb8(0, 0, 180),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(255, 255, 255, 210),
             glass_border: Color::from_rgba8(88, 66, 225, 185),
             glow: Color::from_rgba8(88, 66, 225, 55),
         }
+        .with_derived_defaults()
     }
 
     // ── Cyberpunk 2077 ───────────────────────────────────────────────────────
@@ -320,10 +484,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(0, 255, 255),
             syn_macro: Color::from_rgb8(255, 150, 0),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(8, 2, 22, 190),
             glass_border: Color::from_rgba8(255, 240, 0, 195), // Yellow border — distinctive
             glow: Color::from_rgba8(255, 0, 220, 130),         // Strong magenta glow
         }
+        .with_derived_defaults()
     }
 
     // ── Synthwave '84 ────────────────────────────────────────────────────────
@@ -368,10 +561,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(200, 170, 220),
             syn_macro: Color::from_rgb8(255, 155, 60),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(26, 10, 52, 165),
             glass_border: Color::from_rgba8(252, 86, 255, 185),
             glow: Color::from_rgba8(252, 86, 255, 90),
         }
+        .with_derived_defaults()
     }
 
     // ── Andromeda ────────────────────────────────────────────────────────────
@@ -416,10 +638,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(155, 158, 200),
             syn_macro: Color::from_rgb8(255, 140, 80),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(23, 23, 33, 200),
             glass_border: Color::from_rgba8(120, 100, 255, 185),
             glow: Color::from_rgba8(120, 100, 255, 80),
         }
+        .with_derived_defaults()
     }
 
     // ── Dracula ──────────────────────────────────────────────────────────────
@@ -464,10 +715,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(248, 248, 242),
             syn_macro: Color::from_rgb8(255, 184, 108),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(40, 42, 54, 210),
             glass_border: Color::from_rgba8(189, 147, 249, 185),
             glow: Color::from_rgba8(189, 147, 249, 80),
         }
+        .with_derived_defaults()
     }
 
     // ── Tokyo Night ──────────────────────────────────────────────────────────
@@ -512,10 +792,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(137, 221, 255),
             syn_macro: Color::from_rgb8(224, 175, 104),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(26, 27, 38, 210),
             glass_border: Color::from_rgba8(122, 162, 247, 185),
             glow: Color::from_rgba8(122, 162, 247, 75),
         }
+        .with_derived_defaults()
     }
 
     // ── Monokai ──────────────────────────────────────────────────────────────
@@ -560,10 +869,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(249, 38, 114),
             syn_macro: Color::from_rgb8(253, 151, 31),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(39, 40, 34, 215),
             glass_border: Color::from_rgba8(166, 226, 46, 180),
             glow: Color::from_rgba8(166, 226, 46, 70),
         }
+        .with_derived_defaults()
     }
 
     // ── Nord Dark ────────────────────────────────────────────────────────────
@@ -608,10 +946,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(236, 239, 244),
             syn_macro: Color::from_rgb8(235, 203, 139),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(46, 52, 64, 210),
             glass_border: Color::from_rgba8(136, 192, 208, 185),
             glow: Color::from_rgba8(136, 192, 208, 75),
         }
+        .with_derived_defaults()
     }
 
     // ── Matrix Green ─────────────────────────────────────────────────────────
@@ -656,10 +1023,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(0, 255, 65),
             syn_macro: Color::from_rgb8(200, 255, 0),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(0, 8, 0, 185),
             glass_border: Color::from_rgba8(0, 255, 65, 185),
             glow: Color::from_rgba8(0, 255, 65, 90),
         }
+        .with_derived_defaults()
     }
 
     // ── Root Shell (classic green on black console) ───────────────────────────
@@ -704,10 +1100,39 @@ impl PhazePalette {
             syn_operator: Color::from_rgb8(0, 220, 0),
             syn_macro: Color::from_rgb8(180, 255, 0),
 
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
             glass_bg: Color::from_rgba8(0, 5, 0, 220),
             glass_border: Color::from_rgba8(0, 200, 0, 180),
             glow: Color::from_rgba8(0, 200, 0, 85),
         }
+        .with_derived_defaults()
     }
 }
 

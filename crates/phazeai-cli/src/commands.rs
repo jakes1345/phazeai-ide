@@ -59,6 +59,8 @@ pub enum CommandResult {
     RunSkill { name: String, args: String },
     /// Set up a PhazeAI GitHub Action workflow.
     InstallGithubApp,
+    /// Undo the last AI-made file changes via git.
+    Undo,
 }
 
 pub fn handle_command(input: &str) -> CommandResult {
@@ -84,7 +86,7 @@ pub fn handle_command(input: &str) -> CommandResult {
         }
         "/provider" => {
             if arg.is_empty() {
-                CommandResult::Message("Available providers: anthropic, openai, ollama\nUsage: /provider <provider-name>".into())
+                CommandResult::Message("Available providers: anthropic, openai, ollama, groq, together, openrouter, lmstudio\nUsage: /provider <provider-name>".into())
             } else {
                 CommandResult::ProviderChanged(arg.to_string())
             }
@@ -202,6 +204,7 @@ pub fn handle_command(input: &str) -> CommandResult {
         }
         "/retry" => CommandResult::Retry,
         "/cancel" | "/stop" => CommandResult::Cancel,
+        "/undo" => CommandResult::Undo,
         "/yolo" => CommandResult::SetApprovalMode("auto".into()),
         "/grep" => {
             if arg.is_empty() {

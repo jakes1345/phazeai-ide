@@ -2474,9 +2474,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             } else {
                 floem::peniko::Color::TRANSPARENT
             })
-            .apply_if(blame_loading.get(), |s| {
-                s.color(floem::peniko::Color::from_rgba8(255, 255, 255, 128))
-            })
+            .apply_if(blame_loading.get(), |s| s.color(p.text_disabled))
     })
     .on_click_stop(move |_| {
         let Some((path, _, _)) = state_blame.active_cursor.get() else {

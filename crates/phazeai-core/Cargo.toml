@@ -31,7 +31,7 @@ tree-sitter = { workspace = true }
 lsp-types = { workspace = true }
 urlencoding = "2.1"
 libloading = "0.8"
-phazeai-plugin-api = { path = "../phazeai-plugin-api" }
+phazeai-plugin-api = { path = "../phazeai-plugin-api", version = "0.1.0" }
 zip = "2"
 plist = "1"
 
