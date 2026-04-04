@@ -178,35 +178,35 @@ pub struct CompletionEntry {
     pub detail: Option<String>,
 }
 
+// ── Bridge result struct ──────────────────────────────────────────────────────
+
+/// All reactive signals produced by the LSP bridge.
+pub struct LspBridgeSignals {
+    pub cmd_tx: mpsc::UnboundedSender<LspCommand>,
+    pub diagnostics: RwSignal<Vec<DiagEntry>>,
+    pub completions: RwSignal<Vec<CompletionEntry>>,
+    pub goto_definition: RwSignal<Option<DefinitionResult>>,
+    pub hover_text: RwSignal<Option<String>>,
+    pub references: RwSignal<Vec<ReferenceEntry>>,
+    pub code_actions: RwSignal<Vec<CodeAction>>,
+    pub sig_help: RwSignal<Option<SignatureHelpResult>>,
+    pub doc_symbols: RwSignal<Vec<SymbolEntry>>,
+    pub workspace_symbols: RwSignal<Vec<SymbolEntry>>,
+    pub lsp_progress: RwSignal<Option<String>>,
+    pub peek_def_lines: RwSignal<Vec<String>>,
+    pub code_lens: RwSignal<Vec<CodeLensEntry>>,
+    pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
+    pub inlay_hints: RwSignal<Vec<InlayHintEntry>>,
+}
+
 // ── Bridge entry point ────────────────────────────────────────────────────────
 
 /// Start the LSP bridge.
 ///
-/// Returns a 14-tuple: `(cmd_tx, diag_sig, comp_sig, def_sig, hover_sig, refs_sig, actions_sig,
-/// sig_help_sig, doc_syms_sig, ws_syms_sig, lsp_progress_sig, peek_def_lines_sig, code_lens_sig,
-/// folding_ranges_sig)`.
+/// Returns an `LspBridgeSignals` struct with all reactive signals.
 ///
 /// **Call from within a Floem reactive scope.**
-#[allow(clippy::type_complexity)]
-pub fn start_lsp_bridge(
-    workspace_root: PathBuf,
-) -> (
-    mpsc::UnboundedSender<LspCommand>,
-    RwSignal<Vec<DiagEntry>>,
-    RwSignal<Vec<CompletionEntry>>,
-    RwSignal<Option<DefinitionResult>>,
-    RwSignal<Option<String>>,
-    RwSignal<Vec<ReferenceEntry>>,
-    RwSignal<Vec<CodeAction>>,
-    RwSignal<Option<SignatureHelpResult>>,
-    RwSignal<Vec<SymbolEntry>>,
-    RwSignal<Vec<SymbolEntry>>,
-    RwSignal<Option<String>>,
-    RwSignal<Vec<String>>,
-    RwSignal<Vec<CodeLensEntry>>,
-    RwSignal<Vec<(u32, u32)>>,
-    RwSignal<Vec<InlayHintEntry>>,
-) {
+pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
     let (lsp_cmd_tx, mut lsp_cmd_rx) = mpsc::unbounded_channel::<LspCommand>();
 
     // Diagnostics: bridge → Floem (sync_channel consumed by create_signal_from_channel)
@@ -976,23 +976,23 @@ pub fn start_lsp_bridge(
         }
     });
 
-    (
-        lsp_cmd_tx,
-        diag_sig,
-        comp_sig,
-        def_sig,
-        hover_sig,
-        refs_sig,
-        actions_sig,
-        sig_help_sig,
-        syms_sig,
-        ws_syms_sig,
-        lsp_progress_sig,
-        peek_def_lines_sig,
-        code_lens_sig,
-        folding_ranges_sig,
-        inlay_hints_sig,
-    )
+    LspBridgeSignals {
+        cmd_tx: lsp_cmd_tx,
+        diagnostics: diag_sig,
+        completions: comp_sig,
+        goto_definition: def_sig,
+        hover_text: hover_sig,
+        references: refs_sig,
+        code_actions: actions_sig,
+        sig_help: sig_help_sig,
+        doc_symbols: syms_sig,
+        workspace_symbols: ws_syms_sig,
+        lsp_progress: lsp_progress_sig,
+        peek_def_lines: peek_def_lines_sig,
+        code_lens: code_lens_sig,
+        folding_ranges: folding_ranges_sig,
+        inlay_hints: inlay_hints_sig,
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

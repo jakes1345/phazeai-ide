@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub struct CodeAnalysis {
@@ -53,6 +54,13 @@ impl Language {
     }
 }
 
+static RE_UNWRAP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.unwrap\(\)").unwrap());
+static RE_CLONE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.clone\(\)").unwrap());
+static RE_BARE_EXCEPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"except\s*:").unwrap());
+static RE_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bvar\s+").unwrap());
+static RE_TODO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(TODO|FIXME|HACK)\b").unwrap());
+
 pub struct Linter;
 
 impl Linter {
@@ -87,11 +95,8 @@ impl Linter {
     }
 
     fn analyze_rust(code: &str, issues: &mut Vec<Issue>, suggestions: &mut Vec<String>) {
-        let unwrap_re = Regex::new(r"\.unwrap\(\)").unwrap();
-        let clone_re = Regex::new(r"\.clone\(\)").unwrap();
-
         for (line_num, line) in code.lines().enumerate() {
-            if unwrap_re.is_match(line) {
+            if RE_UNWRAP.is_match(line) {
                 issues.push(Issue {
                     line: line_num + 1,
                     column: line.find(".unwrap").unwrap_or(0),
@@ -101,7 +106,7 @@ impl Linter {
                 });
             }
 
-            if clone_re.is_match(line) && !line.contains('&') {
+            if RE_CLONE.is_match(line) && !line.contains('&') {
                 issues.push(Issue {
                     line: line_num + 1,
                     column: line.find(".clone").unwrap_or(0),
@@ -116,10 +121,8 @@ impl Linter {
     }
 
     fn analyze_python(code: &str, issues: &mut Vec<Issue>) {
-        let bare_except_re = Regex::new(r"except\s*:").unwrap();
-
         for (line_num, line) in code.lines().enumerate() {
-            if bare_except_re.is_match(line) {
+            if RE_BARE_EXCEPT.is_match(line) {
                 issues.push(Issue {
                     line: line_num + 1,
                     column: line.find("except").unwrap_or(0),
@@ -132,10 +135,8 @@ impl Linter {
     }
 
     fn analyze_javascript(code: &str, issues: &mut Vec<Issue>) {
-        let var_re = Regex::new(r"\bvar\s+").unwrap();
-
         for (line_num, line) in code.lines().enumerate() {
-            if var_re.is_match(line) {
+            if RE_VAR.is_match(line) {
                 issues.push(Issue {
                     line: line_num + 1,
                     column: line.find("var").unwrap_or(0),
@@ -150,13 +151,11 @@ impl Linter {
     }
 
     fn analyze_generic(code: &str, issues: &mut Vec<Issue>) {
-        let todo_re = Regex::new(r"(?i)\b(TODO|FIXME|HACK)\b").unwrap();
-
         for (line_num, line) in code.lines().enumerate() {
-            if todo_re.is_match(line) {
+            if RE_TODO.is_match(line) {
                 issues.push(Issue {
                     line: line_num + 1,
-                    column: todo_re.find(line).map(|m| m.start()).unwrap_or(0),
+                    column: RE_TODO.find(line).map(|m| m.start()).unwrap_or(0),
                     severity: Severity::Info,
                     message: "TODO/FIXME comment found".into(),
                     suggestion: None,

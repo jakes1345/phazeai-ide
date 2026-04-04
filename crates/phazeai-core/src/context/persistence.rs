@@ -240,7 +240,12 @@ impl ConversationStore {
 
 impl Default for ConversationStore {
     fn default() -> Self {
-        Self::new().expect("Failed to create conversation store")
+        Self::new().unwrap_or_else(|_| {
+            // Fallback to a temp directory if home dir is unavailable
+            let fallback = std::env::temp_dir().join("phazeai").join("conversations");
+            let _ = fs::create_dir_all(&fallback);
+            Self { base_dir: fallback }
+        })
     }
 }
 

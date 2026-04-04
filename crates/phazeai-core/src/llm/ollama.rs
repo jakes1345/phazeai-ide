@@ -28,8 +28,19 @@ impl OllamaClient {
     }
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
-        self.ollama = Ollama::try_new(&self.base_url).expect("Invalid Ollama URL");
+        let new_url = url.into();
+        match Ollama::try_new(&new_url) {
+            Ok(ollama) => {
+                self.base_url = new_url;
+                self.ollama = ollama;
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: invalid Ollama URL '{}': {}, keeping previous URL",
+                    new_url, e
+                );
+            }
+        }
         self
     }
 

@@ -788,23 +788,22 @@ impl IdeState {
 
         // Start LSP bridge — background tokio thread running LspManager.
         // Must be called in a Floem reactive scope (we're inside the window callback).
-        let (
-            lsp_cmd,
-            diagnostics,
-            completions,
-            goto_definition,
-            hover_text,
-            references,
-            code_actions,
-            sig_help,
-            doc_symbols,
-            workspace_symbols,
-            lsp_progress,
-            peek_def_lines,
-            code_lens,
-            folding_ranges,
-            inlay_hints_lsp,
-        ) = start_lsp_bridge(workspace.clone());
+        let lsp = start_lsp_bridge(workspace.clone());
+        let lsp_cmd = lsp.cmd_tx;
+        let diagnostics = lsp.diagnostics;
+        let completions = lsp.completions;
+        let goto_definition = lsp.goto_definition;
+        let hover_text = lsp.hover_text;
+        let references = lsp.references;
+        let code_actions = lsp.code_actions;
+        let sig_help = lsp.sig_help;
+        let doc_symbols = lsp.doc_symbols;
+        let workspace_symbols = lsp.workspace_symbols;
+        let lsp_progress = lsp.lsp_progress;
+        let peek_def_lines = lsp.peek_def_lines;
+        let code_lens = lsp.code_lens;
+        let folding_ranges = lsp.folding_ranges;
+        let inlay_hints_lsp = lsp.inlay_hints;
 
         // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
         let peek_def_open_sig: RwSignal<bool> = create_rw_signal(false);
