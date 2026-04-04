@@ -524,8 +524,8 @@ fn extract_c_symbols(source: &str, symbols: &mut Vec<CodeSymbol>) {
             if let Some(paren_pos) = trimmed.find('(') {
                 let before_paren = &trimmed[..paren_pos];
                 let parts: Vec<&str> = before_paren.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let name = parts.last().unwrap().trim_start_matches('*').to_string();
+                if let Some(last) = parts.last().filter(|_| parts.len() >= 2) {
+                    let name = last.trim_start_matches('*').to_string();
                     symbols.push(CodeSymbol {
                         name,
                         kind: SymbolKind::Function,

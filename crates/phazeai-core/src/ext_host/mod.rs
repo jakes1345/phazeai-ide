@@ -13,11 +13,6 @@
 //   - `_phazeai_plugin_create()      -> *mut dyn PhazePlugin`
 //   - `_phazeai_plugin_destroy(ptr: *mut dyn PhazePlugin)`
 
-// Keep empty stub modules so existing `pub mod` declarations do not break.
-pub mod js;
-pub mod vsix;
-pub mod wasm;
-
 // VSCode extension asset loading (themes, grammars, snippets, language configs)
 pub mod asset_loader;
 pub mod registry;

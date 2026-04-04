@@ -33,6 +33,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use crate::commands::{self, CommandResult};
+use crate::companion::Companion;
 use crate::theme::Theme;
 
 // ── Single-prompt mode ──────────────────────────────────────────────────
@@ -184,6 +185,9 @@ struct AppState {
     cancel_token: Arc<AtomicBool>,
 
     approval_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+
+    // Companion buddy
+    companion: Companion,
 }
 
 impl AppState {
@@ -204,13 +208,14 @@ impl AppState {
             messages: vec![ChatItem::Message(ChatMessage {
                 role: MessageRole::System,
                 content: format!(
-                    "Welcome to PhazeAI v{}\n\n\
-                     Provider: {}  Model: {}\n\
-                     Directory: {}\n\n\
-                     Enter    Send message       Ctrl+C  Cancel/Quit\n\
-                     Ctrl+B   Toggle file tree   Ctrl+N  New conversation\n\
-                     Ctrl+O   Load session       Ctrl+E  External editor\n\
-                     /help    All commands        /mode   Switch AI mode",
+                    "PhazeAI v{}  ·  {}  ·  {}\n\
+                     {}\n\n\
+                     ╭──────────────────────────────────────╮\n\
+                     │  Enter    Send       Ctrl+C  Quit    │\n\
+                     │  Ctrl+B   Files      Ctrl+N  New     │\n\
+                     │  Ctrl+O   Sessions   Ctrl+E  Editor  │\n\
+                     │  /help    Commands   /mode   Modes   │\n\
+                     ╰──────────────────────────────────────╯",
                     env!("CARGO_PKG_VERSION"),
                     provider_name,
                     settings.llm.model,
@@ -250,6 +255,8 @@ impl AppState {
             agent_task: None,
             cancel_token: Arc::new(AtomicBool::new(false)),
             approval_tx: Arc::new(Mutex::new(None)),
+
+            companion: Companion::new(),
         }
     }
 
@@ -743,18 +750,25 @@ fn build_system_prompt(extra_instructions: Option<&str>) -> String {
 fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
     let theme = &state.theme;
 
-    // Main vertical layout: header + chat + input + status
+    // Main vertical layout: header + chat + companion + input + status
     let input_height = if state.pending_approval.is_some() {
         5
     } else {
         3
     };
 
+    // Tick the companion each frame
+    state.companion.tick();
+    if !state.is_processing && state.pending_approval.is_none() {
+        state.companion.on_idle();
+    }
+
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),            // header bar
             Constraint::Min(5),               // chat
+            Constraint::Length(3),            // companion buddy
             Constraint::Length(input_height), // input (or approval prompt)
             Constraint::Length(1),            // status
         ])
@@ -820,15 +834,18 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState) {
         );
     }
 
+    // Companion buddy
+    crate::companion::draw_companion(f, main_chunks[2], &state.companion, theme);
+
     // Input or approval prompt
     if let Some(ref approval) = state.pending_approval {
-        draw_approval_prompt(f, main_chunks[2], approval, theme);
+        draw_approval_prompt(f, main_chunks[3], approval, theme);
     } else {
-        draw_input(f, main_chunks[2], state, theme);
+        draw_input(f, main_chunks[3], state, theme);
     }
 
     // Status bar
-    draw_status_bar(f, main_chunks[3], state, theme);
+    draw_status_bar(f, main_chunks[4], state, theme);
 
     // Session picker overlay
     if state.show_session_picker {
@@ -1647,6 +1664,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::Thinking { iteration } => {
             state.iterations = iteration;
             state.status_text = format!("Thinking... (step {iteration})");
+            state.companion.on_thinking();
         }
         AgentEvent::ToolApprovalRequest { name, params } => {
             let desc = format!("{}: {}", name, params);
@@ -1654,6 +1672,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                 tool_name: name,
                 description: desc,
             });
+            state.companion.on_approval();
         }
         AgentEvent::TextDelta(text) => {
             if let Some(ChatItem::Message(m)) = state.messages.last_mut() {
@@ -1677,6 +1696,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             };
 
             state.add_tool_card(name);
+            state.companion.on_tool_start();
         }
         AgentEvent::ToolResult {
             name,
@@ -1703,6 +1723,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.is_processing = false;
             state.status_text = format!("Done ({iterations} steps)");
             state.scroll_to_bottom();
+            state.companion.on_complete();
             if state.messages.len().is_multiple_of(10) {
                 state.save_conversation();
             }
@@ -1711,6 +1732,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.is_processing = false;
             state.add_message(MessageRole::System, format!("Error: {e}"));
             state.status_text = "Error".into();
+            state.companion.on_error();
         }
         AgentEvent::BrowserFetchStart { .. }
         | AgentEvent::BrowserFetchComplete { .. }
@@ -1868,6 +1890,7 @@ fn handle_key(
             state.is_processing = true;
             state.status_text = "Sending...".into();
             state.last_user_input = input.clone();
+            state.companion.on_user_message();
             let agent_input = apply_mode_prefix(&state.ai_mode, &input);
             let _ = user_input_tx.send(WorkerCommand::UserMessage(agent_input));
         }
@@ -2154,19 +2177,15 @@ fn handle_command_result(
             }
 
             // Find the first user message (for context)
-            let first_user_idx = state.messages.iter().position(
+            let Some(first_user_idx) = state.messages.iter().position(
                 |item| matches!(item, ChatItem::Message(m) if m.role == MessageRole::User),
-            );
-
-            if first_user_idx.is_none() {
+            ) else {
                 state.add_message(
                     MessageRole::System,
                     "No user messages found to compact.".into(),
                 );
                 return;
-            }
-
-            let first_user_idx = first_user_idx.unwrap();
+            };
 
             // Keep:
             // - Everything before the first user message (system welcome, etc.)
@@ -2585,11 +2604,17 @@ fn handle_command_result(
             // Check LM Studio
             let lm_port = phazeai_core::constants::endpoints::LMSTUDIO_PORT;
             let lm_addr = format!("127.0.0.1:{}", lm_port);
-            let lm_check = std::net::TcpStream::connect_timeout(
-                &lm_addr.parse().unwrap(),
-                std::time::Duration::from_millis(500),
-            );
-            if lm_check.is_ok() {
+            let lm_check = lm_addr
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .and_then(|addr| {
+                    std::net::TcpStream::connect_timeout(
+                        &addr,
+                        std::time::Duration::from_millis(500),
+                    )
+                    .ok()
+                });
+            if lm_check.is_some() {
                 msg.push_str(&format!("  LM Studio: running on port {}\n", lm_port));
             } else {
                 msg.push_str("  LM Studio: not detected\n");
@@ -3226,10 +3251,8 @@ async fn try_start_sidecar() -> Option<phazeai_sidecar::SidecarClient> {
 
     let script_path = if local_path.exists() {
         local_path
-    } else if config_path.as_ref().is_some_and(|p| p.exists()) {
-        config_path.unwrap()
     } else {
-        return None;
+        config_path.filter(|p| p.exists())?
     };
 
     let mut manager = phazeai_sidecar::SidecarManager::new(python, &script_path);

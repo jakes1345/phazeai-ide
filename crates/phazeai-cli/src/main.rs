@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod app;
 mod commands;
+mod companion;
 mod theme;
 
 #[derive(Parser)]

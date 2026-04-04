@@ -8,6 +8,9 @@
 #[path = "commands.rs"]
 pub mod commands;
 
+#[path = "companion.rs"]
+pub mod companion;
+
 #[path = "theme.rs"]
 pub mod theme;
 

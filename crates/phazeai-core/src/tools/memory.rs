@@ -87,7 +87,8 @@ impl Tool for MemoryTool {
 
                 store.items.insert(key.to_string(), content.to_string());
 
-                let serialized = serde_json::to_string_pretty(&store).unwrap();
+                let serialized = serde_json::to_string_pretty(&store)
+                    .map_err(|e| PhazeError::tool("memory", format!("Failed to serialize: {e}")))?;
                 tokio::fs::write(&memory_file, serialized)
                     .await
                     .map_err(|e| {

@@ -1068,8 +1068,8 @@ impl IdeState {
                 }
 
                 let root = workspace_root.clone();
-                let client = shared_client_for_build.lock().ok().and_then(|g| g.clone());
-                if client.is_none() {
+                let Some(client) = shared_client_for_build.lock().ok().and_then(|g| g.clone())
+                else {
                     let _ = building_tx.send(true);
                     spawn_sidecar_start(
                         python_path.clone(),
@@ -1082,9 +1082,7 @@ impl IdeState {
                         true,
                     );
                     return;
-                }
-
-                let client = client.unwrap();
+                };
                 let tx = status_tx_for_build.clone();
                 let building_tx2 = building_tx.clone();
                 let root_str = root.display().to_string();
@@ -6725,9 +6723,9 @@ pub fn launch_phaze_ide() {
                                         }
                                         // d, g, y, c, r, m, ` — pending keys for two-key sequences
                                         "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
-                                            state
-                                                .vim_pending_key
-                                                .set(Some(ch_str.chars().next().unwrap()));
+                                            if let Some(ch) = ch_str.chars().next() {
+                                                state.vim_pending_key.set(Some(ch));
+                                            }
                                         }
                                         _ => {}
                                     }
