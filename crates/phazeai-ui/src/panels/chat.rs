@@ -281,7 +281,9 @@ fn send_to_ai(
 /// Scans for `@path/to/file` tokens, resolves each relative to `root`,
 /// reads file contents, and prepends them as context. Returns the expanded prompt.
 fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
-    let re = regex::Regex::new(r"@([\w./\-]+\.\w+)").unwrap();
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"@([\w./\-]+\.\w+)").expect("valid regex"));
+    let re = &*RE;
     let mut context_blocks = Vec::new();
     let mut clean_msg = message.to_string();
 
