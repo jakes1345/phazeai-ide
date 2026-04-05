@@ -5899,6 +5899,9 @@ fn menu_bar(state: IdeState) -> impl IntoView {
 
 /// Launch the PhazeAI IDE.
 pub fn launch_phaze_ide() {
+    // Anonymous telemetry — single fire-and-forget ping, no personal data
+    phazeai_core::telemetry::report_launch(phazeai_core::telemetry::AppKind::Ide);
+
     let settings = Settings::load();
 
     Application::new()

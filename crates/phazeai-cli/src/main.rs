@@ -50,6 +50,9 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    // Anonymous telemetry — single fire-and-forget ping, no personal data
+    phazeai_core::telemetry::report_launch(phazeai_core::telemetry::AppKind::Cli);
+
     let cli = Cli::parse();
 
     let mut settings = phazeai_core::Settings::load();

@@ -10,6 +10,7 @@ pub mod llm;
 pub mod lsp;
 pub mod mcp;
 pub mod project;
+pub mod telemetry;
 pub mod tools;
 
 // Re-export key types
