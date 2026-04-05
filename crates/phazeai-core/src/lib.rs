@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod analysis;
+pub mod companion;
 pub mod config;
 pub mod constants;
 pub mod context;
