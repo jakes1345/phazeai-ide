@@ -72,7 +72,7 @@ fn inlay_hint_entry_large_position() {
 
 #[test]
 fn inlay_hint_collection_sorted_by_line_then_col() {
-    let mut hints = vec![
+    let mut hints = [
         InlayHintEntry {
             line: 3,
             col: 5,
@@ -442,7 +442,7 @@ fn diag_severity_error_is_highest_value() {
 
 #[test]
 fn diag_severity_sort_descending() {
-    let mut severities = vec![
+    let mut severities = [
         DiagSeverity::Info,
         DiagSeverity::Error,
         DiagSeverity::Hint,
@@ -845,7 +845,7 @@ fn code_lens_entry_fields() {
 
 #[test]
 fn code_lens_multiple_entries_on_same_file() {
-    let lenses = vec![
+    let lenses = [
         CodeLensEntry {
             line: 1,
             label: "Run test".into(),
@@ -865,7 +865,7 @@ fn code_lens_multiple_entries_on_same_file() {
 
 #[test]
 fn code_lens_sorted_by_line() {
-    let mut lenses = vec![
+    let mut lenses = [
         CodeLensEntry {
             line: 50,
             label: "a".into(),

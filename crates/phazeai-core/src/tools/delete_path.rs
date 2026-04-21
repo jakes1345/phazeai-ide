@@ -42,21 +42,35 @@ impl Tool for DeletePathTool {
 
         let path = Path::new(path_str);
 
-        if !path.exists() {
+        // Use symlink_metadata so we see the link itself, not its target.
+        // This prevents TOCTOU: a symlink cannot be redirected between
+        // the safety check and the delete call.
+        let link_meta = std::fs::symlink_metadata(path).map_err(|e| {
+            PhazeError::tool(
+                "delete_path",
+                format!("Path does not exist: {path_str} ({e})"),
+            )
+        })?;
+        let file_type = link_meta.file_type();
+
+        // Symlinks are refused outright — they're a common TOCTOU vector
+        // and `remove_dir_all` on a symlink behaves surprisingly across platforms.
+        if file_type.is_symlink() {
             return Err(PhazeError::tool(
                 "delete_path",
-                format!("Path does not exist: {path_str}"),
+                format!("REFUSED: refusing to delete symlink: {path_str}"),
             ));
         }
 
-        // Safety: refuse to delete critical paths
+        // Safety: refuse to delete critical paths. Canonicalize to resolve
+        // any parent-directory traversal (`../../`) and compare by path equality
+        // rather than string-contains, so e.g. `/usrbin` cannot bypass `/usr`.
         let canonical = path
             .canonicalize()
             .map_err(|e| PhazeError::tool("delete_path", format!("Cannot resolve path: {e}")))?;
-        let canonical_str = canonical.to_string_lossy();
 
         for protected in PROTECTED_PATHS {
-            if canonical_str.as_ref() == *protected {
+            if canonical == Path::new(*protected) {
                 return Err(PhazeError::tool(
                     "delete_path",
                     format!("REFUSED: Cannot delete protected path: {protected}"),
@@ -64,7 +78,7 @@ impl Tool for DeletePathTool {
             }
         }
 
-        // Also protect home directory itself
+        // Also protect home directory itself and its common config subdirs
         if let Some(home) = dirs::home_dir() {
             if canonical == home {
                 return Err(PhazeError::tool(
@@ -74,8 +88,8 @@ impl Tool for DeletePathTool {
             }
         }
 
-        if path.is_file() || path.is_symlink() {
-            tokio::fs::remove_file(path).await.map_err(|e| {
+        if file_type.is_file() {
+            tokio::fs::remove_file(&canonical).await.map_err(|e| {
                 PhazeError::tool("delete_path", format!("Failed to delete file: {e}"))
             })?;
 
@@ -84,8 +98,8 @@ impl Tool for DeletePathTool {
                 "type": "file",
                 "deleted": path_str,
             }))
-        } else if path.is_dir() {
-            tokio::fs::remove_dir_all(path).await.map_err(|e| {
+        } else if file_type.is_dir() {
+            tokio::fs::remove_dir_all(&canonical).await.map_err(|e| {
                 PhazeError::tool("delete_path", format!("Failed to delete directory: {e}"))
             })?;
 

@@ -394,7 +394,12 @@ impl McpClient {
         let mut reader = BufReader::new(stdout);
 
         while let Ok(content_length) = Self::read_content_length(&mut reader) {
-            // Read the body
+            // Explicitly handle 0-length bodies so we don't confuse an empty
+            // heartbeat with EOF further down.
+            if content_length == 0 {
+                continue;
+            }
+
             let mut body = vec![0u8; content_length];
             if reader.read_exact(&mut body).is_err() {
                 break;
@@ -413,7 +418,12 @@ impl McpClient {
                 let sender = {
                     let mut pending = match pending.lock() {
                         Ok(p) => p,
-                        Err(_) => break,
+                        Err(poisoned) => {
+                            tracing::error!(
+                                "MCP pending-request lock poisoned; recovering and continuing",
+                            );
+                            poisoned.into_inner()
+                        }
                     };
                     pending.remove(&id)
                 };
@@ -428,8 +438,17 @@ impl McpClient {
         }
     }
 
+    /// Read MCP framing headers. Content-Length is bounded to 16 MiB so
+    /// a malicious or buggy server can't force an unbounded allocation.
     fn read_content_length(reader: &mut impl BufRead) -> Result<usize, String> {
+        /// Hard ceiling on any single MCP message body.
+        const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024;
+        /// Max bytes to read while waiting for Content-Length, to avoid
+        /// unbounded header sections from non-conforming servers.
+        const MAX_HEADER_BYTES: usize = 64 * 1024;
+
         let mut header_line = String::new();
+        let mut total_header_bytes: usize = 0;
         loop {
             header_line.clear();
             let bytes_read = reader
@@ -437,6 +456,12 @@ impl McpClient {
                 .map_err(|e| format!("Read error: {e}"))?;
             if bytes_read == 0 {
                 return Err("EOF".into());
+            }
+            total_header_bytes = total_header_bytes.saturating_add(bytes_read);
+            if total_header_bytes > MAX_HEADER_BYTES {
+                return Err(format!(
+                    "MCP headers exceeded {MAX_HEADER_BYTES} bytes; likely malformed"
+                ));
             }
 
             let trimmed = header_line.trim();
@@ -449,6 +474,11 @@ impl McpClient {
                     .trim()
                     .parse()
                     .map_err(|e| format!("Invalid Content-Length: {e}"))?;
+                if len > MAX_CONTENT_LENGTH {
+                    return Err(format!(
+                        "MCP message too large: {len} bytes (max {MAX_CONTENT_LENGTH})"
+                    ));
+                }
 
                 // Read the blank line after headers
                 let mut blank = String::new();

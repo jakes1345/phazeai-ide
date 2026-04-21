@@ -125,16 +125,19 @@ impl ConversationStore {
 
     /// Get current timestamp as ISO 8601 string
     fn timestamp() -> String {
-        let now = SystemTime::now()
+        use chrono::{DateTime, Utc};
+
+        let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        // Simple ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ
-        // Using chrono for proper formatting
-        use chrono::{DateTime, Utc};
-        let dt = DateTime::<Utc>::from_timestamp(now as i64, 0)
-            .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+        // The unix epoch is always a valid i64 timestamp, so the first call
+        // effectively never returns None; both branches funnel through a
+        // guaranteed-valid epoch fallback.
+        let dt = DateTime::<Utc>::from_timestamp(now_secs as i64, 0)
+            .or_else(|| DateTime::<Utc>::from_timestamp(0, 0))
+            .unwrap_or_else(Utc::now);
         dt.to_rfc3339()
     }
 
@@ -240,10 +243,17 @@ impl ConversationStore {
 
 impl Default for ConversationStore {
     fn default() -> Self {
-        Self::new().unwrap_or_else(|_| {
+        Self::new().unwrap_or_else(|err| {
             // Fallback to a temp directory if home dir is unavailable
             let fallback = std::env::temp_dir().join("phazeai").join("conversations");
-            let _ = fs::create_dir_all(&fallback);
+            tracing::warn!(
+                error = %err,
+                fallback = %fallback.display(),
+                "ConversationStore: home dir unavailable, using temp fallback",
+            );
+            if let Err(e) = fs::create_dir_all(&fallback) {
+                tracing::error!(error = %e, "failed to create conversation fallback dir");
+            }
             Self { base_dir: fallback }
         })
     }

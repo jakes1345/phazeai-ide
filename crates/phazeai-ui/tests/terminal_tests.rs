@@ -277,18 +277,18 @@ const DEFAULT_TERM_ROWS: u16 = 40;
 fn terminal_default_cols() {
     // 220 is wide enough for most side-by-side split editors
     assert_eq!(DEFAULT_TERM_COLS, 220);
-    assert!(
+    const _: () = assert!(
         DEFAULT_TERM_COLS >= 80,
-        "cols should be at least a standard 80-col terminal"
+        "cols should be at least a standard 80-col terminal",
     );
 }
 
 #[test]
 fn terminal_default_rows() {
     assert_eq!(DEFAULT_TERM_ROWS, 40);
-    assert!(
+    const _: () = assert!(
         DEFAULT_TERM_ROWS >= 24,
-        "rows should be at least a standard 24-row terminal"
+        "rows should be at least a standard 24-row terminal",
     );
 }
 
@@ -296,7 +296,7 @@ fn terminal_default_rows() {
 fn terminal_cols_fits_split_editors() {
     // A 1920px window with two editors needs at least ~180 cols for the terminal
     // to be usable when maximized.  220 comfortably satisfies this.
-    assert!(DEFAULT_TERM_COLS >= 180);
+    const _: () = assert!(DEFAULT_TERM_COLS >= 180);
 }
 
 // ── Tab name sanitization ─────────────────────────────────────────────────────

@@ -3939,7 +3939,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     state2.inline_edit_query.set(String::new());
                 }
                 InlineEditUpdate::Err(e) => {
-                    eprintln!("[PhazeAI] Ctrl+K error: {e}");
+                    tracing::warn!("[PhazeAI] Ctrl+K error: {e}");
                     state2.ai_thinking.set(false);
                     state2.inline_edit_open.set(false);
                     state2.inline_edit_query.set(String::new());

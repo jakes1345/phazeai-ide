@@ -245,7 +245,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("[LSP] Failed to build runtime: {e}");
+                tracing::error!("[LSP] Failed to build runtime: {e}");
                 return;
             }
         };
@@ -273,7 +273,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                         match cmd {
                             Some(LspCommand::OpenFile { path, text }) => {
                                 if let Err(e) = manager.ensure_server_for_file(&path).await {
-                                    eprintln!("[LSP] no server for {}: {e}", path.display());
+                                    tracing::warn!("[LSP] no server for {}: {e}", path.display());
                                 } else {
                                     manager.did_open(&path, &text);
                                 }
@@ -292,7 +292,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(items) => {
                                                 let _ = evt_tx.send(LspEvent::Completions(items));
                                             }
-                                            Err(e) => eprintln!("[LSP] completion error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] completion error: {e}"),
                                         }
                                     });
                                 }
@@ -306,7 +306,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] definition error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] definition error: {e}"),
                                         }
                                     });
                                 }
@@ -321,7 +321,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 let _ = evt_tx.send(LspEvent::Hover(Some(hover)));
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] hover error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] hover error: {e}"),
                                         }
                                     });
                                 }
@@ -338,7 +338,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 }
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] signature_help error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] signature_help error: {e}"),
                                         }
                                     });
                                 }
@@ -583,7 +583,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     let _ = evt_tx.send(LspEvent::Definition(vec![loc]));
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] peek definition error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] peek definition error: {e}"),
                                         }
                                     });
                                 }
@@ -648,7 +648,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] implementation error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] implementation error: {e}"),
                                         }
                                     });
                                 }
@@ -668,7 +668,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     .collect();
                                                 let _ = fold_tx2.try_send(pairs);
                                             }
-                                            Err(e) => eprintln!("[LSP] folding_range error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] folding_range error: {e}"),
                                         }
                                     }
                                 });
@@ -711,7 +711,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     }
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] organize imports error: {e}"),
+                                            Err(e) => tracing::warn!("[LSP] organize imports error: {e}"),
                                         }
                                     });
                                 } else {
@@ -1291,7 +1291,7 @@ fn apply_workspace_edit(edit: lsp_types::WorkspaceEdit, old_word: &str, new_name
     }
 
     // No edits from LSP — should not happen, but guard anyway
-    eprintln!("[LSP] apply_workspace_edit: no edits (old={old_word} new={new_name})");
+    tracing::warn!("[LSP] apply_workspace_edit: no edits (old={old_word} new={new_name})");
 }
 
 /// Apply a list of LSP TextEdits to a file on disk (sort descending by range so

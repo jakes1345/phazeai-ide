@@ -316,7 +316,26 @@ impl Agent {
                             params: params.clone(),
                         });
 
-                        let approved = (approval_fn)(tool_name.clone(), params.clone()).await;
+                        // Guard the approval callback with a hard timeout so a
+                        // dead UI or dropped channel can never hang the agent loop.
+                        // The default matches the UI composer's recv_timeout (5 min).
+                        const APPROVAL_TIMEOUT: std::time::Duration =
+                            std::time::Duration::from_secs(600);
+                        let approved = match tokio::time::timeout(
+                            APPROVAL_TIMEOUT,
+                            (approval_fn)(tool_name.clone(), params.clone()),
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    tool = %tool_name,
+                                    "approval timed out, treating as denial",
+                                );
+                                false
+                            }
+                        };
                         if !approved {
                             let _ = event_tx.send(AgentEvent::ToolResult {
                                 name: tool_name.clone(),

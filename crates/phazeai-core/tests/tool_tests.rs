@@ -477,7 +477,7 @@ async fn test_grep_regex_search() {
 
     assert_eq!(result["pattern"], "line [0-9]");
     let matches = result["matches"].as_array().unwrap();
-    assert!(matches.len() > 0);
+    assert!(!matches.is_empty());
     assert!(matches
         .iter()
         .any(|m| m["content"].as_str().unwrap().contains("line 1")));
@@ -513,7 +513,7 @@ async fn test_grep_case_sensitivity() {
 
     let matches2 = result2["matches"].as_array().unwrap();
     // Should match "Hello" with case insensitive flag
-    assert!(matches2.len() > 0);
+    assert!(!matches2.is_empty());
 }
 
 #[tokio::test]
@@ -550,7 +550,7 @@ async fn test_grep_single_file() {
         .unwrap();
 
     let matches = result["matches"].as_array().unwrap();
-    assert!(matches.len() > 0);
+    assert!(!matches.is_empty());
     assert!(matches[0]["file"].as_str().unwrap().contains("hello.txt"));
 }
 
@@ -641,7 +641,7 @@ async fn test_glob_specific_extension() {
         .unwrap();
 
     let matches = result["matches"].as_array().unwrap();
-    assert!(matches.len() > 0);
+    assert!(!matches.is_empty());
     let match_strings: Vec<String> = matches
         .iter()
         .map(|m| m.as_str().unwrap().to_string())

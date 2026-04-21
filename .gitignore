@@ -1,6 +1,8 @@
 # Build artifacts
 /target/
 **/*.rs.bk
+/rust_out
+/*.profraw
 
 # IDE files
 .idea/

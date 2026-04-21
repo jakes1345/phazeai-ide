@@ -151,7 +151,12 @@ impl Settings {
         }
         let content = toml::to_string_pretty(self)
             .map_err(|e| crate::error::PhazeError::Config(e.to_string()))?;
-        std::fs::write(&config_path, content)?;
+
+        // Atomic write: write to a sibling tmp file, then rename.
+        // Prevents partial/torn config files if the process dies mid-write.
+        let tmp_path = config_path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, &config_path)?;
         Ok(())
     }
 

@@ -10,7 +10,12 @@ use tokio::time::{sleep, timeout, Duration};
 // Git Test Helpers
 // ============================================================================
 
-/// Initialize a git repository in the given directory with proper config
+/// Initialize a git repository in the given directory with proper config.
+///
+/// Also force-disables commit signing and unsets `core.hooksPath`, because
+/// the CI environment may have them configured globally in ways that break
+/// hermetic test repos (e.g. an SSH signing key path that doesn't exist
+/// inside the test sandbox).
 fn init_git_repo(dir: &Path) {
     Command::new("git")
         .args(["init"])
@@ -18,17 +23,20 @@ fn init_git_repo(dir: &Path) {
         .output()
         .expect("Failed to init git repo");
 
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(dir)
-        .output()
-        .expect("Failed to set git user.email");
-
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(dir)
-        .output()
-        .expect("Failed to set git user.name");
+    for (key, value) in [
+        ("user.email", "test@test.com"),
+        ("user.name", "Test"),
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("gpg.format", "openpgp"),
+        ("core.hooksPath", ""),
+    ] {
+        Command::new("git")
+            .args(["config", "--local", key, value])
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to set git {key}"));
+    }
 }
 
 /// Create a file with content in the given directory

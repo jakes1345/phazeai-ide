@@ -325,8 +325,17 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             let approval_rx_arc = approval_rx_arc.clone();
 
             // Drain any stale responses in the approval channel before starting.
-            // (Best-effort — ignore errors.)
-            while approval_rx_arc.lock().unwrap().try_recv().is_ok() {}
+            // Best-effort — lock poisoning is recovered so the UI stays responsive.
+            {
+                let rx = match approval_rx_arc.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => {
+                        tracing::warn!("approval channel lock poisoned; recovering");
+                        poisoned.into_inner()
+                    }
+                };
+                while rx.try_recv().is_ok() {}
+            }
 
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -388,7 +397,15 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                     // Use spawn_blocking so we don't starve the runtime.
                                     let result: ApprovalResponse =
                                         tokio::task::spawn_blocking(move || {
-                                            let lock = rx_inner.lock().unwrap();
+                                            let lock = match rx_inner.lock() {
+                                                Ok(g) => g,
+                                                Err(poisoned) => {
+                                                    tracing::warn!(
+                                                        "approval channel poisoned; recovering"
+                                                    );
+                                                    poisoned.into_inner()
+                                                }
+                                            };
                                             // Wait up to 5 minutes for user response.
                                             lock.recv_timeout(std::time::Duration::from_secs(300))
                                                 .unwrap_or(ApprovalResponse::Denied)

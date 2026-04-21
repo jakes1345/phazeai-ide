@@ -35,6 +35,7 @@ lsp-types = { workspace = true }
 notify = { workspace = true }
 libc = "0.2"
 toml = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 image = "0.25"

@@ -218,7 +218,7 @@ fn test_sidecar_manager_new_creates_non_running_manager() {
 fn test_sidecar_manager_is_running_returns_false_initially() {
     let manager = SidecarManager::new("python3", PathBuf::from("/tmp/test.py"));
 
-    assert_eq!(manager.is_running(), false);
+    assert!(!manager.is_running());
 }
 
 #[tokio::test]

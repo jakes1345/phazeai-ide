@@ -20,8 +20,10 @@ pub struct OllamaClient {
 impl OllamaClient {
     pub fn new(model: impl Into<String>) -> Self {
         let base_url = "http://localhost:11434".to_string();
+        // `try_new` only fails on malformed URLs; this literal is always valid.
+        let ollama = Ollama::try_new(&base_url).expect("built-in Ollama URL must parse");
         Self {
-            ollama: Ollama::try_new(&base_url).expect("Invalid Ollama URL"),
+            ollama,
             model: model.into(),
             base_url,
         }
@@ -35,9 +37,10 @@ impl OllamaClient {
                 self.ollama = ollama;
             }
             Err(e) => {
-                eprintln!(
-                    "Warning: invalid Ollama URL '{}': {}, keeping previous URL",
-                    new_url, e
+                tracing::warn!(
+                    url = %new_url,
+                    error = %e,
+                    "invalid Ollama URL, keeping previous URL",
                 );
             }
         }
