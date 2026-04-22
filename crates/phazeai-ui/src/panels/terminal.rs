@@ -12,16 +12,16 @@ use floem::{
     style::{CursorStyle, Display},
     text::{Attrs, AttrsList, FamilyOwned, TextLayout, Weight},
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
-    IntoView, Renderer,
-};
+    IntoView, Renderer};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use vte::{Params, Perform};
 
-use crate::commands::{execute_command, match_global_shortcut, GlobalCommandState};
+use crate::commands::{execute_command_global, match_global_shortcut, GlobalCommandState};
 use crate::util::safe_get;
 use phazeai_core::constants::terminal as term_consts;
 
 use crate::theme::PhazeTheme;
+use std::time::{Duration, Instant};
 
 // ── Terminal Colors ────────────────────────────────────────────────────────────
 
@@ -29,16 +29,14 @@ use crate::theme::PhazeTheme;
 enum TermColor {
     Default,
     Rgb(u8, u8, u8),
-    Indexed(u8),
-}
+    Indexed(u8)}
 
 impl TermColor {
     fn to_floem_color(self, default: Color) -> Color {
         match self {
             TermColor::Default => default,
             TermColor::Rgb(r, g, b) => Color::from_rgb8(r, g, b),
-            TermColor::Indexed(idx) => indexed_to_color(idx),
-        }
+            TermColor::Indexed(idx) => indexed_to_color(idx)}
     }
 }
 
@@ -94,21 +92,18 @@ struct TermSegment {
     text: String,
     fg: TermColor,
     bg: TermColor,
-    bold: bool,
-}
+    bold: bool}
 
 // ── Terminal Line ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 struct TermLine {
-    segments: Vec<TermSegment>,
-}
+    segments: Vec<TermSegment>}
 
 impl TermLine {
     fn new() -> Self {
         Self {
-            segments: Vec::new(),
-        }
+            segments: Vec::new()}
     }
 
     fn push_char(&mut self, ch: char, fg: TermColor, bg: TermColor, bold: bool) {
@@ -122,8 +117,7 @@ impl TermLine {
             text: ch.to_string(),
             fg,
             bg,
-            bold,
-        });
+            bold});
     }
 
     fn plain_text(&self) -> String {
@@ -153,8 +147,7 @@ struct TermState {
     cursor_col: usize,
     pub cwd: String,
     /// Line indices (into `lines`) where OSC 133;A (prompt start) was seen.
-    pub prompt_line_positions: Vec<usize>,
-}
+    pub prompt_line_positions: Vec<usize>}
 
 impl TermState {
     fn new() -> Self {
@@ -166,8 +159,7 @@ impl TermState {
             cur_bold: false,
             cursor_col: 0,
             cwd: String::new(),
-            prompt_line_positions: Vec::new(),
-        }
+            prompt_line_positions: Vec::new()}
     }
 
     fn commit_line(&mut self) {
@@ -273,8 +265,7 @@ impl TermState {
 // ── VTE Performer ─────────────────────────────────────────────────────────────
 
 struct VtePerformer {
-    state: Arc<Mutex<TermState>>,
-}
+    state: Arc<Mutex<TermState>>}
 
 impl Perform for VtePerformer {
     fn print(&mut self, c: char) {
@@ -515,8 +506,7 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
             F10 => b"\x1b[21~".to_vec(),
             F11 => b"\x1b[23~".to_vec(),
             F12 => b"\x1b[24~".to_vec(),
-            _ => vec![],
-        },
+            _ => vec![]},
 
         // ── Character keys ────────────────────────────────────────────────────
         Key::Character(ch) => {
@@ -537,8 +527,7 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
                         ']' => return b"\x1d".to_vec(),
                         '^' | '6' => return b"\x1e".to_vec(),
                         '_' | '-' => return b"\x1f".to_vec(),
-                        _ => return vec![],
-                    }
+                        _ => return vec![]}
                 }
                 vec![]
             } else if alt {
@@ -552,8 +541,7 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
             }
         }
 
-        _ => vec![],
-    }
+        _ => vec![]}
 }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
@@ -561,6 +549,9 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
 const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
+/// Maximum lines kept in the reactive UI buffer. Full history remains in
+/// `TermState`; this only reduces cloning/churn on PTY updates.
+const MAX_UI_BUFFER_LINES: usize = 2_000;
 
 fn build_line_layout(
     line: &TermLine,
@@ -650,7 +641,8 @@ fn single_terminal(
     }
 
     // ── Update channel: reader thread → reactive signal ───────────────────
-    let (update_tx, update_rx) = std::sync::mpsc::channel::<()>();
+    // Coalesced update channel: at most one pending repaint signal at a time.
+    let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let update_signal = create_signal_from_channel(update_rx);
 
     // ── Reactive line buffer ──────────────────────────────────────────────
@@ -659,6 +651,8 @@ fn single_terminal(
     let line_version: RwSignal<u64> = create_rw_signal(0);
     // Cursor column position for rendering the cursor block
     let cursor_col_sig: RwSignal<usize> = create_rw_signal(0usize);
+    // Throttle expensive UI syncs under high PTY throughput.
+    let last_ui_sync_at: RwSignal<Option<Instant>> = create_rw_signal(None);
 
     // ── Spawn PTY thread ──────────────────────────────────────────────────
     {
@@ -672,8 +666,7 @@ fn single_terminal(
                 rows: 40,
                 cols: 220,
                 pixel_width: 0,
-                pixel_height: 0,
-            }) {
+                pixel_height: 0}) {
                 Ok(p) => p,
                 Err(e) => {
                     if let Ok(mut s) = term_state_t.lock() {
@@ -683,7 +676,7 @@ fn single_terminal(
                         }
                         s.lines.push(err);
                     }
-                    let _ = update_tx.send(());
+                    let _ = update_tx.try_send(());
                     return;
                 }
             };
@@ -702,7 +695,7 @@ fn single_terminal(
                         }
                         s.lines.push(err);
                     }
-                    let _ = update_tx.send(());
+                    let _ = update_tx.try_send(());
                     return;
                 }
             };
@@ -713,8 +706,7 @@ fn single_terminal(
                         *guard = Some(w);
                     }
                 }
-                Err(e) => eprintln!("PTY take_writer error: {e}"),
-            }
+                Err(e) => eprintln!("PTY take_writer error: {e}")}
 
             // Inject PROMPT_COMMAND for OSC 7 (cwd) and OSC 133;A (shell integration) tracking
             {
@@ -748,8 +740,7 @@ fn single_terminal(
             let _child = child;
             let mut parser = vte::Parser::new();
             let mut performer = VtePerformer {
-                state: Arc::clone(&term_state_t),
-            };
+                state: Arc::clone(&term_state_t)};
             let mut buf = [0u8; term_consts::READ_BUFFER_SIZE];
 
             loop {
@@ -759,10 +750,9 @@ fn single_terminal(
                         for &byte in &buf[..n] {
                             parser.advance(&mut performer, byte);
                         }
-                        let _ = update_tx.send(());
+                        let _ = update_tx.try_send(());
                     }
-                    Err(_) => break,
-                }
+                    Err(_) => break}
             }
 
             if let Ok(mut s) = term_state_t.lock() {
@@ -771,7 +761,7 @@ fn single_terminal(
                     s.lines.push(line);
                 }
             }
-            let _ = update_tx.send(());
+            let _ = update_tx.try_send(());
         });
     }
 
@@ -780,8 +770,17 @@ fn single_terminal(
         let term_state_e = Arc::clone(&term_state);
         create_effect(move |_| {
             update_signal.get();
+            let now = Instant::now();
+            if let Some(prev) = last_ui_sync_at.get_untracked() {
+                if now.duration_since(prev) < Duration::from_millis(16) {
+                    return;
+                }
+            }
+            last_ui_sync_at.set(Some(now));
             if let Ok(state) = term_state_e.lock() {
-                let mut all_lines = state.lines.clone();
+                let base_len = state.lines.len();
+                let tail_start = base_len.saturating_sub(MAX_UI_BUFFER_LINES);
+                let mut all_lines = state.lines[tail_start..].to_vec();
                 if !state.current_line.is_empty() {
                     all_lines.push(state.current_line.clone());
                 }
@@ -892,8 +891,7 @@ fn single_terminal(
                     layout
                 } else {
                     let reconstructed = TermLine {
-                        segments: segments.clone(),
-                    };
+                        segments: segments.clone()};
                     build_line_layout(&reconstructed, p.text_primary, p.bg_base, fs)
                 };
                 layout_signal.set(new_layout);
@@ -981,8 +979,8 @@ fn single_terminal(
 
                 // Global shortcuts are dispatched via the unified execute_command so
                 // the behaviour is identical to the root key handler in app.rs.
-                if let Some(cmd) = match_global_shortcut(e) {
-                    execute_command(cmd, &cmd_state);
+                if let Some(cmd) = match_global_shortcut(&e.key.logical_key, &e.modifiers) {
+                    execute_command_global(&cmd, &cmd_state);
                     return;
                 }
 
@@ -1087,8 +1085,7 @@ fn single_terminal(
                         rows,
                         cols,
                         pixel_width: pw as u16,
-                        pixel_height: ph as u16,
-                    });
+                        pixel_height: ph as u16});
                 }
             }
         });
@@ -1113,8 +1110,7 @@ fn single_terminal(
                     rows,
                     cols,
                     pixel_width: pw as u16,
-                    pixel_height: ph as u16,
-                });
+                    pixel_height: ph as u16});
             }
         }
     });

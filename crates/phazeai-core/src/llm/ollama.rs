@@ -20,8 +20,13 @@ pub struct OllamaClient {
 impl OllamaClient {
     pub fn new(model: impl Into<String>) -> Self {
         let base_url = "http://localhost:11434".to_string();
+        let ollama = Ollama::try_new(&base_url).unwrap_or_else(|_| {
+            // Keep startup resilient even if URL parsing behavior changes.
+            // Default points to local Ollama on 127.0.0.1:11434.
+            Ollama::default()
+        });
         Self {
-            ollama: Ollama::try_new(&base_url).expect("Invalid Ollama URL"),
+            ollama,
             model: model.into(),
             base_url,
         }

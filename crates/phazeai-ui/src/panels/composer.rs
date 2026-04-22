@@ -5,15 +5,13 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, text_input, v_stack, Decorators},
-    IntoView,
-};
+    IntoView};
 use phazeai_core::tools::{
-    BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry,
-};
+    BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry};
 use phazeai_core::{Agent, AgentEvent, Settings};
 use serde_json::Value;
 
-use crate::app::IdeState;
+use crate::domain_state::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::util::safe_get;
 
@@ -27,24 +25,21 @@ enum ComposerApprovalMode {
     /// Auto-approve read-only tools; require approval for write/bash/destructive.
     ApproveDestructive,
     /// Require approval before every tool call.
-    ApproveAll,
-}
+    ApproveAll}
 
 impl ComposerApprovalMode {
     fn label(self) -> &'static str {
         match self {
             Self::AutoAll => "Auto-approve all",
             Self::ApproveDestructive => "Approve destructive",
-            Self::ApproveAll => "Approve all",
-        }
+            Self::ApproveAll => "Approve all"}
     }
 
     fn next(self) -> Self {
         match self {
             Self::AutoAll => Self::ApproveDestructive,
             Self::ApproveDestructive => Self::ApproveAll,
-            Self::ApproveAll => Self::AutoAll,
-        }
+            Self::ApproveAll => Self::AutoAll}
     }
 
     /// Decide whether a tool+params pair requires user approval under this mode.
@@ -55,8 +50,7 @@ impl ComposerApprovalMode {
             // non-read-only tools — the ToolApprovalManager::needs_approval
             // logic already does this for AlwaysAsk.
             Self::ApproveDestructive => ToolApprovalMode::AlwaysAsk,
-            Self::ApproveAll => ToolApprovalMode::AlwaysAsk,
-        });
+            Self::ApproveAll => ToolApprovalMode::AlwaysAsk});
 
         match self {
             Self::AutoAll => false,
@@ -87,8 +81,7 @@ enum ComposerUpdate {
     ToolResult {
         name: String,
         success: bool,
-        summary: String,
-    },
+        summary: String},
     /// Agent requesting approval for a tool.
     ToolApprovalRequest { name: String, params: Value },
     /// Agent run completed.
@@ -96,22 +89,19 @@ enum ComposerUpdate {
     /// Error occurred.
     Err(String),
     /// Git diff output after completion.
-    DiffOutput(Vec<DiffCard>),
-}
+    DiffOutput(Vec<DiffCard>)}
 
 #[derive(Clone, Debug)]
 struct DiffCard {
     file: String,
-    diff: String,
-}
+    diff: String}
 
 #[derive(Clone, Debug)]
 struct EventLogEntry {
     kind: EventKind,
     text: String,
     /// Optional file/path extracted from tool params — shown distinctly.
-    path: Option<String>,
-}
+    path: Option<String>}
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -124,23 +114,20 @@ enum EventKind {
     Done,
     Error,
     Diff,
-    Warning,
-}
+    Warning}
 
 // ── Pending approval request ─────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 struct PendingApproval {
     tool_name: String,
-    params: Value,
-}
+    params: Value}
 
 // Channel message used to deliver approval decision back to the agent thread.
 #[derive(Clone, Debug)]
 enum ApprovalResponse {
     Approved,
-    Denied,
-}
+    Denied}
 
 // ── Composer Panel ───────────────────────────────────────────────────────────
 
@@ -148,7 +135,7 @@ enum ApprovalResponse {
 /// events. Includes workspace display, approval-mode toggle, tool visibility,
 /// and a no-git-repo warning banner.
 pub fn composer_panel(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let task_input = create_rw_signal(String::new());
     let is_running = create_rw_signal(false);
     let event_log: RwSignal<Vec<EventLogEntry>> = create_rw_signal(Vec::new());
@@ -168,7 +155,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
     // Check git repo status on load and whenever workspace changes.
     {
-        let workspace = state.workspace_root;
+        let workspace = state.project.workspace_root;
         create_effect(move |_| {
             let ws = workspace.get();
             let has_git = std::path::Path::new(&ws).join(".git").exists()
@@ -202,8 +189,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         log.push(EventLogEntry {
                             kind: EventKind::Thinking,
                             text: format!("Iteration {}", iter),
-                            path: None,
-                        });
+                            path: None});
                         if log.len() > 500 {
                             log.drain(0..log.len() - 500);
                         }
@@ -219,22 +205,19 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         log.push(EventLogEntry {
                             kind: EventKind::ToolStart,
                             text: display,
-                            path,
-                        });
+                            path});
                     });
                 }
                 ComposerUpdate::ToolResult {
                     name,
                     success,
-                    summary,
-                } => {
+                    summary} => {
                     let icon = if success { "+" } else { "x" };
                     event_log.update(|log| {
                         log.push(EventLogEntry {
                             kind: EventKind::ToolResult,
                             text: format!("[{}] {} done: {}", icon, name, summary),
-                            path: None,
-                        });
+                            path: None});
                     });
                 }
                 ComposerUpdate::ToolApprovalRequest { name, params } => {
@@ -244,13 +227,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         log.push(EventLogEntry {
                             kind: EventKind::ApprovalPending,
                             text: format!("Waiting for approval: {}", display),
-                            path: path.clone(),
-                        });
+                            path: path.clone()});
                     });
                     pending_approval.set(Some(PendingApproval {
                         tool_name: name,
-                        params,
-                    }));
+                        params}));
                 }
                 ComposerUpdate::Done { iterations } => {
                     pending_approval.set(None);
@@ -258,11 +239,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         log.push(EventLogEntry {
                             kind: EventKind::Done,
                             text: format!("Completed in {} iterations", iterations),
-                            path: None,
-                        });
+                            path: None});
                     });
                     is_running.set(false);
-                    state.ai_thinking.set(false);
+                    state.ai.thinking.set(false);
                     cancel_token.set(None);
                 }
                 ComposerUpdate::Err(e) => {
@@ -271,11 +251,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         log.push(EventLogEntry {
                             kind: EventKind::Error,
                             text: format!("Error: {}", e),
-                            path: None,
-                        });
+                            path: None});
                     });
                     is_running.set(false);
-                    state.ai_thinking.set(false);
+                    state.ai.thinking.set(false);
                     cancel_token.set(None);
                 }
                 ComposerUpdate::DiffOutput(cards) => {
@@ -293,7 +272,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         let update_tx = update_tx.clone();
         let approval_tx = approval_tx.clone();
         let approval_rx_arc = approval_rx_arc.clone();
-        let workspace = state.workspace_root;
+        let workspace = state.project.workspace_root;
         move || {
             let task = task_input.get();
             let trimmed = task.trim().to_string();
@@ -305,13 +284,12 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             event_log.set(vec![EventLogEntry {
                 kind: EventKind::Thinking,
                 text: "Starting agent...".to_string(),
-                path: None,
-            }]);
+                path: None}]);
             diff_cards.set(Vec::new());
             agent_text.set(String::new());
             pending_approval.set(None);
             is_running.set(true);
-            state.ai_thinking.set(true);
+            state.ai.thinking.set(true);
 
             let token = Arc::new(AtomicBool::new(false));
             cancel_token.set(Some(token.clone()));
@@ -319,6 +297,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             let tx = (*update_tx).clone();
             let ws = workspace.get_untracked();
             let mode = approval_mode.get_untracked();
+            // Snapshot the shared sidecar client (if ready) for semantic search tools.
+            let sidecar_client_snapshot = state.project.sidecar_client
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned());
             // Clone the sync_channel sender for the approval callback.
             let _approval_tx_cb = (*approval_tx).clone();
             // Clone the approval_rx end — we move it into the thread.
@@ -326,7 +309,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
             // Drain any stale responses in the approval channel before starting.
             // (Best-effort — ignore errors.)
-            while approval_rx_arc.lock().unwrap().try_recv().is_ok() {}
+            if let Ok(lock) = approval_rx_arc.lock() {
+                while lock.try_recv().is_ok() {}
+            }
 
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -358,6 +343,14 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         .with_tools(tools)
                         .with_cancel_token(token);
 
+                    // Register semantic search tools if sidecar is running.
+                    if let Some(sc) = sidecar_client_snapshot {
+                        agent.register_tool(Box::new(
+                            phazeai_sidecar::SemanticSearchTool::new(sc.clone()),
+                        ));
+                        agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(sc)));
+                    }
+
                     // Connect MCP servers
                     let mcp_configs = phazeai_core::mcp::McpManager::load_config(&ws);
                     if !mcp_configs.is_empty() {
@@ -382,13 +375,14 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                     // Send approval request to UI.
                                     let _ = tx_inner.send(ComposerUpdate::ToolApprovalRequest {
                                         name: tool_name.clone(),
-                                        params: params.clone(),
-                                    });
+                                        params: params.clone()});
                                     // Block this async task on the sync response channel.
                                     // Use spawn_blocking so we don't starve the runtime.
                                     let result: ApprovalResponse =
                                         tokio::task::spawn_blocking(move || {
-                                            let lock = rx_inner.lock().unwrap();
+                                            let Ok(lock) = rx_inner.lock() else {
+                                                return ApprovalResponse::Denied;
+                                            };
                                             // Wait up to 5 minutes for user response.
                                             lock.recv_timeout(std::time::Duration::from_secs(300))
                                                 .unwrap_or(ApprovalResponse::Denied)
@@ -423,19 +417,16 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                     // We don't have params here — use empty.
                                     let _ = tx2.send(ComposerUpdate::ToolStart {
                                         name,
-                                        params: Value::Null,
-                                    });
+                                        params: Value::Null});
                                 }
                                 AgentEvent::ToolResult {
                                     name,
                                     success,
-                                    summary,
-                                } => {
+                                    summary} => {
                                     let _ = tx2.send(ComposerUpdate::ToolResult {
                                         name,
                                         success,
-                                        summary,
-                                    });
+                                        summary});
                                 }
                                 AgentEvent::ToolApprovalRequest { name, params } => {
                                     let _ = tx2
@@ -509,13 +500,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 let bg = match mode {
                     ComposerApprovalMode::AutoAll => p.warning.with_alpha(0.18),
                     ComposerApprovalMode::ApproveDestructive => p.accent.with_alpha(0.18),
-                    ComposerApprovalMode::ApproveAll => p.success.with_alpha(0.18),
-                };
+                    ComposerApprovalMode::ApproveAll => p.success.with_alpha(0.18)};
                 let fg = match mode {
                     ComposerApprovalMode::AutoAll => p.warning,
                     ComposerApprovalMode::ApproveDestructive => p.accent,
-                    ComposerApprovalMode::ApproveAll => p.success,
-                };
+                    ComposerApprovalMode::ApproveAll => p.success};
                 s.padding_horiz(8.0)
                     .padding_vert(3.0)
                     .font_size(10.0)
@@ -552,7 +541,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 let p = theme.get().palette;
                 s.font_size(10.0).color(p.text_muted).min_width(30.0)
             }),
-            label(move || state.workspace_root.get().display().to_string()).style(move |s| {
+            label(move || state.project.workspace_root.get().display().to_string()).style(move |s| {
                 let p = theme.get().palette;
                 s.font_size(10.0)
                     .color(p.text_secondary)
@@ -727,8 +716,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 let entry = log.get(idx).cloned().unwrap_or(EventLogEntry {
                     kind: EventKind::Text,
                     text: String::new(),
-                    path: None,
-                });
+                    path: None});
                 let kind = entry.kind.clone();
                 let text = entry.text.clone();
                 let path_opt = entry.path.clone();
@@ -758,8 +746,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                 EventKind::Done => p.success,
                                 EventKind::Error => p.error,
                                 EventKind::Diff => p.text_secondary,
-                                EventKind::Warning => p.warning,
-                            };
+                                EventKind::Warning => p.warning};
                             s.font_size(11.0)
                                 .color(color)
                                 .font_family("monospace".to_string())
@@ -821,8 +808,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 let cards = diff_cards.get_untracked();
                 let card = cards.get(idx).cloned().unwrap_or(DiffCard {
                     file: String::new(),
-                    diff: String::new(),
-                });
+                    diff: String::new()});
                 let file = card.file.clone();
                 let diff = card.diff.clone();
                 let expanded = create_rw_signal(false);
@@ -958,8 +944,7 @@ fn extract_path_from_params(tool_name: &str, params: &Value) -> Option<String> {
             .or_else(|| params.get("pattern"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        _ => None,
-    }
+        _ => None}
 }
 
 /// Build a concise, readable one-line description of a tool invocation.
@@ -1007,8 +992,7 @@ fn format_tool_display(tool_name: &str, params: &Value) -> String {
             let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             format!("list_files  {}", path)
         }
-        _ => tool_name.to_string(),
-    }
+        _ => tool_name.to_string()}
 }
 
 fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
@@ -1021,8 +1005,7 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
             if !current_file.is_empty() {
                 cards.push(DiffCard {
                     file: current_file.clone(),
-                    diff: current_diff.clone(),
-                });
+                    diff: current_diff.clone()});
             }
             // Extract filename: "diff --git a/foo b/foo" → "foo"
             current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
@@ -1036,8 +1019,7 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
     if !current_file.is_empty() {
         cards.push(DiffCard {
             file: current_file,
-            diff: current_diff,
-        });
+            diff: current_diff});
     }
 
     cards

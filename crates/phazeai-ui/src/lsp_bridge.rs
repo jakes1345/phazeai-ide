@@ -26,8 +26,7 @@ pub enum LspCommand {
     ChangeFile {
         path: PathBuf,
         text: String,
-        version: i32,
-    },
+        version: i32},
     /// Request completions at a cursor position — triggers Completions event.
     RequestCompletions { path: PathBuf, line: u32, col: u32 },
     /// Request go-to-definition at cursor position.
@@ -46,8 +45,7 @@ pub enum LspCommand {
         line: u32,
         col: u32,
         new_name: String,
-        workspace_root: PathBuf,
-    },
+        workspace_root: PathBuf},
     /// Request all symbols in the current document (outline, Ctrl+Shift+O).
     RequestDocumentSymbols { path: PathBuf },
     /// File was saved — send textDocument/didSave notification to LSP server.
@@ -68,11 +66,9 @@ pub enum LspCommand {
     RequestInlayHints {
         path: PathBuf,
         start_line: u32,
-        end_line: u32,
-    },
+        end_line: u32},
     /// Graceful shutdown.
-    Shutdown,
-}
+    Shutdown}
 
 /// An inlay hint (type annotation, parameter name, etc.) for inline display.
 #[derive(Debug, Clone)]
@@ -82,8 +78,7 @@ pub struct InlayHintEntry {
     /// 0-based column (byte offset within the line) after which the hint is shown.
     pub col: u32,
     /// Text to display, e.g. ": i32" or "name: ".
-    pub label: String,
-}
+    pub label: String}
 
 /// A code lens entry attached to a specific line.
 #[derive(Debug, Clone)]
@@ -91,8 +86,7 @@ pub struct CodeLensEntry {
     /// 1-based line number the lens appears on.
     pub line: u32,
     /// Display label (e.g. "2 references", "Run test").
-    pub label: String,
-}
+    pub label: String}
 
 /// A symbol entry from the document symbol outline.
 #[derive(Debug, Clone)]
@@ -102,8 +96,7 @@ pub struct SymbolEntry {
     /// 1-based line number.
     pub line: u32,
     /// Nesting depth (0 = top-level).
-    pub depth: u32,
-}
+    pub depth: u32}
 
 /// Parsed signature help result returned by the LSP server.
 #[derive(Debug, Clone)]
@@ -113,8 +106,7 @@ pub struct SignatureHelpResult {
     /// Index of the currently-active parameter (0-based).
     pub active_param: usize,
     /// Labels of individual parameters extracted from the signature.
-    pub params: Vec<String>,
-}
+    pub params: Vec<String>}
 
 /// A go-to-definition result (first location only; LSP may return multiple).
 #[derive(Debug, Clone)]
@@ -123,8 +115,7 @@ pub struct DefinitionResult {
     /// 1-based line number.
     pub line: u32,
     /// 1-based column.
-    pub col: u32,
-}
+    pub col: u32}
 
 /// A single find-references result entry.
 #[derive(Debug, Clone)]
@@ -133,8 +124,7 @@ pub struct ReferenceEntry {
     /// 1-based line number.
     pub line: u32,
     /// 1-based column.
-    pub col: u32,
-}
+    pub col: u32}
 
 /// A code action / quick-fix offered by the LSP server (or generated locally).
 #[derive(Debug, Clone)]
@@ -143,8 +133,7 @@ pub struct CodeAction {
     pub kind: String,
     /// Edits to apply: list of `(file_path, new_full_content)`.
     /// Empty means the action is handled procedurally (e.g. "Format Document").
-    pub edit: Option<Vec<(PathBuf, String)>>,
-}
+    pub edit: Option<Vec<(PathBuf, String)>>}
 
 /// Diagnostic severity (mirrors LSP spec without pulling in lsp-types at call sites).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +141,7 @@ pub enum DiagSeverity {
     Error,
     Warning,
     Info,
-    Hint,
-}
+    Hint}
 
 /// A single diagnostic entry, flattened for UI display.
 #[derive(Debug, Clone)]
@@ -164,8 +152,7 @@ pub struct DiagEntry {
     /// 1-based column.
     pub col: u32,
     pub message: String,
-    pub severity: DiagSeverity,
-}
+    pub severity: DiagSeverity}
 
 /// A single completion item, simplified from lsp_types::CompletionItem.
 #[derive(Debug, Clone)]
@@ -175,8 +162,7 @@ pub struct CompletionEntry {
     /// The text to insert (may include snippets; falls back to label).
     pub insert_text: String,
     /// Optional short description shown next to the label.
-    pub detail: Option<String>,
-}
+    pub detail: Option<String>}
 
 // ── Bridge result struct ──────────────────────────────────────────────────────
 
@@ -196,8 +182,7 @@ pub struct LspBridgeSignals {
     pub peek_def_lines: RwSignal<Vec<String>>,
     pub code_lens: RwSignal<Vec<CodeLensEntry>>,
     pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
-    pub inlay_hints: RwSignal<Vec<InlayHintEntry>>,
-}
+    pub inlay_hints: RwSignal<Vec<InlayHintEntry>>}
 
 // ── Bridge entry point ────────────────────────────────────────────────────────
 
@@ -292,8 +277,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(items) => {
                                                 let _ = evt_tx.send(LspEvent::Completions(items));
                                             }
-                                            Err(e) => eprintln!("[LSP] completion error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] completion error: {e}")}
                                     });
                                 }
                             }
@@ -306,8 +290,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] definition error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] definition error: {e}")}
                                     });
                                 }
                             }
@@ -321,8 +304,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 let _ = evt_tx.send(LspEvent::Hover(Some(hover)));
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] hover error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] hover error: {e}")}
                                     });
                                 }
                             }
@@ -338,8 +320,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 }
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] signature_help error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] signature_help error: {e}")}
                                     });
                                 }
                             }
@@ -358,18 +339,18 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 // Fallback: ripgrep word at cursor
                                                 let entries = ripgrep_references(&path2, line, col, &ws_root2);
                                                 let _ = evt_tx.send(LspEvent::References(
-                                                    entries.into_iter().map(|e| {
+                                                    entries.into_iter().filter_map(|e| {
                                                         use lsp_types::{Location, Range, Position};
                                                         let uri_str = format!("file://{}", e.path.display());
-                                                        Location {
-                                                            uri: uri_str.parse().unwrap_or_else(|_| {
-                                                                "file:///unknown".parse().expect("static URL")
-                                                            }),
+                                                        let fallback = match "file:///unknown".parse() {
+                                                            Ok(u) => u,
+                                                            Err(_) => return None};
+                                                        let uri = uri_str.parse().unwrap_or(fallback);
+                                                        Some(Location {
+                                                            uri,
                                                             range: Range {
                                                                 start: Position { line: e.line.saturating_sub(1), character: e.col.saturating_sub(1) },
-                                                                end:   Position { line: e.line.saturating_sub(1), character: e.col.saturating_sub(1) },
-                                                            },
-                                                        }
+                                                                end:   Position { line: e.line.saturating_sub(1), character: e.col.saturating_sub(1) }}})
                                                     }).collect()
                                                 ));
                                             }
@@ -398,16 +379,14 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             apply_workspace_edit(workspace_edit, &old_word2, &new_name);
                                             true
                                         }
-                                        _ => false,
-                                    }
+                                        _ => false}
                                 } else { false };
 
                                 if !did_lsp {
                                     // Fallback: ripgrep-based whole-word replace across workspace
                                     let old_word = match word_at_position(&path, line, col) {
                                         Some(w) => w,
-                                        None => continue,
-                                    };
+                                        None => continue};
                                     let refs = ripgrep_references(&path, line, col, &ws);
                                     // Collect unique file paths
                                     let mut files: Vec<PathBuf> = refs.iter().map(|r| r.path.clone()).collect();
@@ -436,16 +415,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 text_document: lsp_types::TextDocumentIdentifier { uri },
                                                 range: lsp_types::Range {
                                                     start: lsp_types::Position { line, character: col },
-                                                    end: lsp_types::Position { line, character: col },
-                                                },
+                                                    end: lsp_types::Position { line, character: col }},
                                                 context: lsp_types::CodeActionContext {
                                                     diagnostics: vec![],
                                                     only: None,
-                                                    trigger_kind: None,
-                                                },
+                                                    trigger_kind: None},
                                                 work_done_progress_params: Default::default(),
-                                                partial_result_params: Default::default(),
-                                            };
+                                                partial_result_params: Default::default()};
                                             if let Ok(lsp_actions) = client.code_action(params).await {
                                                 if !lsp_actions.is_empty() {
                                                     let actions: Vec<CodeAction> = lsp_actions
@@ -495,15 +471,12 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                                 CodeAction {
                                                                     title: ca.title,
                                                                     kind: ca.kind.map(|k| k.as_str().to_string()).unwrap_or_default(),
-                                                                    edit,
-                                                                }
+                                                                    edit}
                                                             }
                                                             lsp_types::CodeActionOrCommand::Command(cmd) => CodeAction {
                                                                 title: cmd.title,
                                                                 kind: "command".to_string(),
-                                                                edit: None,
-                                                            },
-                                                        })
+                                                                edit: None}})
                                                         .collect();
                                                     // Merge with local fallback actions
                                                     let mut all = actions;
@@ -583,8 +556,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     let _ = evt_tx.send(LspEvent::Definition(vec![loc]));
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] peek definition error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] peek definition error: {e}")}
                                     });
                                 }
                             }
@@ -625,8 +597,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                         name: si.name,
                                                         kind: kind_str,
                                                         line: si.location.range.start.line + 1,
-                                                        depth: 0,
-                                                    }
+                                                        depth: 0}
                                                 }).collect::<Vec<_>>();
                                                 let _ = ws_syms_tx2.try_send(entries);
                                                 return;
@@ -648,8 +619,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] implementation error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] implementation error: {e}")}
                                     });
                                 }
                             }
@@ -668,8 +638,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     .collect();
                                                 let _ = fold_tx2.try_send(pairs);
                                             }
-                                            Err(e) => eprintln!("[LSP] folding_range error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] folding_range error: {e}")}
                                     }
                                 });
                             }
@@ -681,26 +650,21 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                         let uri_str = format!("file://{}", path2.display());
                                         let uri: lsp_types::Uri = match uri_str.parse() {
                                             Ok(u) => u,
-                                            Err(_) => return,
-                                        };
+                                            Err(_) => return};
                                         let params = lsp_types::CodeActionParams {
                                             text_document: lsp_types::TextDocumentIdentifier {
-                                                uri: uri.clone(),
-                                            },
+                                                uri: uri.clone()},
                                             range: lsp_types::Range {
                                                 start: lsp_types::Position { line: 0, character: 0 },
-                                                end:   lsp_types::Position { line: 0, character: 0 },
-                                            },
+                                                end:   lsp_types::Position { line: 0, character: 0 }},
                                             context: lsp_types::CodeActionContext {
                                                 diagnostics: vec![],
                                                 only: Some(vec![
                                                     lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
                                                 ]),
-                                                trigger_kind: None,
-                                            },
+                                                trigger_kind: None},
                                             work_done_progress_params: Default::default(),
-                                            partial_result_params: Default::default(),
-                                        };
+                                            partial_result_params: Default::default()};
                                         match client.code_action(params).await {
                                             Ok(actions) => {
                                                 for action in actions {
@@ -711,8 +675,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     }
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] organize imports error: {e}"),
-                                        }
+                                            Err(e) => eprintln!("[LSP] organize imports error: {e}")}
                                     });
                                 } else {
                                     // Fallback: sort Rust imports locally
@@ -737,8 +700,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 InlayHintEntry {
                                                     line: h.position.line,
                                                     col: h.position.character,
-                                                    label,
-                                                }
+                                                    label}
                                             }).collect();
                                             if !entries.is_empty() {
                                                 let _ = inlay_tx2.try_send(entries);
@@ -751,8 +713,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                     let _ = inlay_tx2.try_send(hints);
                                 });
                             }
-                            Some(LspCommand::Shutdown) | None => break,
-                        }
+                            Some(LspCommand::Shutdown) | None => break}
                     }
 
                     // ── Debounce flush: forward buffered ChangeFile ──────────
@@ -781,8 +742,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                         line: d.range.start.line + 1,
                                         col:  d.range.start.character + 1,
                                         message:  d.message.clone(),
-                                        severity: severity_from_lsp(d.severity),
-                                    }).collect();
+                                        severity: severity_from_lsp(d.severity)}).collect();
                                     all_diags.insert(uri_str, entries);
                                 }
 
@@ -801,16 +761,14 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 CompletionTextEdit::Edit(e) =>
                                                     e.new_text.clone(),
                                                 CompletionTextEdit::InsertAndReplace(e) =>
-                                                    e.new_text.clone(),
-                                            }
+                                                    e.new_text.clone()}
                                         }))
                                         .unwrap_or_else(|| item.label.clone());
 
                                     CompletionEntry {
                                         label:       item.label.clone(),
                                         insert_text,
-                                        detail:      item.detail.clone(),
-                                    }
+                                        detail:      item.detail.clone()}
                                 }).collect();
                                 let _ = comp_tx.try_send(entries);
                             }
@@ -825,8 +783,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                     let result = DefinitionResult {
                                         path,
                                         line: loc.range.start.line + 1,
-                                        col:  loc.range.start.character + 1,
-                                    };
+                                        col:  loc.range.start.character + 1};
                                     let _ = def_tx.try_send(result);
                                 }
                             }
@@ -846,8 +803,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                     ReferenceEntry {
                                         path,
                                         line: loc.range.start.line + 1,
-                                        col:  loc.range.start.character + 1,
-                                    }
+                                        col:  loc.range.start.character + 1}
                                 }).collect();
                                 let _ = refs_tx.try_send(entries);
                             }
@@ -991,8 +947,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
         peek_def_lines: peek_def_lines_sig,
         code_lens: code_lens_sig,
         folding_ranges: folding_ranges_sig,
-        inlay_hints: inlay_hints_sig,
-    }
+        inlay_hints: inlay_hints_sig}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1007,15 +962,13 @@ fn hover_to_string(hover: lsp_types::Hover) -> String {
             .map(marked_string_to_text)
             .collect::<Vec<_>>()
             .join("\n\n"),
-        HoverContents::Markup(markup) => markup.value,
-    }
+        HoverContents::Markup(markup) => markup.value}
 }
 
 fn marked_string_to_text(ms: lsp_types::MarkedString) -> String {
     match ms {
         lsp_types::MarkedString::String(s) => s,
-        lsp_types::MarkedString::LanguageString(ls) => ls.value,
-    }
+        lsp_types::MarkedString::LanguageString(ls) => ls.value}
 }
 
 fn severity_from_lsp(s: Option<lsp_types::DiagnosticSeverity>) -> DiagSeverity {
@@ -1070,8 +1023,7 @@ fn ripgrep_references(
 ) -> Vec<ReferenceEntry> {
     let word = match word_at_position(path, line, col) {
         Some(w) if !w.is_empty() => w,
-        _ => return vec![],
-    };
+        _ => return vec![]};
 
     let output = std::process::Command::new("rg")
         .args(["--json", "-w", &word, workspace.to_string_lossy().as_ref()])
@@ -1079,8 +1031,7 @@ fn ripgrep_references(
 
     let output = match output {
         Ok(o) => o,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut entries = Vec::new();
@@ -1089,8 +1040,7 @@ fn ripgrep_references(
         // Parse each JSON line; skip anything that isn't a "match" event.
         let val: serde_json::Value = match serde_json::from_str(line_str) {
             Ok(v) => v,
-            Err(_) => continue,
-        };
+            Err(_) => continue};
         if val.get("type").and_then(|t| t.as_str()) != Some("match") {
             continue;
         }
@@ -1107,8 +1057,7 @@ fn ripgrep_references(
                 local.push(ReferenceEntry {
                     path: PathBuf::from(file_path),
                     line: line_num,
-                    col: col_start,
-                });
+                    col: col_start});
             }
             Some(local)
         })();
@@ -1137,8 +1086,7 @@ fn generate_code_actions(path: &PathBuf, line: u32, col: u32) -> Vec<CodeAction>
         actions.push(CodeAction {
             title: "Organize Imports (sort use declarations)".to_string(),
             kind: "source.organizeImports".to_string(),
-            edit: organize_rust_imports(path),
-        });
+            edit: organize_rust_imports(path)});
     }
 
     // Context-specific: if word under cursor looks like a variable, offer "Rename Symbol"
@@ -1147,8 +1095,7 @@ fn generate_code_actions(path: &PathBuf, line: u32, col: u32) -> Vec<CodeAction>
             actions.push(CodeAction {
                 title: format!("Find All References to '{word}'"),
                 kind: "refactor.findReferences".to_string(),
-                edit: None,
-            });
+                edit: None});
         }
     }
 
@@ -1311,8 +1258,7 @@ fn apply_text_edits(
         .map(|e| {
             let te = match e {
                 lsp_types::OneOf::Left(t) => t.clone(),
-                lsp_types::OneOf::Right(a) => a.text_edit.clone(),
-            };
+                lsp_types::OneOf::Right(a) => a.text_edit.clone()};
             (
                 te.range.start.line,
                 te.range.start.character,
@@ -1384,8 +1330,7 @@ fn parse_signature_help(sh: lsp_types::SignatureHelp) -> Option<SignatureHelpRes
     Some(SignatureHelpResult {
         label,
         active_param,
-        params,
-    })
+        params})
 }
 
 /// Flatten nested `lsp_types::DocumentSymbol` tree into a flat list with depth info.
@@ -1403,14 +1348,12 @@ fn flatten_symbols(syms: &[lsp_types::DocumentSymbol], depth: u32) -> Vec<Symbol
             lsp_types::SymbolKind::TYPE_PARAMETER => "type",
             lsp_types::SymbolKind::MODULE => "mod",
             lsp_types::SymbolKind::NAMESPACE => "mod",
-            _ => "item",
-        };
+            _ => "item"};
         out.push(SymbolEntry {
             name: sym.name.clone(),
             kind: kind.to_string(),
             line: sym.selection_range.start.line + 1,
-            depth,
-        });
+            depth});
         if let Some(children) = &sym.children {
             out.extend(flatten_symbols(children, depth + 1));
         }
@@ -1422,8 +1365,7 @@ fn flatten_symbols(syms: &[lsp_types::DocumentSymbol], depth: u32) -> Vec<Symbol
 fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mut symbols = Vec::new();
 
@@ -1501,8 +1443,7 @@ fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
                     name,
                     kind: kind.to_string(),
                     line: (i as u32) + 1,
-                    depth,
-                });
+                    depth});
             }
         }
     }
@@ -1539,8 +1480,7 @@ fn symbol_kind_str(kind: lsp_types::SymbolKind) -> String {
         SymbolKind::EVENT => "event",
         SymbolKind::OPERATOR => "op",
         SymbolKind::TYPE_PARAMETER => "type",
-        _ => "sym",
-    }
+        _ => "sym"}
     .to_string()
 }
 
@@ -1570,8 +1510,7 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
 
     let output = match output {
         Ok(o) => o,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut entries = Vec::new();
@@ -1579,8 +1518,7 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
     for line_str in stdout.lines() {
         let val: serde_json::Value = match serde_json::from_str(line_str) {
             Ok(v) => v,
-            Err(_) => continue,
-        };
+            Err(_) => continue};
         if val.get("type").and_then(|t| t.as_str()) != Some("match") {
             continue;
         }
@@ -1605,8 +1543,7 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
                 name,
                 kind: kind_str.to_string(),
                 line: line_num,
-                depth: 0,
-            })
+                depth: 0})
         })();
 
         if let Some(entry) = parsed {
@@ -1622,8 +1559,7 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
 fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mut lenses = Vec::new();
 
@@ -1674,8 +1610,7 @@ fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
         if let Some(lbl) = label {
             lenses.push(CodeLensEntry {
                 line: line_num,
-                label: lbl,
-            });
+                label: lbl});
         }
     }
 
@@ -1740,8 +1675,7 @@ fn inlay_hints_from_file(path: &PathBuf, start_line: u32, end_line: u32) -> Vec<
                 hints.push(InlayHintEntry {
                     line: line_num,
                     col: (col + var_name.len()) as u32,
-                    label: type_hint.to_string(),
-                });
+                    label: type_hint.to_string()});
             }
         }
     }

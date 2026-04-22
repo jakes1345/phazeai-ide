@@ -1,4 +1,4 @@
-use crate::app::IdeState;
+use crate::domain_state::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::components::input::phaze_input;
 use crate::util::safe_get;
@@ -6,8 +6,7 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
-    IntoView,
-};
+    IntoView};
 use rfd::FileDialog;
 
 /// Combined extension manager panel.
@@ -17,7 +16,7 @@ use rfd::FileDialog;
 /// 2. **VSCode extensions** — .vsix files extracted to ~/.phazeai/extensions/
 ///    (themes, grammars, snippets, language configs loaded natively — no JS)
 pub fn extensions_panel(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let search_query = create_rw_signal(String::new());
 
     // ── Channel for all extension scan/install results ────────────────────────
@@ -28,14 +27,14 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
         let state = state.clone();
         create_effect(move |_| {
             if let Some(res) = result_signal.get() {
-                state.ext_loading.set(false);
+                state.workbench.ext_loading.set(false);
                 match res {
                     Ok(names) => {
-                        state.extensions.set(names);
+                        state.workbench.extensions.set(names);
                     }
                     Err(e) => {
                         crate::app::show_toast(
-                            state.status_toast,
+                            state.workbench.status_toast,
                             format!("Extension error: {}", e),
                         );
                     }
@@ -50,8 +49,8 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
         let state = state.clone();
         let tx = result_tx.clone();
         move |_: ()| {
-            state.ext_loading.set(true);
-            let manager = state.ext_manager.clone();
+            state.workbench.ext_loading.set(true);
+            let manager = state.workbench.ext_manager.clone();
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let mut all_names: Vec<String> = Vec::new();
@@ -88,7 +87,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
     let (toast_tx, toast_rx) = std::sync::mpsc::sync_channel::<String>(4);
     let toast_signal = create_signal_from_channel(toast_rx);
     {
-        let toast = state.status_toast;
+        let toast = state.workbench.status_toast;
         create_effect(move |_| {
             if let Some(msg) = toast_signal.get() {
                 crate::app::show_toast(toast, msg);
@@ -109,7 +108,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                 return;
             };
 
-            state.ext_loading.set(true);
+            state.workbench.ext_loading.set(true);
             let tx = tx.clone();
             let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
@@ -170,12 +169,12 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
         v_stack((
             // Section: installed extensions
             label(move || {
-                if state.ext_loading.get() {
+                if state.workbench.ext_loading.get() {
                     "Scanning...".to_string()
-                } else if state.extensions.get().is_empty() {
+                } else if state.workbench.extensions.get().is_empty() {
                     "No extensions installed.\n\nInstall a .vsix file or place native plugins in ~/.phazeai/plugins/".to_string()
                 } else {
-                    format!("{} extension(s)", state.extensions.get().len())
+                    format!("{} extension(s)", state.workbench.extensions.get().len())
                 }
             })
             .style(move |s| {
@@ -187,7 +186,7 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                     .width_full()
             }),
             dyn_stack(
-                move || safe_get(state.extensions, Vec::new()),
+                move || safe_get(state.workbench.extensions, Vec::new()),
                 |ext| ext.clone(),
                 move |ext| {
                     let is_vscode = ext.starts_with("[VSCode]");

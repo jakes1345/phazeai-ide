@@ -1,22 +1,22 @@
 use floem::{
     reactive::{SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView,
-};
-use phazeai_core::{llm::provider::ProviderId, Settings};
+    IntoView};
+use phazeai_core::{
+    llm::provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+    Settings};
 
+use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
 use crate::{
-    app::IdeState,
+    
     components::icon::{icons, phaze_icon},
-    theme::{PhazeTheme, ThemeVariant},
-};
+    theme::{PhazeTheme, ThemeVariant}};
 
 #[derive(Clone)]
 struct ProviderUiStatus {
     available: bool,
     summary: String,
-    detail: String,
-}
+    detail: String}
 
 fn provider_name_to_id(name: &str) -> Option<ProviderId> {
     match name {
@@ -28,8 +28,7 @@ fn provider_name_to_id(name: &str) -> Option<ProviderId> {
         "OpenRouter" => Some(ProviderId::OpenRouter),
         "Ollama (Local)" => Some(ProviderId::Ollama),
         "LM Studio (Local)" => Some(ProviderId::LmStudio),
-        _ => None,
-    }
+        _ => None}
 }
 
 fn provider_status(name: &str) -> ProviderUiStatus {
@@ -37,8 +36,7 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Unknown provider".into(),
-            detail: "This provider name does not map to a configured backend.".into(),
-        };
+            detail: "This provider name does not map to a configured backend.".into()};
     };
 
     let settings = Settings::load();
@@ -47,45 +45,53 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Not configured".into(),
-            detail: "No provider configuration is available for this backend.".into(),
-        };
+            detail: "No provider configuration is available for this backend.".into()};
     };
 
     if !config.enabled {
         return ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
-            detail: "This provider is disabled in settings.toml.".into(),
-        };
+            detail: "This provider is disabled in settings.toml.".into()};
     }
 
     if provider_id.needs_api_key() {
-        if config.api_key().is_some() {
-            return ProviderUiStatus {
-                available: true,
-                summary: "Ready".into(),
-                detail: format!("Configured via {}", config.api_key_env),
-            };
+        match config.api_key_source() {
+            ApiKeySource::Keyring => {
+                return ProviderUiStatus {
+                    available: true,
+                    summary: "Ready".into(),
+                    detail: format!("Stored in OS keyring ({})", config.api_key_env)};
+            }
+            ApiKeySource::Env => {
+                return ProviderUiStatus {
+                    available: true,
+                    summary: "Ready".into(),
+                    detail: format!("Using env var {}", config.api_key_env)};
+            }
+            ApiKeySource::None => {
+                return ProviderUiStatus {
+                    available: false,
+                    summary: "Missing API key".into(),
+                    detail: format!(
+                        "Paste your key below (stored securely) or set {}.",
+                        config.api_key_env
+                    )};
+            }
         }
-        return ProviderUiStatus {
-            available: false,
-            summary: "Missing API key".into(),
-            detail: format!("Set {} in the environment.", config.api_key_env),
-        };
     }
 
     ProviderUiStatus {
         available: true,
         summary: "Ready".into(),
-        detail: format!("Local endpoint: {}", config.base_url),
-    }
+        detail: format!("Local endpoint: {}", config.base_url)}
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 /// A thin horizontal rule used to separate sections.
 fn divider(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     container(label(|| "")).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
@@ -98,7 +104,7 @@ fn divider(state: IdeState) -> impl IntoView {
 
 /// An uppercase section header label.
 fn section_header(text: &'static str, state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     label(move || text).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
@@ -116,7 +122,7 @@ fn stepper_btn(
     on_click: impl Fn() + 'static,
 ) -> impl IntoView {
     use floem::reactive::create_rw_signal;
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let is_hovered = create_rw_signal(false);
 
     container(phaze_icon(
@@ -166,7 +172,7 @@ fn stepper_row(
     max: u32,
     state: IdeState,
 ) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let dec = stepper_btn("-", state.clone(), move || {
         value.update(|v| {
             if *v > min {
@@ -207,7 +213,7 @@ fn stepper_row(
 
 fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let is_hovered = create_rw_signal(false);
 
     container(label(move || name).style(move |s| {
@@ -288,16 +294,16 @@ fn theme_section(state: IdeState) -> impl IntoView {
 
 fn editor_section(state: IdeState) -> impl IntoView {
     // Use the shared font_size and tab_size signals from IdeState.
-    let font_size = state.font_size;
-    let tab_size = state.tab_size;
+    let font_size = state.editor.font_size;
+    let tab_size = state.editor.tab_size;
 
-    let auto_save = state.auto_save;
-    let word_wrap = state.word_wrap;
-    let organize_imports = state.organize_imports_on_save;
-    let code_lens_vis = state.code_lens_visible;
-    let inlay_hints = state.inlay_hints_toggle;
-    let relative_ln = state.relative_line_numbers;
-    let theme_as = state.theme;
+    let auto_save = state.editor.auto_save;
+    let word_wrap = state.editor.word_wrap;
+    let organize_imports = state.editor.organize_imports_on_save;
+    let code_lens_vis = state.editor.code_lens_visible;
+    let inlay_hints = state.editor.inlay_hints_toggle;
+    let relative_ln = state.editor.relative_line_numbers;
+    let theme_as = state.workbench.theme;
     let as_hov = floem::reactive::create_rw_signal(false);
     let ww_hov = floem::reactive::create_rw_signal(false);
     let oi_hov = floem::reactive::create_rw_signal(false);
@@ -368,8 +374,8 @@ fn editor_section(state: IdeState) -> impl IntoView {
 /// A clickable provider option tile.
 fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
-    let theme = state.theme;
-    let provider = state.ai_provider;
+    let theme = state.workbench.theme;
+    let provider = state.ai.provider;
     let is_hovered = create_rw_signal(false);
 
     container(
@@ -449,9 +455,9 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
 }
 
 fn ai_section(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
-    let ai_provider = state.ai_provider;
-    let ai_model = state.ai_model;
+    let theme = state.workbench.theme;
+    let ai_provider = state.ai.provider;
+    let ai_model = state.ai.model;
 
     // Provider tiles
     const PROVIDERS: &[&str] = &[
@@ -541,17 +547,167 @@ fn ai_section(state: IdeState) -> impl IntoView {
     ))
     .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0));
 
+    let api_key_row = api_key_input_row(state.clone());
+
     stack((
         section_header("AI", state.clone()),
         provider_section,
         model_row,
+        api_key_row,
     ))
     .style(|s| s.flex_col().width_full())
 }
 
+/// API key input row — masked text input with Save / Clear buttons. Saves to
+/// the OS keyring under the active provider's `api_key_env` entry name.
+fn api_key_input_row(state: IdeState) -> impl IntoView {
+    use floem::reactive::{create_effect, create_rw_signal};
+    let theme = state.workbench.theme;
+    let ai_provider = state.ai.provider;
+
+    let key_input = create_rw_signal(String::new());
+    let feedback = create_rw_signal(String::new());
+
+    // Clear the input (and any stale feedback) when the active provider changes,
+    // so one provider's key can't accidentally be saved under another.
+    let key_input_eff = key_input;
+    let feedback_eff = feedback;
+    let ai_provider_eff = ai_provider;
+    create_effect(move |_| {
+        let _ = ai_provider_eff.get();
+        key_input_eff.set(String::new());
+        feedback_eff.set(String::new());
+    });
+
+    // Helper: map the currently selected provider to (entry_name, needs_key).
+    let active_entry = move || -> Option<(String, bool)> {
+        let name = ai_provider.get();
+        let id = provider_name_to_id(&name)?;
+        let settings = Settings::load();
+        let registry = settings.build_provider_registry();
+        let cfg = registry.get_config(&id)?;
+        Some((cfg.api_key_env.clone(), id.needs_api_key()))
+    };
+
+    let save_fn = {
+        let active_entry = active_entry;
+        move || {
+            let Some((entry, _)) = active_entry() else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            let val = key_input.get().trim().to_string();
+            if val.is_empty() {
+                feedback.set("Paste a key first.".into());
+                return;
+            }
+            match keyring_set(&entry, &val) {
+                Ok(()) => {
+                    key_input.set(String::new());
+                    feedback.set("Saved to keyring.".into());
+                }
+                Err(e) => feedback.set(format!("Save failed: {e}"))}
+        }
+    };
+
+    let clear_fn = {
+        let active_entry = active_entry;
+        move || {
+            let Some((entry, _)) = active_entry() else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            match keyring_delete(&entry) {
+                Ok(()) => feedback.set("Key cleared.".into()),
+                Err(e) => feedback.set(format!("Clear failed: {e}"))}
+        }
+    };
+
+    let input = text_input(key_input)
+        .placeholder("Paste API key — cleared after Save")
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let needs = provider_name_to_id(&ai_provider.get())
+                .map(|id| id.needs_api_key())
+                .unwrap_or(false);
+            s.flex_grow(1.0)
+                .min_width(0.0)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(4.0)
+                .color(p.text_primary)
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
+                .font_size(12.0)
+                .apply_if(!needs, |s| s.display(floem::style::Display::None))
+        });
+
+    let save_btn = container(label(|| "Save")).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.padding_horiz(10.0)
+                .padding_vert(4.0)
+                .font_size(12.0)
+                .color(p.text_primary)
+                .background(p.accent_dim)
+                .border(1.0)
+                .border_color(p.accent)
+                .border_radius(4.0)
+                .margin_left(6.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+        })
+        .on_click_stop(move |_| save_fn());
+
+    let clear_btn = container(label(|| "Clear")).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.padding_horiz(10.0)
+                .padding_vert(4.0)
+                .font_size(12.0)
+                .color(p.text_muted)
+                .background(p.bg_surface)
+                .border(1.0)
+                .border_color(p.border)
+                .border_radius(4.0)
+                .margin_left(4.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+        })
+        .on_click_stop(move |_| clear_fn());
+
+    let input_row = stack((input, save_btn, clear_btn))
+        .style(|s| s.flex_row().items_center().width_full());
+
+    let feedback_line = label(move || feedback.get()).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0).color(p.text_muted).margin_top(4.0)
+    });
+
+    stack((
+        label(|| "API Key").style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.font_size(13.0).color(p.text_primary).margin_bottom(4.0)
+        }),
+        input_row,
+        feedback_line,
+    ))
+    .style(move |s| {
+        let needs = provider_name_to_id(&ai_provider.get())
+            .map(|id| id.needs_api_key())
+            .unwrap_or(false);
+        s.flex_col()
+            .width_full()
+            .padding_vert(4.0)
+            .apply_if(!needs, |s| s.display(floem::style::Display::None))
+    })
+}
+
 fn about_section(state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let is_link_hovered = create_rw_signal(false);
 
     let icon_row = stack((
@@ -617,7 +773,7 @@ fn about_section(state: IdeState) -> impl IntoView {
 // ─── keybindings reference ───────────────────────────────────────────────────────
 
 fn keybindings_section(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
 
     const BINDINGS: &[(&str, &str)] = &[
         // File
@@ -707,7 +863,7 @@ fn keybindings_section(state: IdeState) -> impl IntoView {
 /// the shared signals — changes here propagate to the rest of the IDE and are
 /// persisted to disk via reactive effects wired in IdeState::new().
 pub fn settings_panel(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
 
     // Panel header
     let header = container(

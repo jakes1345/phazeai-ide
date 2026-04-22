@@ -152,12 +152,27 @@ impl Agent {
         // This avoids the race condition of the old tokio::spawn approach
         let conversation = self.conversation.clone();
         let prompt = prompt.into();
-        // Use blocking lock since this is called during construction
-        let mut conv = conversation
-            .try_lock()
-            .expect("Agent not yet shared during construction");
-        conv.set_system_prompt(prompt);
-        drop(conv);
+        // Retry `try_lock` briefly to handle transient construction contention.
+        for _ in 0..50 {
+            if let Ok(mut conv) = conversation.try_lock() {
+                conv.set_system_prompt(prompt.clone());
+                return self;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // If still contended, apply asynchronously instead of panicking.
+        // This preserves prompt intent even under rare lock contention.
+        std::thread::spawn(move || {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(async move {
+                    let mut conv = conversation.lock().await;
+                    conv.set_system_prompt(prompt);
+                });
+            }
+        });
         self
     }
 

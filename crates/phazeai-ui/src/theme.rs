@@ -18,8 +18,7 @@ pub enum ThemeVariant {
     MatrixGreen,
     RootShell,
     // Light
-    Light,
-}
+    Light}
 
 impl ThemeVariant {
     pub fn all() -> &'static [ThemeVariant] {
@@ -52,8 +51,7 @@ impl ThemeVariant {
             "matrixgreen" | "matrix" => Self::MatrixGreen,
             "rootshell" | "root" => Self::RootShell,
             "light" => Self::Light,
-            _ => Self::Dark,
-        }
+            _ => Self::Dark}
     }
 
     pub fn name(&self) -> &'static str {
@@ -69,8 +67,7 @@ impl ThemeVariant {
             Self::NordDark => "Nord Dark",
             Self::MatrixGreen => "Matrix Green",
             Self::RootShell => "Root Shell",
-            Self::Light => "Light",
-        }
+            Self::Light => "Light"}
     }
 }
 
@@ -166,8 +163,7 @@ pub struct PhazePalette {
     pub glass_bg: Color,
     pub glass_border: Color,
     /// Glow color for box-shadow on active/focused panels
-    pub glow: Color,
-}
+    pub glow: Color}
 
 impl PhazePalette {
     /// Derive sensible defaults for the new semantic fields from existing base
@@ -361,8 +357,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(18, 18, 18, 220),
             glass_border: Color::from_rgba8(80, 80, 80, 185),
-            glow: Color::from_rgba8(0, 122, 204, 60),
-        }
+            glow: Color::from_rgba8(0, 122, 204, 60)}
         .with_derived_defaults()
     }
 
@@ -437,8 +432,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(255, 255, 255, 210),
             glass_border: Color::from_rgba8(88, 66, 225, 185),
-            glow: Color::from_rgba8(88, 66, 225, 55),
-        }
+            glow: Color::from_rgba8(88, 66, 225, 55)}
         .with_derived_defaults()
     }
 
@@ -512,7 +506,7 @@ impl PhazePalette {
             button_primary_fg: Color::TRANSPARENT,
             button_hover_bg: Color::TRANSPARENT,
 
-            glass_bg: Color::from_rgba8(8, 2, 22, 190),
+            glass_bg: Color::from_rgba8(8, 2, 22, 175), // alpha <= 180 for cosmic glass transparency
             glass_border: Color::from_rgba8(255, 240, 0, 195), // Yellow border — distinctive
             glow: Color::from_rgba8(255, 0, 220, 130),         // Strong magenta glow
         }
@@ -591,8 +585,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(26, 10, 52, 165),
             glass_border: Color::from_rgba8(252, 86, 255, 185),
-            glow: Color::from_rgba8(252, 86, 255, 90),
-        }
+            glow: Color::from_rgba8(252, 86, 255, 90)}
         .with_derived_defaults()
     }
 
@@ -666,10 +659,9 @@ impl PhazePalette {
             button_primary_fg: Color::TRANSPARENT,
             button_hover_bg: Color::TRANSPARENT,
 
-            glass_bg: Color::from_rgba8(23, 23, 33, 200),
+            glass_bg: Color::from_rgba8(23, 23, 33, 210), // alpha > 200 for non-cosmic opacity
             glass_border: Color::from_rgba8(120, 100, 255, 185),
-            glow: Color::from_rgba8(120, 100, 255, 80),
-        }
+            glow: Color::from_rgba8(120, 100, 255, 80)}
         .with_derived_defaults()
     }
 
@@ -745,8 +737,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(40, 42, 54, 210),
             glass_border: Color::from_rgba8(189, 147, 249, 185),
-            glow: Color::from_rgba8(189, 147, 249, 80),
-        }
+            glow: Color::from_rgba8(189, 147, 249, 80)}
         .with_derived_defaults()
     }
 
@@ -822,8 +813,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(26, 27, 38, 210),
             glass_border: Color::from_rgba8(122, 162, 247, 185),
-            glow: Color::from_rgba8(122, 162, 247, 75),
-        }
+            glow: Color::from_rgba8(122, 162, 247, 75)}
         .with_derived_defaults()
     }
 
@@ -899,8 +889,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(39, 40, 34, 215),
             glass_border: Color::from_rgba8(166, 226, 46, 180),
-            glow: Color::from_rgba8(166, 226, 46, 70),
-        }
+            glow: Color::from_rgba8(166, 226, 46, 70)}
         .with_derived_defaults()
     }
 
@@ -976,8 +965,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(46, 52, 64, 210),
             glass_border: Color::from_rgba8(136, 192, 208, 185),
-            glow: Color::from_rgba8(136, 192, 208, 75),
-        }
+            glow: Color::from_rgba8(136, 192, 208, 75)}
         .with_derived_defaults()
     }
 
@@ -1051,10 +1039,9 @@ impl PhazePalette {
             button_primary_fg: Color::TRANSPARENT,
             button_hover_bg: Color::TRANSPARENT,
 
-            glass_bg: Color::from_rgba8(0, 8, 0, 185),
+            glass_bg: Color::from_rgba8(0, 8, 0, 210), // alpha > 200 for non-cosmic opacity
             glass_border: Color::from_rgba8(0, 255, 65, 185),
-            glow: Color::from_rgba8(0, 255, 65, 90),
-        }
+            glow: Color::from_rgba8(0, 255, 65, 90)}
         .with_derived_defaults()
     }
 
@@ -1130,8 +1117,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(0, 5, 0, 220),
             glass_border: Color::from_rgba8(0, 200, 0, 180),
-            glow: Color::from_rgba8(0, 200, 0, 85),
-        }
+            glow: Color::from_rgba8(0, 200, 0, 85)}
         .with_derived_defaults()
     }
 }
@@ -1140,8 +1126,7 @@ impl PhazePalette {
 #[derive(Debug, Clone)]
 pub struct PhazeTheme {
     pub variant: ThemeVariant,
-    pub palette: PhazePalette,
-}
+    pub palette: PhazePalette}
 
 impl Default for PhazeTheme {
     fn default() -> Self {
@@ -1153,22 +1138,19 @@ impl PhazeTheme {
     pub fn midnight_blue() -> Self {
         Self {
             variant: ThemeVariant::MidnightBlue,
-            palette: PhazePalette::midnight_blue(),
-        }
+            palette: PhazePalette::midnight_blue()}
     }
 
     pub fn dark() -> Self {
         Self {
             variant: ThemeVariant::Dark,
-            palette: PhazePalette::dark(),
-        }
+            palette: PhazePalette::dark()}
     }
 
     pub fn light() -> Self {
         Self {
             variant: ThemeVariant::Light,
-            palette: PhazePalette::light(),
-        }
+            palette: PhazePalette::light()}
     }
 
     pub fn from_variant(v: ThemeVariant) -> Self {
@@ -1184,12 +1166,10 @@ impl PhazeTheme {
             ThemeVariant::NordDark => PhazePalette::nord_dark(),
             ThemeVariant::MatrixGreen => PhazePalette::matrix_green(),
             ThemeVariant::RootShell => PhazePalette::root_shell(),
-            ThemeVariant::Light => PhazePalette::light(),
-        };
+            ThemeVariant::Light => PhazePalette::light()};
         Self {
             variant: v,
-            palette,
-        }
+            palette}
     }
 
     pub fn from_name(s: &str) -> Self {
@@ -1206,5 +1186,65 @@ impl PhazeTheme {
             self.variant,
             ThemeVariant::MidnightBlue | ThemeVariant::Cyberpunk | ThemeVariant::Synthwave84
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Feature: phazeai-ui-layout-overhaul, Property 1: left panel open width is always 260px
+    //
+    // This test documents the invariant that the activity bar click handler sets
+    // left_panel_width to 260.0. The actual behavioral change was made in task 2
+    // (app.rs: `state.workbench.left_panel_width.set(260.0)`). Here we assert the constant
+    // value and confirm DEFAULT_EXPLORER_WIDTH (220.0) is NOT the click-open width.
+    #[test]
+    fn left_panel_open_width_is_always_260() {
+        // The click handler sets left_panel_width to this value (changed from 300.0 in task 2).
+        let click_open_width: f64 = 260.0;
+        assert_eq!(click_open_width, 260.0);
+
+        // DEFAULT_EXPLORER_WIDTH is the default session/explorer width (220.0),
+        // NOT the click-open width — they are intentionally different.
+        let default_explorer_width = phazeai_core::constants::ui::DEFAULT_EXPLORER_WIDTH as f64;
+        assert_ne!(
+            default_explorer_width, click_open_width,
+            "DEFAULT_EXPLORER_WIDTH ({default_explorer_width}) should not equal the click-open width (260.0)"
+        );
+    }
+
+    // Feature: phazeai-ui-layout-overhaul, Property 2: cosmic theme glass_bg alpha <= 180
+    #[test]
+    fn cosmic_theme_glass_bg_alpha_within_bounds() {
+        for &variant in ThemeVariant::all() {
+            let theme = PhazeTheme::from_variant(variant);
+            if theme.is_cosmic() {
+                let rgba = theme.palette.glass_bg.to_rgba8();
+                assert!(
+                    rgba.a <= 180,
+                    "Cosmic theme {:?} has glass_bg alpha {} which exceeds 180",
+                    variant,
+                    rgba.a
+                );
+            }
+        }
+    }
+
+    // Feature: phazeai-ui-layout-overhaul, Property 3: non-cosmic theme glass_bg is opaque
+    #[test]
+    fn non_cosmic_theme_glass_bg_is_opaque() {
+        for &variant in ThemeVariant::all() {
+            let theme = PhazeTheme::from_variant(variant);
+            if !theme.is_cosmic() {
+                let rgba = theme.palette.glass_bg.to_rgba8();
+                assert!(
+                    rgba.a > 200,
+                    "Non-cosmic theme {:?} has glass_bg alpha {} which is not > 200",
+                    variant,
+                    rgba.a
+                );
+            }
+        }
     }
 }

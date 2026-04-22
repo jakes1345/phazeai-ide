@@ -1,22 +1,22 @@
+use crate::domain_state::IdeState;
 use floem::{
     ext_event::create_ext_action,
     reactive::{create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView,
-};
+    IntoView};
 
-use crate::app::{IdeState, SearchResult};
+use crate::domain_state::SearchResult;
 use crate::util::{safe_get, safe_get_memo};
 
 /// The search panel — workspace search + multi-file replace.
 pub fn search_panel(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
-    let query = state.search_query;
-    let results = state.search_results;
-    let sidecar_ready = state.sidecar_ready;
-    let sidecar_status = state.sidecar_status;
-    let sidecar_building = state.sidecar_building;
-    let sidecar_results = state.sidecar_results;
+    let theme = state.workbench.theme;
+    let query = state.workbench.search_query;
+    let results = state.workbench.search_results;
+    let sidecar_ready = state.project.sidecar_ready;
+    let sidecar_status = state.project.sidecar_status;
+    let sidecar_building = state.project.sidecar_building;
+    let sidecar_results = state.project.sidecar_results;
     let is_searching = create_rw_signal(false);
     let replace_text = create_rw_signal(String::new());
     let replace_open = create_rw_signal(false);
@@ -268,7 +268,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                         });
                                         history_idx.set(None);
                                     }
-                                    let root = state2.workspace_root.get();
+                                    let root = state2.project.workspace_root.get();
                                     perform_search(
                                         state2.clone(),
                                         is_searching,
@@ -281,8 +281,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                         exclude_glob,
                                     );
                                     if !q.trim().is_empty() {
-                                        state2.sidecar_query.set(q.trim().to_string());
-                                        state2.sidecar_search_nonce.update(|n| *n += 1);
+                                        state2.project.sidecar_query.set(q.trim().to_string());
+                                        state2.project.sidecar_search_nonce.update(|n| *n += 1);
                                     }
                                 }
                                 Key::Named(NamedKey::ArrowUp) => {
@@ -292,8 +292,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                     }
                                     let next = match history_idx.get_untracked() {
                                         None => 0,
-                                        Some(i) => (i + 1).min(hist.len() - 1),
-                                    };
+                                        Some(i) => (i + 1).min(hist.len() - 1)};
                                     history_idx.set(Some(next));
                                     query.set(hist[next].clone());
                                 }
@@ -410,8 +409,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         if q.trim().is_empty() {
                             return;
                         }
-                        semantic_state.sidecar_query.set(q.trim().to_string());
-                        semantic_state.sidecar_search_nonce.update(|n| *n += 1);
+                        semantic_state.project.sidecar_query.set(q.trim().to_string());
+                        semantic_state.project.sidecar_search_nonce.update(|n| *n += 1);
                     }),
                 container(label(move || {
                     if sidecar_building.get() {
@@ -433,7 +432,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         .border_color(p.border)
                 })
                 .on_click_stop(move |_| {
-                    semantic_state2.sidecar_build_nonce.update(|n| *n += 1);
+                    semantic_state2.project.sidecar_build_nonce.update(|n| *n += 1);
                 }),
             ))
             .style(|s| s.flex_row().items_center().gap(6.0).width_full()),
@@ -486,8 +485,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             })
                     })
                     .on_click_stop(move |_| {
-                        semantic_state2.open_file.set(Some(file_path.clone()));
-                        semantic_state2.goto_line.set(1);
+                        semantic_state2.editor.open_file.set(Some(file_path.clone()));
+                        semantic_state2.editor.goto_line.set(1);
                     })
                     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                         hovered.set(true);
@@ -548,7 +547,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     })
                     .on_click_stop(move |_| {
                         perform_replace_all(
-                            state3.search_results.get(),
+                            state3.workbench.search_results.get(),
                             query.get(),
                             replace_text.get(),
                             replace_status,
@@ -627,8 +626,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                 })
                 .on_click_stop(move |_| {
                     selected_idx.set(Some(i));
-                    s.open_file.set(Some(path.clone()));
-                    s.goto_line.set(line as u32);
+                    s.editor.open_file.set(Some(path.clone()));
+                    s.editor.goto_line.set(line as u32);
                 })
             },
         )
@@ -742,8 +741,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                 .cursor(floem::style::CursorStyle::Pointer)
                         })
                         .on_click_stop(move |_| {
-                            s.open_file.set(Some(path.clone()));
-                            s.goto_line.set(line as u32);
+                            s.editor.open_file.set(Some(path.clone()));
+                            s.editor.goto_line.set(line as u32);
                         })
                         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                             hovered.set(true);
@@ -814,23 +813,21 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         selected_idx.update(|i| {
                             *i = Some(match *i {
                                 None => 0,
-                                Some(n) => (n + 1).min(total.saturating_sub(1)),
-                            });
+                                Some(n) => (n + 1).min(total.saturating_sub(1))});
                         });
                     }
                     floem::keyboard::Key::Named(NamedKey::ArrowUp) => {
                         selected_idx.update(|i| {
                             *i = Some(match *i {
                                 None => 0,
-                                Some(n) => n.saturating_sub(1),
-                            });
+                                Some(n) => n.saturating_sub(1)});
                         });
                     }
                     floem::keyboard::Key::Named(NamedKey::Enter) => {
                         if let Some(idx) = selected_idx.get() {
                             if let Some(r) = results.get().get(idx).cloned() {
-                                state.open_file.set(Some(r.path.clone()));
-                                state.goto_line.set(r.line as u32 + 1);
+                                state.editor.open_file.set(Some(r.path.clone()));
+                                state.editor.goto_line.set(r.line as u32 + 1);
                             }
                         }
                     }
@@ -873,13 +870,13 @@ fn perform_search(
     include_glob: RwSignal<String>,
     exclude_glob: RwSignal<String>,
 ) {
-    let query = state.search_query.get();
+    let query = state.workbench.search_query.get();
     if query.is_empty() {
         return;
     }
 
     is_searching.set(true);
-    state.search_results.set(vec![]);
+    state.workbench.search_results.set(vec![]);
 
     let regex = use_regex.get();
     let case_sens = case_sensitive.get();
@@ -889,7 +886,7 @@ fn perform_search(
     let exclude = exclude_glob.get();
     // Capture open tabs for filtering (only if open_only is enabled)
     let open_tab_paths: Vec<std::path::PathBuf> = if open_only {
-        state.open_tabs.get()
+        state.editor.open_tabs.get()
     } else {
         vec![]
     };
@@ -946,8 +943,7 @@ fn perform_search(
                         found.push(SearchResult {
                             path: root.join(parts[0]),
                             line: line_num,
-                            content: parts[2].to_string(),
-                        });
+                            content: parts[2].to_string()});
                     }
                 }
             }
@@ -975,8 +971,7 @@ fn perform_search(
                             found.push(SearchResult {
                                 path: entry.path().to_path_buf(),
                                 line: i + 1,
-                                content: line_text.to_string(),
-                            });
+                                content: line_text.to_string()});
                             if found.len() >= 500 {
                                 break;
                             }
@@ -995,7 +990,7 @@ fn perform_search(
         let _ = tx.send(found);
     });
 
-    let results_sig = state.search_results;
+    let results_sig = state.workbench.search_results;
     // create_ext_action avoids leaking a new signal+effect on every search invocation
     let on_results = create_ext_action(Scope::current(), move |found: Vec<SearchResult>| {
         results_sig.set(found);
@@ -1061,17 +1056,16 @@ fn perform_replace_all(
                     count = content.matches(&find2).count();
                     content.replace(&find2, &replace2)
                 } else {
-                    let mut result = String::new();
-                    let mut rest = content.as_str();
-                    let lo_find = find2.to_lowercase();
-                    while let Some(pos) = rest.to_lowercase().find(&lo_find) {
-                        result.push_str(&rest[..pos]);
-                        result.push_str(&replace2);
-                        rest = &rest[pos + find2.len()..];
-                        count += 1;
+                    // Avoid repeated per-iteration lowercase allocations.
+                    if let Ok(re) = regex::RegexBuilder::new(&regex::escape(&find2))
+                        .case_insensitive(true)
+                        .build()
+                    {
+                        count = re.find_iter(&content).count();
+                        re.replace_all(&content, replace2.as_str()).to_string()
+                    } else {
+                        content.clone()
                     }
-                    result.push_str(rest);
-                    result
                 };
                 replaced_count += count;
                 new

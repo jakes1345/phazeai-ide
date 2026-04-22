@@ -6,9 +6,7 @@ use std::{
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+        Arc}};
 
 use floem::{
     event::{Event, EventListener},
@@ -24,32 +22,27 @@ use floem::{
                 buffer::rope_text::RopeText,
                 cursor::{Cursor, CursorMode},
                 editor::EditType,
-                selection::{SelRegion, Selection},
-            },
+                selection::{SelRegion, Selection}},
             id::EditorId,
             layout::{LineExtraStyle, TextLayoutLine},
             text::{default_dark_color, Document, SimpleStylingBuilder, Styling, WrapMethod},
-            EditorStyle,
-        },
-        label, scroll, stack, text_editor, text_input, Decorators,
-    },
-    IntoView, Renderer,
-};
+            EditorStyle},
+        label, scroll, stack, text_editor, text_input, Decorators},
+    IntoView, Renderer};
 
 use crate::lsp_bridge::DiagSeverity;
 use crate::util::safe_get;
 use lazy_static::lazy_static;
 use syntect::{
     highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator, ThemeSet},
-    parsing::{ParseState, ScopeStack, SyntaxSet},
-};
+    parsing::{ParseState, ScopeStack, SyntaxSet}};
 
 use phazeai_core::{llm::Message, Settings};
 
+use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
 use crate::{
     components::icon::{icons, phaze_icon},
-    theme::PhazeTheme,
-};
+    theme::PhazeTheme};
 
 // ── Syntect globals (lazy_static → 'static lifetimes) ────────────────────────
 
@@ -101,8 +94,7 @@ struct SyntaxStyle {
     bracket_pair_guides: Vec<(usize, usize, usize, usize)>,
     /// Last known rope length for cache invalidation. If rope length changes,
     /// the entire states cache is cleared to prevent stale highlighting.
-    last_rope_len: std::cell::Cell<usize>,
-}
+    last_rope_len: std::cell::Cell<usize>}
 
 impl SyntaxStyle {
     /// Create a `SyntaxStyle` for the given file extension.
@@ -137,8 +129,7 @@ impl SyntaxStyle {
             "kt" | "kts" => SYNTAX_SET.find_syntax_by_extension("kt"),
             "swift" => SYNTAX_SET.find_syntax_by_extension("swift"),
             "cs" => SYNTAX_SET.find_syntax_by_extension("cs"),
-            _ => None,
-        }
+            _ => None}
         .or_else(|| SYNTAX_SET.find_syntax_plain_text().into())
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
@@ -165,8 +156,7 @@ impl SyntaxStyle {
             char_width_px: 8.4,
             blame_line: None,
             bracket_pair_guides: Vec::new(),
-            last_rope_len: std::cell::Cell::new(0),
-        }
+            last_rope_len: std::cell::Cell::new(0)}
     }
 
     fn set_doc(&mut self, doc: Rc<dyn Document>) {
@@ -244,6 +234,54 @@ fn find_word_occurrences(text: &str, word: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Returns the identifier/word at `col` (byte offset) within a single line.
+/// This avoids allocating or scanning the full document when the cursor moves.
+fn word_at_line_col(line_text: &str, col: usize) -> Option<String> {
+    if line_text.is_empty() {
+        return None;
+    }
+    let col = col.min(line_text.len());
+    // Clamp to a char boundary at or before `col`.
+    let mut idx = line_text[..col]
+        .char_indices()
+        .next_back()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if idx >= line_text.len() {
+        idx = line_text
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+    let ch = line_text[idx..].chars().next()?;
+    if !ch.is_alphanumeric() && ch != '_' {
+        return None;
+    }
+
+    let mut start = idx;
+    for (i, c) in line_text[..idx].char_indices().rev() {
+        if c.is_alphanumeric() || c == '_' {
+            start = i;
+        } else {
+            break;
+        }
+    }
+    let mut end = idx;
+    for c in line_text[idx..].chars() {
+        if c.is_alphanumeric() || c == '_' {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        None
+    } else {
+        Some(line_text[start..end].to_string())
+    }
+}
+
 // ── Git diff parser ────────────────────────────────────────────────────────
 
 /// Run `git diff HEAD -- <path>` and parse changed lines for the new file.
@@ -257,16 +295,14 @@ fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
     if !out.status.success() && out.stdout.is_empty() {
         return vec![];
     }
 
     let diff = match std::str::from_utf8(&out.stdout) {
         Ok(s) => s,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
 
     let mut result: Vec<(usize, u8)> = Vec::new();
     let mut new_line: usize = 0;
@@ -483,8 +519,7 @@ impl Styling for SyntaxStyle {
                 height: line_h,
                 bg_color: Some(floem::peniko::Color::from_rgba8(255, 255, 255, 12)),
                 under_line: None,
-                wave_line: None,
-            });
+                wave_line: None});
         }
 
         // Draw wave_line (error) or under_line (warning/info) for diagnostic lines.
@@ -496,8 +531,7 @@ impl Styling for SyntaxStyle {
                 DiagSeverity::Error => floem::peniko::Color::from_rgba8(255, 85, 85, 230),
                 DiagSeverity::Warning => floem::peniko::Color::from_rgba8(255, 200, 50, 200),
                 DiagSeverity::Info => floem::peniko::Color::from_rgba8(80, 150, 255, 180),
-                DiagSeverity::Hint => floem::peniko::Color::from_rgba8(120, 180, 120, 160),
-            };
+                DiagSeverity::Hint => floem::peniko::Color::from_rgba8(120, 180, 120, 160)};
             layout_line.extra_style.push(LineExtraStyle {
                 x: 0.0,
                 y: 0.0,
@@ -516,8 +550,7 @@ impl Styling for SyntaxStyle {
                     Some(color)
                 } else {
                     None
-                },
-            });
+                }});
         }
 
         // Draw git gutter decorations: a 3 px colored bar at x=0 on each changed line.
@@ -528,8 +561,7 @@ impl Styling for SyntaxStyle {
             let color = match status {
                 0 => self.git_color_added,
                 1 => self.git_color_modified,
-                _ => self.git_color_deleted,
-            };
+                _ => self.git_color_deleted};
             let line_h = self.inner.line_height(edid, line) as f64;
             layout_line.extra_style.push(LineExtraStyle {
                 x: 0.0,
@@ -538,8 +570,7 @@ impl Styling for SyntaxStyle {
                 height: line_h,
                 bg_color: Some(color),
                 under_line: None,
-                wave_line: None,
-            });
+                wave_line: None});
         }
 
         // Draw fold indicator (bright = collapsed, dim = expanded) in gutter.
@@ -573,8 +604,7 @@ impl Styling for SyntaxStyle {
                         height: line_h,
                         bg_color: Some(floem::peniko::Color::from_rgba8(120, 120, 140, 35)),
                         under_line: None,
-                        wave_line: None,
-                    });
+                        wave_line: None});
                     indent += 4;
                 }
             }
@@ -603,8 +633,7 @@ impl Styling for SyntaxStyle {
                 height: line_h,
                 bg_color: Some(color),
                 under_line: None,
-                wave_line: None,
-            });
+                wave_line: None});
         }
 
         // ── Find-bar: highlight ALL matches ─────────────────────────────────
@@ -634,8 +663,7 @@ impl Styling for SyntaxStyle {
                         height: line_h,
                         bg_color: Some(floem::peniko::Color::from_rgba8(255, 230, 0, 55)),
                         under_line: None,
-                        wave_line: None,
-                    });
+                        wave_line: None});
                 }
             }
         }
@@ -665,8 +693,7 @@ impl Styling for SyntaxStyle {
                             height: line_h,
                             bg_color: Some(color),
                             under_line: Some(floem::peniko::Color::from_rgba8(255, 255, 160, 200)),
-                            wave_line: None,
-                        });
+                            wave_line: None});
                     }
                 }
             }
@@ -701,8 +728,7 @@ impl Styling for SyntaxStyle {
                         height: line_h,
                         bg_color: Some(floem::peniko::Color::from_rgba8(100, 160, 255, 50)),
                         under_line: None,
-                        wave_line: None,
-                    });
+                        wave_line: None});
                 }
             }
         }
@@ -739,8 +765,7 @@ impl SyntaxStyle {
                 height: sq,
                 bg_color: Some(color),
                 under_line: None,
-                wave_line: None,
-            });
+                wave_line: None});
             break;
         }
     }
@@ -878,8 +903,7 @@ fn find_bracket_match(
 struct TabState {
     path: PathBuf,
     name: String,
-    dirty: RwSignal<bool>,
-}
+    dirty: RwSignal<bool>}
 
 // ── Editor panel ──────────────────────────────────────────────────────────────
 
@@ -969,8 +993,7 @@ pub fn editor_panel(
                         list.push(TabState {
                             path: p,
                             name,
-                            dirty: create_rw_signal(false),
-                        });
+                            dirty: create_rw_signal(false)});
                     }
                 });
             }
@@ -1108,7 +1131,7 @@ pub fn editor_panel(
     let goto_line: RwSignal<usize> = create_rw_signal(1usize);
 
     // Wire external goto_line (from LSP go-to-definition) into the local mechanism.
-    // When IdeState.goto_line becomes nonzero we jump to that line, then reset to 0.
+    // When IdeState.editor.goto_line becomes nonzero we jump to that line, then reset to 0.
     create_effect(move |_| {
         let line = ext_goto_line.get();
         if line > 0 {
@@ -1139,8 +1162,7 @@ pub fn editor_panel(
                     list.push(TabState {
                         path: p.clone(),
                         name,
-                        dirty: create_rw_signal(false),
-                    });
+                        dirty: create_rw_signal(false)});
                     disambiguate_tab_names(list);
                     new_idx.set(list.len() - 1);
                 });
@@ -1166,13 +1188,11 @@ pub fn editor_panel(
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
             // doesn't need it, but gopls, pylsp, etc. do) get the save notification.
             let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::SaveFile {
-                path: tab.path.clone(),
-            });
+                path: tab.path.clone()});
             // Organize imports if enabled
             if organize_imports_on_save.get_untracked() {
                 let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::OrganizeImports {
-                    path: tab.path.clone(),
-                });
+                    path: tab.path.clone()});
             }
             // Run formatter in background — file is already saved to disk
             let path = tab.path.clone();
@@ -1185,8 +1205,7 @@ pub fn editor_panel(
                         vec!["--write".to_string(), path.to_string_lossy().to_string()],
                     )),
                     "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
-                    _ => None,
-                };
+                    _ => None};
                 if let Some((cmd, args)) = formatter {
                     let _ = std::process::Command::new(cmd).args(&args).status();
                 }
@@ -1483,6 +1502,9 @@ pub fn editor_panel(
             // Stores byte-offset ranges in `word_hl`; the styling effect
             // below picks them up and draws soft highlight boxes.
             let word_hl: RwSignal<Vec<(usize, usize)>> = create_rw_signal(vec![]);
+            // Cache the active symbol to avoid recomputing full-document
+            // occurrences on every cursor movement within the same word.
+            let last_word_hl: RwSignal<Option<String>> = create_rw_signal(None);
             // Tracks the 0-based line index of the cursor for current-line highlighting.
             let current_line_sig: RwSignal<usize> = create_rw_signal(0usize);
 
@@ -1528,24 +1550,41 @@ pub fn editor_panel(
                     let len = rope.len();
                     if len == 0 {
                         word_hl.set(vec![]);
+                        last_word_hl.set(None);
                         return;
                     }
-                    // Avoid searching huge files (> 2 MB) on every keystroke.
-                    let ranges = if len < 2_000_000 {
-                        let text = rope.slice_to_cow(0..len).to_string();
-                        if let Some((_, _, word)) = word_at_offset(&text, offset) {
-                            if word.len() >= 2 {
-                                find_word_occurrences(&text, &word)
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            vec![]
-                        }
+                    let line = rope.line_of_offset(offset);
+                    let line_start = rope.offset_of_line(line);
+                    let line_end = if line + 1 < rope.num_lines() {
+                        rope.offset_of_line(line + 1)
                     } else {
-                        vec![]
+                        len
                     };
+                    let line_text = rope.slice_to_cow(line_start..line_end).to_string();
+                    let col = offset.saturating_sub(line_start);
+                    let Some(word) = word_at_line_col(&line_text, col) else {
+                        word_hl.set(vec![]);
+                        last_word_hl.set(None);
+                        return;
+                    };
+                    if word.len() < 2 {
+                        word_hl.set(vec![]);
+                        last_word_hl.set(None);
+                        return;
+                    }
+                    if last_word_hl.get_untracked().as_ref() == Some(&word) {
+                        return;
+                    }
+                    // Keep cursor hot path light for large files.
+                    if len >= 1_000_000 {
+                        word_hl.set(vec![]);
+                        last_word_hl.set(Some(word));
+                        return;
+                    }
+                    let text = rope.slice_to_cow(0..len).to_string();
+                    let ranges = find_word_occurrences(&text, &word);
                     word_hl.set(ranges);
+                    last_word_hl.set(Some(word));
                 });
             }
 
@@ -1832,8 +1871,7 @@ pub fn editor_panel(
                                     Some('\'')
                                 }
                             }
-                            _ => None,
-                        };
+                            _ => None};
                         if let Some(close_ch) = close {
                             // Only auto-close when next char is whitespace or end-of-file.
                             let next_is_ok = cur_pos >= rope.len() || {
@@ -1905,8 +1943,7 @@ pub fn editor_panel(
                                     '{' => Some('}'),
                                     '"' => Some('"'),
                                     '\'' => Some('\''),
-                                    _ => None,
-                                });
+                                    _ => None});
                                 if let Some(close_ch) = close_opt {
                                     surr_suppress.set(true);
                                     let insert_text = format!("{sel_text}{close_ch}");
@@ -2211,8 +2248,7 @@ pub fn editor_panel(
                         "lua" => "-- ",
                         "hs" | "elm" => "-- ",
                         "sql" => "-- ",
-                        _ => "// ",
-                    };
+                        _ => "// "};
 
                     let rope = doc_for_comment.rope_text();
                     let offset = cursor_sig.get().offset();
@@ -2470,8 +2506,7 @@ pub fn editor_panel(
                     // Build multi-region selection from existing cursor
                     let existing_sel = match &cur.mode {
                         CursorMode::Insert(s) => s.clone(),
-                        _ => Selection::caret(offset),
-                    };
+                        _ => Selection::caret(offset)};
                     let mut regions: Vec<SelRegion> = existing_sel.regions().to_vec();
                     regions.push(SelRegion::new(new_off, new_off, None));
                     let mut sel = Selection::new();
@@ -2514,8 +2549,7 @@ pub fn editor_panel(
                     let new_off = next_line_start + cur_col.min(next_line_len);
                     let existing_sel = match &cur.mode {
                         CursorMode::Insert(s) => s.clone(),
-                        _ => Selection::caret(offset),
-                    };
+                        _ => Selection::caret(offset)};
                     let mut regions: Vec<SelRegion> = existing_sel.regions().to_vec();
                     regions.push(SelRegion::new(new_off, new_off, None));
                     let mut sel = Selection::new();
@@ -2540,8 +2574,6 @@ pub fn editor_panel(
                     let rope = doc_sticky.rope_text();
                     let offset = cursor_sig.get_untracked().offset();
                     let cur_line = rope.line_of_offset(offset);
-                    let text = rope.slice_to_cow(0..rope.len()).to_string();
-                    let lines: Vec<&str> = text.lines().collect();
 
                     // Patterns that start a scope block
                     fn is_scope_header(line: &str) -> bool {
@@ -2569,15 +2601,15 @@ pub fn editor_panel(
                         line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
                     }
 
-                    let cur_indent = lines.get(cur_line).map(|l| indent_of(l)).unwrap_or(0);
+                    let cur_line_text = rope.line_content(cur_line).to_string();
+                    let cur_indent = indent_of(cur_line_text.trim_end_matches(['\n', '\r']));
 
                     let mut headers: Vec<String> = Vec::new();
                     let mut last_indent = cur_indent;
-                    for line_idx in (0..cur_line).rev() {
-                        let line = match lines.get(line_idx) {
-                            Some(l) => l,
-                            None => continue,
-                        };
+                    // Keep this bounded so cursor motion doesn't scan entire large files.
+                    for line_idx in (0..cur_line).rev().take(600) {
+                        let line_text = rope.line_content(line_idx).to_string();
+                        let line = line_text.trim_end_matches(['\n', '\r']);
                         let ind = indent_of(line);
                         if is_scope_header(line) && ind < last_indent {
                             headers.push(line.trim().to_string());
@@ -2967,8 +2999,7 @@ pub fn editor_panel(
                                     ']' => ('[', false),
                                     '{' => ('}', true),
                                     '}' => ('{', false),
-                                    _ => (ch, true),
-                                };
+                                    _ => (ch, true)};
                                 if search != ch || fwd {
                                     let open = if fwd { ch } else { search };
                                     let close = if fwd { search } else { ch };
@@ -3163,8 +3194,7 @@ pub fn editor_panel(
                         VimMotion::EnterExMode => cur_offset,
                         // ── Expand / Shrink selection ─────────────────
                         // These are triggered via nonces, handled in separate effects below.
-                        VimMotion::ExpandSelection | VimMotion::ShrinkSelection => cur_offset,
-                    };
+                        VimMotion::ExpandSelection | VimMotion::ShrinkSelection => cur_offset};
 
                     // Apply visual mode selection if active
                     let sel = if vim_visual_mode.get_untracked() {
@@ -3552,8 +3582,7 @@ pub fn editor_panel(
                                     vec!["--write".to_string(), tmp.to_string_lossy().to_string()],
                                 ),
                                 "py" => ("black", vec![tmp.to_string_lossy().to_string()]),
-                                _ => return None,
-                            };
+                                _ => return None};
                             let ok = std::process::Command::new(cmd)
                                 .args(&args)
                                 .status()
@@ -3591,8 +3620,7 @@ pub fn editor_panel(
                     if std::fs::write(&tab_path_snf, content).is_ok() {
                         tab_dirty_snf.set(false);
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
-                            path: tab_path_snf.clone(),
-                        });
+                            path: tab_path_snf.clone()});
                     }
                 });
             }
@@ -3678,14 +3706,12 @@ pub fn editor_panel(
                             .build()
                         {
                             Ok(rt) => rt,
-                            Err(_) => return,
-                        };
+                            Err(_) => return};
 
                         let suggestion = rt.block_on(async move {
                             let client = match settings.build_llm_client() {
                                 Ok(c) => c,
-                                Err(_) => return String::new(),
-                            };
+                                Err(_) => return String::new()};
 
                             // Trim to reasonable context window sizes.
                             let pre = if prefix.len() > 1500 {
@@ -3728,8 +3754,7 @@ pub fn editor_panel(
                                         text
                                     }
                                 }
-                                Err(_) => String::new(),
-                            }
+                                Err(_) => String::new()}
                         });
 
                         // One last generation check before writing to channel.
@@ -3956,8 +3981,7 @@ pub fn editor_panel(
                         let _ = lsp_tx.send(crate::lsp_bridge::LspCommand::ChangeFile {
                             path: lsp_path.clone(),
                             text,
-                            version: ver,
-                        });
+                            version: ver});
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.
                         if auto_save.get_untracked() {
                             let gen = as_gen.fetch_add(1, Ordering::Relaxed) + 1;
@@ -4061,8 +4085,7 @@ pub fn editor_panel(
                 let color = match diag.severity {
                     crate::lsp_bridge::DiagSeverity::Error => p.error.with_alpha(0.9),
                     crate::lsp_bridge::DiagSeverity::Warning => p.warning.with_alpha(0.8),
-                    _ => p.accent.with_alpha(0.5),
-                };
+                    _ => p.accent.with_alpha(0.5)};
                 cx.fill(
                     &floem::kurbo::Rect::new(1.0, y, w, y + line_h.max(2.0)),
                     color,
@@ -5063,8 +5086,7 @@ fn disambiguate_tab_names(list: &mut [TabState]) {
 pub struct EditorConfigSettings {
     pub indent_size: Option<u32>,
     pub use_tabs: Option<bool>,
-    pub end_of_line: Option<&'static str>,
-}
+    pub end_of_line: Option<&'static str>}
 
 /// Walk up from `file_path`'s parent toward `workspace_root`, reading `.editorconfig`
 /// files (innermost wins for each key).  Parses `[*]` and extension-specific sections.
@@ -5145,8 +5167,7 @@ pub fn read_editorconfig(
                             "crlf" => Some("CRLF"),
                             "lf" => Some("LF"),
                             "cr" => Some("LF"), // treat CR as LF for display
-                            _ => None,
-                        };
+                            _ => None};
                     }
                     _ => {}
                 }
@@ -5157,6 +5178,5 @@ pub fn read_editorconfig(
     EditorConfigSettings {
         indent_size,
         use_tabs,
-        end_of_line,
-    }
+        end_of_line}
 }

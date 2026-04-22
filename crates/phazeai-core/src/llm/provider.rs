@@ -121,12 +121,75 @@ pub struct ProviderConfig {
     pub default_model: String,
 }
 
+/// Keyring service name used for storing provider API keys.
+pub const KEYRING_SERVICE: &str = "phazeai";
+
+/// Read an API key from the OS keyring (macOS Keychain / Linux Secret Service /
+/// Windows Credential Manager). Returns `None` if the entry is absent or the
+/// keyring backend is unavailable (e.g., headless CI).
+pub fn keyring_get(entry_name: &str) -> Option<String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, entry_name).ok()?;
+    entry.get_password().ok()
+}
+
+/// Store an API key in the OS keyring. Returns the backend error as a string
+/// so UI layers can surface it to the user.
+pub fn keyring_set(entry_name: &str, value: &str) -> Result<(), String> {
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
+    entry.set_password(value).map_err(|e| e.to_string())
+}
+
+/// Delete an API key from the OS keyring. A missing entry is treated as
+/// success (idempotent clear).
+pub fn keyring_delete(entry_name: &str) -> Result<(), String> {
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Key-source indicator shown in the settings UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeySource {
+    None,
+    Keyring,
+    Env,
+}
+
 impl ProviderConfig {
+    /// Resolve the API key, preferring the OS keyring and falling back to the
+    /// configured environment variable.
     pub fn api_key(&self) -> Option<String> {
         if self.api_key_env.is_empty() {
             return None;
         }
+        if let Some(k) = keyring_get(&self.api_key_env) {
+            if !k.is_empty() {
+                return Some(k);
+            }
+        }
         std::env::var(&self.api_key_env).ok()
+    }
+
+    /// Report where the key came from (for the settings UI status line).
+    pub fn api_key_source(&self) -> ApiKeySource {
+        if self.api_key_env.is_empty() {
+            return ApiKeySource::None;
+        }
+        if keyring_get(&self.api_key_env)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            return ApiKeySource::Keyring;
+        }
+        if std::env::var(&self.api_key_env).is_ok() {
+            return ApiKeySource::Env;
+        }
+        ApiKeySource::None
     }
 
     pub fn is_available(&self) -> bool {

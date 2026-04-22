@@ -9,10 +9,11 @@ fn main() {
         unsafe {
             let unlimited = libc::rlimit {
                 rlim_cur: libc::RLIM_INFINITY,
-                rlim_max: libc::RLIM_INFINITY,
-            };
+                rlim_max: libc::RLIM_INFINITY};
             libc::setrlimit(libc::RLIMIT_STACK, &unlimited);
         }
     }
+    phazeai_ui::init_logging();
+    tracing::info!(target: "phazeai_ui", "PhazeAI IDE starting");
     phazeai_ui::launch_phaze_ide();
 }

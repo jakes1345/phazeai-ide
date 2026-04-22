@@ -1,0 +1,5 @@
+name = "phazeai-plugin-canary"
+version = "0.1.0"
+description = "End-to-end canary for the PhazePlugin ABI."
+author = "PhazeAI"
+min_api_version = 1

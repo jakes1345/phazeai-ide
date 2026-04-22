@@ -12,8 +12,7 @@ use floem::{
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
     window::WindowConfig,
-    Application, IntoView, Renderer,
-};
+    Application, IntoView, Renderer};
 use phazeai_core::config::LlmProvider;
 use phazeai_core::constants::ui as ui_const;
 use phazeai_core::{Agent, AgentEvent, Settings};
@@ -21,8 +20,7 @@ use phazeai_sidecar::{SidecarClient, SidecarManager};
 
 use crate::lsp_bridge::{
     start_lsp_bridge, CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry,
-    DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry,
-};
+    DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry};
 
 use crate::{
     commands::{execute_command, match_global_shortcut},
@@ -30,11 +28,10 @@ use crate::{
     panels::{
         chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
         extensions::extensions_panel, git::git_panel, github_actions::github_actions_panel, search,
-        settings::settings_panel, terminal::terminal_panel,
-    },
+        settings::settings_panel, terminal::terminal_panel, tests::tests_panel},
+    domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
     theme::{PhazeTheme, ThemeVariant},
-    util::safe_get,
-};
+    util::safe_get};
 
 /// Vim normal-mode motions dispatched to the active editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,16 +87,9 @@ pub enum VimMotion {
     /// Yank (copy) the current visual selection and exit visual mode.
     YankVisualSelection,
     /// Change (delete + enter insert) the current visual selection.
-    ChangeVisualSelection,
-}
+    ChangeVisualSelection}
 
 /// Global IDE state shared across all panels via Floem reactive system.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SearchResult {
-    pub path: std::path::PathBuf,
-    pub line: usize,
-    pub content: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -124,286 +114,13 @@ pub enum Tab {
     References,
     Symbols,
     GitDiff,
-}
-
-#[derive(Clone)]
-pub struct IdeState {
-    pub theme: RwSignal<PhazeTheme>,
-    pub left_panel_tab: RwSignal<Tab>,
-    pub bottom_panel_tab: RwSignal<Tab>,
-    pub show_left_panel: RwSignal<bool>,
-    pub show_right_panel: RwSignal<bool>,
-    pub show_bottom_panel: RwSignal<bool>,
-    pub open_file: RwSignal<Option<PathBuf>>,
-    pub workspace_root: RwSignal<PathBuf>,
-    /// Set to `true` while the AI chat panel is processing a request.
-    /// Shared with the editor's sentient gutter so it glows during inference.
-    pub ai_thinking: RwSignal<bool>,
-    /// Rendered width of the left sidebar (300.0 when open, 0.0 when closed).
-    /// Note: This snaps immediately. In the future, this could use a smooth animation loop
-    /// when Floem exposes a stable `create_animation` / `spring` API.
-    pub left_panel_width: RwSignal<f64>,
-    /// Real git branch — populated async from `git rev-parse --abbrev-ref HEAD`.
-    pub git_branch: RwSignal<String>,
-    /// Whether the command palette overlay is visible.
-    pub command_palette_open: RwSignal<bool>,
-    /// Search text typed in the command palette.
-    pub command_palette_query: RwSignal<String>,
-    /// Whether the Ctrl+P file picker overlay is visible.
-    pub file_picker_open: RwSignal<bool>,
-    /// Query text in the file picker.
-    pub file_picker_query: RwSignal<String>,
-    /// All workspace files, populated async when picker opens.
-    pub file_picker_files: RwSignal<Vec<std::path::PathBuf>>,
-    // Search
-    pub search_query: RwSignal<String>,
-    pub search_results: RwSignal<Vec<SearchResult>>,
-    // LSP — populated async by start_lsp_bridge()
-    pub diagnostics: RwSignal<Vec<DiagEntry>>,
-    pub lsp_cmd: tokio::sync::mpsc::UnboundedSender<LspCommand>,
-    /// Latest completion list from the LSP server (set after RequestCompletions).
-    pub completions: RwSignal<Vec<CompletionEntry>>,
-    /// Whether the completion popup is visible.
-    pub completion_open: RwSignal<bool>,
-    /// Index of the highlighted item in the completion popup.
-    pub completion_selected: RwSignal<usize>,
-    /// Active cursor position: (path, 0-based line, 0-based col).
-    /// Written by the editor; read by Ctrl+Space handler to know where to request.
-    pub active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
-    // Panel resize drag state (used by the divider + overlay)
-    pub panel_drag_active: RwSignal<bool>,
-    pub panel_drag_start_x: RwSignal<f64>,
-    pub panel_drag_start_width: RwSignal<f64>,
-    /// Completion to insert: (text, prefix_byte_len_to_delete).
-    /// prefix_byte_len_to_delete is the number of bytes of already-typed prefix to
-    /// replace — e.g. if the user typed "pri" and accepted "println!", delete 3 bytes.
-    /// Set to 0 for ghost-text (FIM) insertions where no prefix exists.
-    pub pending_completion: RwSignal<Option<(String, usize)>>,
-    /// Whether the Ctrl+K inline AI-edit overlay is open.
-    pub inline_edit_open: RwSignal<bool>,
-    /// User instruction typed in the inline-edit overlay.
-    pub inline_edit_query: RwSignal<String>,
-    /// Prefix typed since last Ctrl+Space — used to filter the completion list.
-    pub completion_filter_text: RwSignal<String>,
-    /// Whether vim keybindings are enabled (persisted to settings).
-    pub vim_mode: RwSignal<bool>,
-    /// Editor font size (persisted to config.toml).
-    pub font_size: RwSignal<u32>,
-    /// Editor tab size (persisted to config.toml).
-    pub tab_size: RwSignal<u32>,
-    /// Set by the LSP bridge when a go-to-definition result arrives.
-    /// The IdeState effect watches this, opens the target file, and sets `goto_line`.
-    pub goto_definition: RwSignal<Option<DefinitionResult>>,
-    /// Hover documentation text from the LSP server (None when idle).
-    pub hover_text: RwSignal<Option<String>>,
-    /// Non-zero when the editor should jump to this 1-based line in the active file.
-    /// Cleared to 0 by the editor after it performs the scroll/jump.
-    pub goto_line: RwSignal<u32>,
-    /// Incremented to trigger comment-toggle on the current line in the active editor.
-    pub comment_toggle_nonce: RwSignal<u64>,
-    /// All currently open editor tabs (written by editor_panel, read for session save).
-    pub open_tabs: RwSignal<Vec<PathBuf>>,
-    /// Tabs to restore on startup (passed once to editor_panel; not reactive after init).
-    pub initial_tabs: Vec<PathBuf>,
-    /// Active AI provider display name (e.g. "Claude (Anthropic)", "Ollama (Local)").
-    pub ai_provider: RwSignal<String>,
-    /// Active AI model identifier (e.g. "claude-sonnet-4-6", "llama3.2").
-    pub ai_model: RwSignal<String>,
-    /// True when vim mode is in Normal (command) mode; false = Insert mode.
-    pub vim_normal_mode: RwSignal<bool>,
-    /// Vim: pending first key of a two-key command (e.g. "d" before "d", "g" before "g").
-    pub vim_pending_key: RwSignal<Option<char>>,
-    /// Vim motion dispatched to the active editor when set.
-    pub vim_motion: RwSignal<Option<VimMotion>>,
-    /// Ghost text (FIM) suggestion — shown inline after cursor, Tab to accept.
-    pub ghost_text: RwSignal<Option<String>>,
-    /// Output panel log lines (build/run output, LSP messages, etc.)
-    pub output_log: RwSignal<Vec<String>>,
-    /// Find-all-references results (Shift+F12).
-    pub references: RwSignal<Vec<ReferenceEntry>>,
-    /// Whether the References tab in the bottom panel is the active view.
-    pub references_visible: RwSignal<bool>,
-    /// Code action list populated by Ctrl+. / RequestCodeActions.
-    pub code_actions: RwSignal<Vec<CodeAction>>,
-    /// Whether the code-action floating dropdown is open.
-    pub code_actions_open: RwSignal<bool>,
-    /// F2 rename-symbol overlay: true when open.
-    pub rename_open: RwSignal<bool>,
-    /// F2 rename-symbol overlay: the new name being typed.
-    pub rename_query: RwSignal<String>,
-    /// Original word the user is renaming (filled from cursor on F2).
-    pub rename_target: RwSignal<String>,
-    /// Signature help result from the LSP server (Ctrl+Shift+Space).
-    pub sig_help: RwSignal<Option<crate::lsp_bridge::SignatureHelpResult>>,
-    /// Document symbol outline for the active file (LSP or regex fallback).
-    pub doc_symbols: RwSignal<Vec<SymbolEntry>>,
-    /// Toast notification text — auto-cleared after 3 s.
-    pub status_toast: RwSignal<Option<String>>,
-    /// Zen mode — when true, hides all panels for distraction-free editing (Ctrl+Shift+Z).
-    pub zen_mode: RwSignal<bool>,
-    /// Line ending style of the active file ("LF", "CRLF", or "Mixed").
-    pub line_ending: RwSignal<&'static str>,
-    /// Whether the workspace symbols overlay (Ctrl+T) is visible.
-    pub ws_syms_open: RwSignal<bool>,
-    /// Filter query typed in the workspace symbols overlay.
-    pub ws_syms_query: RwSignal<String>,
-    /// Workspace symbol results — updated by the LSP bridge after RequestWorkspaceSymbols.
-    pub workspace_symbols: RwSignal<Vec<SymbolEntry>>,
-    /// Whether the branch picker overlay is open (click branch in status bar).
-    pub branch_picker_open: RwSignal<bool>,
-    /// List of local git branches for the branch picker overlay.
-    pub branch_list: RwSignal<Vec<String>>,
-    /// Auto-save: when true, saves the active file after 1.5 s of inactivity.
-    pub auto_save: RwSignal<bool>,
-    /// Word wrap toggle — when true the editor wraps long lines at the viewport edge.
-    pub word_wrap: RwSignal<bool>,
-    /// Ctrl+D nonce — incremented to trigger "select next occurrence" in active editor.
-    pub ctrl_d_nonce: RwSignal<u64>,
-    /// Fold nonce — Ctrl+Shift+[ collapses the block at the cursor line.
-    pub fold_nonce: RwSignal<u64>,
-    /// Unfold nonce — Ctrl+Shift+] expands the collapsed block at/around the cursor.
-    pub unfold_nonce: RwSignal<u64>,
-    /// Alt+Up — move the current line up one line.
-    pub move_line_up_nonce: RwSignal<u64>,
-    /// Alt+Down — move the current line down one line.
-    pub move_line_down_nonce: RwSignal<u64>,
-    /// Alt+Shift+Down — duplicate the current line below.
-    pub duplicate_line_nonce: RwSignal<u64>,
-    /// Ctrl+Shift+K — delete the entire current line.
-    pub delete_line_nonce: RwSignal<u64>,
-    /// Inline blame annotation for the current cursor line (shown in status bar).
-    pub active_blame: RwSignal<String>,
-    /// Whether the split editor pane is visible (Ctrl+Alt+\).
-    pub split_editor: RwSignal<bool>,
-    /// Active file in the split editor pane (independent of primary pane).
-    pub split_open_file: RwSignal<Option<PathBuf>>,
-    /// Open tabs in the split editor pane.
-    pub split_open_tabs: RwSignal<Vec<PathBuf>>,
-    /// Cursor position in the split editor pane.
-    pub split_active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
-    /// Column cursor up nonce — Ctrl+Alt+Up adds cursor on line above at same column.
-    pub col_cursor_up_nonce: RwSignal<u64>,
-    /// Column cursor down nonce — Ctrl+Alt+Down adds cursor on line below at same column.
-    pub col_cursor_down_nonce: RwSignal<u64>,
-    /// Sticky scroll lines for the active tab — enclosing scope headers pinned above editor.
-    pub sticky_lines: RwSignal<Vec<String>>,
-    /// Transform to uppercase nonce — editor transforms current selection or word to UPPER CASE.
-    pub transform_upper_nonce: RwSignal<u64>,
-    /// Transform to lowercase nonce — editor transforms current selection or word to lower case.
-    pub transform_lower_nonce: RwSignal<u64>,
-    /// Join current line with the next line nonce.
-    pub join_line_nonce: RwSignal<u64>,
-    /// Sort selected lines alphabetically nonce.
-    pub sort_lines_nonce: RwSignal<u64>,
-    /// Vim visual mode active (v/V pressed).
-    pub vim_visual_mode: RwSignal<bool>,
-    /// Vim visual mode line-wise (V) vs char-wise (v).
-    pub vim_visual_line: RwSignal<bool>,
-    /// Vim marks: char → (file_path, byte_offset).
-    pub vim_marks: RwSignal<std::collections::HashMap<char, (std::path::PathBuf, usize)>>,
-    /// Vim last applied motion — used by `.` (repeat last change).
-    pub vim_last_motion: RwSignal<Option<VimMotion>>,
-    /// Vim ex command bar visible (`:` pressed in normal mode).
-    pub vim_ex_open: RwSignal<bool>,
-    /// Vim ex command text being typed.
-    pub vim_ex_input: RwSignal<String>,
-    /// Expand selection nonce (Ctrl+Shift+→).
-    pub expand_selection_nonce: RwSignal<u64>,
-    /// Shrink selection nonce (Ctrl+Shift+←).
-    pub shrink_selection_nonce: RwSignal<u64>,
-    /// Split editor down — horizontal split (second editor below first).
-    pub split_editor_down: RwSignal<bool>,
-    /// Open file in the horizontal split pane.
-    pub split_down_file: RwSignal<Option<std::path::PathBuf>>,
-    /// Open tabs in the horizontal split pane.
-    pub split_down_tabs: RwSignal<Vec<std::path::PathBuf>>,
-    /// Cursor in horizontal split pane.
-    pub split_down_cursor: RwSignal<Option<(std::path::PathBuf, u32, u32)>>,
-    /// Relative line numbers: show distance-from-cursor in gutter instead of absolute.
-    pub relative_line_numbers: RwSignal<bool>,
-    /// Scratch file counter — each Ctrl+N increments for unique untitled name.
-    pub scratch_counter: RwSignal<u32>,
-    /// Scratch file paths — virtual paths not backed by disk.
-    pub scratch_paths: RwSignal<Vec<std::path::PathBuf>>,
-    /// Yank ring: last 5 yanked strings (vim yy / Ctrl+C).
-    pub yank_ring: RwSignal<Vec<String>>,
-    /// Index into yank ring for Ctrl+Shift+V cycle.
-    pub yank_ring_idx: RwSignal<usize>,
-    /// Active file is read-only (permissions check on open).
-    pub active_readonly: RwSignal<bool>,
-    /// Goto line/col overlay open.
-    pub goto_overlay_open: RwSignal<bool>,
-    /// Goto overlay input text.
-    pub goto_overlay_input: RwSignal<String>,
-    /// Bottom panel maximized (double-click header to toggle).
-    pub bottom_panel_maximized: RwSignal<bool>,
-    /// LSP progress message (e.g. "indexing 45%") — None when idle.
-    pub lsp_progress: RwSignal<Option<String>>,
-    /// Peek definition source lines (Alt+F12) — set when a peek result arrives.
-    pub peek_def_lines: RwSignal<Vec<String>>,
-    /// Whether the peek definition popup is visible.
-    pub peek_def_open: RwSignal<bool>,
-    /// Code lens entries for the active file.
-    pub code_lens: RwSignal<Vec<CodeLensEntry>>,
-    /// LSP folding ranges for the active file: (start_line, end_line) pairs (0-based).
-    pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
-    /// When true, automatically send OrganizeImports after saving the active file.
-    pub organize_imports_on_save: RwSignal<bool>,
-    /// Text to send to the active terminal PTY (Run in Terminal / Run File).
-    /// Set by editor context menu; terminal_panel watches and resets to None after writing.
-    pub run_in_terminal_text: RwSignal<Option<String>>,
-    /// Incremented to title-case the current selection in the active editor.
-    pub transform_title_nonce: RwSignal<u64>,
-    /// Incremented to format only the current selection (rustfmt/prettier on selection).
-    pub format_selection_nonce: RwSignal<u64>,
-    /// Incremented to save the active file without running format-on-save.
-    pub save_no_format_nonce: RwSignal<u64>,
-    /// Incremented to fold all detected ranges in the active editor.
-    pub fold_all_nonce: RwSignal<u64>,
-    /// Incremented to unfold all ranges in the active editor.
-    pub unfold_all_nonce: RwSignal<u64>,
-    /// Code-lens entries for the active file (shown as inline gutter labels).
-    pub code_lens_visible: RwSignal<bool>,
-    /// Whether LSP inlay hints are shown in the editor.
-    pub inlay_hints_toggle: RwSignal<bool>,
-    /// Inlay hint entries from LSP or regex fallback for the active file.
-    pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
-    /// Shared handle to the sidecar client for explicit shutdown on IDE exit.
-    pub sidecar_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
-    /// Whether the semantic search sidecar is running.
-    pub sidecar_ready: RwSignal<bool>,
-    /// Human-readable sidecar/indexing status shown in the UI.
-    pub sidecar_status: RwSignal<String>,
-    /// True while the semantic index is being built or rebuilt.
-    pub sidecar_building: RwSignal<bool>,
-    /// Semantic search results (file path + snippet pairs).
-    pub sidecar_results: RwSignal<Vec<(String, String)>>,
-    /// Semantic index rebuild nonce — increment to trigger a rebuild.
-    pub sidecar_build_nonce: RwSignal<u64>,
-    /// Semantic search query nonce — increment to trigger a search.
-    pub sidecar_search_nonce: RwSignal<u64>,
-    /// Current semantic search query text.
-    pub sidecar_query: RwSignal<String>,
-
-    /// Text to inject into the chat panel input and auto-send.
-    /// Set by context menu "Explain Selection" / "Generate Tests" / "Fix with AI".
-    pub pending_chat_inject: RwSignal<Option<String>>,
-
-    // Extensions
-    /// Native plugin manager
-    pub ext_manager: Arc<std::sync::Mutex<phazeai_core::ext_host::ExtensionManager>>,
-    /// Extensions currently loading or starting up
-    pub ext_loading: RwSignal<bool>,
-    /// Commands registered by extensions
-    pub ext_commands: RwSignal<Vec<String>>,
-    /// List of loaded extensions
-    pub extensions: RwSignal<Vec<String>>,
-}
+    TerminalOutput,
+    Tests}
 
 impl std::fmt::Debug for IdeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdeState")
-            .field("workspace_root", &self.workspace_root.get_untracked())
+            .field("workspace_root", &self.project.workspace_root.get_untracked())
             .finish()
     }
 }
@@ -416,29 +133,16 @@ impl IdeState {
     /// current signal values and writes them to `session.toml` via
     /// `session_update`.
     pub fn as_global_command_state(&self) -> crate::commands::GlobalCommandState {
-        let show_left = self.show_left_panel;
-        let left_width = self.left_panel_width;
-        let show_bottom = self.show_bottom_panel;
-        let show_right = self.show_right_panel;
         crate::commands::GlobalCommandState {
-            show_left_panel: self.show_left_panel,
-            left_panel_width: self.left_panel_width,
-            show_bottom_panel: self.show_bottom_panel,
-            show_right_panel: self.show_right_panel,
-            file_picker_open: self.file_picker_open,
-            file_picker_query: self.file_picker_query,
-            command_palette_open: self.command_palette_open,
-            zen_mode: self.zen_mode,
-            split_editor: self.split_editor,
-            primary_open_file: self.open_file,
-            split_open_file: self.split_open_file,
-            status_toast: self.status_toast,
-            // on_persist is a no-op: all signal mutations are observed by the unified
-            // debounced-save effect in IdeState::new(), so no explicit write needed.
-            on_persist: std::rc::Rc::new(move || {
-                // Suppress dead-code warnings for captured signals.
-                let _ = (show_left, left_width, show_bottom, show_right);
-            }),
+            show_left_panel: self.workbench.show_left_panel,
+            left_panel_width: self.workbench.left_panel_width,
+            show_bottom_panel: self.workbench.show_bottom_panel,
+            show_right_panel: self.workbench.show_right_panel,
+            file_picker_open: self.workbench.file_picker_open,
+            file_picker_query: self.workbench.file_picker_query,
+            command_palette_open: self.workbench.command_palette_open,
+            zen_mode: self.workbench.zen_mode,
+            split_editor: self.editor.split_editor,
         }
     }
 }
@@ -464,8 +168,7 @@ struct SessionState {
     vim_mode: bool,
     theme: String,
     /// Zen mode — hides all chrome for distraction-free editing.
-    zen_mode: bool,
-}
+    zen_mode: bool}
 
 impl Default for SessionState {
     fn default() -> Self {
@@ -480,8 +183,7 @@ impl Default for SessionState {
             split_editor_down: false,
             vim_mode: false,
             theme: "Midnight Blue".to_string(),
-            zen_mode: false,
-        }
+            zen_mode: false}
     }
 }
 
@@ -578,16 +280,16 @@ fn session_commit(
         split_editor_down,
         vim_mode,
         theme,
-        zen_mode,
-    };
+        zen_mode};
     session_save_debounced(gen, ss);
 }
 
 fn dirs_next_config() -> Option<PathBuf> {
     let home = std::env::var("HOME")
-        .ok()
         .map(PathBuf::from)
-        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))?;
+        .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
+        .inspect_err(|e| tracing::warn!(target: "phazeai_ui", error = %e, "Failed to get HOME env var"))
+        .ok()?;
     Some(home.join(".config").join("phazeai"))
 }
 
@@ -602,8 +304,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
         "OpenRouter" => Some(LlmProvider::OpenRouter),
         "LM Studio (Local)" => Some(LlmProvider::LmStudio),
         "Ollama (Local)" => Some(LlmProvider::Ollama),
-        _ => None,
-    }
+        _ => None}
 }
 
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
@@ -647,13 +348,23 @@ fn spawn_sidecar_start(
     build_after_start: bool,
 ) {
     std::thread::spawn(move || {
-        if shared_client.lock().ok().and_then(|g| g.clone()).is_some() {
+        let client_guard = match shared_client.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock shared client");
+                let _ = ready_tx.send(false);
+                return;
+            }
+        };
+        
+        if client_guard.clone().is_some() {
             let _ = ready_tx.send(true);
             if build_after_start {
                 let _ = build_tx.send(true);
             }
             return;
         }
+        drop(client_guard);
 
         let _ = status_tx.send(format!(
             "Starting semantic search sidecar with {}...",
@@ -729,14 +440,14 @@ impl IdeState {
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(&cwd)
             .output()
-            .ok()
-            .and_then(|out| {
+            .map(|out| {
                 if out.status.success() {
                     String::from_utf8(out.stdout)
-                        .ok()
                         .map(|s| PathBuf::from(s.trim()))
+                        .unwrap_or(cwd.clone())
                 } else {
-                    None
+                    tracing::debug!(target: "phazeai_ui", "Not in git repo, using cwd");
+                    cwd.clone()
                 }
             })
             .unwrap_or(cwd);
@@ -750,18 +461,22 @@ impl IdeState {
             let branch = std::process::Command::new("git")
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .output()
-                .ok()
-                .and_then(|out| {
+                .map(|out| {
                     if out.status.success() {
                         String::from_utf8(out.stdout)
-                            .ok()
                             .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
+                            .ok()
+                            .and_then(|s| if s.is_empty() { None } else { Some(s) })
+                            .unwrap_or_else(|| "main".to_string())
                     } else {
-                        None
+                        tracing::debug!(target: "phazeai_ui", "Failed to get git branch");
+                        "main".to_string()
                     }
                 })
-                .unwrap_or_else(|| "main".to_string());
+                .unwrap_or_else(|e| {
+                    tracing::warn!(target: "phazeai_ui", error = %e, "git command failed");
+                    "main".to_string()
+                });
             let _ = branch_tx.send(branch);
         });
 
@@ -848,46 +563,27 @@ impl IdeState {
                         if let Ok(text) = std::fs::read_to_string(&p) {
                             let _ = lsp.send(LspCommand::OpenFile {
                                 path: p.clone(),
-                                text,
-                            });
+                                text});
                         }
                     });
                 }
             });
         }
 
-        // Request document symbols whenever the active file changes.
+        // Batch file-open LSP requests in one effect to reduce reactive fanout.
         {
             let lsp_tx = lsp_cmd.clone();
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    let _ = lsp_tx.send(LspCommand::RequestDocumentSymbols { path });
-                }
-            });
-        }
-
-        // Request LSP folding ranges + code lens whenever the active file changes.
-        {
-            let lsp_tx = lsp_cmd.clone();
-            let lsp_tx2 = lsp_cmd.clone();
-            create_effect(move |_| {
-                if let Some(path) = open_file.get() {
-                    let _ = lsp_tx.send(LspCommand::RequestFoldingRanges { path });
-                }
-            });
-            create_effect(move |_| {
-                if let Some(path) = open_file.get() {
-                    let _ = lsp_tx2.send(LspCommand::RequestCodeLens { path });
-                }
-            });
-            let lsp_tx3 = lsp_cmd.clone();
-            create_effect(move |_| {
-                if let Some(path) = open_file.get() {
-                    let _ = lsp_tx3.send(LspCommand::RequestInlayHints {
+                    let _ = lsp_tx.send(LspCommand::RequestDocumentSymbols {
+                        path: path.clone()});
+                    let _ = lsp_tx.send(LspCommand::RequestFoldingRanges {
+                        path: path.clone()});
+                    let _ = lsp_tx.send(LspCommand::RequestCodeLens { path: path.clone() });
+                    let _ = lsp_tx.send(LspCommand::RequestInlayHints {
                         path,
                         start_line: 0,
-                        end_line: 2000,
-                    });
+                        end_line: 2000});
                 }
             });
         }
@@ -914,7 +610,6 @@ impl IdeState {
                             .map(|m| m.permissions().readonly())
                             .unwrap_or(false);
                         let style = std::fs::read(&path)
-                            .ok()
                             .map(|bytes| {
                                 let crlf_count = bytes.windows(2).filter(|w| *w == b"\r\n").count();
                                 let lf_count = bytes.iter().filter(|&&b| b == b'\n').count();
@@ -926,7 +621,10 @@ impl IdeState {
                                     "LF"
                                 }
                             })
-                            .unwrap_or("LF");
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(target: "phazeai_ui", error = %e, path = %path.display(), "Failed to read file for line ending detection");
+                                "LF"
+                            });
                         let _ = tx.try_send((readonly, style));
                     });
                 } else {
@@ -991,19 +689,33 @@ impl IdeState {
 
         let script_candidates: Vec<PathBuf> = {
             let exe_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                .map(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or(None);
             let mut candidates = vec![
                 PathBuf::from("sidecar/server.py"),
                 PathBuf::from("../sidecar/server.py"),
             ];
-            if let Some(dir) = exe_dir {
+            if let Some(dir) = &exe_dir {
+                // Binary-adjacent: <exe>/sidecar/server.py and siblings
                 candidates.push(dir.join("sidecar/server.py"));
                 candidates.push(dir.join("../sidecar/server.py"));
                 candidates.push(dir.join("../../sidecar/server.py"));
+                // Installed alongside binary: <exe>/../share/phazeai/sidecar/server.py
+                candidates.push(dir.join("../share/phazeai/sidecar/server.py"));
+                candidates.push(dir.join("../lib/phazeai/sidecar/server.py"));
             }
-            if let Some(home) = dirs_next_config() {
-                candidates.push(home.join("sidecar/server.py"));
+            // XDG data dir: ~/.local/share/phazeai/sidecar/server.py
+            if let Ok(home_str) = std::env::var("HOME") {
+                let home = PathBuf::from(home_str);
+                candidates.push(home.join(".local/share/phazeai/sidecar/server.py"));
+            }
+            // XDG_DATA_HOME override
+            if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+                candidates.push(PathBuf::from(xdg).join("phazeai/sidecar/server.py"));
+            }
+            // Config dir fallback: ~/.config/phazeai/sidecar/server.py
+            if let Some(cfg) = dirs_next_config() {
+                candidates.push(cfg.join("sidecar/server.py"));
             }
             candidates
         };
@@ -1067,8 +779,17 @@ impl IdeState {
                 }
 
                 let root = workspace_root.clone();
-                let Some(client) = shared_client_for_build.lock().ok().and_then(|g| g.clone())
+                let client_guard = match shared_client_for_build.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock shared client");
+                        return;
+                    }
+                };
+                
+                let Some(client) = client_guard.clone()
                 else {
+                    drop(client_guard);
                     let _ = building_tx.send(true);
                     spawn_sidecar_start(
                         python_path.clone(),
@@ -1134,7 +855,21 @@ impl IdeState {
                     let client_cell = shared_client_for_search.clone();
                     let status_tx3 = status_tx_for_search.clone();
                     std::thread::spawn(move || {
-                        let client = client_cell.lock().ok().and_then(|g| g.clone());
+                        let client_guard = match client_cell.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock client for search");
+                                let _ = status_tx3.send("Internal error: failed to access client".to_string());
+                                let _ = tx.send(vec![(
+                                    "error".to_string(),
+                                    "internal error".to_string(),
+                                )]);
+                                return;
+                            }
+                        };
+                        let client = client_guard.clone();
+                        drop(client_guard);
+                        
                         let Some(client) = client else {
                             let _ = status_tx3.send(
                                 "Semantic search unavailable. Build the index to start the sidecar."
@@ -1192,8 +927,7 @@ impl IdeState {
                                     } else {
                                         format!("semantic search failed: {e}")
                                     },
-                                )],
-                            }
+                                )]}
                         });
 
                         let _ = tx.send(results);
@@ -1305,142 +1039,157 @@ impl IdeState {
             });
         }
 
-        Self {
+        let workbench = WorkbenchState {
             theme: theme_signal,
             left_panel_tab: create_rw_signal(Tab::Explorer),
             bottom_panel_tab: create_rw_signal(Tab::Terminal),
             show_left_panel: show_left_panel_sig,
             show_right_panel: show_right_panel_sig,
             show_bottom_panel: show_bottom_panel_sig,
-            open_file,
-            workspace_root: create_rw_signal(workspace),
-            ai_thinking: create_rw_signal(false),
             left_panel_width: left_panel_width_sig,
-            git_branch,
+            zen_mode: zen_mode_sig,
+            bottom_panel_maximized: create_rw_signal(false),
+            panel_drag_active: create_rw_signal(false),
+            panel_drag_start_x: create_rw_signal(0.0),
             command_palette_open: create_rw_signal(false),
             command_palette_query: create_rw_signal(String::new()),
+            status_toast: status_toast_sig,
             file_picker_open: create_rw_signal(false),
             file_picker_query: create_rw_signal(String::new()),
             file_picker_files: create_rw_signal(Vec::new()),
-            search_query: create_rw_signal("".to_string()),
+            search_query: create_rw_signal(String::new()),
             search_results: create_rw_signal(Vec::new()),
-            diagnostics,
-            lsp_cmd,
-            completions,
-            completion_open: create_rw_signal(false),
-            completion_selected: create_rw_signal(0usize),
-            active_cursor: create_rw_signal(None),
-            panel_drag_active: create_rw_signal(false),
-            panel_drag_start_x: create_rw_signal(0.0),
-            panel_drag_start_width: left_panel_width_sig,
-            pending_completion: create_rw_signal(None::<(String, usize)>),
-            inline_edit_open: create_rw_signal(false),
-            inline_edit_query: create_rw_signal(String::new()),
-            completion_filter_text: create_rw_signal(String::new()),
-            vim_mode: vim_mode_sig,
-            font_size: font_size_signal,
-            tab_size: tab_size_signal,
-            goto_definition,
-            hover_text,
-            goto_line: goto_line_sig,
-            comment_toggle_nonce: create_rw_signal(0u64),
+            output_log: create_rw_signal(Vec::new()),
+            run_in_terminal_text: create_rw_signal(None),
+            panel_drag_start_width: create_rw_signal(0.0),
+            extensions: create_rw_signal(Vec::new()),
+            ext_loading: create_rw_signal(false),
+            ext_manager: ext_manager.clone(),
+        };
+
+        let editor = EditorState {
+            open_file,
             open_tabs: open_tabs_sig,
-            initial_tabs,
-            ai_provider: ai_provider_sig,
-            ai_model: ai_model_sig,
+            active_cursor: create_rw_signal(None),
+            vim_mode: vim_mode_sig,
             vim_normal_mode: create_rw_signal(false),
             vim_pending_key: create_rw_signal(None),
             vim_motion: create_rw_signal(None),
-            ghost_text: create_rw_signal(None),
-            output_log: create_rw_signal(vec!["[PhazeAI] Output panel ready.".to_string()]),
-            references,
-            references_visible: create_rw_signal(false),
-            code_actions,
-            code_actions_open: create_rw_signal(false),
-            rename_open: create_rw_signal(false),
-            rename_query: create_rw_signal(String::new()),
-            rename_target: create_rw_signal(String::new()),
-            sig_help,
-            doc_symbols,
-            status_toast: status_toast_sig,
-            zen_mode: zen_mode_sig,
-            line_ending: line_ending_sig,
-            ws_syms_open: create_rw_signal(false),
-            ws_syms_query: create_rw_signal(String::new()),
-            workspace_symbols,
-            branch_picker_open: create_rw_signal(false),
-            branch_list: create_rw_signal(Vec::new()),
-            auto_save: auto_save_signal,
-            word_wrap: word_wrap_signal,
-            ctrl_d_nonce: create_rw_signal(0u64),
-            fold_nonce: create_rw_signal(0u64),
-            unfold_nonce: create_rw_signal(0u64),
-            move_line_up_nonce: create_rw_signal(0u64),
-            move_line_down_nonce: create_rw_signal(0u64),
-            duplicate_line_nonce: create_rw_signal(0u64),
-            delete_line_nonce: create_rw_signal(0u64),
-            active_blame: create_rw_signal(String::new()),
-            split_editor: split_editor_sig,
-            split_open_file: create_rw_signal(None),
-            split_open_tabs: create_rw_signal(Vec::new()),
-            split_active_cursor: create_rw_signal(None),
-            col_cursor_up_nonce: create_rw_signal(0u64),
-            col_cursor_down_nonce: create_rw_signal(0u64),
-            sticky_lines: create_rw_signal(Vec::new()),
-            transform_upper_nonce: create_rw_signal(0u64),
-            transform_lower_nonce: create_rw_signal(0u64),
-            join_line_nonce: create_rw_signal(0u64),
-            sort_lines_nonce: create_rw_signal(0u64),
             vim_visual_mode: create_rw_signal(false),
             vim_visual_line: create_rw_signal(false),
             vim_marks: create_rw_signal(std::collections::HashMap::new()),
             vim_last_motion: create_rw_signal(None),
             vim_ex_open: create_rw_signal(false),
             vim_ex_input: create_rw_signal(String::new()),
-            expand_selection_nonce: create_rw_signal(0u64),
-            shrink_selection_nonce: create_rw_signal(0u64),
-            split_editor_down: split_editor_down_sig,
-            split_down_file: create_rw_signal(None),
-            split_down_tabs: create_rw_signal(Vec::new()),
-            split_down_cursor: create_rw_signal(None),
+            font_size: font_size_signal,
+            tab_size: tab_size_signal,
+            auto_save: auto_save_signal,
+            word_wrap: word_wrap_signal,
             relative_line_numbers: relative_line_numbers_signal,
-            scratch_counter: create_rw_signal(0u32),
-            scratch_paths: create_rw_signal(Vec::new()),
-            yank_ring: create_rw_signal(Vec::new()),
-            yank_ring_idx: create_rw_signal(0usize),
+            line_ending: line_ending_sig,
             active_readonly: active_readonly_sig,
-            goto_overlay_open: create_rw_signal(false),
-            goto_overlay_input: create_rw_signal(String::new()),
-            bottom_panel_maximized: create_rw_signal(false),
-            lsp_progress,
-            peek_def_lines,
-            peek_def_open: peek_def_open_sig,
+            diagnostics,
+            completions,
+            completion_open: create_rw_signal(false),
+            completion_selected: create_rw_signal(0),
+            completion_filter_text: create_rw_signal(String::new()),
+            hover_text,
+            goto_line: goto_line_sig,
+            goto_definition,
+            references,
+            references_visible: create_rw_signal(false),
+            code_actions,
+            code_actions_open: create_rw_signal(false),
+            doc_symbols,
+            inlay_hints: inlay_hints_lsp,
             code_lens,
             folding_ranges,
-            organize_imports_on_save: organize_imports_signal,
-            run_in_terminal_text: create_rw_signal(None),
-            transform_title_nonce: create_rw_signal(0u64),
-            format_selection_nonce: create_rw_signal(0u64),
-            save_no_format_nonce: create_rw_signal(0u64),
-            fold_all_nonce: create_rw_signal(0u64),
-            unfold_all_nonce: create_rw_signal(0u64),
-            code_lens_visible: code_lens_visible_signal,
-            inlay_hints_toggle: inlay_hints_toggle_signal,
-            inlay_hints_sig: inlay_hints_lsp,
-            sidecar_client: shared_client.clone(),
+            comment_toggle_nonce: create_rw_signal(0),
+            ctrl_d_nonce: create_rw_signal(0),
+            fold_nonce: create_rw_signal(0),
+            unfold_nonce: create_rw_signal(0),
+            fold_all_nonce: create_rw_signal(0),
+            unfold_all_nonce: create_rw_signal(0),
+            move_line_up_nonce: create_rw_signal(0),
+            move_line_down_nonce: create_rw_signal(0),
+            duplicate_line_nonce: create_rw_signal(0),
+            delete_line_nonce: create_rw_signal(0),
+            transform_upper_nonce: create_rw_signal(0),
+            transform_lower_nonce: create_rw_signal(0),
+            transform_title_nonce: create_rw_signal(0),
+            join_line_nonce: create_rw_signal(0),
+            sort_lines_nonce: create_rw_signal(0),
+            format_selection_nonce: create_rw_signal(0),
+            split_editor: create_rw_signal(false),
+            active_blame: create_rw_signal(String::new()),
+            pending_completion: create_rw_signal(None),
+            yank_ring: create_rw_signal(Vec::new()),
+            yank_ring_idx: create_rw_signal(0),
+            split_editor_down: create_rw_signal(false),
+            rename_open: create_rw_signal(false),
+            rename_query: create_rw_signal(String::new()),
+            rename_target: create_rw_signal(String::new()),
+            sig_help: create_rw_signal(None),
+            ws_syms_open: create_rw_signal(false),
+            ws_syms_query: create_rw_signal(String::new()),
+            workspace_symbols: create_rw_signal(Vec::new()),
+            goto_overlay_open: create_rw_signal(false),
+            goto_overlay_input: create_rw_signal(String::new()),
+            peek_def_open: create_rw_signal(false),
+            peek_def_lines: create_rw_signal(Vec::new()),
+            col_cursor_up_nonce: create_rw_signal(0),
+            col_cursor_down_nonce: create_rw_signal(0),
+            sticky_lines: create_rw_signal(Vec::new()),
+            expand_selection_nonce: create_rw_signal(0),
+            shrink_selection_nonce: create_rw_signal(0),
+            save_no_format_nonce: create_rw_signal(0),
+            code_lens_visible: create_rw_signal(true),
+            organize_imports_on_save: create_rw_signal(true),
+            inlay_hints_sig: create_rw_signal(Vec::new()),
+            inlay_hints_toggle: create_rw_signal(true),
+            split_open_file: create_rw_signal(None),
+            split_active_cursor: create_rw_signal(None),
+            split_open_tabs: create_rw_signal(Vec::new()),
+            split_down_file: create_rw_signal(None),
+            split_down_cursor: create_rw_signal(None),
+            split_down_tabs: create_rw_signal(Vec::new())};
+
+        let ai = AiState {
+            provider: ai_provider_sig,
+            model: ai_model_sig,
+            thinking: create_rw_signal(false),
+            ghost_text: create_rw_signal(None),
+            pending_chat_inject: create_rw_signal(None),
+            inline_edit_open: create_rw_signal(false),
+            inline_edit_query: create_rw_signal(String::new()),
+            token_usage_input: create_rw_signal(0),
+            token_usage_output: create_rw_signal(0)};
+
+        let project = ProjectState {
+            workspace_root: create_rw_signal(workspace),
+            git_branch,
+            sidecar_client: shared_client,
             sidecar_ready: sidecar_ready_sig,
             sidecar_status: sidecar_status_sig,
             sidecar_building: sidecar_building_sig,
             sidecar_results: sidecar_results_sig,
-            sidecar_build_nonce: sidecar_build_nonce_sig,
-            sidecar_search_nonce: sidecar_search_nonce_sig,
             sidecar_query: sidecar_query_sig,
-            pending_chat_inject: create_rw_signal(None),
-            ext_manager,
-            ext_loading: create_rw_signal(false),
-            ext_commands: create_rw_signal(Vec::new()),
-            extensions: create_rw_signal(Vec::new()),
-        }
+            sidecar_build_nonce: create_rw_signal(0),
+            sidecar_search_nonce: create_rw_signal(0),
+            branch_picker_open: create_rw_signal(false),
+            branch_list: create_rw_signal(Vec::new()),
+            lsp_progress: lsp_progress,
+            lsp_cmd: lsp_cmd,
+            scratch_paths: create_rw_signal(Vec::new()),
+            scratch_counter: create_rw_signal(0),
+            initial_tabs: initial_tabs.clone(),
+        };
+
+        Self {
+            workbench,
+            editor,
+            ai,
+            project}
     }
 }
 
@@ -1449,8 +1198,7 @@ impl IdeState {
 #[derive(Clone)]
 struct PaletteCommand {
     label: &'static str,
-    action: fn(IdeState),
-}
+    action: fn(IdeState)}
 
 fn all_commands() -> Vec<PaletteCommand> {
     vec![
@@ -1458,199 +1206,168 @@ fn all_commands() -> Vec<PaletteCommand> {
             label: "Open File…",
             action: |s| {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
-                    s.open_file.set(Some(path));
-                    s.show_left_panel.set(true);
-                    s.left_panel_width.set(260.0);
+                    s.editor.open_file.set(Some(path));
+                    s.workbench.show_left_panel.set(true);
+                    s.workbench.left_panel_width.set(260.0);
                 }
-            },
-        },
+            }},
         PaletteCommand {
             label: "Open Folder…",
             action: |s| {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    s.workspace_root.set(folder);
+                    s.project.workspace_root.set(folder);
                     // Clear file picker cache so it re-walks on next open
-                    s.file_picker_files.set(Vec::new());
-                    s.show_left_panel.set(true);
-                    s.left_panel_width.set(300.0);
-                    s.left_panel_tab.set(crate::app::Tab::Explorer);
+                    s.workbench.file_picker_files.set(Vec::new());
+                    s.workbench.show_left_panel.set(true);
+                    s.workbench.left_panel_width.set(300.0);
+                    s.workbench.left_panel_tab.set(crate::app::Tab::Explorer);
                 }
-            },
-        },
+            }},
         PaletteCommand {
             label: "Toggle Terminal",
             action: |s| {
-                s.show_bottom_panel.update(|v| *v = !*v);
-            },
-        },
+                s.workbench.show_bottom_panel.update(|v| *v = !*v);
+            }},
         PaletteCommand {
             label: "Toggle Explorer",
             action: |s| {
-                s.show_left_panel.update(|v| *v = !*v);
-                let open = s.show_left_panel.get();
-                s.left_panel_width.set(if open { 260.0 } else { 0.0 });
-            },
-        },
+                s.workbench.show_left_panel.update(|v| *v = !*v);
+                let open = s.workbench.show_left_panel.get();
+                s.workbench.left_panel_width.set(if open { 260.0 } else { 0.0 });
+            }},
         PaletteCommand {
             label: "Toggle AI Chat",
             action: |s| {
-                s.show_right_panel.update(|v| *v = !*v);
-            },
-        },
+                s.workbench.show_right_panel.update(|v| *v = !*v);
+            }},
         // ── All 12 themes ────────────────────────────────────────────────────
         PaletteCommand {
             label: "Theme: Midnight Blue",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::MidnightBlue));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Cyberpunk 2077",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Cyberpunk));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Synthwave '84",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Synthwave84));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Andromeda",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Andromeda));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Dark",
             action: |s| {
-                s.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
-            },
-        },
+                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
+            }},
         PaletteCommand {
             label: "Theme: Dracula",
             action: |s| {
-                s.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
-            },
-        },
+                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
+            }},
         PaletteCommand {
             label: "Theme: Tokyo Night",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::TokyoNight));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Monokai",
             action: |s| {
-                s.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
-            },
-        },
+                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
+            }},
         PaletteCommand {
             label: "Theme: Nord Dark",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::NordDark));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Matrix Green",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::MatrixGreen));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Root Shell",
             action: |s| {
-                s.theme
+                s.workbench.theme
                     .set(PhazeTheme::from_variant(ThemeVariant::RootShell));
-            },
-        },
+            }},
         PaletteCommand {
             label: "Theme: Light",
             action: |s| {
-                s.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
-            },
-        },
+                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
+            }},
         PaletteCommand {
             label: "Transform: To Uppercase",
-            action: |s| s.transform_upper_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.transform_upper_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Transform: To Lowercase",
-            action: |s| s.transform_lower_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.transform_lower_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Join Lines",
-            action: |s| s.join_line_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.join_line_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Sort Lines (Ascending)",
-            action: |s| s.sort_lines_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.sort_lines_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Toggle Relative Line Numbers",
-            action: |s| s.relative_line_numbers.update(|v| *v = !*v),
-        },
+            action: |s| s.editor.relative_line_numbers.update(|v| *v = !*v)},
         PaletteCommand {
             label: "New Scratch File",
             action: |s| {
-                let n = s.scratch_counter.get() + 1;
-                s.scratch_counter.set(n);
+                let n = s.project.scratch_counter.get() + 1;
+                s.project.scratch_counter.set(n);
                 let p = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
-                s.scratch_paths.update(|v| v.push(p.clone()));
-                s.open_file.set(Some(p));
-            },
-        },
+                s.project.scratch_paths.update(|v: &mut Vec<PathBuf>| v.push(p.clone()));
+                s.editor.open_file.set(Some(p));
+            }},
         PaletteCommand {
             label: "Go to Line/Column",
             action: |s| {
-                s.goto_overlay_open.set(true);
-                s.goto_overlay_input.set(String::new());
-            },
-        },
+                s.editor.goto_overlay_open.set(true);
+                s.editor.goto_overlay_input.set(String::new());
+            }},
         PaletteCommand {
             label: "Toggle Organize Imports on Save",
-            action: |s| s.organize_imports_on_save.update(|v| *v = !*v),
-        },
+            action: |s| s.editor.organize_imports_on_save.update(|v| *v = !*v)},
         PaletteCommand {
             label: "Transform: To Title Case",
-            action: |s| s.transform_title_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.transform_title_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Format Selection",
-            action: |s| s.format_selection_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.format_selection_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Save Without Formatting",
-            action: |s| s.save_no_format_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.save_no_format_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Fold All",
-            action: |s| s.fold_all_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.fold_all_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Unfold All",
-            action: |s| s.unfold_all_nonce.update(|v| *v += 1),
-        },
+            action: |s| s.editor.unfold_all_nonce.update(|v| *v += 1)},
         PaletteCommand {
             label: "Toggle Code Lens",
-            action: |s| s.code_lens_visible.update(|v| *v = !*v),
-        },
+            action: |s| s.editor.code_lens_visible.update(|v| *v = !*v)},
     ]
 }
 
 // ── File picker overlay (Ctrl+P) ──────────────────────────────────────────────
 
 fn file_picker(state: IdeState) -> impl IntoView {
-    let query = state.file_picker_query;
-    let all_files = state.file_picker_files;
+    let query = state.workbench.file_picker_query;
+    let all_files = state.workbench.file_picker_files;
     let hovered: RwSignal<Option<usize>> = create_rw_signal(None);
 
     // When picker opens, walk workspace asynchronously (re-walk when root changes)
@@ -1663,10 +1380,10 @@ fn file_picker(state: IdeState) -> impl IntoView {
         }
     });
     create_effect(move |_| {
-        if !state.file_picker_open.get() {
+        if !state.workbench.file_picker_open.get() {
             return;
         }
-        let root = state.workspace_root.get();
+        let root = state.project.workspace_root.get();
         if last_root.get().as_ref() == Some(&root) {
             return;
         }
@@ -1714,7 +1431,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
     };
 
     let search_box = text_input(query).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.width_full()
             .padding(10.0)
@@ -1732,7 +1449,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
             let state = state.clone();
             move |(idx, path)| {
                 let path_clone = path.clone();
-                let root = state.workspace_root.get();
+                let root = state.project.workspace_root.get();
                 let display = path
                     .strip_prefix(&root)
                     .ok()
@@ -1753,14 +1470,14 @@ fn file_picker(state: IdeState) -> impl IntoView {
                             let state = state.clone();
                             move |s| {
                                 s.font_size(13.0)
-                                    .color(state.theme.get().palette.text_primary)
+                                    .color(state.workbench.theme.get().palette.text_primary)
                             }
                         }),
                         label(move || format!("  {}", display2)).style({
                             let state = state.clone();
                             move |s| {
                                 s.font_size(11.0)
-                                    .color(state.theme.get().palette.text_muted)
+                                    .color(state.workbench.theme.get().palette.text_muted)
                                     .flex_grow(1.0)
                             }
                         }),
@@ -1770,7 +1487,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
                 .style({
                     let state = state.clone();
                     move |s| {
-                        let t = state.theme.get();
+                        let t = state.workbench.theme.get();
                         let p = &t.palette;
                         s.width_full()
                             .padding_horiz(12.0)
@@ -1788,9 +1505,9 @@ fn file_picker(state: IdeState) -> impl IntoView {
                     let state = state.clone();
                     let path2 = path.clone();
                     move |_| {
-                        state.open_file.set(Some(path2.clone()));
-                        state.file_picker_open.set(false);
-                        state.file_picker_query.set(String::new());
+                        state.editor.open_file.set(Some(path2.clone()));
+                        state.workbench.file_picker_open.set(false);
+                        state.workbench.file_picker_query.set(String::new());
                     }
                 })
                 .on_event_stop(EventListener::PointerEnter, move |_| {
@@ -1807,10 +1524,10 @@ fn file_picker(state: IdeState) -> impl IntoView {
 
     let empty_hint = container(label(|| "Searching workspace files…").style(move |s| {
         s.font_size(12.0)
-            .color(state.theme.get().palette.text_muted)
+            .color(state.workbench.theme.get().palette.text_muted)
     }))
     .style(move |s| {
-        let empty = all_files.get().is_empty() && state.file_picker_open.get();
+        let empty = all_files.get().is_empty() && state.workbench.file_picker_open.get();
         s.width_full()
             .padding_vert(12.0)
             .items_center()
@@ -1822,7 +1539,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
         .style({
             let state = state.clone();
             move |s| {
-                let t = state.theme.get();
+                let t = state.workbench.theme.get();
                 let p = &t.palette;
                 s.flex_col()
                     .width(560.0)
@@ -1843,8 +1560,8 @@ fn file_picker(state: IdeState) -> impl IntoView {
             move |event| {
                 if let Event::KeyDown(e) = event {
                     if e.key.logical_key == Key::Named(NamedKey::Escape) {
-                        state.file_picker_open.set(false);
-                        state.file_picker_query.set(String::new());
+                        state.workbench.file_picker_open.set(false);
+                        state.workbench.file_picker_query.set(String::new());
                     }
                 }
             }
@@ -1854,13 +1571,13 @@ fn file_picker(state: IdeState) -> impl IntoView {
         .style({
             let state = state.clone();
             move |s| {
-                let shown = state.file_picker_open.get();
+                let shown = state.workbench.file_picker_open.get();
                 s.absolute()
                     .inset(0)
                     .items_start()
                     .justify_center()
                     .padding_top(80.0)
-                    .background(state.theme.get().palette.overlay_bg)
+                    .background(state.workbench.theme.get().palette.overlay_bg)
                     .z_index(ui_const::Z_FILE_PICKER)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
@@ -1868,8 +1585,8 @@ fn file_picker(state: IdeState) -> impl IntoView {
         .on_click_stop({
             let state = state.clone();
             move |_| {
-                state.file_picker_open.set(false);
-                state.file_picker_query.set(String::new());
+                state.workbench.file_picker_open.set(false);
+                state.workbench.file_picker_query.set(String::new());
             }
         })
 }
@@ -1877,7 +1594,7 @@ fn file_picker(state: IdeState) -> impl IntoView {
 // ── Command palette overlay ───────────────────────────────────────────────────
 
 fn command_palette(state: IdeState) -> impl IntoView {
-    let query = state.command_palette_query;
+    let query = state.workbench.command_palette_query;
 
     // Build a filtered list of matching commands driven by the query signal.
     #[allow(clippy::type_complexity)]
@@ -1894,7 +1611,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
     let row_hovered: RwSignal<Option<usize>> = create_rw_signal(None);
 
     let search_box = text_input(query).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.width_full()
             .padding(10.0)
@@ -1917,13 +1634,13 @@ fn command_palette(state: IdeState) -> impl IntoView {
                     let state = state.clone();
                     move |s| {
                         s.font_size(13.0)
-                            .color(state.theme.get().palette.text_primary)
+                            .color(state.workbench.theme.get().palette.text_primary)
                     }
                 }))
                 .style({
                     let state = state.clone();
                     move |s| {
-                        let t = state.theme.get();
+                        let t = state.workbench.theme.get();
                         let p = &t.palette;
                         let is_hov = hovered.get() == Some(idx);
                         s.width_full()
@@ -1942,8 +1659,8 @@ fn command_palette(state: IdeState) -> impl IntoView {
                     let state = state.clone();
                     move |_| {
                         cmd_action(state.clone());
-                        state.command_palette_open.set(false);
-                        state.command_palette_query.set(String::new());
+                        state.workbench.command_palette_open.set(false);
+                        state.workbench.command_palette_query.set(String::new());
                     }
                 })
                 .on_event_stop(EventListener::PointerEnter, move |_| {
@@ -1962,7 +1679,7 @@ fn command_palette(state: IdeState) -> impl IntoView {
         .style({
             let state = state.clone();
             move |s| {
-                let t = state.theme.get();
+                let t = state.workbench.theme.get();
                 let p = &t.palette;
                 s.flex_col()
                     .width(500.0)
@@ -1984,8 +1701,8 @@ fn command_palette(state: IdeState) -> impl IntoView {
             move |event| {
                 if let Event::KeyDown(e) = event {
                     if e.key.logical_key == Key::Named(floem::keyboard::NamedKey::Escape) {
-                        state.command_palette_open.set(false);
-                        state.command_palette_query.set(String::new());
+                        state.workbench.command_palette_open.set(false);
+                        state.workbench.command_palette_query.set(String::new());
                     }
                 }
             }
@@ -1997,12 +1714,12 @@ fn command_palette(state: IdeState) -> impl IntoView {
         .style({
             let state = state.clone();
             move |s| {
-                let shown = state.command_palette_open.get();
+                let shown = state.workbench.command_palette_open.get();
                 s.absolute()
                     .inset(0)
                     .items_center()
                     .justify_center()
-                    .background(state.theme.get().palette.overlay_bg)
+                    .background(state.workbench.theme.get().palette.overlay_bg)
                     .z_index(ui_const::Z_COMMAND_PALETTE)
                     .apply_if(!shown, |s| s.display(floem::style::Display::None))
             }
@@ -2010,8 +1727,8 @@ fn command_palette(state: IdeState) -> impl IntoView {
         .on_click_stop({
             let state = state.clone();
             move |_| {
-                state.command_palette_open.set(false);
-                state.command_palette_query.set(String::new());
+                state.workbench.command_palette_open.set(false);
+                state.workbench.command_palette_query.set(String::new());
             }
         })
 }
@@ -2035,7 +1752,7 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
         // 2. Subtle hex grid — faint accent dots for an "engineered" technical feel
         let hex_size = 40.0;
-        let grid_color = p.accent.with_alpha(0.09);
+        let grid_color = p.accent.with_alpha(0.18);
         let horiz_dist = hex_size * 3.0f64.sqrt();
         let vert_dist = hex_size * 1.5;
 
@@ -2061,7 +1778,7 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
 fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl IntoView {
     let is_hovered = create_rw_signal(false);
-    let active = move || state.left_panel_tab.get() == tab && state.show_left_panel.get();
+    let active = move || state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get();
 
     let icon_color = move |p: &crate::theme::PhazePalette| {
         if active() {
@@ -2071,20 +1788,20 @@ fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl I
         }
     };
 
-    container(phaze_icon(icon_svg, 22.0, icon_color, state.theme))
+    container(phaze_icon(icon_svg, 22.0, icon_color, state.workbench.theme))
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
             let is_active = active();
             let is_hov = is_hovered.get();
 
-            s.width(42.0)
-                .height(42.0)
+            s.width(40.0)
+                .height(40.0)
                 .border_radius(10.0)
                 .items_center()
                 .justify_center()
                 .cursor(floem::style::CursorStyle::Pointer)
-                .margin_bottom(6.0)
+                .margin_bottom(4.0)
                 .transition(
                     floem::style::Background,
                     floem::style::Transition::linear(Duration::from_millis(150)),
@@ -2100,13 +1817,13 @@ fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl I
                 })
         })
         .on_click_stop(move |_| {
-            if state.left_panel_tab.get() == tab && state.show_left_panel.get() {
-                state.show_left_panel.set(false);
-                state.left_panel_width.set(0.0);
+            if state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get() {
+                state.workbench.show_left_panel.set(false);
+                state.workbench.left_panel_width.set(0.0);
             } else {
-                state.left_panel_tab.set(tab);
-                state.show_left_panel.set(true);
-                state.left_panel_width.set(300.0); // Slightly wider sidebar for premium feel
+                state.workbench.left_panel_tab.set(tab);
+                state.workbench.show_left_panel.set(true);
+                state.workbench.left_panel_width.set(260.0);
             }
         })
         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -2129,6 +1846,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::CONTAINER, Tab::Containers, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Makefile, state.clone()),
         activity_bar_btn(icons::GITHUB, Tab::GitHub, state.clone()),
+        activity_bar_btn(icons::LIST_CHECKS, Tab::Tests, state.clone()),
         stack((
             activity_bar_btn(icons::EXTENSIONS, Tab::Extensions, state.clone()),
             activity_bar_btn(icons::SETTINGS, Tab::Settings, state.clone()),
@@ -2138,7 +1856,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
     ))
     .style(|s| s.flex_col().padding(8.0).gap(2.0))
     .style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.flex_col()
             .width(48.0)
@@ -2228,10 +1946,10 @@ fn coming_soon_panel(
 
 fn left_panel(state: IdeState) -> impl IntoView {
     let explorer = explorer_panel(
-        state.workspace_root,
-        state.open_file,
-        state.theme,
-        state.open_tabs,
+        state.project.workspace_root,
+        state.editor.open_file,
+        state.workbench.theme,
+        state.editor.open_tabs,
     );
 
     let explorer_wrap = container(explorer).style({
@@ -2239,7 +1957,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Explorer, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Explorer, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2250,7 +1968,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Search, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Search, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2261,7 +1979,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Git, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Git, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2270,14 +1988,14 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let debug_wrap = container(coming_soon_panel(
         "Run and Debug",
         "Run, step, and inspect your code with integrated debugger support.",
-        state.theme,
+        state.workbench.theme,
     ))
     .style({
         let state = state.clone();
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Debug, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Debug, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2288,7 +2006,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Extensions, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Extensions, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2297,14 +2015,14 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let remote_wrap = container(coming_soon_panel(
         "Remote Explorer",
         "Connect to remote machines, containers, and cloud environments via SSH.",
-        state.theme,
+        state.workbench.theme,
     ))
     .style({
         let state = state.clone();
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Remote, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Remote, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2313,14 +2031,14 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let container_wrap = container(coming_soon_panel(
         "Containers",
         "Manage Docker containers, images, and compose services.",
-        state.theme,
+        state.workbench.theme,
     ))
     .style({
         let state = state.clone();
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Containers, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Containers, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2329,14 +2047,14 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let makefile_wrap = container(coming_soon_panel(
         "Makefile",
         "Browse and run Makefile targets with a single click.",
-        state.theme,
+        state.workbench.theme,
     ))
     .style({
         let state = state.clone();
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Makefile, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Makefile, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2347,7 +2065,18 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::GitHub, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::GitHub, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
+
+    let tests_wrap = container(tests_panel(state.clone())).style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Tests, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2358,7 +2087,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Symbols, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Symbols, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2369,7 +2098,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Composer, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Composer, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2380,7 +2109,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Settings, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Settings, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2389,14 +2118,14 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let account_wrap = container(coming_soon_panel(
         "Account",
         "Sign in to sync settings, manage PhazeAI Cloud features, and collaborate with your team.",
-        state.theme,
+        state.workbench.theme,
     ))
     .style({
         let state = state.clone();
         move |s| {
             s.width_full()
                 .height_full()
-                .apply_if(state.left_panel_tab.get() != Tab::Account, |s| {
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Account, |s| {
                     s.display(floem::style::Display::None)
                 })
         }
@@ -2414,6 +2143,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             container_wrap,
             makefile_wrap,
             github_wrap,
+            tests_wrap,
             composer_wrap,
             settings_wrap,
             account_wrap,
@@ -2421,11 +2151,11 @@ fn left_panel(state: IdeState) -> impl IntoView {
         .style(|s| s.width_full().height_full()),
     )
     .style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
-        let show = state.show_left_panel.get();
+        let show = state.workbench.show_left_panel.get();
         let width = if show {
-            state.left_panel_width.get()
+            state.workbench.left_panel_width.get()
         } else {
             0.0
         };
@@ -2436,7 +2166,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             .border_color(p.glass_border)
             .box_shadow_h_offset(6.0)
             .box_shadow_v_offset(0.0)
-            .box_shadow_blur(12.0)
+            .box_shadow_blur(16.0)
             .box_shadow_color(p.glow)
             .box_shadow_spread(0.0)
             .apply_if(!show, |s| s.display(floem::style::Display::None))
@@ -2447,9 +2177,9 @@ fn bottom_panel_tab(label_str: &'static str, tab: Tab, state: IdeState) -> impl 
     let is_hovered = create_rw_signal(false);
     container(label(move || label_str))
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
-            let active = state.bottom_panel_tab.get() == tab;
+            let active = state.workbench.bottom_panel_tab.get() == tab;
             let hovered = is_hovered.get();
             s.padding_horiz(12.0)
                 .padding_vert(6.0)
@@ -2466,8 +2196,8 @@ fn bottom_panel_tab(label_str: &'static str, tab: Tab, state: IdeState) -> impl 
                 .apply_if(active, |s| s.border_top(2.0).border_color(p.accent))
         })
         .on_click_stop(move |_| {
-            state.bottom_panel_tab.set(tab);
-            state.show_bottom_panel.set(true);
+            state.workbench.bottom_panel_tab.set(tab);
+            state.workbench.show_bottom_panel.set(true);
         })
         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
             is_hovered.set(true);
@@ -2485,9 +2215,9 @@ where
     let is_hovered = create_rw_signal(false);
     container(label(label_fn))
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
-            let active = state.bottom_panel_tab.get() == tab;
+            let active = state.workbench.bottom_panel_tab.get() == tab;
             let hovered = is_hovered.get();
             s.padding_horiz(12.0)
                 .padding_vert(6.0)
@@ -2504,8 +2234,8 @@ where
                 .apply_if(active, |s| s.border_top(2.0).border_color(p.accent))
         })
         .on_click_stop(move |_| {
-            state.bottom_panel_tab.set(tab);
-            state.show_bottom_panel.set(true);
+            state.workbench.bottom_panel_tab.set(tab);
+            state.workbench.show_bottom_panel.set(true);
         })
         .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
             is_hovered.set(true);
@@ -2519,7 +2249,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
     // Cloud sign-in indicator (left-most element)
     // let cloud_btn = container(label(|| "☁ Sign in"))
     //     .style(move |s| {
-    //         let p = state.theme.get().palette;
+    //         let p = state.workbench.theme.get().palette;
     //         s.font_size(10.0)
     //             .padding_horiz(8.0)
     //             .padding_vert(2.0)
@@ -2555,16 +2285,16 @@ fn status_bar(state: IdeState) -> impl IntoView {
         let is_hov = create_rw_signal(false);
         container(
             stack((
-                phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.theme),
-                label(move || format!(" {} ", s.git_branch.get())).style(move |s2| {
-                    s2.color(state.theme.get().palette.text_secondary)
+                phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.workbench.theme),
+                label(move || format!(" {} ", s.project.git_branch.get())).style(move |s2| {
+                    s2.color(state.workbench.theme.get().palette.text_secondary)
                         .font_size(11.0)
                 }),
             ))
             .style(|s| s.items_center()),
         )
         .style(move |s| {
-            let p = s2.theme.get().palette;
+            let p = s2.workbench.theme.get().palette;
             s.padding_horiz(6.0)
                 .padding_vert(2.0)
                 .border_radius(4.0)
@@ -2579,8 +2309,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
             let s3 = state.clone();
             let (branch_tx, branch_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(1);
             let branch_sig = floem::ext_event::create_signal_from_channel(branch_rx);
-            let picker_open_sig = state.branch_picker_open;
-            let branch_list_sig = state.branch_list;
+            let picker_open_sig = state.project.branch_picker_open;
+            let branch_list_sig = state.project.branch_list;
             create_effect(move |_| {
                 if let Some(branches) = branch_sig.get() {
                     branch_list_sig.set(branches);
@@ -2588,14 +2318,13 @@ fn status_bar(state: IdeState) -> impl IntoView {
                 }
             });
             move |_| {
-                let root = s3.workspace_root.get();
+                let root = s3.project.workspace_root.get();
                 let tx = branch_tx.clone();
                 std::thread::spawn(move || {
                     let branches = std::process::Command::new("git")
                         .args(["branch", "--list"])
                         .current_dir(&root)
                         .output()
-                        .ok()
                         .map(|out| {
                             String::from_utf8_lossy(&out.stdout)
                                 .lines()
@@ -2603,7 +2332,10 @@ fn status_bar(state: IdeState) -> impl IntoView {
                                 .filter(|l| !l.is_empty())
                                 .collect::<Vec<_>>()
                         })
-                        .unwrap_or_default();
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(target: "phazeai_ui", error = %e, "Failed to list git branches");
+                            vec![]
+                        });
                     let _ = tx.send(branches);
                 });
             }
@@ -2615,9 +2347,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
     let left = stack((
         branch_btn,
         label(|| "   ").style(|s| s.font_size(11.0)),
-        phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.theme),
-        label(move || format!(" {}", state.ai_model.get())).style(move |s| {
-            s.color(state.theme.get().palette.text_secondary)
+        phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.workbench.theme),
+        label(move || format!(" {}", state.ai.model.get())).style(move |s| {
+            s.color(state.workbench.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
     ))
@@ -2628,19 +2360,19 @@ fn status_bar(state: IdeState) -> impl IntoView {
         let s = state.clone();
         let s_label = state.clone();
         container(label(move || {
-            if !s_label.vim_mode.get() {
+            if !s_label.editor.vim_mode.get() {
                 return "NORMAL".to_string();
             }
-            if s_label.vim_normal_mode.get() {
+            if s_label.editor.vim_normal_mode.get() {
                 "-- NORMAL --".to_string()
             } else {
                 "-- INSERT --".to_string()
             }
         }))
         .style(move |s2| {
-            let p = state.theme.get().palette;
-            let vim = state.vim_mode.get();
-            let normal = state.vim_normal_mode.get();
+            let p = state.workbench.theme.get().palette;
+            let vim = state.editor.vim_mode.get();
+            let normal = state.editor.vim_normal_mode.get();
             s2.font_size(10.0)
                 .padding_horiz(6.0)
                 .padding_vert(2.0)
@@ -2660,12 +2392,12 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| {
             let s2 = s.clone();
-            s2.vim_mode.update(|v| *v = !*v);
+            s2.editor.vim_mode.update(|v| *v = !*v);
             // When enabling vim mode, start in Normal mode.
-            if s2.vim_mode.get() {
-                s2.vim_normal_mode.set(true);
+            if s2.editor.vim_mode.get() {
+                s2.editor.vim_normal_mode.set(true);
             } else {
-                s2.vim_normal_mode.set(false);
+                s2.editor.vim_normal_mode.set(false);
             }
             // Session is persisted by the unified debounced effect watching vim_mode.
         })
@@ -2674,19 +2406,19 @@ fn status_bar(state: IdeState) -> impl IntoView {
     let right = stack((
         // Line / column indicator — reads from active_cursor (set by editor on every move).
         label(move || {
-            if let Some((_, line, col)) = state.active_cursor.get() {
+            if let Some((_, line, col)) = state.editor.active_cursor.get() {
                 format!("Ln {},  Col {}  ", line + 1, col + 1)
             } else {
                 String::new()
             }
         })
         .style(move |s| {
-            s.color(state.theme.get().palette.text_secondary)
+            s.color(state.workbench.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
         // LSP diagnostic counts — live from the reactive diagnostics signal.
         label(move || {
-            let diags = state.diagnostics.get();
+            let diags = state.editor.diagnostics.get();
             let errs = diags
                 .iter()
                 .filter(|d| d.severity == DiagSeverity::Error)
@@ -2702,9 +2434,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
             }
         })
         .style(move |s| {
-            let p = state.theme.get().palette;
-            let has_errs = state
-                .diagnostics
+            let p = state.workbench.theme.get().palette;
+            let has_errs = state.editor.diagnostics
                 .get()
                 .iter()
                 .any(|d| d.severity == DiagSeverity::Error);
@@ -2714,8 +2445,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
         vim_btn,
         // Diagnostic message for current cursor line (from LSP).
         label(move || {
-            if let Some((ref path, line, _col)) = state.active_cursor.get() {
-                let diags = state.diagnostics.get();
+            if let Some((ref path, line, _col)) = state.editor.active_cursor.get() {
+                let diags = state.editor.diagnostics.get();
                 // Find first diagnostic on current line (1-based line = line+1).
                 let cur_line_1 = line + 1;
                 if let Some(d) = diags
@@ -2726,8 +2457,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                         DiagSeverity::Error => "⊗ ",
                         DiagSeverity::Warning => "⚠ ",
                         DiagSeverity::Info => "ℹ ",
-                        DiagSeverity::Hint => "💡 ",
-                    };
+                        DiagSeverity::Hint => "💡 "};
                     let msg = if d.message.len() > 60 {
                         let end = d.message.floor_char_boundary(60);
                         format!("{}{}…  ", prefix, &d.message[..end])
@@ -2740,12 +2470,11 @@ fn status_bar(state: IdeState) -> impl IntoView {
             String::new()
         })
         .style(move |s| {
-            let p = state.theme.get().palette;
-            let has_err = state
-                .active_cursor
+            let p = state.workbench.theme.get().palette;
+            let has_err = state.editor.active_cursor
                 .get()
                 .map(|(ref path, line, _)| {
-                    state.diagnostics.get().iter().any(|d| {
+                    state.editor.diagnostics.get().iter().any(|d| {
                         d.path == *path && d.line == line + 1 && d.severity == DiagSeverity::Error
                     })
                 })
@@ -2755,8 +2484,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
         }),
         // LSP progress indicator — shown while indexing, hidden when idle.
         label(move || {
-            state
-                .lsp_progress
+            state.project.lsp_progress
                 .get()
                 .map(|msg| {
                     if msg.len() > 40 {
@@ -2769,38 +2497,38 @@ fn status_bar(state: IdeState) -> impl IntoView {
                 .unwrap_or_default()
         })
         .style(move |s| {
-            s.color(state.theme.get().palette.text_muted)
+            s.color(state.workbench.theme.get().palette.text_muted)
                 .font_size(10.0)
-                .apply_if(state.lsp_progress.get().is_none(), |s| {
+                .apply_if(state.project.lsp_progress.get().is_none(), |s| {
                     s.display(floem::style::Display::None)
                 })
         }),
         label(|| "AI Ready  ")
-            .style(move |s| s.color(state.theme.get().palette.success).font_size(11.0)),
+            .style(move |s| s.color(state.workbench.theme.get().palette.success).font_size(11.0)),
         // Git blame for current cursor line
         label(move || {
-            let blame = state.active_blame.get();
+            let blame = state.editor.active_blame.get();
             if blame.is_empty() {
                 String::new()
             } else {
-                format!("  {blame}  ")
+                format!("  {}  ", blame)
             }
         })
         .style(move |s| {
-            let p = state.theme.get().palette;
+            let p = state.workbench.theme.get().palette;
             s.font_size(10.0)
                 .color(p.text_muted)
-                .apply_if(state.active_blame.get().is_empty(), |s| {
+                .apply_if(state.editor.active_blame.get().is_empty(), |s| {
                     s.display(floem::style::Display::None)
                 })
         }),
         // Dynamic encoding + line ending indicator — clickable to toggle CRLF/LF
         {
             let le_state = state.clone();
-            let le_theme = state.theme;
+            let le_theme = state.workbench.theme;
             let le_hov = create_rw_signal(false);
             container(
-                label(move || format!("UTF-8 {}  ", le_state.line_ending.get())).style(move |s| {
+                label(move || format!("UTF-8 {}  ", le_state.editor.line_ending.get())).style(move |s| {
                     let p = le_theme.get().palette;
                     s.color(if le_hov.get() { p.accent } else { p.text_muted })
                         .font_size(11.0)
@@ -2809,13 +2537,13 @@ fn status_bar(state: IdeState) -> impl IntoView {
             )
             .on_click_stop(move |_| {
                 // Toggle line ending and convert file bytes
-                let current = state.line_ending.get();
+                let current = state.editor.line_ending.get();
                 let new_le: &'static str = if current == "CRLF" { "LF" } else { "CRLF" };
-                state.line_ending.set(new_le);
+                state.editor.line_ending.set(new_le);
                 // Convert open file bytes
-                if let Some(path) = state.open_file.get_untracked() {
+                if let Some(path) = state.editor.open_file.get_untracked() {
                     if path.exists() {
-                        let toast = state.status_toast;
+                        let toast = state.workbench.status_toast;
                         if let Ok(bytes) = std::fs::read(&path) {
                             let converted = if new_le == "LF" {
                                 // Remove all \r
@@ -2846,8 +2574,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
             .on_event_stop(EventListener::PointerLeave, move |_| le_hov.set(false))
         },
         label(move || {
-            state
-                .open_file
+            state.editor.open_file
                 .get()
                 .as_ref()
                 .and_then(|p| p.extension())
@@ -2857,19 +2584,18 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     "js" | "ts" => "TypeScript  ",
                     "toml" => "TOML  ",
                     "md" => "Markdown  ",
-                    _ => "Text  ",
-                })
+                    _ => "Text  "})
                 .unwrap_or("  ")
                 .to_string()
         })
         .style(move |s| {
-            s.color(state.theme.get().palette.text_muted)
+            s.color(state.workbench.theme.get().palette.text_muted)
                 .font_size(11.0)
         }),
         // Read-only indicator
         {
-            let ro_theme = state.theme;
-            let ro_sig = state.active_readonly;
+            let ro_theme = state.workbench.theme;
+            let ro_sig = state.editor.active_readonly;
             label(move || if ro_sig.get() { "🔒 READ-ONLY  " } else { "" }).style(move |s| {
                 let p = ro_theme.get().palette;
                 s.color(p.error)
@@ -2881,9 +2607,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
     .style(|s| s.items_center().padding_horiz(8.0));
 
     stack((left, right)).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
-        s.height(24.0)
+        s.height(22.0)
             .width_full()
             .background(p.glass_bg)
             .border_top(1.0)
@@ -2901,10 +2627,10 @@ fn status_bar(state: IdeState) -> impl IntoView {
 
 fn problems_view(state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal as crws;
-    let diags = state.diagnostics;
-    let theme = state.theme;
-    let open_file = state.open_file;
-    let goto_line = state.goto_line;
+    let diags = state.editor.diagnostics;
+    let theme = state.workbench.theme;
+    let open_file = state.editor.open_file;
+    let goto_line = state.editor.goto_line;
 
     // Filter toggles
     let show_errors = crws(true);
@@ -2994,22 +2720,20 @@ fn problems_view(state: IdeState) -> impl IntoView {
                     .filter(|d| match d.severity {
                         DiagSeverity::Error => show_errors.get(),
                         DiagSeverity::Warning => show_warnings.get(),
-                        _ => true,
-                    })
+                        _ => true})
                     .enumerate()
                     .collect::<Vec<_>>()
             },
             |(idx, _)| *idx,
             {
-                let theme = state.theme;
+                let theme = state.workbench.theme;
                 move |(_, entry): (usize, DiagEntry)| {
                     let sev = entry.severity;
                     let icon = match sev {
                         DiagSeverity::Error => "⊗",
                         DiagSeverity::Warning => "⚠",
                         DiagSeverity::Info => "ℹ",
-                        DiagSeverity::Hint => "○",
-                    };
+                        DiagSeverity::Hint => "○"};
                     let filename = entry
                         .path
                         .file_name()
@@ -3029,8 +2753,7 @@ fn problems_view(state: IdeState) -> impl IntoView {
                                     DiagSeverity::Error => p.error,
                                     DiagSeverity::Warning => p.warning,
                                     DiagSeverity::Info => p.accent,
-                                    _ => p.text_muted,
-                                };
+                                    _ => p.text_muted};
                                 s.font_size(13.0).color(c).margin_right(8.0)
                             }),
                             label(move || msg.clone()).style(move |s| {
@@ -3094,10 +2817,10 @@ fn problems_view(state: IdeState) -> impl IntoView {
 
 fn references_view(state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal as crws;
-    let refs = state.references;
-    let theme = state.theme;
-    let open_file = state.open_file;
-    let goto_line = state.goto_line;
+    let refs = state.editor.references;
+    let theme = state.workbench.theme;
+    let open_file = state.editor.open_file;
+    let goto_line = state.editor.goto_line;
 
     let empty_msg = container(
         label(move || {
@@ -3146,7 +2869,7 @@ fn references_view(state: IdeState) -> impl IntoView {
             },
             |(idx, _)| *idx,
             {
-                let theme = state.theme;
+                let theme = state.workbench.theme;
                 move |(_, entry): (usize, ReferenceEntry)| {
                     let filename = entry
                         .path
@@ -3160,13 +2883,16 @@ fn references_view(state: IdeState) -> impl IntoView {
 
                     // Show a snippet of the line if possible
                     let snippet = std::fs::read_to_string(&entry.path)
-                        .ok()
-                        .and_then(|c| {
+                        .map(|c| {
                             c.lines()
                                 .nth(entry.line.saturating_sub(1) as usize)
                                 .map(|l| l.trim().to_string())
+                                .unwrap_or_default()
                         })
-                        .unwrap_or_default();
+                        .unwrap_or_else(|e| {
+                            tracing::debug!(target: "phazeai_ui", error = %e, path = %entry.path.display(), "Failed to read file for snippet");
+                            String::new()
+                        });
 
                     container(
                         stack((
@@ -3231,8 +2957,8 @@ fn references_view(state: IdeState) -> impl IntoView {
 }
 
 fn output_view(state: IdeState) -> impl IntoView {
-    let log = state.output_log;
-    let theme = state.theme;
+    let log = state.workbench.output_log;
+    let theme = state.workbench.theme;
     scroll(
         dyn_stack(
             move || {
@@ -3270,7 +2996,7 @@ fn output_view(state: IdeState) -> impl IntoView {
 }
 
 fn debug_console_view(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     container(
         stack((
             label(|| "▷  No active debug session").style(move |s| {
@@ -3288,7 +3014,7 @@ fn debug_console_view(state: IdeState) -> impl IntoView {
 }
 
 fn ports_view(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     container(
         stack((
             label(|| "No forwarded ports").style(move |s| {
@@ -3308,11 +3034,11 @@ fn ports_view(state: IdeState) -> impl IntoView {
 /// Symbol outline panel — displayed in the left sidebar under the "Symbols" tab.
 fn symbol_outline_panel(state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal as crws;
-    let symbols = state.doc_symbols;
-    let theme = state.theme;
-    let open_file = state.open_file;
-    let goto_line = state.goto_line;
-    let lsp_cmd = state.lsp_cmd.clone();
+    let symbols = state.editor.doc_symbols;
+    let theme = state.workbench.theme;
+    let open_file = state.editor.open_file;
+    let goto_line = state.editor.goto_line;
+    let lsp_cmd = state.project.lsp_cmd.clone();
 
     // Refresh button
     let refresh_btn = container(label(|| " ↺ ".to_string()).style(move |s| {
@@ -3368,7 +3094,7 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
             },
             |(i, _)| *i,
             {
-                let theme = state.theme;
+                let theme = state.workbench.theme;
                 move |(_, sym): (usize, SymbolEntry)| {
                     let hovered = crws(false);
                     let name = sym.name.clone();
@@ -3384,8 +3110,7 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
                         "trait" => pal.syn_function,
                         "impl" => pal.syn_string,
                         "mod" => pal.syn_number,
-                        _ => pal.text_muted,
-                    };
+                        _ => pal.text_muted};
 
                     container(
                         stack((
@@ -3438,8 +3163,8 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
 
 /// Git diff viewer — shown in the bottom panel "GIT DIFF" tab.
 fn git_diff_view(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
-    let open_file = state.open_file;
+    let theme = state.workbench.theme;
+    let open_file = state.editor.open_file;
 
     // Reactive signal holding the parsed diff lines (text + color-kind).
     // 0=context, 1=added (+), 2=removed (-), 3=header (@@/---/+++)
@@ -3504,14 +3229,12 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
                     1 => pal.diff_added_fg,
                     2 => pal.diff_removed_fg,
                     3 => pal.diff_header_fg,
-                    _ => pal.text_secondary,
-                };
+                    _ => pal.text_secondary};
                 let bg = match kind {
                     1 => pal.diff_added_bg,
                     2 => pal.diff_removed_bg,
                     3 => pal.diff_header_bg,
-                    _ => floem::peniko::Color::TRANSPARENT,
-                };
+                    _ => floem::peniko::Color::TRANSPARENT};
                 container(label(move || text.clone()).style(move |s| {
                     s.font_size(12.0)
                         .color(color)
@@ -3547,8 +3270,7 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
         .output();
     let output = match out {
         Ok(o) => o,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
         // Try diff against staged (index) as fallback
@@ -3558,8 +3280,7 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
             .output();
         let text2 = match out2 {
             Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(_) => return vec![],
-        };
+            Err(_) => return vec![]};
         if text2.trim().is_empty() {
             return vec![];
         }
@@ -3587,8 +3308,8 @@ fn parse_diff_output(text: &str) -> Vec<(String, u8)> {
 }
 
 fn bottom_panel(state: IdeState) -> impl IntoView {
-    let current_tab = state.bottom_panel_tab;
-    let maximized = state.bottom_panel_maximized;
+    let current_tab = state.workbench.bottom_panel_tab;
+    let maximized = state.workbench.bottom_panel_maximized;
 
     container(
         stack((
@@ -3597,7 +3318,7 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
                 bottom_panel_tab("TERMINAL", Tab::Terminal, state.clone()),
                 bottom_panel_tab_dyn(
                     {
-                        let diags = state.diagnostics;
+                        let diags = state.editor.diagnostics;
                         move || {
                             let n = diags.get().len();
                             if n == 0 {
@@ -3616,18 +3337,18 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
                 bottom_panel_tab("DEBUG CONSOLE", Tab::DebugConsole, state.clone()),
                 bottom_panel_tab("PORTS", Tab::Ports, state.clone()),
                 // Close button
-                phaze_icon(icons::CLOSE, 12.0, move |p| p.text_muted, state.theme)
+                phaze_icon(icons::CLOSE, 12.0, move |p| p.text_muted, state.workbench.theme)
                     .style(move |s| {
                         s.margin_left(floem::unit::PxPctAuto::Auto)
                             .padding(4.0)
                             .cursor(floem::style::CursorStyle::Pointer)
                     })
                     .on_click_stop(move |_| {
-                        state.show_bottom_panel.set(false);
+                        state.workbench.show_bottom_panel.set(false);
                     }),
             ))
             .style(move |s| {
-                let t = state.theme.get();
+                let t = state.workbench.theme.get();
                 s.width_full()
                     .height(32.0)
                     .background(t.palette.bg_elevated)
@@ -3648,9 +3369,9 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             // Content
             stack((
                 container(terminal_panel(
-                    state.theme,
+                    state.workbench.theme,
                     state.as_global_command_state(),
-                    state.run_in_terminal_text,
+                    state.workbench.run_in_terminal_text,
                 ))
                 .style(move |s| {
                     s.width_full()
@@ -3707,7 +3428,7 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
         .style(|s| s.flex_col().width_full().height_full()),
     )
     .style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.flex_col()
             .height(240.0)
@@ -3720,16 +3441,16 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             .box_shadow_blur(10.0)
             .box_shadow_color(p.glow)
             .box_shadow_spread(0.0)
-            .apply_if(!state.show_bottom_panel.get(), |s| {
+            .apply_if(!state.workbench.show_bottom_panel.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     })
 }
 
 fn completion_popup(state: IdeState) -> impl IntoView {
-    let items = state.completions;
-    let selected = state.completion_selected;
-    let filter = state.completion_filter_text;
+    let items = state.editor.completions;
+    let selected = state.editor.completion_selected;
+    let filter = state.editor.completion_filter_text;
 
     // Filtered + enumerated list — index preserves original position so
     // Enter/Tab handler can look up the right entry by `selected`.
@@ -3752,16 +3473,16 @@ fn completion_popup(state: IdeState) -> impl IntoView {
                 let item_label = entry.label.clone();
                 stack((
                     label(move || item_label.clone()).style(move |s: floem::style::Style| {
-                        let p = state.theme.get().palette;
+                        let p = state.workbench.theme.get().palette;
                         s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
                     }),
                     label(move || item_detail.clone()).style(move |s: floem::style::Style| {
-                        let p = state.theme.get().palette;
+                        let p = state.workbench.theme.get().palette;
                         s.font_size(11.0).color(p.text_muted).margin_left(8.0)
                     }),
                 ))
                 .style(move |s: floem::style::Style| {
-                    let p = state.theme.get().palette;
+                    let p = state.workbench.theme.get().palette;
                     s.items_center()
                         .width_full()
                         .padding_horiz(12.0)
@@ -3778,7 +3499,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
                     let state = state.clone();
                     move |_| {
                         selected.set(idx);
-                        state.completion_open.set(false);
+                        state.editor.completion_open.set(false);
                     }
                 })
                 .on_event_stop(EventListener::PointerEnter, move |_| selected.set(idx))
@@ -3794,12 +3515,12 @@ fn completion_popup(state: IdeState) -> impl IntoView {
     let header = stack((
         label(|| "Completions").style(move |s| {
             s.font_size(11.0)
-                .color(state.theme.get().palette.text_muted)
+                .color(state.workbench.theme.get().palette.text_muted)
                 .flex_grow(1.0)
         }),
         container(label(|| "Esc"))
             .style(move |s| {
-                let p = state.theme.get().palette;
+                let p = state.workbench.theme.get().palette;
                 s.font_size(10.0)
                     .color(p.text_muted)
                     .background(p.bg_elevated)
@@ -3808,7 +3529,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
                     .border_radius(3.0)
                     .cursor(floem::style::CursorStyle::Pointer)
             })
-            .on_click_stop(move |_| state.completion_open.set(false)),
+            .on_click_stop(move |_| state.editor.completion_open.set(false)),
     ))
     .style(move |s| {
         s.items_center()
@@ -3816,7 +3537,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
             .padding_horiz(12.0)
             .padding_vert(6.0)
             .border_bottom(1.0)
-            .border_color(state.theme.get().palette.border)
+            .border_color(state.workbench.theme.get().palette.border)
             .margin_bottom(4.0)
     });
 
@@ -3848,14 +3569,14 @@ fn completion_popup(state: IdeState) -> impl IntoView {
             .filter(|e| f.is_empty() || e.label.to_lowercase().starts_with(&f))
             .count();
         s.font_size(12.0)
-            .color(state.theme.get().palette.text_muted)
+            .color(state.workbench.theme.get().palette.text_muted)
             .padding(12.0)
             .apply_if(count > 0, |s| s.display(floem::style::Display::None))
     });
 
     let popup_box = stack((header, empty_hint, list))
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
             s.flex_col()
                 .width(ui_const::COMPLETION_POPUP_WIDTH)
@@ -3873,7 +3594,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
             if let Event::KeyDown(ke) = e {
                 match &ke.key.logical_key {
                     Key::Named(floem::keyboard::NamedKey::Escape) => {
-                        state.completion_open.set(false);
+                        state.editor.completion_open.set(false);
                     }
                     Key::Named(floem::keyboard::NamedKey::ArrowDown) => {
                         let f = filter.get().to_lowercase();
@@ -3895,7 +3616,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
 
     container(popup_box)
         .style(move |s| {
-            let shown = state.completion_open.get();
+            let shown = state.editor.completion_open.get();
             s.absolute()
                 .inset(0)
                 .items_start()
@@ -3905,7 +3626,7 @@ fn completion_popup(state: IdeState) -> impl IntoView {
                 .background(floem::peniko::Color::TRANSPARENT)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
-        .on_click_stop(move |_| state.completion_open.set(false))
+        .on_click_stop(move |_| state.editor.completion_open.set(false))
 }
 
 // ── Ctrl+K inline AI-edit overlay ────────────────────────────────────────────
@@ -3913,13 +3634,12 @@ fn completion_popup(state: IdeState) -> impl IntoView {
 #[derive(Clone, Debug)]
 enum InlineEditUpdate {
     Done(String),
-    Err(String),
-}
+    Err(String)}
 
 fn inline_edit_overlay(state: IdeState) -> impl IntoView {
-    let open = state.inline_edit_open;
-    let query = state.inline_edit_query;
-    let ai_thinking = state.ai_thinking;
+    let open = state.ai.inline_edit_open;
+    let query = state.ai.inline_edit_query;
+    let ai_thinking = state.ai.thinking;
 
     // Channel created once at overlay-construction time (reactive scope).
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<InlineEditUpdate>(64);
@@ -3933,16 +3653,16 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
             match upd {
                 InlineEditUpdate::Done(text) => {
                     // Insert AI result at current cursor position via pending_completion.
-                    state2.pending_completion.set(Some((text, 0)));
-                    state2.ai_thinking.set(false);
-                    state2.inline_edit_open.set(false);
-                    state2.inline_edit_query.set(String::new());
+                    state2.editor.pending_completion.set(Some((text, 0)));
+                    state2.ai.thinking.set(false);
+                    state2.ai.inline_edit_open.set(false);
+                    state2.ai.inline_edit_query.set(String::new());
                 }
                 InlineEditUpdate::Err(e) => {
                     eprintln!("[PhazeAI] Ctrl+K error: {e}");
-                    state2.ai_thinking.set(false);
-                    state2.inline_edit_open.set(false);
-                    state2.inline_edit_query.set(String::new());
+                    state2.ai.thinking.set(false);
+                    state2.ai.inline_edit_open.set(false);
+                    state2.ai.inline_edit_query.set(String::new());
                 }
             }
         });
@@ -3950,14 +3670,14 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
 
     let hint = label(|| "Describe the change (Enter to apply, Esc to cancel)").style(move |s| {
         s.font_size(11.0)
-            .color(state.theme.get().palette.text_muted)
+            .color(state.workbench.theme.get().palette.text_muted)
             .margin_bottom(6.0)
     });
 
     let input = text_input(query)
         .placeholder("e.g. \"add error handling\", \"convert to async\", \"add JSDoc\"")
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
             s.width_full().padding_horiz(10.0).padding_vert(8.0)
              .font_size(14.0)
@@ -3979,11 +3699,14 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                         if instruction.is_empty() { return; }
                         ai_thinking.set(true);
                         // Build context from open file (first 4 KB to stay within budget)
-                        let file_ctx = state.open_file.get()
+                        let file_ctx = state.editor.open_file.get()
                             .and_then(|p| std::fs::read_to_string(&p).ok())
                             .unwrap_or_default();
-                        let end = file_ctx.floor_char_boundary(4096);
-                        let file_ctx = if file_ctx.len() > 4096 { &file_ctx[..end] } else { &file_ctx };
+                        let file_ctx = if file_ctx.len() > 4096 {
+                            file_ctx[..file_ctx.floor_char_boundary(4096)].to_string()
+                        } else {
+                            file_ctx
+                        };
                         let prompt = format!(
                             "Apply the following edit to the code. \
                              Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
@@ -4033,7 +3756,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
         });
 
     let badge = label(|| "✦ AI Edit").style(move |s| {
-        let p = state.theme.get().palette;
+        let p = state.workbench.theme.get().palette;
         s.font_size(11.0)
             .color(p.accent)
             .font_weight(floem::text::Weight::BOLD)
@@ -4041,7 +3764,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
     });
 
     let box_view = stack((badge, hint, input)).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.flex_col()
             .padding(20.0)
@@ -4066,7 +3789,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 .justify_center()
                 .padding_top(200.0)
                 .z_index(ui_const::Z_INLINE_EDIT)
-                .background(state.theme.get().palette.overlay_bg)
+                .background(state.workbench.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| {
@@ -4078,8 +3801,8 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
 // ── LSP Hover tooltip overlay ─────────────────────────────────────────────────
 
 fn hover_tooltip(state: IdeState) -> impl IntoView {
-    let hover_text = state.hover_text;
-    let theme = state.theme;
+    let hover_text = state.editor.hover_text;
+    let theme = state.workbench.theme;
 
     // Wrap the text in a styled container that looks like a floating doc box.
     let tooltip_box = container(label(move || hover_text.get().unwrap_or_default()).style(
@@ -4124,9 +3847,9 @@ fn hover_tooltip(state: IdeState) -> impl IntoView {
 // ── Code Actions dropdown overlay (Ctrl+.) ───────────────────────────────────
 
 fn code_actions_overlay(state: IdeState) -> impl IntoView {
-    let open = state.code_actions_open;
-    let actions = state.code_actions;
-    let theme = state.theme;
+    let open = state.editor.code_actions_open;
+    let actions = state.editor.code_actions;
+    let theme = state.workbench.theme;
     let hovered: RwSignal<Option<usize>> = create_rw_signal(None);
 
     let header = stack((
@@ -4199,11 +3922,11 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                     container(
                         stack((
                             label(|| "▶ ").style(move |s| {
-                                let p = state3.theme.get().palette;
+                                let p = state3.workbench.theme.get().palette;
                                 s.font_size(10.0).color(p.accent).margin_right(4.0)
                             }),
                             label(move || title.clone()).style(move |s: floem::style::Style| {
-                                let p = state3.theme.get().palette;
+                                let p = state3.workbench.theme.get().palette;
                                 s.font_size(13.0).color(p.text_primary).flex_grow(1.0)
                             }),
                         ))
@@ -4212,7 +3935,7 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                     .style({
                         let state4 = state2.clone();
                         move |s| {
-                            let p = state4.theme.get().palette;
+                            let p = state4.workbench.theme.get().palette;
                             s.width_full()
                                 .padding_horiz(12.0)
                                 .padding_vert(8.0)
@@ -4230,30 +3953,29 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                         let kind2 = kind.clone();
                         let edits2 = edits.clone();
                         move |_| {
-                            state5.code_actions_open.set(false);
+                            state5.editor.code_actions_open.set(false);
                             if kind2 == "source.formatDocument" {
                                 // Trigger format via comment_toggle_nonce repurposed, or a dedicated nonce.
                                 // For now, open the file refresh by toggling a state:
                                 // The formatter (save-on-format) runs when a file is re-opened.
-                                if let Some(path) = state5.open_file.get() {
+                                if let Some(path) = state5.editor.open_file.get() {
                                     if let Ok(text) = std::fs::read_to_string(&path) {
-                                        let _ = state5.lsp_cmd.send(LspCommand::OpenFile {
+                                        let _ = state5.project.lsp_cmd.send(LspCommand::OpenFile {
                                             path: path.clone(),
-                                            text,
-                                        });
+                                            text});
                                     }
                                 }
                             } else if kind2 == "refactor.findReferences" {
                                 // Switch to References tab in bottom panel
-                                state5.show_bottom_panel.set(true);
-                                state5.bottom_panel_tab.set(Tab::References);
+                                state5.workbench.show_bottom_panel.set(true);
+                                state5.workbench.bottom_panel_tab.set(Tab::References);
                             } else if let Some(file_edits) = edits2.as_ref() {
                                 // Apply workspace edits (e.g. organize imports)
                                 for (fpath, new_content) in file_edits {
                                     let _ = std::fs::write(fpath, new_content);
                                     // Re-open in editor to reflect changes
-                                    if state5.open_file.get().as_ref() == Some(fpath) {
-                                        state5.open_file.set(Some(fpath.clone()));
+                                    if state5.editor.open_file.get().as_ref() == Some(fpath) {
+                                        state5.editor.open_file.set(Some(fpath.clone()));
                                     }
                                 }
                             }
@@ -4274,7 +3996,7 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
 
     let dropdown_box = stack((header, empty_hint, list))
         .style(move |s| {
-            let t = state.theme.get();
+            let t = state.workbench.theme.get();
             let p = &t.palette;
             s.flex_col()
                 .width(380.0)
@@ -4298,17 +4020,17 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
 
     container(dropdown_box)
         .style(move |s| {
-            let shown = state.code_actions_open.get();
+            let shown = state.editor.code_actions_open.get();
             s.absolute()
                 .inset(0)
                 .items_start()
                 .justify_center()
                 .padding_top(150.0)
                 .z_index(ui_const::Z_CODE_ACTIONS)
-                .background(state.theme.get().palette.overlay_bg_light)
+                .background(state.workbench.theme.get().palette.overlay_bg_light)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
-        .on_click_stop(move |_| state.code_actions_open.set(false))
+        .on_click_stop(move |_| state.editor.code_actions_open.set(false))
 }
 
 /// Rename-symbol overlay (F2): a small text-input dialog centered on screen.
@@ -4316,12 +4038,12 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
     use floem::reactive::{SignalGet, SignalUpdate};
     use floem::views::{container, label, stack, text_input, Decorators};
 
-    let open = state.rename_open;
-    let query = state.rename_query;
-    let target = state.rename_target;
-    let lsp_cmd = state.lsp_cmd.clone();
-    let cursor = state.active_cursor;
-    let ws = state.workspace_root.get_untracked();
+    let open = state.editor.rename_open;
+    let query = state.editor.rename_query;
+    let target = state.editor.rename_target;
+    let lsp_cmd = state.project.lsp_cmd.clone();
+    let cursor = state.editor.active_cursor;
+    let ws = state.project.workspace_root.get_untracked();
 
     let input = text_input(query).style(|s| s.width(320.0).padding(8.0).font_size(14.0));
 
@@ -4329,7 +4051,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
         let lsp_cmd2 = lsp_cmd.clone();
         label(|| "Rename".to_string())
             .style(move |s| {
-                let pal = &state.theme.get().palette;
+                let pal = &state.workbench.theme.get().palette;
                 s.padding_horiz(16.0)
                     .padding_vert(6.0)
                     .background(pal.button_primary_bg)
@@ -4346,8 +4068,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
                         line,
                         col,
                         new_name,
-                        workspace_root: ws.clone(),
-                    });
+                        workspace_root: ws.clone()});
                 }
                 open.set(false);
             })
@@ -4355,7 +4076,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
 
     let cancel = label(|| "Cancel".to_string())
         .style(move |s| {
-            let pal = &state.theme.get().palette;
+            let pal = &state.workbench.theme.get().palette;
             s.padding_horiz(16.0)
                 .padding_vert(6.0)
                 .background(pal.button_hover_bg)
@@ -4368,7 +4089,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
 
     let title = label(move || format!("Rename '{}'", target.get())).style(move |s| {
         s.font_size(13.0)
-            .color(state.theme.get().palette.text_secondary)
+            .color(state.workbench.theme.get().palette.text_secondary)
             .margin_bottom(8.0)
     });
 
@@ -4382,7 +4103,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
         .style(|s| s.flex_col().gap(4.0)),
     )
     .style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.padding(20.0)
             .border_radius(10.0)
@@ -4400,7 +4121,7 @@ fn rename_overlay(state: IdeState) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .z_index(ui_const::Z_RENAME)
-                .background(state.theme.get().palette.overlay_bg)
+                .background(state.workbench.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -4411,7 +4132,7 @@ fn sig_help_overlay(state: IdeState) -> impl IntoView {
     use floem::reactive::SignalGet;
     use floem::views::{container, label, Decorators};
 
-    let sig_help = state.sig_help;
+    let sig_help = state.editor.sig_help;
 
     let content = container(
         label(move || {
@@ -4433,11 +4154,11 @@ fn sig_help_overlay(state: IdeState) -> impl IntoView {
         })
         .style(move |s| {
             s.font_size(12.0)
-                .color(state.theme.get().palette.text_secondary)
+                .color(state.workbench.theme.get().palette.text_secondary)
         }),
     )
     .style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.padding(10.0)
             .border_radius(6.0)
@@ -4464,8 +4185,8 @@ fn sig_help_overlay(state: IdeState) -> impl IntoView {
 // ── Toast notification overlay ────────────────────────────────────────────────
 
 fn toast_overlay(state: IdeState) -> impl IntoView {
-    let toast = state.status_toast;
-    let theme = state.theme;
+    let toast = state.workbench.status_toast;
+    let theme = state.workbench.theme;
 
     container(
         label(move || toast.get().unwrap_or_default()).style(move |s| {
@@ -4503,12 +4224,12 @@ fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
     use floem::reactive::{SignalGet, SignalUpdate};
     use floem::views::{container, dyn_stack, empty, label, scroll, text_input, Decorators};
 
-    let open = state.ws_syms_open;
-    let query = state.ws_syms_query;
-    let symbols = state.workspace_symbols;
-    let theme = state.theme;
-    let lsp_cmd = state.lsp_cmd.clone();
-    let goto_line = state.goto_line;
+    let open = state.editor.ws_syms_open;
+    let query = state.editor.ws_syms_query;
+    let symbols = state.editor.workspace_symbols;
+    let theme = state.workbench.theme;
+    let lsp_cmd = state.project.lsp_cmd.clone();
+    let goto_line = state.editor.goto_line;
 
     // Derived: filter symbols by query (client-side for fast response)
     let filtered = move || {
@@ -4648,7 +4369,7 @@ fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
                 .justify_center()
                 .padding_top(80.0)
                 .z_index(ui_const::Z_WS_SYMBOLS)
-                .background(state.theme.get().palette.overlay_bg)
+                .background(state.workbench.theme.get().palette.overlay_bg)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -4657,12 +4378,12 @@ fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
 // ── Branch picker overlay (click branch in status bar) ───────────────────────
 
 fn branch_picker_overlay(state: IdeState) -> impl IntoView {
-    let open = state.branch_picker_open;
-    let branches = state.branch_list;
-    let current = state.git_branch;
-    let theme = state.theme;
-    let workspace = state.workspace_root;
-    let toast = state.status_toast;
+    let open = state.project.branch_picker_open;
+    let branches = state.project.branch_list;
+    let current = state.project.git_branch;
+    let theme = state.workbench.theme;
+    let workspace = state.project.workspace_root;
+    let toast = state.workbench.status_toast;
 
     // Channel for checkout results — created once, shared across all dyn_stack rows.
     let (checkout_tx, checkout_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
@@ -4738,8 +4459,7 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                         let result = match out {
                             Ok(o) if o.status.success() => Ok(branch_name),
                             Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-                            Err(e) => Err(e.to_string()),
-                        };
+                            Err(e) => Err(e.to_string())};
                         let _ = tx.send(result);
                     });
                 })
@@ -4800,12 +4520,12 @@ fn branch_picker_overlay(state: IdeState) -> impl IntoView {
 
 // ── Vim ex command bar (:w, :q, :wq, :wqa, :e <file>, etc.) ─────────────────
 fn vim_ex_overlay(state: IdeState) -> impl IntoView {
-    let open = state.vim_ex_open;
-    let input_sig = state.vim_ex_input;
-    let theme = state.theme;
-    let open_file = state.open_file;
-    let toast = state.status_toast;
-    let workspace = state.workspace_root;
+    let open = state.editor.vim_ex_open;
+    let input_sig = state.editor.vim_ex_input;
+    let theme = state.workbench.theme;
+    let open_file = state.editor.open_file;
+    let toast = state.workbench.status_toast;
+    let workspace = state.project.workspace_root;
 
     let input_view = text_input(input_sig)
         .style(move |s| {
@@ -4903,11 +4623,11 @@ fn vim_ex_overlay(state: IdeState) -> impl IntoView {
 
 // ── Goto line/col overlay (Ctrl+G) ────────────────────────────────────────────
 fn goto_overlay(state: IdeState) -> impl IntoView {
-    let open = state.goto_overlay_open;
-    let input_sig = state.goto_overlay_input;
-    let goto_line = state.goto_line;
-    let theme = state.theme;
-    let toast = state.status_toast;
+    let open = state.editor.goto_overlay_open;
+    let input_sig = state.editor.goto_overlay_input;
+    let goto_line = state.editor.goto_line;
+    let theme = state.workbench.theme;
+    let toast = state.workbench.status_toast;
 
     let input_view = text_input(input_sig)
         .placeholder("Line or line:col")
@@ -4986,9 +4706,9 @@ fn goto_overlay(state: IdeState) -> impl IntoView {
 // ── Peek Definition overlay (Alt+F12) ────────────────────────────────────────
 
 fn peek_def_overlay(state: IdeState) -> impl IntoView {
-    let open = state.peek_def_open;
-    let lines = state.peek_def_lines;
-    let theme = state.theme;
+    let open = state.editor.peek_def_open;
+    let lines = state.editor.peek_def_lines;
+    let theme = state.workbench.theme;
 
     let close_btn = container(label(|| "  Close  "))
         .style(move |s| {
@@ -5080,7 +4800,7 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .z_index(ui_const::Z_PEEK_DEF)
-                .background(state.theme.get().palette.overlay_bg_light)
+                .background(state.workbench.theme.get().palette.overlay_bg_light)
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
@@ -5088,79 +4808,79 @@ fn peek_def_overlay(state: IdeState) -> impl IntoView {
 
 fn ide_root(state: IdeState) -> impl IntoView {
     let raw_editor = editor_panel(
-        state.open_file,
-        state.theme,
-        state.ai_thinking,
-        state.lsp_cmd.clone(),
-        state.active_cursor,
-        state.pending_completion,
-        state.diagnostics,
-        state.goto_line,
-        state.comment_toggle_nonce,
-        state.initial_tabs.clone(),
-        state.open_tabs,
-        state.vim_motion,
-        state.ghost_text,
-        state.auto_save,
-        state.workspace_root.get_untracked(),
-        state.font_size,
-        state.word_wrap,
-        state.ctrl_d_nonce,
-        state.fold_nonce,
-        state.unfold_nonce,
-        state.move_line_up_nonce,
-        state.move_line_down_nonce,
-        state.duplicate_line_nonce,
-        state.delete_line_nonce,
-        state.active_blame,
-        state.col_cursor_up_nonce,
-        state.col_cursor_down_nonce,
-        state.sticky_lines,
-        state.transform_upper_nonce,
-        state.transform_lower_nonce,
-        state.join_line_nonce,
-        state.sort_lines_nonce,
-        state.vim_visual_mode,
-        state.vim_marks,
-        state.vim_last_motion,
-        state.expand_selection_nonce,
-        state.shrink_selection_nonce,
-        state.relative_line_numbers,
-        state.yank_ring,
-        state.tab_size,
-        state.line_ending,
-        state.folding_ranges,
-        state.transform_title_nonce,
-        state.format_selection_nonce,
-        state.save_no_format_nonce,
-        state.fold_all_nonce,
-        state.unfold_all_nonce,
-        state.code_lens,
-        state.code_lens_visible,
-        state.organize_imports_on_save,
-        state.inlay_hints_sig,
-        state.inlay_hints_toggle,
+        state.editor.open_file,
+        state.workbench.theme,
+        state.ai.thinking,
+        state.project.lsp_cmd.clone(),
+        state.editor.active_cursor,
+        state.editor.pending_completion,
+        state.editor.diagnostics,
+        state.editor.goto_line,
+        state.editor.comment_toggle_nonce,
+        state.project.initial_tabs.clone(),
+        state.editor.open_tabs,
+        state.editor.vim_motion,
+        state.ai.ghost_text,
+        state.editor.auto_save,
+        state.project.workspace_root.get_untracked(),
+        state.editor.font_size,
+        state.editor.word_wrap,
+        state.editor.ctrl_d_nonce,
+        state.editor.fold_nonce,
+        state.editor.unfold_nonce,
+        state.editor.move_line_up_nonce,
+        state.editor.move_line_down_nonce,
+        state.editor.duplicate_line_nonce,
+        state.editor.delete_line_nonce,
+        state.editor.active_blame,
+        state.editor.col_cursor_up_nonce,
+        state.editor.col_cursor_down_nonce,
+        state.editor.sticky_lines,
+        state.editor.transform_upper_nonce,
+        state.editor.transform_lower_nonce,
+        state.editor.join_line_nonce,
+        state.editor.sort_lines_nonce,
+        state.editor.vim_visual_mode,
+        state.editor.vim_marks,
+        state.editor.vim_last_motion,
+        state.editor.expand_selection_nonce,
+        state.editor.shrink_selection_nonce,
+        state.editor.relative_line_numbers,
+        state.editor.yank_ring,
+        state.editor.tab_size,
+        state.editor.line_ending,
+        state.editor.folding_ranges,
+        state.editor.transform_title_nonce,
+        state.editor.format_selection_nonce,
+        state.editor.save_no_format_nonce,
+        state.editor.fold_all_nonce,
+        state.editor.unfold_all_nonce,
+        state.editor.code_lens,
+        state.editor.code_lens_visible,
+        state.editor.organize_imports_on_save,
+        state.editor.inlay_hints_sig,
+        state.editor.inlay_hints_toggle,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
     let split_raw = editor_panel(
-        state.split_open_file,
-        state.theme,
-        state.ai_thinking,
-        state.lsp_cmd.clone(),
-        state.split_active_cursor,
-        state.pending_completion,
-        state.diagnostics,
+        state.editor.split_open_file,
+        state.workbench.theme,
+        state.ai.thinking,
+        state.project.lsp_cmd.clone(),
+        state.editor.split_active_cursor,
+        state.editor.pending_completion,
+        state.editor.diagnostics,
         create_rw_signal(0u32), // independent goto_line for split pane
         create_rw_signal(0u64), // independent comment nonce
         vec![],                 // no session restore for split pane
-        state.split_open_tabs,
-        state.vim_motion,
-        state.ghost_text,
-        state.auto_save,
-        state.workspace_root.get_untracked(),
-        state.font_size,
-        state.word_wrap,
+        state.editor.split_open_tabs,
+        state.editor.vim_motion,
+        state.ai.ghost_text,
+        state.editor.auto_save,
+        state.project.workspace_root.get_untracked(),
+        state.editor.font_size,
+        state.editor.word_wrap,
         create_rw_signal(0u64),          // ctrl_d
         create_rw_signal(0u64),          // fold
         create_rw_signal(0u64),          // unfold
@@ -5176,15 +4896,15 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),          // transform_lower
         create_rw_signal(0u64),          // join_line
         create_rw_signal(0u64),          // sort_lines
-        state.vim_visual_mode,
-        state.vim_marks,
-        state.vim_last_motion,
+        state.editor.vim_visual_mode,
+        state.editor.vim_marks,
+        state.editor.vim_last_motion,
         create_rw_signal(0u64),                     // expand_selection
         create_rw_signal(0u64),                     // shrink_selection
         create_rw_signal(false),                    // relative_line_numbers
         create_rw_signal(Vec::<String>::new()),     // yank_ring
-        state.tab_size,                             // tab_size
-        state.line_ending,                          // line_ending_out
+        state.editor.tab_size,                             // tab_size
+        state.editor.line_ending,                          // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (split pane)
         create_rw_signal(0u64),                     // transform_title_nonce
         create_rw_signal(0u64),                     // format_selection_nonce
@@ -5201,16 +4921,16 @@ fn ide_root(state: IdeState) -> impl IntoView {
         s.flex_grow(1.0)
             .min_width(0.0)
             .min_height(0.0)
-            .apply_if(!state.split_editor.get(), |s| {
+            .apply_if(!state.editor.split_editor.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     });
     let split_divider = container(floem::views::empty()).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         s.width(3.0)
             .height_full()
             .background(t.palette.glass_border)
-            .apply_if(!state.split_editor.get(), |s| {
+            .apply_if(!state.editor.split_editor.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     });
@@ -5238,48 +4958,45 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                 // Paste from clipboard into editor
                                 if let Ok(mut cb) = arboard::Clipboard::new() {
                                     if let Ok(text) = cb.get_text() {
-                                        s2.pending_completion.set(Some((text, 0)));
+                                        s2.editor.pending_completion.set(Some((text, 0)));
                                     }
                                 }
                             }))
                             .separator()
                             .entry(MenuItem::new("Go to Definition\tF12").action(move || {
-                                if let Some((path, line, col)) = s3.active_cursor.get() {
-                                    let _ = s3.lsp_cmd.send(LspCommand::RequestDefinition {
+                                if let Some((path, line, col)) = s3.editor.active_cursor.get() {
+                                    let _ = s3.project.lsp_cmd.send(LspCommand::RequestDefinition {
                                         path,
                                         line,
-                                        col,
-                                    });
+                                        col});
                                 }
                             }))
                             .entry(MenuItem::new("Find All References\tShift+F12").action(
                                 move || {
-                                    if let Some((path, line, col)) = s4.active_cursor.get() {
-                                        let _ = s4.lsp_cmd.send(LspCommand::RequestReferences {
+                                    if let Some((path, line, col)) = s4.editor.active_cursor.get() {
+                                        let _ = s4.project.lsp_cmd.send(LspCommand::RequestReferences {
                                             path,
                                             line,
-                                            col,
-                                        });
-                                        s4.show_bottom_panel.set(true);
-                                        s4.bottom_panel_tab.set(Tab::References);
+                                            col});
+                                        s4.workbench.show_bottom_panel.set(true);
+                                        s4.workbench.bottom_panel_tab.set(Tab::References);
                                     }
                                 },
                             ))
                             .entry(MenuItem::new("Rename Symbol\tF2").action(move || {
-                                s5.rename_open.set(true);
+                                s5.editor.rename_open.set(true);
                             }))
                             .entry(MenuItem::new("Code Actions\tCtrl+.").action(move || {
-                                if let Some((path, line, col)) = s6.active_cursor.get() {
-                                    let _ = s6.lsp_cmd.send(LspCommand::RequestCodeActions {
+                                if let Some((path, line, col)) = s6.editor.active_cursor.get() {
+                                    let _ = s6.project.lsp_cmd.send(LspCommand::RequestCodeActions {
                                         path,
                                         line,
-                                        col,
-                                    });
+                                        col});
                                 }
                             }))
                             .separator()
                             .entry(MenuItem::new("Toggle Comment\tCtrl+/").action(move || {
-                                s7.comment_toggle_nonce.update(|v| *v += 1);
+                                s7.editor.comment_toggle_nonce.update(|v| *v += 1);
                             }));
                         // AI-powered context menu items
                         let s_explain = s.clone();
@@ -5290,47 +5007,47 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) = s_explain.active_cursor.get() {
+                                if let Some((ref path, line, _)) = s_explain.editor.active_cursor.get() {
                                     let fname = path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
                                         .unwrap_or_else(|| "file".to_string());
-                                    s_explain.pending_chat_inject.set(Some(format!(
+                                    s_explain.ai.pending_chat_inject.set(Some(format!(
                                         "Explain the code around line {} in {}",
                                         line + 1,
                                         fname
                                     )));
-                                    s_explain.show_right_panel.set(true);
+                                    s_explain.workbench.show_right_panel.set(true);
                                 }
                             }))
                             .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) = s_tests.active_cursor.get() {
+                                if let Some((ref path, line, _)) = s_tests.editor.active_cursor.get() {
                                     let fname = path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
                                         .unwrap_or_else(|| "file".to_string());
-                                    s_tests.pending_chat_inject.set(Some(format!(
+                                    s_tests.ai.pending_chat_inject.set(Some(format!(
                                         "Generate unit tests for the function at line {} in {}",
                                         line + 1,
                                         fname
                                     )));
-                                    s_tests.show_right_panel.set(true);
+                                    s_tests.workbench.show_right_panel.set(true);
                                 }
                             }))
                             .entry(MenuItem::new("🔧 Fix with AI").action(move || {
-                                if let Some((ref path, line, _)) = s_fix.active_cursor.get() {
-                                    let diags = s_fix.diagnostics.get();
+                                if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get() {
+                                    let diags = s_fix.editor.diagnostics.get();
                                     let cur_diag = diags
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
                                         s_fix
-                                            .pending_chat_inject
+                                            .ai.pending_chat_inject
                                             .set(Some(format!("Fix this error: {}", d.message)));
-                                        s_fix.show_right_panel.set(true);
+                                        s_fix.workbench.show_right_panel.set(true);
                                     } else {
                                         show_toast(
-                                            s_fix.status_toast,
+                                            s_fix.workbench.status_toast,
                                             "No diagnostic on this line",
                                         );
                                     }
@@ -5349,15 +5066,15 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                 };
                                 if !text.trim().is_empty() {
                                     s_run
-                                        .run_in_terminal_text
+                                        .workbench.run_in_terminal_text
                                         .set(Some(text.trim().to_string()));
-                                    s_run.show_bottom_panel.set(true);
-                                    s_run.bottom_panel_tab.set(Tab::Terminal);
+                                    s_run.workbench.show_bottom_panel.set(true);
+                                    s_run.workbench.bottom_panel_tab.set(Tab::Terminal);
                                 }
                             }))
                             .entry(MenuItem::new("Run File").action(move || {
                                 // Build a shell command based on the active file's extension.
-                                if let Some(ref path) = s_run_file.open_file.get() {
+                                if let Some(ref path) = s_run_file.editor.open_file.get() {
                                     let ext =
                                         path.extension().and_then(|e| e.to_str()).unwrap_or("");
                                     let path_str = path.to_string_lossy().to_string();
@@ -5369,11 +5086,10 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         "sh" => format!("bash {}", path_str),
                                         "rb" => format!("ruby {}", path_str),
                                         "go" => format!("go run {}", path_str),
-                                        _ => format!("./{}", path_str),
-                                    };
-                                    s_run_file.run_in_terminal_text.set(Some(cmd));
-                                    s_run_file.show_bottom_panel.set(true);
-                                    s_run_file.bottom_panel_tab.set(Tab::Terminal);
+                                        _ => format!("./{}", path_str)};
+                                    s_run_file.workbench.run_in_terminal_text.set(Some(cmd));
+                                    s_run_file.workbench.show_bottom_panel.set(true);
+                                    s_run_file.workbench.bottom_panel_tab.set(Tab::Terminal);
                                 }
                             }));
                         show_context_menu(menu, None);
@@ -5383,26 +5099,29 @@ fn ide_root(state: IdeState) -> impl IntoView {
     };
 
     let chat = chat_panel(
-        state.theme,
-        state.ai_thinking,
-        state.pending_chat_inject,
-        state.workspace_root,
+        state.workbench.theme,
+        state.ai.thinking,
+        state.ai.pending_chat_inject,
+        state.project.workspace_root,
+        state.project.sidecar_client.clone(),
     );
 
     let chat_wrap = container(chat).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
-        s.height_full()
+        s.width(320.0)
+            .height_full()
+            .min_width(320.0)
+            .max_width(320.0)
             .background(p.glass_bg)
             .border_left(1.0)
             .border_color(p.glass_border)
-            // Left-edge glow from chat panel
             .box_shadow_h_offset(-6.0)
             .box_shadow_v_offset(0.0)
-            .box_shadow_blur(12.0)
+            .box_shadow_blur(16.0)
             .box_shadow_color(p.glow)
             .box_shadow_spread(0.0)
-            .apply_if(!state.show_right_panel.get(), |s| {
+            .apply_if(!state.workbench.show_right_panel.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     });
@@ -5413,9 +5132,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
         let down_s = state.clone();
         container(empty())
             .style(move |s| {
-                let t = style_s.theme.get();
-                let active = style_s.panel_drag_active.get();
-                let shown = style_s.show_left_panel.get();
+                let t = style_s.workbench.theme.get();
+                let active = style_s.workbench.panel_drag_active.get();
+                let shown = style_s.workbench.show_left_panel.get();
                 s.width(4.0)
                     .height_full()
                     .cursor(floem::style::CursorStyle::ColResize)
@@ -5428,17 +5147,17 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
             .on_event_stop(EventListener::PointerDown, move |e| {
                 if let Event::PointerDown(pe) = e {
-                    down_s.panel_drag_active.set(true);
-                    down_s.panel_drag_start_x.set(pe.pos.x);
+                    down_s.workbench.panel_drag_active.set(true);
+                    down_s.workbench.panel_drag_start_x.set(pe.pos.x);
                     down_s
-                        .panel_drag_start_width
-                        .set(down_s.left_panel_width.get());
+                        .workbench.panel_drag_start_width
+                        .set(down_s.workbench.left_panel_width.get());
                 }
             })
     };
 
     // Zen mode — hide sidebars / bottom / status bar for distraction-free editing
-    let zen = state.zen_mode;
+    let zen = state.workbench.zen_mode;
 
     let activity_wrap = container(activity_bar(state.clone()))
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
@@ -5446,28 +5165,27 @@ fn ide_root(state: IdeState) -> impl IntoView {
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
     let divider_wrap = container(divider)
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
-    let chat_zen_wrap = container(chat_wrap)
-        .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
+    let chat_zen_wrap = container(chat_wrap).style(|s| s);
 
     // ── Horizontal (down) split editor pane ──────────────────────────────────
     let down_raw = editor_panel(
-        state.split_down_file,
-        state.theme,
-        state.ai_thinking,
-        state.lsp_cmd.clone(),
-        state.split_down_cursor,
-        state.pending_completion,
-        state.diagnostics,
+        state.editor.split_down_file,
+        state.workbench.theme,
+        state.ai.thinking,
+        state.project.lsp_cmd.clone(),
+        state.editor.split_down_cursor,
+        state.editor.pending_completion,
+        state.editor.diagnostics,
         create_rw_signal(0u32),
         create_rw_signal(0u64),
         vec![],
-        state.split_down_tabs,
-        state.vim_motion,
-        state.ghost_text,
-        state.auto_save,
-        state.workspace_root.get_untracked(),
-        state.font_size,
-        state.word_wrap,
+        state.editor.split_down_tabs,
+        state.editor.vim_motion,
+        state.ai.ghost_text,
+        state.editor.auto_save,
+        state.project.workspace_root.get_untracked(),
+        state.editor.font_size,
+        state.editor.word_wrap,
         create_rw_signal(0u64),
         create_rw_signal(0u64),
         create_rw_signal(0u64),
@@ -5483,15 +5201,15 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),
         create_rw_signal(0u64),
         create_rw_signal(0u64),
-        state.vim_visual_mode,
-        state.vim_marks,
-        state.vim_last_motion,
+        state.editor.vim_visual_mode,
+        state.editor.vim_marks,
+        state.editor.vim_last_motion,
         create_rw_signal(0u64),
         create_rw_signal(0u64),
         create_rw_signal(false),                    // relative_line_numbers
         create_rw_signal(Vec::<String>::new()),     // yank_ring
-        state.tab_size,                             // tab_size
-        state.line_ending,                          // line_ending_out
+        state.editor.tab_size,                             // tab_size
+        state.editor.line_ending,                          // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (down pane)
         create_rw_signal(0u64),                     // transform_title_nonce
         create_rw_signal(0u64),                     // format_selection_nonce
@@ -5508,16 +5226,16 @@ fn ide_root(state: IdeState) -> impl IntoView {
         s.flex_grow(1.0)
             .min_width(0.0)
             .min_height(0.0)
-            .apply_if(!state.split_editor_down.get(), |s| {
+            .apply_if(!state.editor.split_editor_down.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     });
     let down_divider = container(floem::views::empty()).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         s.height(3.0)
             .width_full()
             .background(t.palette.glass_border)
-            .apply_if(!state.split_editor_down.get(), |s| {
+            .apply_if(!state.editor.split_editor_down.get(), |s| {
                 s.display(floem::style::Display::None)
             })
     });
@@ -5540,13 +5258,13 @@ fn ide_root(state: IdeState) -> impl IntoView {
 
     // Bottom panel (terminal etc.)
     let bottom_raw = bottom_panel(state.clone());
-    let bottom_panel_max = state.bottom_panel_maximized;
+    let bottom_panel_max = state.workbench.bottom_panel_maximized;
     let bottom = container(bottom_raw).style(move |s| {
         let s = s.apply_if(zen.get(), |s| s.display(floem::style::Display::None));
         if bottom_panel_max.get() {
             s.flex_grow(10.0).min_height(0.0)
         } else {
-            s
+            s.height(220.0)
         }
     });
 
@@ -5556,7 +5274,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
 
     stack((content_row, bottom, status_wrap)).style(move |s| {
-        let t = state.theme.get();
+        let t = state.workbench.theme.get();
         let p = &t.palette;
         s.flex_col()
             .width_full()
@@ -5604,22 +5322,22 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── File menu ────────────────────────────────────────────────────────────
     let file_item = {
         let s = state.clone();
-        make_item("File", state.theme).on_click_stop(move |_| {
+        make_item("File", state.workbench.theme).on_click_stop(move |_| {
             let s2 = s.clone();
             let s3 = s.clone();
             let s4 = s.clone();
             let menu = Menu::new("File")
                 .entry(MenuItem::new("Open File…\tCtrl+O").action(move || {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        s2.open_file.set(Some(path));
+                        s2.editor.open_file.set(Some(path));
                     }
                 }))
                 .entry(MenuItem::new("Open Folder…").action(move || {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        s3.workspace_root.set(folder);
-                        s3.file_picker_files.set(Vec::new());
-                        s3.show_left_panel.set(true);
-                        s3.left_panel_tab.set(Tab::Explorer);
+                        s3.project.workspace_root.set(folder);
+                        s3.workbench.file_picker_files.set(Vec::new());
+                        s3.workbench.show_left_panel.set(true);
+                        s3.workbench.left_panel_tab.set(Tab::Explorer);
                     }
                 }))
                 .separator()
@@ -5634,23 +5352,23 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── Edit menu ────────────────────────────────────────────────────────────
     let edit_item = {
         let s = state.clone();
-        make_item("Edit", state.theme).on_click_stop(move |_| {
+        make_item("Edit", state.workbench.theme).on_click_stop(move |_| {
             let s2 = s.clone();
             let s3 = s.clone();
             let s4 = s.clone();
             let menu = Menu::new("Edit")
                 .entry(MenuItem::new("Toggle Comment\tCtrl+/").action(move || {
-                    s2.comment_toggle_nonce.update(|v| *v += 1);
+                    s2.editor.comment_toggle_nonce.update(|v| *v += 1);
                 }))
                 .separator()
                 .entry(MenuItem::new("Inline AI Edit\tCtrl+K").action(move || {
-                    s3.inline_edit_open.set(true);
-                    s3.inline_edit_query.set(String::new());
+                    s3.ai.inline_edit_open.set(true);
+                    s3.ai.inline_edit_query.set(String::new());
                 }))
                 .separator()
                 .entry(
                     MenuItem::new("Command Palette\tCtrl+Shift+P").action(move || {
-                        s4.command_palette_open.set(true);
+                        s4.workbench.command_palette_open.set(true);
                     }),
                 );
             show_context_menu(menu, None);
@@ -5660,7 +5378,7 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── View menu ────────────────────────────────────────────────────────────
     let view_item = {
         let s = state.clone();
-        make_item("View", state.theme).on_click_stop(move |_| {
+        make_item("View", state.workbench.theme).on_click_stop(move |_| {
             let s_exp = s.clone();
             let s_term = s.clone();
             let s_chat = s.clone();
@@ -5672,106 +5390,106 @@ fn menu_bar(state: IdeState) -> impl IntoView {
                 .entry(MenuItem::new("Midnight Blue").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::MidnightBlue));
                     }
                 }))
                 .entry(MenuItem::new("Cyberpunk 2077").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Cyberpunk));
                     }
                 }))
                 .entry(MenuItem::new("Synthwave '84").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Synthwave84));
                     }
                 }))
                 .entry(MenuItem::new("Andromeda").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Andromeda));
                     }
                 }))
                 .entry(MenuItem::new("Dark").action({
                     let s = s.clone();
                     move || {
-                        s.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
+                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
                     }
                 }))
                 .entry(MenuItem::new("Dracula").action({
                     let s = s.clone();
                     move || {
-                        s.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
+                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
                     }
                 }))
                 .entry(MenuItem::new("Tokyo Night").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::TokyoNight));
                     }
                 }))
                 .entry(MenuItem::new("Monokai").action({
                     let s = s.clone();
                     move || {
-                        s.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
+                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
                     }
                 }))
                 .entry(MenuItem::new("Nord Dark").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::NordDark));
                     }
                 }))
                 .entry(MenuItem::new("Matrix Green").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::MatrixGreen));
                     }
                 }))
                 .entry(MenuItem::new("Root Shell").action({
                     let s = s.clone();
                     move || {
-                        s.theme
+                        s.workbench.theme
                             .set(PhazeTheme::from_variant(ThemeVariant::RootShell));
                     }
                 }))
                 .entry(MenuItem::new("Light").action({
                     let s = s.clone();
                     move || {
-                        s.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
+                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
                     }
                 }));
 
             let menu = Menu::new("View")
                 .entry(MenuItem::new("Explorer\tCtrl+B").action(move || {
-                    s_exp.show_left_panel.update(|v| *v = !*v);
-                    let open = s_exp.show_left_panel.get();
-                    s_exp.left_panel_width.set(if open { 260.0 } else { 0.0 });
+                    s_exp.workbench.show_left_panel.update(|v| *v = !*v);
+                    let open = s_exp.workbench.show_left_panel.get();
+                    s_exp.workbench.left_panel_width.set(if open { 260.0 } else { 0.0 });
                 }))
                 .entry(MenuItem::new("Terminal\tCtrl+J").action(move || {
-                    s_term.show_bottom_panel.update(|v| *v = !*v);
+                    s_term.workbench.show_bottom_panel.update(|v| *v = !*v);
                 }))
                 .entry(MenuItem::new("AI Chat\tCtrl+\\").action(move || {
-                    s_chat.show_right_panel.update(|v| *v = !*v);
+                    s_chat.workbench.show_right_panel.update(|v| *v = !*v);
                 }))
                 .separator()
                 .entry(MenuItem::new("Zoom In\tCtrl+=").action(move || {
-                    s_zin.font_size.update(|v| *v = (*v + 1).min(32));
+                    s_zin.editor.font_size.update(|v| *v = (*v + 1).min(32));
                 }))
                 .entry(MenuItem::new("Zoom Out\tCtrl+-").action(move || {
-                    s_zout.font_size.update(|v| *v = v.saturating_sub(1).max(8));
+                    s_zout.editor.font_size.update(|v| *v = v.saturating_sub(1).max(8));
                 }))
                 .separator()
                 .entry(MenuItem::new("Zen Mode\tCtrl+Shift+Z").action(move || {
-                    s_zen.zen_mode.update(|v| *v = !*v);
+                    s_zen.workbench.zen_mode.update(|v| *v = !*v);
                 }))
                 .separator()
                 .entry(theme_menu);
@@ -5782,39 +5500,37 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── Go menu ──────────────────────────────────────────────────────────────
     let go_item = {
         let s = state.clone();
-        make_item("Go", state.theme).on_click_stop(move |_| {
+        make_item("Go", state.workbench.theme).on_click_stop(move |_| {
             let s_def = s.clone();
             let s_sym = s.clone();
             let s_fp = s.clone();
             let menu = Menu::new("Go")
                 .entry(MenuItem::new("Go to Definition\tF12").action(move || {
-                    if let Some((path, line, col)) = s_def.active_cursor.get() {
+                    if let Some((path, line, col)) = s_def.editor.active_cursor.get() {
                         let _ =
                             s_def
-                                .lsp_cmd
+                                .project.lsp_cmd
                                 .send(LspCommand::RequestDefinition { path, line, col });
                     }
                 }))
                 .entry(
                     MenuItem::new("Find All References\tShift+F12").action(move || {
-                        if let Some((path, line, col)) = s_sym.active_cursor.get() {
-                            let _ = s_sym.lsp_cmd.send(LspCommand::RequestReferences {
+                        if let Some((path, line, col)) = s_sym.editor.active_cursor.get() {
+                            let _ = s_sym.project.lsp_cmd.send(LspCommand::RequestReferences {
                                 path,
                                 line,
-                                col,
-                            });
-                            s_sym.references_visible.set(true);
-                            s_sym.show_bottom_panel.set(true);
-                            s_sym.bottom_panel_tab.set(Tab::References);
+                                col});
+                            s_sym.editor.references_visible.set(true);
+                            s_sym.workbench.show_bottom_panel.set(true);
+                            s_sym.workbench.bottom_panel_tab.set(Tab::References);
                         }
                     }),
                 )
                 .entry(MenuItem::new("Workspace Symbols\tCtrl+T").action(move || {
-                    s_fp.ws_syms_open.set(true);
-                    s_fp.ws_syms_query.set(String::new());
-                    let _ = s_fp.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
-                        query: String::new(),
-                    });
+                    s_fp.editor.ws_syms_open.set(true);
+                    s_fp.editor.ws_syms_query.set(String::new());
+                    let _ = s_fp.project.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
+                        query: String::new()});
                 }));
             show_context_menu(menu, None);
         })
@@ -5823,24 +5539,24 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── Run menu ─────────────────────────────────────────────────────────────
     let run_item = {
         let s = state.clone();
-        make_item("Run", state.theme).on_click_stop(move |_| {
+        make_item("Run", state.workbench.theme).on_click_stop(move |_| {
             let s_run = s.clone();
             let s_build = s.clone();
             let s_test = s.clone();
             let menu = Menu::new("Run")
                 .entry(MenuItem::new("Open Terminal\tCtrl+J").action(move || {
-                    s_run.show_bottom_panel.set(true);
-                    s_run.bottom_panel_tab.set(Tab::Terminal);
+                    s_run.workbench.show_bottom_panel.set(true);
+                    s_run.workbench.bottom_panel_tab.set(Tab::Terminal);
                 }))
                 .separator()
                 .entry(MenuItem::new("Show Build Output").action(move || {
-                    s_build.show_bottom_panel.set(true);
-                    s_build.bottom_panel_tab.set(Tab::Output);
+                    s_build.workbench.show_bottom_panel.set(true);
+                    s_build.workbench.bottom_panel_tab.set(Tab::Output);
                 }))
                 .entry(
                     MenuItem::new("Show Problems\tCtrl+Shift+M").action(move || {
-                        s_test.show_bottom_panel.set(true);
-                        s_test.bottom_panel_tab.set(Tab::Problems);
+                        s_test.workbench.show_bottom_panel.set(true);
+                        s_test.workbench.bottom_panel_tab.set(Tab::Problems);
                     }),
                 );
             show_context_menu(menu, None);
@@ -5850,12 +5566,12 @@ fn menu_bar(state: IdeState) -> impl IntoView {
     // ── Help menu ────────────────────────────────────────────────────────────
     let help_item = {
         let s = state.clone();
-        make_item("Help", state.theme).on_click_stop(move |_| {
+        make_item("Help", state.workbench.theme).on_click_stop(move |_| {
             let s2 = s.clone();
             let menu = Menu::new("Help")
                 .entry(
                     MenuItem::new("Command Palette\tCtrl+Shift+P").action(move || {
-                        s2.command_palette_open.set(true);
+                        s2.workbench.command_palette_open.set(true);
                     }),
                 )
                 .separator()
@@ -5882,12 +5598,12 @@ fn menu_bar(state: IdeState) -> impl IntoView {
         file_item, edit_item, view_item, go_item, run_item, help_item,
     ))
     .style(move |s| {
-        let t = bar_state.theme.get();
+        let t = bar_state.workbench.theme.get();
         let p = &t.palette;
         s.flex_row()
             .width_full()
-            .height(24.0)
-            .min_height(24.0)
+            .height(28.0)
+            .min_height(28.0)
             .background(p.bg_deep)
             .border_bottom(1.0)
             .border_color(p.glass_border.with_alpha(0.25))
@@ -5935,7 +5651,7 @@ pub fn launch_phaze_ide() {
                     let up_s = state.clone();
                     container(empty())
                         .style(move |s| {
-                            let active = style_s.panel_drag_active.get();
+                            let active = style_s.workbench.panel_drag_active.get();
                             s.absolute()
                                 .inset(0)
                                 .z_index(ui_const::Z_DRAG_OVERLAY)
@@ -5944,21 +5660,21 @@ pub fn launch_phaze_ide() {
                         })
                         .on_event_stop(EventListener::PointerMove, move |e| {
                             if let Event::PointerMove(pe) = e {
-                                let delta = pe.pos.x - move_s.panel_drag_start_x.get();
-                                let new_w = (move_s.panel_drag_start_width.get() + delta)
+                                let delta = pe.pos.x - move_s.workbench.panel_drag_start_x.get();
+                                let new_w = (move_s.workbench.panel_drag_start_width.get() + delta)
                                     .clamp(80.0, 700.0);
-                                move_s.left_panel_width.set(new_w);
-                                move_s.show_left_panel.set(true);
+                                move_s.workbench.left_panel_width.set(new_w);
+                                move_s.workbench.show_left_panel.set(true);
                             }
                         })
                         .on_event_stop(EventListener::PointerUp, move |_| {
-                            up_s.panel_drag_active.set(false);
+                            up_s.workbench.panel_drag_active.set(false);
                         })
                 };
 
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
                 let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
-                    .style(|s| s.flex_col().width_full().height_full().padding(16.0));
+                    .style(|s| s.flex_col().width_full().height_full());
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((
@@ -5975,7 +5691,7 @@ pub fn launch_phaze_ide() {
                 });
 
                 stack((
-                    cosmic_bg_canvas(state.theme),
+                    cosmic_bg_canvas(state.workbench.theme),
                     ide_with_menu,
                     palette,             // Z_COMMAND_PALETTE(100)
                     picker,              // Z_FILE_PICKER(200) — on top of palette
@@ -5991,7 +5707,7 @@ pub fn launch_phaze_ide() {
                     overlays_b,
                 ))
                 .style(move |s| {
-                    let t = state.theme.get();
+                    let t = state.workbench.theme.get();
                     let p = &t.palette;
                     s.width_full().height_full().background(p.bg_base)
                 })
@@ -6004,8 +5720,8 @@ pub fn launch_phaze_ide() {
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
 
                             // ── Global shortcut dispatch (unified via execute_command) ──
-                            if let Some(cmd) = match_global_shortcut(key_event) {
-                                execute_command(cmd, &state.as_global_command_state());
+                            if let Some(cmd) = match_global_shortcut(&key_event.key.logical_key, &key_event.modifiers) {
+                                execute_command(&cmd, &state);
                                 return;
                             }
 
@@ -6013,152 +5729,146 @@ pub fn launch_phaze_ide() {
                             if let Key::Named(ref named) = key_event.key.logical_key {
                                 match named {
                                     floem::keyboard::NamedKey::Escape => {
-                                        if state.peek_def_open.get() {
-                                            state.peek_def_open.set(false);
-                                            state.peek_def_lines.set(vec![]);
+                                        if state.editor.peek_def_open.get() {
+                                            state.editor.peek_def_open.set(false);
+                                            state.editor.peek_def_lines.set(vec![]);
                                             return;
                                         }
-                                        if state.branch_picker_open.get() {
-                                            state.branch_picker_open.set(false);
+                                        if state.project.branch_picker_open.get() {
+                                            state.project.branch_picker_open.set(false);
                                             return;
                                         }
-                                        if state.rename_open.get() {
-                                            state.rename_open.set(false);
+                                        if state.editor.rename_open.get() {
+                                            state.editor.rename_open.set(false);
                                             return;
                                         }
-                                        if state.sig_help.get().is_some() {
-                                            state.sig_help.set(None);
+                                        if state.editor.sig_help.get().is_some() {
+                                            state.editor.sig_help.set(None);
                                             return;
                                         }
-                                        if state.code_actions_open.get() {
-                                            state.code_actions_open.set(false);
+                                        if state.editor.code_actions_open.get() {
+                                            state.editor.code_actions_open.set(false);
                                             return;
                                         }
-                                        if state.inline_edit_open.get() {
-                                            state.inline_edit_open.set(false);
-                                            state.inline_edit_query.set(String::new());
+                                        if state.ai.inline_edit_open.get() {
+                                            state.ai.inline_edit_open.set(false);
+                                            state.ai.inline_edit_query.set(String::new());
                                             return;
                                         }
-                                        if state.completion_open.get() {
-                                            state.completion_open.set(false);
+                                        if state.editor.completion_open.get() {
+                                            state.editor.completion_open.set(false);
                                             return;
                                         }
-                                        if state.file_picker_open.get() {
-                                            state.file_picker_open.set(false);
-                                            state.file_picker_query.set(String::new());
+                                        if state.workbench.file_picker_open.get() {
+                                            state.workbench.file_picker_open.set(false);
+                                            state.workbench.file_picker_query.set(String::new());
                                             return;
                                         }
-                                        if state.command_palette_open.get() {
-                                            state.command_palette_open.set(false);
-                                            state.command_palette_query.set(String::new());
+                                        if state.workbench.command_palette_open.get() {
+                                            state.workbench.command_palette_open.set(false);
+                                            state.workbench.command_palette_query.set(String::new());
                                             return;
                                         }
                                         // Vim: Escape enters Normal mode / exits ex/visual
-                                        if state.vim_mode.get() {
-                                            if state.vim_ex_open.get() {
-                                                state.vim_ex_open.set(false);
-                                                state.vim_ex_input.set(String::new());
+                                        if state.editor.vim_mode.get() {
+                                            if state.editor.vim_ex_open.get() {
+                                                state.editor.vim_ex_open.set(false);
+                                                state.editor.vim_ex_input.set(String::new());
                                                 return;
                                             }
-                                            if state.vim_visual_mode.get() {
-                                                state.vim_visual_mode.set(false);
+                                            if state.editor.vim_visual_mode.get() {
+                                                state.editor.vim_visual_mode.set(false);
                                             }
-                                            state.vim_normal_mode.set(true);
-                                            state.vim_pending_key.set(None);
+                                            state.editor.vim_normal_mode.set(true);
+                                            state.editor.vim_pending_key.set(None);
                                             return;
                                         }
                                     }
                                     floem::keyboard::NamedKey::Tab => {
                                         // Tab accepts ghost text (FIM) suggestion first.
-                                        if let Some(suggestion) = state.ghost_text.get() {
+                                        if let Some(suggestion) = state.ai.ghost_text.get() {
                                             // Ghost text: insert at cursor, no prefix to delete.
-                                            state.pending_completion.set(Some((suggestion, 0)));
-                                            state.ghost_text.set(None);
+                                            state.editor.pending_completion.set(Some((suggestion, 0)));
+                                            state.ai.ghost_text.set(None);
                                             return;
                                         }
                                         // Tab also accepts LSP completion popup.
-                                        if state.completion_open.get() {
-                                            let items = state.completions.get();
-                                            let sel = state.completion_selected.get();
-                                            let prefix_b = state.completion_filter_text.get().len();
+                                        if state.editor.completion_open.get() {
+                                            let items = state.editor.completions.get();
+                                            let sel = state.editor.completion_selected.get();
+                                            let prefix_b = state.editor.completion_filter_text.get().len();
                                             if let Some(entry) = items.get(sel) {
                                                 let text = if entry.insert_text.is_empty() {
                                                     entry.label.clone()
                                                 } else {
                                                     entry.insert_text.clone()
                                                 };
-                                                state
-                                                    .pending_completion
+                                                state.editor.pending_completion
                                                     .set(Some((text, prefix_b)));
                                             }
-                                            state.completion_open.set(false);
-                                            state.completion_filter_text.set(String::new());
+                                            state.editor.completion_open.set(false);
+                                            state.editor.completion_filter_text.set(String::new());
                                             return;
                                         }
                                     }
                                     floem::keyboard::NamedKey::Enter => {
-                                        if state.completion_open.get() {
-                                            let items = state.completions.get();
-                                            let sel = state.completion_selected.get();
-                                            let prefix_b = state.completion_filter_text.get().len();
+                                        if state.editor.completion_open.get() {
+                                            let items = state.editor.completions.get();
+                                            let sel = state.editor.completion_selected.get();
+                                            let prefix_b = state.editor.completion_filter_text.get().len();
                                             if let Some(entry) = items.get(sel) {
                                                 let text = if entry.insert_text.is_empty() {
                                                     entry.label.clone()
                                                 } else {
                                                     entry.insert_text.clone()
                                                 };
-                                                state
-                                                    .pending_completion
+                                                state.editor.pending_completion
                                                     .set(Some((text, prefix_b)));
                                             }
-                                            state.completion_open.set(false);
-                                            state.completion_filter_text.set(String::new());
+                                            state.editor.completion_open.set(false);
+                                            state.editor.completion_filter_text.set(String::new());
                                             return;
                                         }
                                     }
                                     // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition; Ctrl+F12 — go to implementation
                                     floem::keyboard::NamedKey::F12 => {
-                                        if let Some((path, line, col)) = state.active_cursor.get() {
+                                        if let Some((path, line, col)) = state.editor.active_cursor.get() {
                                             if ctrl {
                                                 // Ctrl+F12: go to implementation
-                                                let _ = state.lsp_cmd.send(
+                                                let _ = state.project.lsp_cmd.send(
                                                     LspCommand::RequestImplementation {
                                                         path,
                                                         line,
-                                                        col,
-                                                    },
+                                                        col},
                                                 );
                                             } else if shift {
                                                 // Shift+F12: find all references
-                                                let _ = state.lsp_cmd.send(
+                                                let _ = state.project.lsp_cmd.send(
                                                     LspCommand::RequestReferences {
                                                         path,
                                                         line,
-                                                        col,
-                                                    },
+                                                        col},
                                                 );
-                                                state.references_visible.set(true);
-                                                state.show_bottom_panel.set(true);
-                                                state.bottom_panel_tab.set(Tab::References);
+                                                state.editor.references_visible.set(true);
+                                                state.workbench.show_bottom_panel.set(true);
+                                                state.workbench.bottom_panel_tab.set(Tab::References);
                                             } else if alt {
                                                 // Alt+F12: peek definition
-                                                state.peek_def_lines.set(vec![]);
-                                                state.peek_def_open.set(false);
-                                                let _ = state.lsp_cmd.send(
+                                                state.editor.peek_def_lines.set(vec![]);
+                                                state.editor.peek_def_open.set(false);
+                                                let _ = state.project.lsp_cmd.send(
                                                     LspCommand::RequestPeekDefinition {
                                                         path,
                                                         line,
-                                                        col,
-                                                    },
+                                                        col},
                                                 );
                                             } else {
                                                 // F12: go to definition
-                                                let _ = state.lsp_cmd.send(
+                                                let _ = state.project.lsp_cmd.send(
                                                     LspCommand::RequestDefinition {
                                                         path,
                                                         line,
-                                                        col,
-                                                    },
+                                                        col},
                                                 );
                                             }
                                         }
@@ -6168,29 +5878,26 @@ pub fn launch_phaze_ide() {
                                     floem::keyboard::NamedKey::F1 => {
                                         if ctrl {
                                             if let Some((path, line, col)) =
-                                                state.active_cursor.get()
+                                                state.editor.active_cursor.get()
                                             {
                                                 let _ =
-                                                    state.lsp_cmd.send(LspCommand::RequestHover {
+                                                    state.project.lsp_cmd.send(LspCommand::RequestHover {
                                                         path,
                                                         line,
-                                                        col,
-                                                    });
+                                                        col});
                                             }
                                             return;
                                         }
                                     }
                                     // F2 — rename symbol at cursor
                                     floem::keyboard::NamedKey::F2 => {
-                                        if let Some((path, line, col)) = state.active_cursor.get() {
-                                            // Prefill rename box with the word under cursor
+                                        if let Some((path, line, col)) = state.editor.active_cursor.get() {
                                             let word = std::fs::read_to_string(&path)
                                                 .ok()
                                                 .and_then(|content| {
                                                     let target_line = content
                                                         .lines()
-                                                        .nth(line as usize)?
-                                                        .to_string();
+                                                        .nth(line as usize)?;
                                                     let col = (col as usize).min(target_line.len());
                                                     let start = target_line[..col]
                                                         .char_indices()
@@ -6207,19 +5914,14 @@ pub fn launch_phaze_ide() {
                                                             c.is_alphanumeric() || *c == '_'
                                                         })
                                                         .last()
-                                                        .map(|(i, _)| col + i + 1)
-                                                        .unwrap_or(col);
-                                                    let w = target_line[start..end].to_string();
-                                                    if w.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(w)
-                                                    }
+                                                        .map(|(i, _)| i + col)
+                                                        .unwrap_or(target_line.len());
+                                                    Some(target_line[start..end].to_string())
                                                 })
                                                 .unwrap_or_default();
-                                            state.rename_target.set(word.clone());
-                                            state.rename_query.set(word);
-                                            state.rename_open.set(true);
+                                            state.editor.rename_target.set(word.clone());
+                                            state.editor.rename_query.set(word);
+                                            state.editor.rename_open.set(true);
                                         }
                                         return;
                                     }
@@ -6227,26 +5929,26 @@ pub fn launch_phaze_ide() {
                                     floem::keyboard::NamedKey::ArrowUp
                                         if alt && !ctrl && !shift =>
                                     {
-                                        state.move_line_up_nonce.update(|n| *n += 1);
+                                        state.editor.move_line_up_nonce.update(|n| *n += 1);
                                         return;
                                     }
                                     floem::keyboard::NamedKey::ArrowDown if alt && !ctrl => {
                                         if shift {
-                                            state.duplicate_line_nonce.update(|n| *n += 1);
+                                            state.editor.duplicate_line_nonce.update(|n| *n += 1);
                                         } else {
-                                            state.move_line_down_nonce.update(|n| *n += 1);
+                                            state.editor.move_line_down_nonce.update(|n| *n += 1);
                                         }
                                         return;
                                     }
                                     // Ctrl+Alt+Up/Down — add column cursor on adjacent line
                                     floem::keyboard::NamedKey::ArrowUp if ctrl && alt && !shift => {
-                                        state.col_cursor_up_nonce.update(|n| *n += 1);
+                                        state.editor.col_cursor_up_nonce.update(|n| *n += 1);
                                         return;
                                     }
                                     floem::keyboard::NamedKey::ArrowDown
                                         if ctrl && alt && !shift =>
                                     {
-                                        state.col_cursor_down_nonce.update(|n| *n += 1);
+                                        state.editor.col_cursor_down_nonce.update(|n| *n += 1);
                                         return;
                                     }
                                     _ => {}
@@ -6258,7 +5960,7 @@ pub fn launch_phaze_ide() {
                                 && key_event.key.logical_key
                                     == Key::Named(floem::keyboard::NamedKey::Space)
                             {
-                                if let Some((path, line, col)) = state.active_cursor.get() {
+                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
                                     // Compute word before cursor as the filter prefix.
                                     let prefix = std::fs::read_to_string(&path)
                                         .ok()
@@ -6277,15 +5979,14 @@ pub fn launch_phaze_ide() {
                                             Some(prefix)
                                         })
                                         .unwrap_or_default();
-                                    state.completion_filter_text.set(prefix);
-                                    let _ = state.lsp_cmd.send(LspCommand::RequestCompletions {
+                                    state.editor.completion_filter_text.set(prefix);
+                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestCompletions {
                                         path,
                                         line,
-                                        col,
-                                    });
+                                        col});
                                 }
-                                state.completion_selected.set(0);
-                                state.completion_open.set(true);
+                                state.editor.completion_selected.set(0);
+                                state.editor.completion_open.set(true);
                                 return;
                             }
 
@@ -6295,8 +5996,8 @@ pub fn launch_phaze_ide() {
                                 && !alt
                                 && key_event.key.logical_key == Key::Character("g".into())
                             {
-                                state.goto_overlay_open.set(true);
-                                state.goto_overlay_input.set(String::new());
+                                state.editor.goto_overlay_open.set(true);
+                                state.editor.goto_overlay_input.set(String::new());
                                 return;
                             }
 
@@ -6306,7 +6007,7 @@ pub fn launch_phaze_ide() {
                                 && alt
                                 && key_event.key.logical_key == Key::Character("s".into())
                             {
-                                state.save_no_format_nonce.update(|v| *v += 1);
+                                state.editor.save_no_format_nonce.update(|v| *v += 1);
                                 return;
                             }
 
@@ -6316,13 +6017,13 @@ pub fn launch_phaze_ide() {
                                 && alt
                                 && key_event.key.logical_key == Key::Character("i".into())
                             {
-                                state.inlay_hints_toggle.update(|v| *v = !*v);
-                                let msg = if state.inlay_hints_toggle.get() {
+                                state.editor.inlay_hints_toggle.update(|v| *v = !*v);
+                                let msg = if state.editor.inlay_hints_toggle.get() {
                                     "Inlay Hints: on"
                                 } else {
                                     "Inlay Hints: off"
                                 };
-                                show_toast(state.status_toast, msg);
+                                show_toast(state.workbench.status_toast, msg);
                                 return;
                             }
 
@@ -6332,12 +6033,12 @@ pub fn launch_phaze_ide() {
                                 && !alt
                                 && key_event.key.logical_key == Key::Character("n".into())
                             {
-                                let n = state.scratch_counter.get() + 1;
-                                state.scratch_counter.set(n);
+                                let n = state.project.scratch_counter.get() + 1;
+                                state.project.scratch_counter.set(n);
                                 let scratch_path =
                                     std::path::PathBuf::from(format!("scratch://untitled-{n}"));
-                                state.scratch_paths.update(|v| v.push(scratch_path.clone()));
-                                state.open_file.set(Some(scratch_path));
+                                state.project.scratch_paths.update(|v: &mut Vec<PathBuf>| v.push(scratch_path.clone()));
+                                state.editor.open_file.set(Some(scratch_path));
                                 return;
                             }
 
@@ -6346,29 +6047,27 @@ pub fn launch_phaze_ide() {
                                 && !shift
                                 && key_event.key.logical_key == Key::Character("t".into())
                             {
-                                let open = state.ws_syms_open.get();
-                                state.ws_syms_open.set(!open);
+                                let open = state.editor.ws_syms_open.get();
+                                state.editor.ws_syms_open.set(!open);
                                 if !open {
-                                    state.ws_syms_query.set(String::new());
+                                    state.editor.ws_syms_query.set(String::new());
                                     // Kick off an empty-query search to pre-populate list.
                                     let _ =
-                                        state.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
-                                            query: String::new(),
-                                        });
+                                        state.project.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
+                                            query: String::new()});
                                 }
                                 return;
                             }
 
                             // Ctrl+. → code actions
                             if ctrl && key_event.key.logical_key == Key::Character(".".into()) {
-                                if let Some((path, line, col)) = state.active_cursor.get() {
-                                    let _ = state.lsp_cmd.send(LspCommand::RequestCodeActions {
+                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestCodeActions {
                                         path,
                                         line,
-                                        col,
-                                    });
+                                        col});
                                 }
-                                state.code_actions_open.set(true);
+                                state.editor.code_actions_open.set(true);
                                 return;
                             }
 
@@ -6378,12 +6077,11 @@ pub fn launch_phaze_ide() {
                                 && key_event.key.logical_key
                                     == Key::Named(floem::keyboard::NamedKey::Space)
                             {
-                                if let Some((path, line, col)) = state.active_cursor.get() {
-                                    let _ = state.lsp_cmd.send(LspCommand::RequestSignatureHelp {
+                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestSignatureHelp {
                                         path,
                                         line,
-                                        col,
-                                    });
+                                        col});
                                 }
                                 return;
                             }
@@ -6393,13 +6091,13 @@ pub fn launch_phaze_ide() {
 
                                 // Alt+Z — toggle word wrap
                                 if alt && !ctrl && !shift && ch.as_str() == "z" {
-                                    state.word_wrap.update(|v| *v = !*v);
-                                    let msg = if state.word_wrap.get() {
+                                    state.editor.word_wrap.update(|v| *v = !*v);
+                                    let msg = if state.editor.word_wrap.get() {
                                         "Word wrap on"
                                     } else {
                                         "Word wrap off"
                                     };
-                                    show_toast(state.status_toast, msg);
+                                    show_toast(state.workbench.status_toast, msg);
                                     return;
                                 }
 
@@ -6407,45 +6105,44 @@ pub fn launch_phaze_ide() {
                                     match ch.as_str() {
                                         // Ctrl+= / Ctrl++ — zoom in editor font
                                         "=" | "+" => {
-                                            state.font_size.update(|v| *v = (*v + 1).min(40));
+                                            state.editor.font_size.update(|v| *v = (*v + 1).min(40));
                                             return;
                                         }
                                         // Ctrl+- — zoom out editor font
                                         "-" => {
-                                            state
-                                                .font_size
+                                            state.editor.font_size
                                                 .update(|v| *v = v.saturating_sub(1).max(8));
                                             return;
                                         }
                                         // Ctrl+0 — reset editor font to default
                                         "0" => {
-                                            state.font_size.set(14);
+                                            state.editor.font_size.set(14);
                                             return;
                                         }
                                         // Ctrl+D — vim half-page down OR multi-cursor
                                         "d" => {
-                                            if state.vim_mode.get() && state.vim_normal_mode.get() {
-                                                state.vim_motion.set(Some(VimMotion::HalfPageDown));
+                                            if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
+                                                state.editor.vim_motion.set(Some(VimMotion::HalfPageDown));
                                             } else {
-                                                state.ctrl_d_nonce.update(|v| *v += 1);
+                                                state.editor.ctrl_d_nonce.update(|v| *v += 1);
                                             }
                                             return;
                                         }
                                         // Ctrl+U — vim half-page up
                                         "u" => {
-                                            if state.vim_mode.get() && state.vim_normal_mode.get() {
-                                                state.vim_motion.set(Some(VimMotion::HalfPageUp));
+                                            if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
+                                                state.editor.vim_motion.set(Some(VimMotion::HalfPageUp));
                                                 return;
                                             }
                                         }
                                         // Ctrl+K — open inline AI edit overlay
                                         "k" => {
-                                            state.inline_edit_open.set(true);
-                                            state.inline_edit_query.set(String::new());
+                                            state.ai.inline_edit_open.set(true);
+                                            state.ai.inline_edit_query.set(String::new());
                                         }
                                         // Ctrl+/ — toggle line comment
                                         "/" => {
-                                            state.comment_toggle_nonce.update(|v| *v += 1);
+                                            state.editor.comment_toggle_nonce.update(|v| *v += 1);
                                         }
                                         _ => {}
                                     }
@@ -6455,49 +6152,49 @@ pub fn launch_phaze_ide() {
                                 if ctrl && shift && !alt {
                                     // Ctrl+Shift+[ → fold block at cursor
                                     if ch.as_str() == "[" {
-                                        state.fold_nonce.update(|v| *v += 1);
-                                        show_toast(state.status_toast, "Folded");
+                                        state.editor.fold_nonce.update(|v| *v += 1);
+                                        show_toast(state.workbench.status_toast, "Folded");
                                         return;
                                     }
                                     // Ctrl+Shift+] → unfold block at cursor
                                     if ch.as_str() == "]" {
-                                        state.unfold_nonce.update(|v| *v += 1);
-                                        show_toast(state.status_toast, "Unfolded");
+                                        state.editor.unfold_nonce.update(|v| *v += 1);
+                                        show_toast(state.workbench.status_toast, "Unfolded");
                                         return;
                                     }
                                     // Ctrl+Shift+K → delete entire line
                                     if ch.as_str() == "k" {
-                                        state.delete_line_nonce.update(|v| *v += 1);
+                                        state.editor.delete_line_nonce.update(|v| *v += 1);
                                         return;
                                     }
                                     // Ctrl+Shift+U → transform uppercase
                                     if ch.as_str() == "u" {
-                                        state.transform_upper_nonce.update(|v| *v += 1);
+                                        state.editor.transform_upper_nonce.update(|v| *v += 1);
                                         return;
                                     }
                                     // Ctrl+Shift+L → transform lowercase
                                     if ch.as_str() == "l" {
-                                        state.transform_lower_nonce.update(|v| *v += 1);
+                                        state.editor.transform_lower_nonce.update(|v| *v += 1);
                                         return;
                                     }
                                     // Ctrl+Shift+T → transform title case
                                     if ch.as_str() == "t" {
-                                        state.transform_title_nonce.update(|v| *v += 1);
+                                        state.editor.transform_title_nonce.update(|v| *v += 1);
                                         return;
                                     }
                                     // Ctrl+Shift+J → join lines
                                     if ch.as_str() == "j" {
-                                        state.join_line_nonce.update(|v| *v += 1);
+                                        state.editor.join_line_nonce.update(|v| *v += 1);
                                         return;
                                     }
                                     // Ctrl+Shift+V → cycle yank ring and paste
                                     if ch.as_str() == "v" {
-                                        let ring = state.yank_ring.get();
+                                        let ring = state.editor.yank_ring.get();
                                         if !ring.is_empty() {
-                                            let idx = (state.yank_ring_idx.get() + 1) % ring.len();
-                                            state.yank_ring_idx.set(idx);
+                                            let idx = (state.editor.yank_ring_idx.get() + 1) % ring.len();
+                                            state.editor.yank_ring_idx.set(idx);
                                             let text = ring[idx].clone();
-                                            state.pending_completion.set(Some((text, 0)));
+                                            state.editor.pending_completion.set(Some((text, 0)));
                                         }
                                         return;
                                     }
@@ -6505,72 +6202,64 @@ pub fn launch_phaze_ide() {
 
                                 // Ctrl+Alt+Shift+D → split editor down toggle
                                 if ctrl && alt && shift && ch.as_str() == "d" {
-                                    state.split_editor_down.update(|v| *v = !*v);
+                                    state.editor.split_editor_down.update(|v| *v = !*v);
                                     return;
                                 }
 
                                 // ── Vim normal-mode keys (no Ctrl) ───────────────
-                                if state.vim_mode.get()
-                                    && state.vim_normal_mode.get()
+                                if state.editor.vim_mode.get()
+                                    && state.editor.vim_normal_mode.get()
                                     && !ctrl
                                     && !alt
                                 {
-                                    let pending = state.vim_pending_key.get();
+                                    let pending = state.editor.vim_pending_key.get();
                                     let ch_str = ch.as_str();
 
                                     // Two-key sequences
                                     if let Some(prev) = pending {
-                                        state.vim_pending_key.set(None);
+                                        state.editor.vim_pending_key.set(None);
                                         match (prev, ch_str) {
                                             ('d', "d") => {
-                                                state.vim_motion.set(Some(VimMotion::DeleteLine));
-                                                state
-                                                    .vim_last_motion
+                                                state.editor.vim_motion.set(Some(VimMotion::DeleteLine));
+                                                state.editor.vim_last_motion
                                                     .set(Some(VimMotion::DeleteLine));
                                             }
                                             ('g', "g") => {
-                                                state.vim_motion.set(Some(VimMotion::GotoFileTop));
+                                                state.editor.vim_motion.set(Some(VimMotion::GotoFileTop));
                                             }
                                             ('y', "y") => {
-                                                state.vim_motion.set(Some(VimMotion::YankLine));
+                                                state.editor.vim_motion.set(Some(VimMotion::YankLine));
                                             }
                                             ('c', "c") => {
-                                                state.vim_normal_mode.set(false);
-                                                state
-                                                    .vim_motion
+                                                state.editor.vim_normal_mode.set(false);
+                                                state.editor.vim_motion
                                                     .set(Some(VimMotion::ChangeWholeLine));
-                                                state
-                                                    .vim_last_motion
+                                                state.editor.vim_last_motion
                                                     .set(Some(VimMotion::ChangeWholeLine));
                                             }
                                             ('c', "w") => {
-                                                state.vim_normal_mode.set(false);
-                                                state.vim_motion.set(Some(VimMotion::ChangeWord));
-                                                state
-                                                    .vim_last_motion
+                                                state.editor.vim_normal_mode.set(false);
+                                                state.editor.vim_motion.set(Some(VimMotion::ChangeWord));
+                                                state.editor.vim_last_motion
                                                     .set(Some(VimMotion::ChangeWord));
                                             }
                                             ('r', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .vim_motion
+                                                    state.editor.vim_motion
                                                         .set(Some(VimMotion::ReplaceChar(c)));
-                                                    state
-                                                        .vim_last_motion
+                                                    state.editor.vim_last_motion
                                                         .set(Some(VimMotion::ReplaceChar(c)));
                                                 }
                                             }
                                             ('m', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .vim_motion
+                                                    state.editor.vim_motion
                                                         .set(Some(VimMotion::SetMark(c)));
                                                 }
                                             }
                                             ('`', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .vim_motion
+                                                    state.editor.vim_motion
                                                         .set(Some(VimMotion::GotoMark(c)));
                                                 }
                                             }
@@ -6580,33 +6269,28 @@ pub fn launch_phaze_ide() {
                                     }
 
                                     // Visual mode intercepts d/y/c to operate on selection
-                                    if state.vim_visual_mode.get_untracked() {
+                                    if state.editor.vim_visual_mode.get_untracked() {
                                         match ch_str {
                                             "d" | "x" => {
-                                                state
-                                                    .vim_motion
+                                                state.editor.vim_motion
                                                     .set(Some(VimMotion::DeleteVisualSelection));
-                                                state.vim_visual_mode.set(false);
-                                                state
-                                                    .vim_last_motion
+                                                state.editor.vim_visual_mode.set(false);
+                                                state.editor.vim_last_motion
                                                     .set(Some(VimMotion::DeleteVisualSelection));
                                                 return;
                                             }
                                             "y" => {
-                                                state
-                                                    .vim_motion
+                                                state.editor.vim_motion
                                                     .set(Some(VimMotion::YankVisualSelection));
-                                                state.vim_visual_mode.set(false);
+                                                state.editor.vim_visual_mode.set(false);
                                                 return;
                                             }
                                             "c" => {
-                                                state.vim_visual_mode.set(false);
-                                                state.vim_normal_mode.set(false);
-                                                state
-                                                    .vim_motion
+                                                state.editor.vim_visual_mode.set(false);
+                                                state.editor.vim_normal_mode.set(false);
+                                                state.editor.vim_motion
                                                     .set(Some(VimMotion::ChangeVisualSelection));
-                                                state
-                                                    .vim_last_motion
+                                                state.editor.vim_last_motion
                                                     .set(Some(VimMotion::ChangeVisualSelection));
                                                 return;
                                             }
@@ -6617,116 +6301,112 @@ pub fn launch_phaze_ide() {
                                     // Single-key normal mode commands
                                     match ch_str {
                                         "h" => {
-                                            state.vim_motion.set(Some(VimMotion::Left));
+                                            state.editor.vim_motion.set(Some(VimMotion::Left));
                                         }
                                         "j" => {
-                                            state.vim_motion.set(Some(VimMotion::Down));
+                                            state.editor.vim_motion.set(Some(VimMotion::Down));
                                         }
                                         "k" => {
-                                            state.vim_motion.set(Some(VimMotion::Up));
+                                            state.editor.vim_motion.set(Some(VimMotion::Up));
                                         }
                                         "l" => {
-                                            state.vim_motion.set(Some(VimMotion::Right));
+                                            state.editor.vim_motion.set(Some(VimMotion::Right));
                                         }
                                         "w" => {
-                                            state.vim_motion.set(Some(VimMotion::WordForward));
+                                            state.editor.vim_motion.set(Some(VimMotion::WordForward));
                                         }
                                         "b" => {
-                                            state.vim_motion.set(Some(VimMotion::WordBackward));
+                                            state.editor.vim_motion.set(Some(VimMotion::WordBackward));
                                         }
                                         "0" => {
-                                            state.vim_motion.set(Some(VimMotion::LineStart));
+                                            state.editor.vim_motion.set(Some(VimMotion::LineStart));
                                         }
                                         "$" => {
-                                            state.vim_motion.set(Some(VimMotion::LineEnd));
+                                            state.editor.vim_motion.set(Some(VimMotion::LineEnd));
                                         }
                                         "x" => {
-                                            state.vim_motion.set(Some(VimMotion::DeleteChar));
+                                            state.editor.vim_motion.set(Some(VimMotion::DeleteChar));
                                         }
                                         "i" => {
-                                            state.vim_normal_mode.set(false);
-                                            state.vim_motion.set(Some(VimMotion::EnterInsert));
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion.set(Some(VimMotion::EnterInsert));
                                         }
                                         "a" => {
-                                            state.vim_normal_mode.set(false);
-                                            state.vim_motion.set(Some(VimMotion::EnterInsertAfter));
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion.set(Some(VimMotion::EnterInsertAfter));
                                         }
                                         "o" => {
-                                            state.vim_normal_mode.set(false);
-                                            state
-                                                .vim_motion
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion
                                                 .set(Some(VimMotion::EnterInsertNewlineBelow));
                                         }
                                         // p / P — paste from vim register
                                         "p" => {
-                                            state.vim_motion.set(Some(VimMotion::Paste));
+                                            state.editor.vim_motion.set(Some(VimMotion::Paste));
                                         }
                                         "P" => {
-                                            state.vim_motion.set(Some(VimMotion::PasteBefore));
+                                            state.editor.vim_motion.set(Some(VimMotion::PasteBefore));
                                         }
                                         // G — go to end of file
                                         "G" => {
-                                            state.vim_motion.set(Some(VimMotion::GotoFileBottom));
+                                            state.editor.vim_motion.set(Some(VimMotion::GotoFileBottom));
                                         }
                                         // A — insert at end of line
                                         "A" => {
-                                            state.vim_normal_mode.set(false);
-                                            state.vim_motion.set(Some(VimMotion::InsertAtLineEnd));
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion.set(Some(VimMotion::InsertAtLineEnd));
                                         }
                                         // I — insert at start of line
                                         "I" => {
-                                            state.vim_normal_mode.set(false);
-                                            state
-                                                .vim_motion
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion
                                                 .set(Some(VimMotion::InsertAtLineStart));
                                         }
                                         // C — change to end of line (delete + insert)
                                         "C" => {
-                                            state.vim_normal_mode.set(false);
-                                            state.vim_motion.set(Some(VimMotion::ChangeToLineEnd));
+                                            state.editor.vim_normal_mode.set(false);
+                                            state.editor.vim_motion.set(Some(VimMotion::ChangeToLineEnd));
                                         }
                                         // D — delete to end of line
                                         "D" => {
-                                            state.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
-                                            state
-                                                .vim_last_motion
+                                            state.editor.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
+                                            state.editor.vim_last_motion
                                                 .set(Some(VimMotion::DeleteToLineEnd));
                                         }
                                         // % — jump to matching bracket
                                         "%" => {
-                                            state
-                                                .vim_motion
+                                            state.editor.vim_motion
                                                 .set(Some(VimMotion::JumpMatchingBracket));
                                         }
                                         // v — start char-wise visual mode
                                         "v" => {
-                                            state.vim_visual_mode.set(true);
-                                            state.vim_visual_line.set(false);
-                                            state.vim_motion.set(Some(VimMotion::VisualCharStart));
+                                            state.editor.vim_visual_mode.set(true);
+                                            state.editor.vim_visual_line.set(false);
+                                            state.editor.vim_motion.set(Some(VimMotion::VisualCharStart));
                                         }
                                         // V — start line-wise visual mode
                                         "V" => {
-                                            state.vim_visual_mode.set(true);
-                                            state.vim_visual_line.set(true);
-                                            state.vim_motion.set(Some(VimMotion::VisualLineStart));
+                                            state.editor.vim_visual_mode.set(true);
+                                            state.editor.vim_visual_line.set(true);
+                                            state.editor.vim_motion.set(Some(VimMotion::VisualLineStart));
                                         }
                                         // Escape in visual mode — return to normal
                                         // (handled in NamedKey::Escape section below)
                                         // . — repeat last change
                                         "." => {
-                                            if let Some(last) = state.vim_last_motion.get() {
-                                                state.vim_motion.set(Some(last));
+                                            if let Some(last) = state.editor.vim_last_motion.get() {
+                                                state.editor.vim_motion.set(Some(last));
                                             }
                                         }
                                         // : — open ex command bar
                                         ":" => {
-                                            state.vim_ex_open.set(true);
-                                            state.vim_ex_input.set(String::new());
+                                            state.editor.vim_ex_open.set(true);
+                                            state.editor.vim_ex_input.set(String::new());
                                         }
                                         // d, g, y, c, r, m, ` — pending keys for two-key sequences
                                         "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
                                             if let Some(ch) = ch_str.chars().next() {
-                                                state.vim_pending_key.set(Some(ch));
+                                                state.editor.vim_pending_key.set(Some(ch));
                                             }
                                         }
                                         _ => {}
@@ -6740,7 +6420,7 @@ pub fn launch_phaze_ide() {
                     let state = state.clone();
                     move |_| {
                         // Kill sidecar process cleanly on IDE exit.
-                        if let Ok(guard) = state.sidecar_client.lock() {
+                        if let Ok(guard) = state.project.sidecar_client.lock() {
                             if let Some(client) = guard.as_ref() {
                                 // Build a small runtime just for the shutdown call.
                                 if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -6754,24 +6434,23 @@ pub fn launch_phaze_ide() {
                         }
                         // Save complete session state synchronously on close so the
                         // 1-second debounce timer cannot miss the final state.
-                        let open_tabs = state.open_tabs.get_untracked();
-                        let active_file = state.open_file.get_untracked();
+                        let open_tabs = state.editor.open_tabs.get_untracked();
+                        let active_file = state.editor.open_file.get_untracked();
                         let active_tab_index = active_file
                             .as_ref()
                             .and_then(|f| open_tabs.iter().position(|t| t == f));
                         save_session(&SessionState {
                             open_tabs,
                             active_tab_index,
-                            left_panel_width: state.left_panel_width.get_untracked(),
-                            show_left_panel: state.show_left_panel.get_untracked(),
-                            show_right_panel: state.show_right_panel.get_untracked(),
-                            show_bottom_panel: state.show_bottom_panel.get_untracked(),
-                            split_editor: state.split_editor.get_untracked(),
-                            split_editor_down: state.split_editor_down.get_untracked(),
-                            vim_mode: state.vim_mode.get_untracked(),
-                            theme: state.theme.get_untracked().variant.name().to_string(),
-                            zen_mode: state.zen_mode.get_untracked(),
-                        });
+                            left_panel_width: state.workbench.left_panel_width.get_untracked(),
+                            show_left_panel: state.workbench.show_left_panel.get_untracked(),
+                            show_right_panel: state.workbench.show_right_panel.get_untracked(),
+                            show_bottom_panel: state.workbench.show_bottom_panel.get_untracked(),
+                            split_editor: state.editor.split_editor.get_untracked(),
+                            split_editor_down: state.editor.split_editor_down.get_untracked(),
+                            vim_mode: state.editor.vim_mode.get_untracked(),
+                            theme: state.workbench.theme.get_untracked().variant.name().to_string(),
+                            zen_mode: state.workbench.zen_mode.get_untracked()});
                     }
                 })
             },

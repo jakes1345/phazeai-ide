@@ -169,8 +169,8 @@ pub mod ui {
     pub const DEFAULT_EXPLORER_WIDTH: f32 = 220.0;
     pub const DEFAULT_CHAT_WIDTH: f32 = 320.0;
     pub const DEFAULT_TERMINAL_HEIGHT: f32 = 200.0;
-    pub const STATUS_BAR_HEIGHT: f32 = 24.0;
-    pub const MENU_BAR_HEIGHT: f32 = 24.0;
+    pub const STATUS_BAR_HEIGHT: f32 = 22.0;
+    pub const MENU_BAR_HEIGHT: f32 = 28.0;
     pub const TAB_BAR_HEIGHT: f32 = 32.0;
     pub const BREADCRUMB_HEIGHT: f32 = 24.0;
     pub const MIN_PANEL_WIDTH: f32 = 150.0;

@@ -8,16 +8,15 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView,
-};
+    IntoView};
 use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
+use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
 use crate::{
-    app::{show_toast, IdeState},
+    app::{show_toast},
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
-    util::safe_get,
-};
+    util::safe_get};
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -27,15 +26,13 @@ pub enum GitFileStatus {
     Added,
     Deleted,
     Untracked,
-    Renamed,
-}
+    Renamed}
 
 #[derive(Clone, Debug)]
 pub struct GitFileEntry {
     pub status: GitFileStatus,
     pub path: String,
-    pub staged: bool,
-}
+    pub staged: bool}
 
 impl GitFileEntry {
     fn badge(&self) -> &'static str {
@@ -44,8 +41,7 @@ impl GitFileEntry {
             GitFileStatus::Added => "A",
             GitFileStatus::Deleted => "D",
             GitFileStatus::Untracked => "U",
-            GitFileStatus::Renamed => "R",
-        }
+            GitFileStatus::Renamed => "R"}
     }
 
     fn badge_color(&self, p: &crate::theme::PhazePalette) -> floem::peniko::Color {
@@ -54,8 +50,7 @@ impl GitFileEntry {
             GitFileStatus::Added => p.git_added,
             GitFileStatus::Deleted => p.git_deleted,
             GitFileStatus::Untracked => p.git_untracked,
-            GitFileStatus::Renamed => p.warning,
-        }
+            GitFileStatus::Renamed => p.warning}
     }
 }
 
@@ -63,8 +58,7 @@ impl GitFileEntry {
 pub struct GitStatusData {
     pub staged: Vec<GitFileEntry>,
     pub unstaged: Vec<GitFileEntry>,
-    pub untracked: Vec<GitFileEntry>,
-}
+    pub untracked: Vec<GitFileEntry>}
 
 /// A single commit entry from `git log`.
 #[derive(Clone, Debug)]
@@ -72,8 +66,7 @@ pub struct CommitEntry {
     pub hash: String,
     pub message: String,
     pub author: String,
-    pub date: String,
-}
+    pub date: String}
 
 /// A commit log entry with both full and short hash, for the COMMIT LOG section.
 #[derive(Clone, Debug)]
@@ -87,8 +80,7 @@ pub struct CommitLogEntry {
     /// Author name.
     pub author: String,
     /// Human-readable relative time ("2 hours ago").
-    pub relative_time: String,
-}
+    pub relative_time: String}
 
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
@@ -106,8 +98,7 @@ fn parse_porcelain(output: &str) -> GitStatusData {
             data.untracked.push(GitFileEntry {
                 status: GitFileStatus::Untracked,
                 path,
-                staged: false,
-            });
+                staged: false});
             continue;
         }
 
@@ -118,15 +109,13 @@ fn parse_porcelain(output: &str) -> GitStatusData {
             data.staged.push(GitFileEntry {
                 status: s,
                 path: path.clone(),
-                staged: true,
-            });
+                staged: true});
         }
         if let Some(s) = unstaged_status {
             data.unstaged.push(GitFileEntry {
                 status: s,
                 path,
-                staged: false,
-            });
+                staged: false});
         }
     }
     data
@@ -138,8 +127,7 @@ fn char_to_status(c: char) -> Option<GitFileStatus> {
         'A' => Some(GitFileStatus::Added),
         'D' => Some(GitFileStatus::Deleted),
         'R' => Some(GitFileStatus::Renamed),
-        _ => None,
-    }
+        _ => None}
 }
 
 fn run_git_status(root: &std::path::Path) -> GitStatusData {
@@ -149,8 +137,7 @@ fn run_git_status(root: &std::path::Path) -> GitStatusData {
         .output();
     match out {
         Ok(o) if o.status.success() => parse_porcelain(&String::from_utf8_lossy(&o.stdout)),
-        _ => GitStatusData::default(),
-    }
+        _ => GitStatusData::default()}
 }
 
 fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
@@ -212,21 +199,38 @@ fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(root)
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "main".to_string());
+        .map(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "main".to_string())
+            } else {
+                tracing::debug!(target: "phazeai_ui", "git rev-parse failed, using main");
+                "main".to_string()
+            }
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "phazeai_ui", error = %e, "Failed to get current branch");
+            "main".to_string()
+        });
 
     // All local branches
     let branches_raw = std::process::Command::new("git")
         .args(["branch", "--list"])
         .current_dir(root)
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
+        .map(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).to_string()
+            } else {
+                tracing::debug!(target: "phazeai_ui", "git branch --list failed");
+                String::new()
+            }
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(target: "phazeai_ui", error = %e, "Failed to list branches");
+            String::new()
+        });
 
     let branches: Vec<String> = branches_raw
         .lines()
@@ -316,19 +320,21 @@ fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
-    let out = std::process::Command::new("git")
+    std::process::Command::new("git")
         .args(["stash", "list"])
         .current_dir(root)
         .output()
-        .ok();
-    out.map(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .enumerate()
-            .map(|(i, l)| (i, l.to_string()))
-            .collect()
-    })
-    .unwrap_or_default()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .enumerate()
+                .map(|(i, l)| (i, l.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|e| {
+            tracing::debug!(target: "phazeai_ui", error = %e, "Failed to get stash list");
+            vec![]
+        })
 }
 
 fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, String> {
@@ -388,7 +394,6 @@ fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
         .args(["tag", "--sort=-version:refname"])
         .current_dir(root)
         .output()
-        .ok()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
@@ -396,7 +401,10 @@ fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
                 .filter(|l| !l.is_empty())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::debug!(target: "phazeai_ui", error = %e, "Failed to get tag list");
+            vec![]
+        })
 }
 
 fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, String> {
@@ -451,8 +459,7 @@ fn run_git_diff_head(root: &std::path::Path) -> String {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
-        Err(e) => e.to_string(),
-    }
+        Err(e) => e.to_string()}
 }
 
 /// A single rendered line from a diff, carrying enough context to extract a hunk patch.
@@ -463,8 +470,7 @@ struct DiffDisplayLine {
     /// The character that classifies the line: '+', '-', '@', 'd' (diff/---/+++ header), ' '
     kind: char,
     /// Index into the hunk list: Some(n) means this is hunk header n, None otherwise.
-    hunk_index: Option<usize>,
-}
+    hunk_index: Option<usize>}
 
 /// Parse a raw `git diff` string into display lines.
 /// Also returns a parallel `hunks` vec where each entry is the patch text for that hunk
@@ -501,16 +507,14 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: 'd',
-                hunk_index: None,
-            });
+                hunk_index: None});
         } else if line.starts_with("--- ") || line.starts_with("+++ ") {
             file_header.push(line.to_string());
             let kind = if line.starts_with("--- ") { '-' } else { '+' };
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind,
-                hunk_index: None,
-            });
+                hunk_index: None});
         } else if line.starts_with("@@ ") {
             // Flush previous hunk body.
             if in_hunk && !current_hunk_body.is_empty() {
@@ -532,22 +536,19 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: '@',
-                hunk_index: Some(hunk_idx),
-            });
+                hunk_index: Some(hunk_idx)});
         } else if in_hunk {
             current_hunk_body.push(line.to_string());
             let kind = line.chars().next().unwrap_or(' ');
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind,
-                hunk_index: None,
-            });
+                hunk_index: None});
         } else {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: ' ',
-                hunk_index: None,
-            });
+                hunk_index: None});
         }
     }
 
@@ -611,8 +612,7 @@ fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
-        Err(e) => e.to_string(),
-    }
+        Err(e) => e.to_string()}
 }
 
 /// Loads the 50 most recent commits via `git log`.
@@ -634,8 +634,7 @@ fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
                     hash: parts[0].to_string(),
                     message: parts[1].to_string(),
                     author: parts[2].to_string(),
-                    date: parts[3].to_string(),
-                })
+                    date: parts[3].to_string()})
             } else {
                 None
             }
@@ -664,8 +663,7 @@ fn run_git_log_full(root: &std::path::Path, limit: usize) -> Vec<CommitLogEntry>
                     short_hash: parts[1].to_string(),
                     message: parts[2].to_string(),
                     author: parts[3].to_string(),
-                    relative_time: parts[4].to_string(),
-                })
+                    relative_time: parts[4].to_string()})
             } else {
                 None
             }
@@ -687,8 +685,7 @@ pub struct BlameEntry {
     /// Commit date `YYYY-MM-DD`.
     pub date: String,
     /// The source line content.
-    pub content: String,
-}
+    pub content: String}
 
 fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
     // Format (from `git blame --date=short`):
@@ -729,8 +726,7 @@ fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
         hash,
         author,
         date,
-        content,
-    }
+        content}
 }
 
 /// Run `git blame --date=short <path>` and return per-line blame info.
@@ -742,8 +738,7 @@ fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return vec![],
-    };
+        Err(_) => return vec![]};
     if !out.status.success() || out.stdout.is_empty() {
         return vec![];
     }
@@ -757,7 +752,7 @@ fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
 // ── Panel root ────────────────────────────────────────────────────────────────
 
 pub fn git_panel(state: IdeState) -> impl IntoView {
-    let theme = state.theme;
+    let theme = state.workbench.theme;
     let git_data = create_rw_signal(GitStatusData::default());
     let commit_msg = create_rw_signal(String::new());
     let status_msg = create_rw_signal(String::new());
@@ -826,7 +821,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Helper: full refresh (status + branch + log)
     let full_refresh = {
-        let root = state.workspace_root;
+        let root = state.project.workspace_root;
         let s_tx = status_refresh_tx.clone();
         let b_tx = branches_refresh_tx.clone();
         let c_tx = commits_refresh_tx.clone();
@@ -865,14 +860,19 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let refresh_sig = create_signal_from_channel(refresh_rx);
 
-        let root_for_watch = state.workspace_root.get_untracked();
+        let root_for_watch = state.project.workspace_root.get_untracked();
         std::thread::spawn(move || {
             let git_index = root_for_watch.join(".git").join("index");
-            let mut last_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
+            let mut last_mtime = git_index.metadata()
+                .ok()
+                .and_then(|m| m.modified().ok());
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                let current_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
+                let current_mtime = git_index.metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok());
                 if current_mtime != last_mtime {
+                    tracing::debug!(target: "phazeai_ui", "Git index changed, triggering refresh");
                     last_mtime = current_mtime;
                     if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
                         refresh_tx.try_send(())
@@ -892,7 +892,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Load stash list on startup
     {
-        let root = state.workspace_root.get_untracked();
+        let root = state.project.workspace_root.get_untracked();
         let (stash_init_tx, stash_init_rx) =
             std::sync::mpsc::sync_channel::<Vec<(usize, String)>>(1);
         let stash_init_sig = create_signal_from_channel(stash_init_rx);
@@ -908,7 +908,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Load tag list on startup
     {
-        let root = state.workspace_root.get_untracked();
+        let root = state.project.workspace_root.get_untracked();
         let (tag_init_tx, tag_init_rx) = std::sync::mpsc::sync_channel::<Vec<String>>(1);
         let tag_init_sig = create_signal_from_channel(tag_init_rx);
         create_effect(move |_| {
@@ -954,14 +954,14 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 }
                 {
                     is_loading.set(true);
-                    let root = state_pull2.workspace_root.get();
+                    let root = state_pull2.project.workspace_root.get();
                     let tx = s_tx.clone();
                     std::thread::spawn(move || {
                         let _ = tx.try_send(run_git_status(&root));
                     });
                 }
                 {
-                    let root = state_pull2.workspace_root.get();
+                    let root = state_pull2.project.workspace_root.get();
                     let tx = c_tx.clone();
                     std::thread::spawn(move || {
                         let _ = tx.try_send(run_git_log(&root));
@@ -1010,7 +1010,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_pull.workspace_root.get();
+        let root = state_pull.project.workspace_root.get();
         let tx = pull_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_pull(&root));
@@ -1048,7 +1048,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_push.workspace_root.get();
+        let root = state_push.project.workspace_root.get();
         let tx = push_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_push(&root));
@@ -1097,7 +1097,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         let b_tx = branches_refresh_tx.clone();
         move |_| {
             // Refresh branch list and toggle picker
-            let root = state_br.workspace_root.get();
+            let root = state_br.project.workspace_root.get();
             let tx = b_tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.try_send(run_git_branches(&root));
@@ -1140,7 +1140,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     .on_click_stop({
         let b_tx = branches_refresh_tx.clone();
         move |_| {
-            let root = state_merge.workspace_root.get();
+            let root = state_merge.project.workspace_root.get();
             let tx = b_tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.try_send(run_git_branches(&root));
@@ -1176,7 +1176,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     }
                 }
                 is_loading.set(true);
-                let root = state_stash2.workspace_root.get();
+                let root = state_stash2.project.workspace_root.get();
                 let tx = s_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_status(&root));
@@ -1199,7 +1199,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     }
                 }
                 is_loading.set(true);
-                let root = state_stashp2.workspace_root.get();
+                let root = state_stashp2.project.workspace_root.get();
                 let tx = s_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_status(&root));
@@ -1231,7 +1231,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_stash.workspace_root.get();
+        let root = state_stash.project.workspace_root.get();
         let tx = stash_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_stash(&root));
@@ -1267,7 +1267,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_stashp.workspace_root.get();
+        let root = state_stashp.project.workspace_root.get();
         let tx = stash_pop_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_stash_pop(&root));
@@ -1319,7 +1319,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_fetch.workspace_root.get();
+        let root = state_fetch.project.workspace_root.get();
         let tx = fetch_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_fetch(&root));
@@ -1347,7 +1347,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         create_effect(move |_| {
             if stage_all_result_sig.get().is_some() {
                 is_loading.set(true);
-                let root = state_sa2.workspace_root.get();
+                let root = state_sa2.project.workspace_root.get();
                 let tx = s_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_status(&root));
@@ -1382,7 +1382,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_sa.workspace_root.get();
+        let root = state_sa.project.workspace_root.get();
         let tx = stage_all_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_add(&root, "-A"));
@@ -1425,7 +1425,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         let c_tx = commits_refresh_tx.clone();
         move |_| {
             is_loading.set(true);
-            let root = state_r.workspace_root.get();
+            let root = state_r.project.workspace_root.get();
             {
                 let r = root.clone();
                 let tx = s_tx.clone();
@@ -1539,7 +1539,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                         status_msg.set(format!("Delete error: {}", e.lines().next().unwrap_or("?")))
                     }
                 }
-                let root = state_checkout.workspace_root.get();
+                let root = state_checkout.project.workspace_root.get();
                 let tx = b_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_branches(&root));
@@ -1559,7 +1559,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             if let Some(result) = branch_checkout_result_sig.get() {
                 match result {
                     Ok(()) => {
-                        let root = state_checkout.workspace_root.get();
+                        let root = state_checkout.project.workspace_root.get();
                         {
                             let r = root.clone();
                             let tx = b_tx.clone();
@@ -1605,7 +1605,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let bn = branch_name.clone();
             let bn2 = branch_name.clone();
             let bn_del = branch_name.clone();
-            let root = state_checkout.workspace_root.get();
+            let root = state_checkout.project.workspace_root.get();
             let root_del = root.clone();
             let branch_del_tx = branch_del_tx.clone();
             let branch_checkout_tx = branch_checkout_tx.clone();
@@ -1728,7 +1728,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             if let Some((result, attempted_name)) = new_branch_result_sig.get() {
                 match result {
                     Ok(()) => {
-                        let root = state_nb.workspace_root.get();
+                        let root = state_nb.project.workspace_root.get();
                         {
                             let r = root.clone();
                             let tx = b_tx.clone();
@@ -1804,7 +1804,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         if name.is_empty() {
             return;
         }
-        let root = state_nb.workspace_root.get();
+        let root = state_nb.project.workspace_root.get();
         let tx = new_branch_tx.clone();
         std::thread::spawn(move || {
             let result = run_git_checkout_new(&root, &name);
@@ -1896,14 +1896,14 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                         status_msg.set("Committed successfully!".to_string());
                         {
                             is_loading.set(true);
-                            let root = state_commit.workspace_root.get();
+                            let root = state_commit.project.workspace_root.get();
                             let tx = s_tx.clone();
                             std::thread::spawn(move || {
                                 let _ = tx.try_send(run_git_status(&root));
                             });
                         }
                         {
-                            let root = state_commit.workspace_root.get();
+                            let root = state_commit.project.workspace_root.get();
                             let tx = c_tx.clone();
                             std::thread::spawn(move || {
                                 let _ = tx.try_send(run_git_log(&root));
@@ -1981,7 +1981,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         }
         ai_gen_active.set(true);
 
-        let root = state_ai.workspace_root.get();
+        let root = state_ai.project.workspace_root.get();
         let tx = ai_commit_tx.clone();
 
         std::thread::spawn(move || {
@@ -1990,9 +1990,13 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .args(["diff", "--cached", "--stat"])
                 .current_dir(&root)
                 .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map(|o| {
+                    if o.status.success() {
+                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                    } else {
+                        String::new()
+                    }
+                })
                 .unwrap_or_default();
 
             if stat.is_empty() {
@@ -2004,9 +2008,13 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .args(["diff", "--cached"])
                 .current_dir(&root)
                 .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .map(|o| {
+                    if o.status.success() {
+                        String::from_utf8_lossy(&o.stdout).to_string()
+                    } else {
+                        String::new()
+                    }
+                })
                 .unwrap_or_default();
 
             let snippet = if full_diff.len() > 8_000 {
@@ -2038,8 +2046,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let result = rt.block_on(async move {
                 let client = match settings.build_llm_client() {
                     Ok(c) => c,
-                    Err(_) => return String::new(),
-                };
+                    Err(_) => return String::new()};
                 let agent = Agent::new(client);
                 let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
                 let mut accumulated = String::new();
@@ -2094,7 +2101,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             status_msg.set("Enter a commit message first.".to_string());
             return;
         }
-        let root = state_c.workspace_root.get();
+        let root = state_c.project.workspace_root.get();
         let msg2 = msg.clone();
         let tx = commit_result_tx.clone();
         std::thread::spawn(move || {
@@ -2239,8 +2246,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 Err(e) => status_msg.set(format!(
                     "Cherry-pick error: {}",
                     e.lines().next().unwrap_or("?")
-                )),
-            }
+                ))}
         }
     });
 
@@ -2303,8 +2309,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     })
             });
 
-            let root_for_diff = state_for_diff.workspace_root;
-            let root_for_cp = state_for_diff.workspace_root;
+            let root_for_diff = state_for_diff.project.workspace_root;
+            let root_for_cp = state_for_diff.project.workspace_root;
             let cp_hov = create_rw_signal(false);
             let hash_cp = hash.clone();
             let cherry_pick_btn = container(label(|| "🍒").style(move |s| {
@@ -2477,7 +2483,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             .apply_if(blame_loading.get(), |s| s.color(p.text_disabled))
     })
     .on_click_stop(move |_| {
-        let Some((path, _, _)) = state_blame.active_cursor.get() else {
+        let Some((path, _, _)) = state_blame.editor.active_cursor.get() else {
             return;
         };
         blame_loading.set(true);
@@ -2615,10 +2621,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
             .on_click_stop(move |_| {
                 // Jump to the blamed line in the editor.
-                if let Some((cur_path, _, _)) = state_b.active_cursor.get() {
-                    state_b.open_file.set(Some(cur_path));
+                if let Some((cur_path, _, _)) = state_b.editor.active_cursor.get() {
+                    state_b.editor.open_file.set(Some(cur_path));
                 }
-                state_b.goto_line.set(line_no as u32);
+                state_b.editor.goto_line.set(line_no as u32);
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 row_hov.set(true)
@@ -2662,15 +2668,14 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         std::sync::mpsc::sync_channel::<(Result<String, String>, usize)>(1);
     let stash_apply_result_sig = create_signal_from_channel(stash_apply_rx);
     {
-        let root_sa = state_stash_apply.workspace_root;
+        let root_sa = state_stash_apply.project.workspace_root;
         let reload_tx = stash_list_reload_tx.clone();
         create_effect(move |_| {
             if let Some((result, idx)) = stash_apply_result_sig.get() {
                 match result {
                     Ok(_) => stash_list_status.set(format!("Applied stash@{{{idx}}}")),
                     Err(e) => stash_list_status
-                        .set(format!("Apply error: {}", e.lines().next().unwrap_or("?"))),
-                }
+                        .set(format!("Apply error: {}", e.lines().next().unwrap_or("?")))}
                 let root = root_sa.get();
                 let tx = reload_tx.clone();
                 std::thread::spawn(move || {
@@ -2684,15 +2689,14 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         std::sync::mpsc::sync_channel::<(Result<String, String>, usize)>(1);
     let stash_drop_result_sig = create_signal_from_channel(stash_drop_rx);
     {
-        let root_sd = state_stash_drop.workspace_root;
+        let root_sd = state_stash_drop.project.workspace_root;
         let reload_tx = stash_list_reload_tx.clone();
         create_effect(move |_| {
             if let Some((result, idx)) = stash_drop_result_sig.get() {
                 match result {
                     Ok(_) => stash_list_status.set(format!("Dropped stash@{{{idx}}}")),
                     Err(e) => stash_list_status
-                        .set(format!("Drop error: {}", e.lines().next().unwrap_or("?"))),
-                }
+                        .set(format!("Drop error: {}", e.lines().next().unwrap_or("?")))}
                 let root = root_sd.get();
                 let tx = reload_tx.clone();
                 std::thread::spawn(move || {
@@ -2724,7 +2728,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_stash_list.workspace_root.get();
+        let root = state_stash_list.project.workspace_root.get();
         let tx = stash_list_reload_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_stash_list(&root));
@@ -2813,8 +2817,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let row_hov = create_rw_signal(false);
             let apply_hov = create_rw_signal(false);
             let drop_hov = create_rw_signal(false);
-            let root_apply = state_stash_apply.workspace_root;
-            let root_drop = state_stash_drop.workspace_root;
+            let root_apply = state_stash_apply.project.workspace_root;
+            let root_drop = state_stash_drop.project.workspace_root;
             let stash_apply_tx = stash_apply_tx.clone();
             let stash_drop_tx = stash_drop_tx.clone();
             let display_text = if label_text.len() > ui_const::GIT_CONTENT_TRUNCATE {
@@ -2974,7 +2978,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         move |branch_name: String| {
             let row_hov = create_rw_signal(false);
             let bn = branch_name.clone();
-            let root = state_merge_do.workspace_root;
+            let root = state_merge_do.project.workspace_root;
             let merge_tx = merge_tx.clone();
             container(label(move || bn.clone()).style(move |s| {
                 let t = theme.get();
@@ -3075,7 +3079,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let (tag_create_tx, tag_create_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let tag_create_result_sig = create_signal_from_channel(tag_create_rx);
     {
-        let root_tc = state_tag_create.workspace_root;
+        let root_tc = state_tag_create.project.workspace_root;
         let reload_tx = tag_list_reload_tx.clone();
         create_effect(move |_| {
             if let Some(result) = tag_create_result_sig.get() {
@@ -3106,8 +3110,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 Err(e) => tag_status.set(format!(
                     "Push tags error: {}",
                     e.lines().next().unwrap_or("?")
-                )),
-            }
+                ))}
         }
     });
     let push_tags_hov = create_rw_signal(false);
@@ -3134,7 +3137,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_tag_refresh.workspace_root.get();
+        let root = state_tag_refresh.project.workspace_root.get();
         let tx = tag_list_reload_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_tag_list(&root));
@@ -3279,7 +3282,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         if name.is_empty() {
             return;
         }
-        let root = state_tag_create.workspace_root.get();
+        let root = state_tag_create.project.workspace_root.get();
         let tx = tag_create_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_tag_create(&root, &name));
@@ -3314,7 +3317,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             })
     })
     .on_click_stop(move |_| {
-        let root = state_tag_push.workspace_root.get();
+        let root = state_tag_push.project.workspace_root.get();
         let tx = push_tags_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(run_git_tag_push(&root));
@@ -3397,7 +3400,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Helper closure: reload the diff and parse it.
     let load_diff: std::rc::Rc<dyn Fn()> = {
-        let root = state_diff_load.workspace_root;
+        let root = state_diff_load.project.workspace_root;
         let tx = diff_raw_tx.clone();
         std::rc::Rc::new(move || {
             let r = root.get();
@@ -3410,7 +3413,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Reactive effect: when selected_commit changes, load that commit's diff.
     {
-        let root = state.workspace_root;
+        let root = state.project.workspace_root;
         let tx = diff_raw_tx.clone();
         create_effect(move |_| {
             if let Some(hash) = selected_commit.get() {
@@ -3633,8 +3636,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     '-' => p.git_deleted,
                     '@' => p.info,
                     'd' => p.text_muted,
-                    _ => p.text_primary,
-                };
+                    _ => p.text_primary};
                 s.font_size(10.0)
                     .color(col)
                     .font_family("monospace".to_string())
@@ -3646,7 +3648,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             // Revert button — always rendered but hidden for non-hunk-header lines.
             let revert_hov = create_rw_signal(false);
-            let root_rev = state_diff_revert.workspace_root;
+            let root_rev = state_diff_revert.project.workspace_root;
             let revert_btn = container(label(|| "Revert").style(move |s| {
                 let t = theme.get();
                 s.font_size(9.0)
@@ -3761,7 +3763,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // Helper closure: load commit log entries.
     let load_commit_log: std::rc::Rc<dyn Fn()> = {
-        let root = state_log.workspace_root;
+        let root = state_log.project.workspace_root;
         let tx = commit_log_tx.clone();
         std::rc::Rc::new(move || {
             let r = root.get();
@@ -4034,8 +4036,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 enum SectionKind {
     Staged,
     Unstaged,
-    Untracked,
-}
+    Untracked}
 
 fn git_section(
     title: &'static str,
@@ -4061,8 +4062,7 @@ fn git_section(
                 let count = match kind {
                     SectionKind::Staged => data.staged.len(),
                     SectionKind::Unstaged => data.unstaged.len(),
-                    SectionKind::Untracked => data.untracked.len(),
-                };
+                    SectionKind::Untracked => data.untracked.len()};
                 format!("{title} ({count})")
             })
             .style(move |s| {
@@ -4105,7 +4105,7 @@ fn git_section(
         create_effect(move |_| {
             if primary_action_result_sig.get().is_some() {
                 is_loading.set(true);
-                let root = state.workspace_root.get();
+                let root = state.project.workspace_root.get();
                 let tx = s_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_status(&root));
@@ -4122,7 +4122,7 @@ fn git_section(
         create_effect(move |_| {
             if discard_action_result_sig.get().is_some() {
                 is_loading.set(true);
-                let root = state.workspace_root.get();
+                let root = state.project.workspace_root.get();
                 let tx = s_tx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.try_send(run_git_status(&root));
@@ -4140,8 +4140,7 @@ fn git_section(
             match kind {
                 SectionKind::Staged => data.staged,
                 SectionKind::Unstaged => data.unstaged,
-                SectionKind::Untracked => data.untracked,
-            }
+                SectionKind::Untracked => data.untracked}
         },
         |entry| entry.path.clone(),
         {
@@ -4162,9 +4161,9 @@ fn git_section(
                     .filter(|p| !p.as_os_str().is_empty())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let abs_path = state.workspace_root.get().join(&rel_path);
+                let abs_path = state.project.workspace_root.get().join(&rel_path);
                 let state_r = state.clone();
-                let root = state.workspace_root.get();
+                let root = state.project.workspace_root.get();
 
                 // ── Action buttons (only visible on hover) ────────────────
                 // Primary action: stage (+) for Unstaged/Untracked, unstage (−) for Staged
@@ -4174,8 +4173,7 @@ fn git_section(
                 let primary_label = match kind {
                     SectionKind::Staged => "−",
                     SectionKind::Unstaged => "+",
-                    SectionKind::Untracked => "+",
-                };
+                    SectionKind::Untracked => "+"};
                 let primary_btn = container(label(move || primary_label).style(move |s| {
                     let t = theme.get();
                     let p = &t.palette;
@@ -4209,8 +4207,7 @@ fn git_section(
                         let result = match kind {
                             SectionKind::Staged => run_git_reset(&r, &path),
                             SectionKind::Unstaged => run_git_add(&r, &path),
-                            SectionKind::Untracked => run_git_add(&r, &path),
-                        };
+                            SectionKind::Untracked => run_git_add(&r, &path)};
                         let _ = tx.send(result);
                     });
                 })
@@ -4261,7 +4258,7 @@ fn git_section(
                     if !discard_confirm.get_untracked() {
                         discard_confirm.set(true);
                         show_toast(
-                            state_discard.status_toast,
+                            state_discard.workbench.status_toast,
                             format!("Click discard again to restore {path}", path = rel_path2),
                         );
                         return;
@@ -4327,7 +4324,7 @@ fn git_section(
                         })
                 })
                 .on_click_stop(move |_| {
-                    state_r.open_file.set(Some(abs_path.clone()));
+                    state_r.editor.open_file.set(Some(abs_path.clone()));
                 })
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                     row_hov.set(true)
@@ -4343,8 +4340,7 @@ fn git_section(
     let empty_label_text = match kind {
         SectionKind::Staged => "No staged changes",
         SectionKind::Unstaged => "No unstaged changes",
-        SectionKind::Untracked => "No untracked files",
-    };
+        SectionKind::Untracked => "No untracked files"};
 
     let empty_state = label(move || empty_label_text.to_string()).style(move |s| {
         let t = theme.get();
@@ -4352,8 +4348,7 @@ fn git_section(
         let is_empty = match kind {
             SectionKind::Staged => git_data.get().staged.is_empty(),
             SectionKind::Unstaged => git_data.get().unstaged.is_empty(),
-            SectionKind::Untracked => git_data.get().untracked.is_empty(),
-        };
+            SectionKind::Untracked => git_data.get().untracked.is_empty()};
         s.font_size(11.0)
             .color(p.text_muted)
             .padding_left(16.0)

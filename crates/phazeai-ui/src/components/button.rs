@@ -1,8 +1,7 @@
 use floem::{
     reactive::{create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, label, Decorators},
-    IntoView,
-};
+    IntoView};
 
 use crate::theme::PhazeTheme;
 
@@ -11,8 +10,7 @@ pub enum ButtonVariant {
     Primary,
     Secondary,
     Ghost,
-    Danger,
-}
+    Danger}
 
 pub fn phaze_button(
     text: impl Into<String>,
@@ -63,8 +61,7 @@ pub fn phaze_button(
                     },
                     p.error,
                     p.error.with_alpha(0.5),
-                ),
-            };
+                )};
             s.padding_horiz(12.0)
                 .padding_vert(6.0)
                 .border_radius(6.0)
