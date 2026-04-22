@@ -19,7 +19,7 @@ use phazeai_core::{Agent, AgentEvent, Settings};
 use phazeai_sidecar::{SidecarClient, SidecarManager};
 
 use crate::lsp_bridge::{
-    start_lsp_bridge, CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry,
+    start_lsp_bridge, CodeAction, CompletionEntry, DiagEntry,
     DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry};
 
 use crate::{
@@ -511,9 +511,9 @@ impl IdeState {
         let hover_text = lsp.hover_text;
         let references = lsp.references;
         let code_actions = lsp.code_actions;
-        let sig_help = lsp.sig_help;
+        let _sig_help = lsp.sig_help;
         let doc_symbols = lsp.doc_symbols;
-        let workspace_symbols = lsp.workspace_symbols;
+        let _workspace_symbols = lsp.workspace_symbols;
         let lsp_progress = lsp.lsp_progress;
         let peek_def_lines = lsp.peek_def_lines;
         let code_lens = lsp.code_lens;

@@ -39,7 +39,6 @@ use syntect::{
 
 use phazeai_core::{llm::Message, Settings};
 
-use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme};

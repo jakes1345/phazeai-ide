@@ -13,7 +13,6 @@ use phazeai_core::{
     Settings};
 use phazeai_sidecar::SidecarClient;
 
-use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,

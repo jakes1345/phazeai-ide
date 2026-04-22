@@ -3,7 +3,6 @@ pub mod editor;
 pub mod project;
 pub mod workbench;
 
-use std::sync::Arc;
 use floem::reactive::RwSignal;
 use crate::theme::PhazeTheme;
 

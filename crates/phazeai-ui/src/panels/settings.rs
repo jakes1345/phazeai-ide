@@ -6,7 +6,7 @@ use phazeai_core::{
     llm::provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
     Settings};
 
-use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
+use crate::domain_state::IdeState;
 use crate::{
     
     components::icon::{icons, phaze_icon},

@@ -11,7 +11,7 @@ use floem::{
     IntoView};
 use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
-use crate::domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState};
+use crate::domain_state::IdeState;
 use crate::{
     app::{show_toast},
     components::icon::{icons, phaze_icon},
