@@ -126,6 +126,10 @@ enum ChatItem {
 struct PendingApproval {
     tool_name: String,
     description: String,
+    /// Parameters of the call awaiting approval. Forwarded to
+    /// `ToolApprovalManager::record_approval` so per-call dedup keys match
+    /// the next `needs_approval` check.
+    params: serde_json::Value,
 }
 
 enum WorkerCommand {
@@ -573,7 +577,7 @@ pub async fn run_tui(
 
                 if approved {
                     let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
-                    mgr.record_approval(&tool_name);
+                    mgr.record_approval(&tool_name, &params);
                 }
 
                 approved
@@ -1671,6 +1675,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.pending_approval = Some(PendingApproval {
                 tool_name: name,
                 description: desc,
+                params,
             });
             state.companion.on_approval();
         }
@@ -2087,7 +2092,9 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('s') | KeyCode::Char('S') => {
             // Allow this one tool for the session (record then approve).
             if let Some(ref approval) = state.pending_approval {
-                state.approval_manager.record_approval(&approval.tool_name);
+                state
+                    .approval_manager
+                    .record_approval(&approval.tool_name, &approval.params);
             }
             send_approval(state, true);
             state.pending_approval = None;

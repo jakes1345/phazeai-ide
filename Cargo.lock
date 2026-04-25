@@ -6996,10 +6996,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-extension"
-version = "0.1.0"
-
-[[package]]
 name = "wasm-metadata"
 version = "0.244.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

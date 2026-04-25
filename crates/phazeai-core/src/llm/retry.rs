@@ -133,7 +133,7 @@ mod tests {
         // d1 should generally exceed d0 within jitter; d10 must be capped.
         assert!(d10 <= MAX_DELAY_MS + JITTER_MS);
         assert!(d0 <= 300, "d0 was {d0}");
-        assert!(d1 >= 500 && d1 <= 700, "d1 was {d1}");
-        assert!(d2 >= 1700 && d2 <= 1900, "d2 was {d2}");
+        assert!((500..=700).contains(&d1), "d1 was {d1}");
+        assert!((1700..=1900).contains(&d2), "d2 was {d2}");
     }
 }

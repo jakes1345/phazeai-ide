@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 /// Approval mode for tool execution
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,7 +34,11 @@ pub enum ToolPermission {
 pub struct ToolApprovalManager {
     /// Current approval mode
     mode: ToolApprovalMode,
-    /// Tools that have been approved (for AskOnce mode)
+    /// Approval cache for AskOnce mode. Each entry is a string of the form
+    /// `"<tool_name>:<param_hash_hex>"` so two calls to the same tool with
+    /// different parameters (e.g. `bash "echo hi"` vs `bash "rm -rf /"`)
+    /// each require their own approval. Read by `needs_approval`, written
+    /// by `record_approval`.
     approved_tools: HashSet<String>,
 }
 
@@ -80,10 +86,69 @@ impl ToolApprovalManager {
                 if permission == ToolPermission::ReadOnly {
                     return false;
                 }
-                // Check if already approved
-                !self.approved_tools.contains(tool_name)
+                // Check if THIS specific (tool, params) pair has been approved.
+                // Hashing the destination signature (path, source/dest, command,
+                // output_path, url) means approving "bash echo hi" doesn't blanket
+                // approve "bash rm -rf /". Falls back to full params hash for
+                // tools we don't know structurally.
+                !self.approved_tools.contains(&Self::approval_key(tool_name, params))
             }
         }
+    }
+
+    /// Compute the AskOnce dedup key. The shape of each tool's "destination
+    /// signature" (the parameter the user is morally consenting to) is
+    /// hand-picked so a small parameter change forces re-approval, without
+    /// being so broad that whitespace tweaks hammer the user with prompts.
+    fn approval_key(tool_name: &str, params: &Value) -> String {
+        let mut hasher = DefaultHasher::new();
+        match tool_name {
+            "bash" => {
+                params
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+            }
+            "edit_file" | "write_file" | "read_file" | "delete_path"
+            | "create_directory" => {
+                params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+            }
+            "move_path" | "copy_path" => {
+                params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+                params
+                    .get("destination")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+            }
+            "download" => {
+                params
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+                params
+                    .get("output_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .hash(&mut hasher);
+            }
+            _ => {
+                // Unknown tool — hash the whole params blob so any change is
+                // a new approval.
+                params.to_string().hash(&mut hasher);
+            }
+        }
+        format!("{}:{:x}", tool_name, hasher.finish())
     }
 
     /// Classify a tool's permission level based on name and parameters
@@ -214,9 +279,21 @@ impl ToolApprovalManager {
         ToolPermission::Execute
     }
 
-    /// Record that a tool has been approved (for AskOnce mode)
-    pub fn record_approval(&mut self, tool_name: &str) {
-        self.approved_tools.insert(tool_name.to_string());
+    /// Record that a tool call has been approved (for AskOnce mode). Caller
+    /// passes the same `params` they will eventually execute so the dedup
+    /// key matches the next `needs_approval` check.
+    pub fn record_approval(&mut self, tool_name: &str, params: &Value) {
+        self.approved_tools
+            .insert(Self::approval_key(tool_name, params));
+    }
+
+    /// Legacy single-arg overload — preserves old callers that don't have a
+    /// `params` value. Records the tool with empty params; subsequent calls
+    /// with non-empty params will still re-prompt because their hashes differ.
+    /// Prefer `record_approval` with real params.
+    pub fn record_approval_legacy(&mut self, tool_name: &str) {
+        self.approved_tools
+            .insert(Self::approval_key(tool_name, &Value::Null));
     }
 
     /// Format a user-friendly approval prompt
@@ -309,9 +386,10 @@ impl ToolApprovalManager {
         self.approved_tools.clear();
     }
 
-    /// Check if a specific tool has been approved
-    pub fn is_approved(&self, tool_name: &str) -> bool {
-        self.approved_tools.contains(tool_name)
+    /// Check if a specific (tool, params) pair has been approved.
+    pub fn is_approved(&self, tool_name: &str, params: &Value) -> bool {
+        self.approved_tools
+            .contains(&Self::approval_key(tool_name, params))
     }
 }
 
@@ -430,14 +508,21 @@ mod tests {
     fn test_ask_once_mode() {
         let mut manager = ToolApprovalManager::new(ToolApprovalMode::AskOnce);
 
+        let params = json!({"path": "/tmp/foo.txt", "content": "x"});
+
         // First call needs approval
-        assert!(manager.needs_approval("write_file", &json!({})));
+        assert!(manager.needs_approval("write_file", &params));
 
-        // Record approval
-        manager.record_approval("write_file");
+        // Record approval for THIS specific path
+        manager.record_approval("write_file", &params);
 
-        // Second call should not need approval
-        assert!(!manager.needs_approval("write_file", &json!({})));
+        // Second call with the same path should not need approval
+        assert!(!manager.needs_approval("write_file", &params));
+
+        // But a different path must re-prompt — per-call approval is the
+        // whole point of Session 7.
+        let other = json!({"path": "/tmp/other.txt", "content": "y"});
+        assert!(manager.needs_approval("write_file", &other));
 
         // Read-only never needs approval
         assert!(!manager.needs_approval("read_file", &json!({})));
@@ -459,11 +544,25 @@ mod tests {
     #[test]
     fn test_clear_approvals() {
         let mut manager = ToolApprovalManager::new(ToolApprovalMode::AskOnce);
+        let params = json!({"path": "/tmp/foo.txt"});
 
-        manager.record_approval("write_file");
-        assert!(manager.is_approved("write_file"));
+        manager.record_approval("write_file", &params);
+        assert!(manager.is_approved("write_file", &params));
 
         manager.clear_approvals();
-        assert!(!manager.is_approved("write_file"));
+        assert!(!manager.is_approved("write_file", &params));
+    }
+
+    #[test]
+    fn test_per_call_dedup() {
+        // Approving `bash echo hi` must NOT auto-approve `bash rm -rf /tmp`.
+        // This was the entire motivation for Session 7.
+        let mut manager = ToolApprovalManager::new(ToolApprovalMode::AskOnce);
+        let echo = json!({"command": "echo hi"});
+        let rm = json!({"command": "rm -rf /tmp/anything"});
+
+        manager.record_approval("bash", &echo);
+        assert!(!manager.needs_approval("bash", &echo));
+        assert!(manager.needs_approval("bash", &rm));
     }
 }
