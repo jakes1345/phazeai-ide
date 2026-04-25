@@ -52,14 +52,23 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
             state.workbench.ext_loading.set(true);
             let manager = state.workbench.ext_manager.clone();
             let tx = tx.clone();
+            let snapshot = state.workbench.editor_snapshot.clone();
             std::thread::spawn(move || {
                 let mut all_names: Vec<String> = Vec::new();
 
                 // 1. Scan native Rust plugins
                 if let Ok(mut mgr) = manager.lock() {
-                    let host = phazeai_core::ext_host::DummyDelegate;
-                    let host =
-                        phazeai_core::ext_host::IdeDelegateHost::new(std::sync::Arc::new(host));
+                    // Real delegate backed by the workbench editor snapshot.
+                    // Plugins calling `get_active_file_path` see the current
+                    // open file rather than the empty string DummyDelegate
+                    // returned. `insert_text` and `execute_command` are still
+                    // logged-only — wiring them into the editor reactively is
+                    // its own session — but file metadata reads are live.
+                    let delegate =
+                        phazeai_core::ext_host::SnapshotDelegate::logging(snapshot);
+                    let host = phazeai_core::ext_host::IdeDelegateHost::new(
+                        std::sync::Arc::new(delegate),
+                    );
                     mgr.scan_plugins(&host);
                     for p in mgr.get_plugins() {
                         all_names.push(format!(

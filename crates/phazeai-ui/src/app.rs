@@ -982,6 +982,22 @@ impl IdeState {
             phazeai_core::ext_host::ExtensionManager::new(),
         ));
 
+        // Thread-safe editor snapshot consulted by the plugin host. We push
+        // updates into it from a create_effect on `open_file` below, so a
+        // plugin calling `host.get_active_file_path()` from any thread always
+        // sees the current value. Cheap inner RwLock — no signal coupling.
+        let editor_snapshot = Arc::new(phazeai_core::ext_host::EditorSnapshot::new());
+        {
+            let snap = editor_snapshot.clone();
+            create_effect(move |_| {
+                let path_str = open_file
+                    .get()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                snap.set_active_file_path(path_str);
+            });
+        }
+
         // Persist provider + model changes to settings.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
@@ -1071,6 +1087,7 @@ impl IdeState {
             extensions: create_rw_signal(Vec::new()),
             ext_loading: create_rw_signal(false),
             ext_manager: ext_manager.clone(),
+            editor_snapshot: editor_snapshot.clone(),
         };
 
         let editor = EditorState {

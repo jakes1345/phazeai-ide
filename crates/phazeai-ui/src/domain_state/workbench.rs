@@ -36,4 +36,8 @@ pub struct WorkbenchState {
     pub extensions: RwSignal<Vec<String>>,
     pub ext_loading: RwSignal<bool>,
     pub ext_manager: std::sync::Arc<std::sync::Mutex<phazeai_core::ext_host::ExtensionManager>>,
+    /// Thread-safe view of the active editor for plugins. Populated from the
+    /// open_file/active_text signals via create_effect; the plugin host reads
+    /// from this snapshot off the UI thread.
+    pub editor_snapshot: std::sync::Arc<phazeai_core::ext_host::EditorSnapshot>,
 }

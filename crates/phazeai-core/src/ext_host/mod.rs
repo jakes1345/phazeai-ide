@@ -38,9 +38,32 @@ pub trait IdeDelegate: Send + Sync {
     fn log(&self, msg: &str);
     fn show_message(&self, msg: &str);
     fn get_active_text(&self) -> String;
+
+    /// Absolute path of the file in the active editor tab. Empty string when
+    /// no file is open. Default returns "" for backwards compatibility.
+    fn get_active_file_path(&self) -> String {
+        String::new()
+    }
+
+    /// Insert `text` at the active editor's cursor (replacing any selection).
+    /// Default is a no-op so existing single-purpose delegates compile, but
+    /// host implementations should override to wire into the editor.
+    fn insert_text(&self, text: &str) {
+        let _ = text;
+    }
+
+    /// Execute a built-in IDE command (`workbench.action.openFile`,
+    /// `editor.action.formatDocument`, etc.). Returns Ok(output) or
+    /// Err(message). Default returns Err so plugins can detect a host that
+    /// didn't override it.
+    fn execute_command(&self, cmd: &str, args: &str) -> Result<String, String> {
+        let _ = (cmd, args);
+        Err("ide command dispatch not wired by this host".to_string())
+    }
 }
 
-/// A default no-op implementation used when no real delegate is provided.
+/// Default delegate used when no IDE host is available (CLI, tests). Logs to
+/// tracing rather than presenting messages on a UI surface.
 pub struct DummyDelegate;
 
 impl IdeDelegate for DummyDelegate {
@@ -52,6 +75,122 @@ impl IdeDelegate for DummyDelegate {
     }
     fn get_active_text(&self) -> String {
         String::new()
+    }
+}
+
+/// Thread-safe snapshot of editor state that an IDE host can update as the
+/// user opens files, moves the cursor, etc. `IdeDelegate` reads from this
+/// snapshot on every `get_active_*` call, so plugins always see the latest
+/// values. Wrap in `Arc` and clone freely; cheap inner `RwLock`.
+#[derive(Default)]
+pub struct EditorSnapshot {
+    inner: std::sync::RwLock<EditorSnapshotInner>,
+}
+
+#[derive(Default, Clone)]
+struct EditorSnapshotInner {
+    active_file_path: String,
+    active_text: String,
+}
+
+impl EditorSnapshot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_active_file_path(&self, path: impl Into<String>) {
+        if let Ok(mut g) = self.inner.write() {
+            g.active_file_path = path.into();
+        }
+    }
+
+    pub fn set_active_text(&self, text: impl Into<String>) {
+        if let Ok(mut g) = self.inner.write() {
+            g.active_text = text.into();
+        }
+    }
+
+    pub fn active_file_path(&self) -> String {
+        self.inner
+            .read()
+            .map(|g| g.active_file_path.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn active_text(&self) -> String {
+        self.inner
+            .read()
+            .map(|g| g.active_text.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Callback type for editor mutations the delegate forwards on behalf of a
+/// plugin: insert text, execute IDE command. The host registers concrete
+/// implementations during construction; defaults log a warning so plugins
+/// see a real error rather than silent failure.
+pub type InsertTextFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+pub type ExecuteCommandFn =
+    std::sync::Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
+
+/// IDE-host-side delegate that combines an `EditorSnapshot` (read path) with
+/// callback functions (write path). Construct in the UI layer with closures
+/// that capture the necessary reactive signals/handles; once handed to
+/// `IdeDelegateHost::new` the plugin host can drive it from any thread.
+pub struct SnapshotDelegate {
+    snapshot: std::sync::Arc<EditorSnapshot>,
+    insert: InsertTextFn,
+    execute: ExecuteCommandFn,
+}
+
+impl SnapshotDelegate {
+    pub fn new(
+        snapshot: std::sync::Arc<EditorSnapshot>,
+        insert: InsertTextFn,
+        execute: ExecuteCommandFn,
+    ) -> Self {
+        Self {
+            snapshot,
+            insert,
+            execute,
+        }
+    }
+
+    /// Convenience: build a delegate that logs all writes via tracing and
+    /// returns success. Useful in tests and CLI contexts where there is no
+    /// editor to mutate.
+    pub fn logging(snapshot: std::sync::Arc<EditorSnapshot>) -> Self {
+        Self {
+            snapshot,
+            insert: std::sync::Arc::new(|text| {
+                info!(target: "phazeai_core::ext_host", insert = %text, "plugin requested insert_text (no editor wired)");
+            }),
+            execute: std::sync::Arc::new(|cmd, args| {
+                info!(target: "phazeai_core::ext_host", cmd = %cmd, args = %args, "plugin requested execute_command (no dispatcher wired)");
+                Err("ide command dispatch not wired by this host".to_string())
+            }),
+        }
+    }
+}
+
+impl IdeDelegate for SnapshotDelegate {
+    fn log(&self, msg: &str) {
+        info!(target: "phazeai_core::ext_host::plugin", "{msg}");
+    }
+    fn show_message(&self, msg: &str) {
+        info!(target: "phazeai_core::ext_host::plugin", "[message] {msg}");
+    }
+    fn get_active_text(&self) -> String {
+        self.snapshot.active_text()
+    }
+    fn get_active_file_path(&self) -> String {
+        self.snapshot.active_file_path()
+    }
+    fn insert_text(&self, text: &str) {
+        (self.insert)(text);
+    }
+    fn execute_command(&self, cmd: &str, args: &str) -> Result<String, String> {
+        (self.execute)(cmd, args)
     }
 }
 
@@ -85,13 +224,15 @@ impl PluginHost for IdeDelegateHost {
     }
 
     fn get_active_file_path(&self) -> String {
-        String::new()
+        self.delegate.get_active_file_path()
     }
 
-    fn insert_text(&self, _text: &str) {}
+    fn insert_text(&self, text: &str) {
+        self.delegate.insert_text(text);
+    }
 
-    fn execute_command(&self, _cmd: &str, _args: &str) -> Result<String, String> {
-        Err("Not implemented in DummyDelegate bridge".to_string())
+    fn execute_command(&self, cmd: &str, args: &str) -> Result<String, String> {
+        self.delegate.execute_command(cmd, args)
     }
 }
 
