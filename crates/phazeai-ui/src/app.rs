@@ -452,6 +452,12 @@ impl IdeState {
             })
             .unwrap_or(cwd);
 
+        // Sandbox every filesystem-touching tool to the resolved workspace root.
+        // After this call, agent tools (bash, edit_file, write_file, download,
+        // move_path, copy_path, create_directory, delete_path) refuse paths
+        // outside the workspace, including `..` and symlink escapes.
+        phazeai_core::tools::sandbox::set_workspace_root(Some(workspace.clone()));
+
         let git_branch = create_rw_signal("main".to_string());
 
         // Spawn a background thread to read the real git branch and push it to

@@ -1,5 +1,6 @@
 mod approval;
 mod bash;
+pub mod sandbox;
 mod browse;
 pub mod copy_path;
 mod create_directory;

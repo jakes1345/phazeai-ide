@@ -1,7 +1,7 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::path::Path;
 
 pub struct ReadFileTool;
 
@@ -42,7 +42,8 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("read_file", "Missing required parameter: path"))?;
 
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+        let resolved = sandbox::resolve_within_workspace("read_file", path)?;
+        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             PhazeError::tool("read_file", format!("Failed to read '{}': {}", path, e))
         })?;
 
@@ -117,7 +118,8 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("write_file", "Missing required parameter: content"))?;
 
-        if let Some(parent) = Path::new(path).parent() {
+        let resolved = sandbox::resolve_target_path("write_file", path)?;
+        if let Some(parent) = resolved.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     PhazeError::tool(
@@ -128,7 +130,7 @@ impl Tool for WriteFileTool {
             }
         }
 
-        tokio::fs::write(path, content).await.map_err(|e| {
+        tokio::fs::write(&resolved, content).await.map_err(|e| {
             PhazeError::tool("write_file", format!("Failed to write '{}': {}", path, e))
         })?;
 

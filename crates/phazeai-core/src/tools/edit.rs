@@ -1,4 +1,5 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
 
@@ -68,7 +69,8 @@ impl Tool for EditTool {
 
         let context = params.get("context").and_then(|v| v.as_str());
 
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+        let resolved = sandbox::resolve_within_workspace("edit_file", path)?;
+        let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             PhazeError::tool("edit_file", format!("Failed to read '{}': {}", path, e))
         })?;
 
@@ -117,7 +119,7 @@ impl Tool for EditTool {
             ));
         };
 
-        tokio::fs::write(path, &new_content).await.map_err(|e| {
+        tokio::fs::write(&resolved, &new_content).await.map_err(|e| {
             PhazeError::tool("edit_file", format!("Failed to write '{}': {}", path, e))
         })?;
 

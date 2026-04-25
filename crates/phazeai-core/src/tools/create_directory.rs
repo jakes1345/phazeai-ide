@@ -1,7 +1,7 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::path::Path;
 
 pub struct CreateDirectoryTool;
 
@@ -33,7 +33,8 @@ impl Tool for CreateDirectoryTool {
             PhazeError::tool("create_directory", "Missing required parameter: path")
         })?;
 
-        let path = Path::new(path_str);
+        let resolved = sandbox::resolve_target_path("create_directory", path_str)?;
+        let path = resolved.as_path();
         let already_existed = path.exists();
 
         tokio::fs::create_dir_all(path).await.map_err(|e| {

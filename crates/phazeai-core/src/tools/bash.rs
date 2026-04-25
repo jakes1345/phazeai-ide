@@ -1,4 +1,5 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -65,6 +66,25 @@ impl Tool for BashTool {
             .unwrap_or(120);
 
         let cwd = self.cwd.lock().await.clone();
+        // If a workspace root is configured, refuse to run commands whose cwd
+        // already lies outside it. Defends against the agent doing `cd /etc &&
+        // rm -rf foo` over multiple turns. Per-command shell escapes are not
+        // detectable here — rely on the approval gate for that.
+        if let Some(root) = sandbox::workspace_root() {
+            let canonical_cwd = cwd
+                .canonicalize()
+                .unwrap_or_else(|_| cwd.clone());
+            if !canonical_cwd.starts_with(&root) && !sandbox::is_protected_system_path(&canonical_cwd) {
+                return Err(PhazeError::tool(
+                    "bash",
+                    format!(
+                        "REFUSED: shell cwd '{}' is outside the workspace root '{}'",
+                        canonical_cwd.display(),
+                        root.display()
+                    ),
+                ));
+            }
+        }
 
         // Capture pwd after command so we can track cwd changes (only on success)
         let wrapped_command = format!("{command} && echo \"PWD:$(pwd)\"");

@@ -55,6 +55,28 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Sandbox tool filesystem access to the project root (git toplevel, falling
+    // back to current dir). Tools refuse paths outside this root, including `..`
+    // escapes and symlink escapes.
+    if let Ok(cwd) = std::env::current_dir() {
+        let workspace = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8(o.stdout)
+                        .ok()
+                        .map(|s| std::path::PathBuf::from(s.trim()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(cwd);
+        phazeai_core::tools::sandbox::set_workspace_root(Some(workspace));
+    }
+
     let mut settings = phazeai_core::Settings::load();
 
     if let Some(ref model) = cli.model {

@@ -1,7 +1,7 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::path::Path;
 
 pub struct MovePathTool;
 
@@ -45,8 +45,10 @@ impl Tool for MovePathTool {
                 PhazeError::tool("move_path", "Missing required parameter: destination")
             })?;
 
-        let source_path = Path::new(source);
-        let dest_path = Path::new(destination);
+        let source_buf = sandbox::resolve_within_workspace("move_path", source)?;
+        let dest_buf = sandbox::resolve_target_path("move_path", destination)?;
+        let source_path = source_buf.as_path();
+        let dest_path = dest_buf.as_path();
 
         if !source_path.exists() {
             return Err(PhazeError::tool(

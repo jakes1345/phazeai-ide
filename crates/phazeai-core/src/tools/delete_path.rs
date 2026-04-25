@@ -1,13 +1,7 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::path::Path;
-
-/// Critical paths that must never be deleted
-const PROTECTED_PATHS: &[&str] = &[
-    "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var", "/tmp", "/boot", "/dev", "/proc",
-    "/sys", "/lib", "/lib64", "/opt",
-];
 
 pub struct DeletePathTool;
 
@@ -40,38 +34,17 @@ impl Tool for DeletePathTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("delete_path", "Missing required parameter: path"))?;
 
-        let path = Path::new(path_str);
+        // sandbox::resolve_within_workspace handles: empty input, system-protected
+        // paths (extended list incl. /srv /mnt /media /root), home directory,
+        // workspace boundary, and ../ symlink escapes.
+        let resolved = sandbox::resolve_within_workspace("delete_path", path_str)?;
+        let path = resolved.as_path();
 
         if !path.exists() {
             return Err(PhazeError::tool(
                 "delete_path",
                 format!("Path does not exist: {path_str}"),
             ));
-        }
-
-        // Safety: refuse to delete critical paths
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| PhazeError::tool("delete_path", format!("Cannot resolve path: {e}")))?;
-        let canonical_str = canonical.to_string_lossy();
-
-        for protected in PROTECTED_PATHS {
-            if canonical_str.as_ref() == *protected {
-                return Err(PhazeError::tool(
-                    "delete_path",
-                    format!("REFUSED: Cannot delete protected path: {protected}"),
-                ));
-            }
-        }
-
-        // Also protect home directory itself
-        if let Some(home) = dirs::home_dir() {
-            if canonical == home {
-                return Err(PhazeError::tool(
-                    "delete_path",
-                    "REFUSED: Cannot delete home directory",
-                ));
-            }
         }
 
         if path.is_file() || path.is_symlink() {

@@ -3,6 +3,7 @@
 /// Supports downloading binaries, images, documents, archives, etc.
 /// with progress tracking and size limits.
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
 
@@ -59,7 +60,8 @@ impl Tool for DownloadTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let path = std::path::Path::new(output_path);
+        let resolved = sandbox::resolve_target_path("download", output_path)?;
+        let path = resolved.as_path();
 
         if path.exists() && !overwrite {
             return Err(PhazeError::tool(
