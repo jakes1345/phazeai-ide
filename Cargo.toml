@@ -9,7 +9,6 @@ members = [
     "crates/ollama-rs",
     "crates/phazeai-plugin-api",
     "crates/phazeai-plugin-canary",
-    "ext-host/wasm-extension",
 ]
 
 [workspace.package]
