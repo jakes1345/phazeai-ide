@@ -25,9 +25,41 @@ impl AppKind {
     }
 }
 
+/// Returns true if telemetry is enabled. Telemetry is OFF by default.
+/// Enable by setting `PHAZEAI_TELEMETRY=1` (any of: 1, true, yes, on — case-insensitive),
+/// or by writing `telemetry = true` to `~/.config/phazeai/telemetry.toml`.
+/// Explicit `PHAZEAI_TELEMETRY=0` always wins, even if the config file enables it.
+pub fn is_enabled() -> bool {
+    if let Ok(v) = std::env::var("PHAZEAI_TELEMETRY") {
+        let v = v.trim().to_ascii_lowercase();
+        return matches!(v.as_str(), "1" | "true" | "yes" | "on");
+    }
+    let path = match dirs::config_dir() {
+        Some(p) => p.join("phazeai").join("telemetry.toml"),
+        None => return false,
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    contents
+        .lines()
+        .map(|l| l.trim())
+        .find_map(|l| l.strip_prefix("telemetry"))
+        .and_then(|rhs| rhs.split('=').nth(1))
+        .map(|v| {
+            let v = v.trim().trim_matches('"').to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 /// Send an anonymous telemetry ping. Fire-and-forget — errors are silently ignored.
-/// Call this once on app startup. It spawns a background task and returns immediately.
+/// No-op unless telemetry has been explicitly opted-in via env var or config file
+/// (see [`is_enabled`]). Call this once on app startup; returns immediately.
 pub fn report_launch(app: AppKind) {
+    if !is_enabled() {
+        return;
+    }
     // Spawn a detached thread so this works whether or not a tokio runtime exists.
     std::thread::spawn(move || {
         let _ = send_ping(app);

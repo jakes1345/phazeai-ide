@@ -55,6 +55,45 @@ pub fn init_logging() {
         .init();
 }
 
+/// Install a process-wide panic hook that logs the panic (with location and
+/// backtrace) via `tracing::error!` to the rolling log file and stderr, then
+/// chains to the default hook so the process still aborts with a useful
+/// stderr trace. Without this, a panic on the Floem UI thread causes the
+/// window to vanish silently with no log entry — the primary cause of the
+/// "closes immediately" symptom.
+///
+/// Idempotent: only installs once per process.
+pub fn install_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info
+                .payload()
+                .downcast_ref::<&'static str>()
+                .copied()
+                .map(str::to_string)
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!(
+                target: "phazeai_ui::panic",
+                location = %location,
+                payload = %payload,
+                backtrace = %backtrace,
+                "panic on thread '{}'",
+                std::thread::current().name().unwrap_or("<unnamed>")
+            );
+            default_hook(info);
+        }));
+    });
+}
+
 /// Log an error with context - use this instead of .ok() or .unwrap()
 #[macro_export]
 macro_rules! log_err {

@@ -29,7 +29,7 @@ ollama-rs = { workspace = true }
 comrak = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
-tree-sitter-python = "0.23"
+tree-sitter-python = "0.25"
 lsp-types = { workspace = true }
 urlencoding = "2.1"
 libloading = "0.8"

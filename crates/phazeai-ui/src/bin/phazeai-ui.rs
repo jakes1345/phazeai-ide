@@ -14,6 +14,7 @@ fn main() {
         }
     }
     phazeai_ui::init_logging();
+    phazeai_ui::install_panic_hook();
     tracing::info!(target: "phazeai_ui", "PhazeAI IDE starting");
     phazeai_ui::launch_phaze_ide();
 }
