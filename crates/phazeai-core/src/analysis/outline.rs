@@ -324,22 +324,23 @@ pub fn generate_repo_map(root: &Path) -> String {
         .git_ignore(true)
         .build();
 
-    for result in walker {
-        if let Ok(entry) = result {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                let path = entry.path();
-                let symbols = if let Ok(content) = std::fs::read_to_string(path) {
-                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    extract_symbols_generic(&content, ext)
-                } else {
-                    continue;
-                };
+    for entry in walker.flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let path = entry.path();
+            let symbols = if let Ok(content) = std::fs::read_to_string(path) {
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                extract_symbols_generic(&content, ext)
+            } else {
+                continue;
+            };
 
-                if !symbols.is_empty() {
-                    out.push_str(&format!("{}:\n", path.strip_prefix(root).unwrap_or(path).display()));
-                    out.push_str(&symbols_to_repo_map(path, &symbols));
-                    out.push_str("\n");
-                }
+            if !symbols.is_empty() {
+                out.push_str(&format!(
+                    "{}:\n",
+                    path.strip_prefix(root).unwrap_or(path).display()
+                ));
+                out.push_str(&symbols_to_repo_map(path, &symbols));
+                out.push('\n');
             }
         }
     }
