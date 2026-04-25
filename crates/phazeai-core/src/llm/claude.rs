@@ -165,15 +165,16 @@ impl LlmClient for ClaudeClient {
         let url = format!("{}/v1/messages", self.base_url);
         let request_body = self.build_request_body(messages, tools, false);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        let response = crate::llm::retry::send_with_retry("claude", || {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         let response_text = response.text().await?;
@@ -232,15 +233,18 @@ impl LlmClient for ClaudeClient {
         let url = format!("{}/v1/messages", self.base_url);
         let request_body = self.build_request_body(messages, tools, true);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        // Retry only the request submission; once the SSE stream starts we
+        // can't safely re-issue without duplicating tokens.
+        let response = crate::llm::retry::send_with_retry("claude", || {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send()
+        })
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();

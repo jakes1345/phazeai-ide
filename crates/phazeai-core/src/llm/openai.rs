@@ -154,13 +154,14 @@ impl LlmClient for OpenAIClient {
             stream: None,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
-            .send()
-            .await?;
+        let response = crate::llm::retry::send_with_retry("openai", || {
+            self.client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&request_body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         let response_text = response.text().await?;
@@ -266,13 +267,16 @@ impl LlmClient for OpenAIClient {
             stream: Some(true),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
-            .send()
-            .await?;
+        // Retry only the request submission; once the SSE stream begins we
+        // can't safely re-issue without duplicating tokens to the consumer.
+        let response = crate::llm::retry::send_with_retry("openai", || {
+            self.client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&request_body)
+                .send()
+        })
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();

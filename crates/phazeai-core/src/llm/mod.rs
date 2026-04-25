@@ -5,6 +5,7 @@ mod ollama;
 pub mod ollama_manager;
 mod openai;
 pub mod provider;
+pub mod retry;
 mod traits;
 
 pub use claude::ClaudeClient;

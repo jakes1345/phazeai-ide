@@ -362,8 +362,14 @@ impl Agent {
 
                     let (success, result_str) = self.execute_tool(tool_call).await;
 
+                    // Tool result summary sent to the UI/CLI event stream. The
+                    // full untruncated result is still appended to the
+                    // conversation history below so the LLM sees everything.
+                    // Cap at 4 KiB and tell the user how much was elided —
+                    // 200 chars (the previous limit) silently hid most output.
+                    const SUMMARY_LIMIT: usize = 4096;
                     let summary = if success {
-                        truncate_str(&result_str, 200)
+                        truncate_str_annotated(&result_str, SUMMARY_LIMIT)
                     } else {
                         result_str.clone()
                     };
@@ -465,11 +471,17 @@ impl Agent {
     }
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len).collect();
-        format!("{truncated}...")
+/// Append an explicit "[truncated N chars]" marker
+/// when truncation occurs, so the UI tells the user (and downstream LLM if the
+/// summary ever gets routed back to a model) exactly how much output was
+/// hidden. The full result is still written to the conversation history;
+/// this is purely a UI summary transformer.
+fn truncate_str_annotated(s: &str, max_len: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_len {
+        return s.to_string();
     }
+    let kept: String = s.chars().take(max_len).collect();
+    let elided = total - max_len;
+    format!("{kept}\n... [truncated, {elided} more chars in tool output sent to model]")
 }
