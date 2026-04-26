@@ -11,8 +11,13 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+
+const MAX_RESTARTS_PER_WINDOW: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
 
 /// An MCP tool definition received from a server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +112,7 @@ pub struct McpClient {
     tools: Vec<McpToolDef>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
+    alive: Arc<AtomicBool>,
 }
 
 impl McpClient {
@@ -141,8 +147,13 @@ impl McpClient {
 
         // Spawn reader thread
         let pending_clone = pending.clone();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_clone = alive.clone();
+        let name_clone = config.name.clone();
         std::thread::spawn(move || {
             Self::read_loop(stdout, pending_clone);
+            alive_clone.store(false, Ordering::SeqCst);
+            tracing::warn!("MCP server '{name_clone}' reader loop exited (EOF)");
         });
 
         let mut client = Self {
@@ -155,6 +166,7 @@ impl McpClient {
             tools: Vec::new(),
             resources: Vec::new(),
             prompts: Vec::new(),
+            alive,
         };
 
         client.initialize()?;
@@ -304,6 +316,11 @@ impl McpClient {
     /// Server info (if available after initialization)
     pub fn server_info(&self) -> Option<&McpServerInfo> {
         self.server_info.as_ref()
+    }
+
+    /// True if the underlying server process and read loop are still running.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     // ── JSON-RPC Transport ────────────────────────────────────────────
@@ -472,12 +489,21 @@ impl Drop for McpClient {
 /// Loads server configs from `.phazeai/mcp.json` and connects to them.
 pub struct McpManager {
     clients: HashMap<String, McpClient>,
+    /// Configs kept by name so dead servers can be restarted with the same launch params.
+    configs: HashMap<String, McpServerConfig>,
+    /// Restart timestamps per server-name for rate-cap.
+    restart_history: HashMap<String, VecDeque<Instant>>,
+    /// Servers we've stopped retrying after exceeding the cap.
+    blocked: HashMap<String, Instant>,
 }
 
 impl McpManager {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            configs: HashMap::new(),
+            restart_history: HashMap::new(),
+            blocked: HashMap::new(),
         }
     }
 
@@ -514,6 +540,7 @@ impl McpManager {
     /// Connect to all configured MCP servers
     pub fn connect_all(&mut self, configs: &[McpServerConfig]) {
         for config in configs {
+            self.configs.insert(config.name.clone(), config.clone());
             match McpClient::connect(config) {
                 Ok(client) => {
                     tracing::info!(
@@ -528,6 +555,68 @@ impl McpManager {
                 }
             }
         }
+    }
+
+    /// Detect dead MCP clients and respawn them (rate-limited).
+    /// Capabilities (tools/resources/prompts) are re-discovered automatically by
+    /// `McpClient::connect` → `initialize`.
+    pub fn health_check(&mut self) {
+        let dead: Vec<String> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| !c.is_alive())
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in dead {
+            tracing::warn!("MCP server '{name}' died; attempting restart");
+            self.clients.remove(&name);
+
+            if !self.allow_restart(&name) {
+                tracing::error!(
+                    "MCP server '{name}' exceeded {} restarts in {}s; giving up",
+                    MAX_RESTARTS_PER_WINDOW,
+                    RESTART_WINDOW.as_secs()
+                );
+                self.blocked.insert(name.clone(), Instant::now());
+                continue;
+            }
+
+            let Some(config) = self.configs.get(&name).cloned() else {
+                tracing::error!("No stored config for MCP server '{name}'; cannot restart");
+                continue;
+            };
+
+            match McpClient::connect(&config) {
+                Ok(client) => {
+                    tracing::info!(
+                        "Reconnected MCP server '{name}': {} tools",
+                        client.tools().len()
+                    );
+                    self.clients.insert(name, client);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to restart MCP server '{name}': {e}");
+                }
+            }
+        }
+    }
+
+    fn allow_restart(&mut self, name: &str) -> bool {
+        let now = Instant::now();
+        let history = self.restart_history.entry(name.to_string()).or_default();
+        while let Some(&front) = history.front() {
+            if now.duration_since(front) > RESTART_WINDOW {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        if history.len() >= MAX_RESTARTS_PER_WINDOW {
+            return false;
+        }
+        history.push_back(now);
+        true
     }
 
     /// Get all tools from all connected MCP servers (prefixed with server name)

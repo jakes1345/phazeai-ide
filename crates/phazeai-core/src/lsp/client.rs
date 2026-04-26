@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -63,6 +63,7 @@ pub struct LspClient {
     child: Option<Child>,
     event_tx: mpsc::UnboundedSender<LspEvent>,
     capabilities: Arc<Mutex<Option<ServerCapabilities>>>,
+    alive: Arc<AtomicBool>,
 }
 
 impl LspClient {
@@ -90,6 +91,7 @@ impl LspClient {
             Arc::new(Mutex::new(HashMap::new()));
 
         let server_name = server_cmd.to_string();
+        let alive = Arc::new(AtomicBool::new(true));
 
         let client = Self {
             id_counter: AtomicU64::new(1),
@@ -99,13 +101,18 @@ impl LspClient {
             child: Some(child),
             event_tx: event_tx.clone(),
             capabilities: Arc::new(Mutex::new(None)),
+            alive: alive.clone(),
         };
 
         // Spawn reader thread to process LSP messages from stdout
         let event_tx_clone = event_tx.clone();
         let pending_clone = pending.clone();
+        let alive_clone = alive.clone();
+        let server_name_clone = server_name.clone();
         thread::spawn(move || {
             Self::reader_loop(stdout, event_tx_clone, pending_clone);
+            alive_clone.store(false, Ordering::SeqCst);
+            tracing::warn!("LSP server '{}' reader loop exited (process likely died)", server_name_clone);
         });
 
         Ok(client)
@@ -548,6 +555,11 @@ impl LspClient {
         self.event_tx
             .send(LspEvent::Formatting(edits))
             .map_err(|e| e.to_string())
+    }
+
+    /// Returns true if the language server process is still running.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     /// Shutdown the language server

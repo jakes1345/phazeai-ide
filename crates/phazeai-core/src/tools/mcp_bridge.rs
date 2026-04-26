@@ -68,9 +68,12 @@ impl Tool for McpToolBridge {
 
         // MCP calls use blocking_recv internally, so run on a blocking thread
         let result = tokio::task::spawn_blocking(move || {
-            let mgr = manager
+            let mut mgr = manager
                 .lock()
                 .map_err(|e| PhazeError::tool("mcp", format!("Manager lock poisoned: {e}")))?;
+
+            // Restart any servers whose stdio EOF'd since the last call.
+            mgr.health_check();
 
             mgr.call_tool(&server_name, &tool_name, params)
                 .map_err(|e| PhazeError::tool("mcp", e))

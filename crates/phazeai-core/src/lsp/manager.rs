@@ -1,12 +1,16 @@
 /// LSP Manager — auto-detects and spawns the right language server
 /// for a given project type. Inspired by Lapce's plugin catalog.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use super::client::{LspClient, LspEvent};
 use crate::project::workspace::ProjectType;
+
+const MAX_RESTARTS_PER_WINDOW: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
 
 /// Known language server configurations
 #[derive(Debug, Clone)]
@@ -16,11 +20,26 @@ pub struct LspServerConfig {
     pub language_ids: Vec<String>,
 }
 
+/// Cached open document — kept by the manager so a restarted server can be
+/// brought back to the same `did_open` state.
+#[derive(Clone)]
+struct OpenDoc {
+    language_id: String,
+    text: String,
+    version: i32,
+}
+
 /// Manages multiple LSP clients for different languages in a workspace.
 pub struct LspManager {
     clients: HashMap<String, std::sync::Arc<LspClient>>,
     workspace_root: PathBuf,
     event_tx: mpsc::UnboundedSender<LspEvent>,
+    /// Last-known text+version per open path so we can replay did_open after restart.
+    open_docs: HashMap<PathBuf, OpenDoc>,
+    /// Restart timestamps per language for rate-cap.
+    restart_history: HashMap<String, VecDeque<Instant>>,
+    /// Languages we've given up on after exceeding the restart cap.
+    blocked: HashMap<String, Instant>,
 }
 
 impl LspManager {
@@ -29,6 +48,9 @@ impl LspManager {
             clients: HashMap::new(),
             workspace_root,
             event_tx,
+            open_docs: HashMap::new(),
+            restart_history: HashMap::new(),
+            blocked: HashMap::new(),
         }
     }
 
@@ -133,8 +155,16 @@ impl LspManager {
     }
 
     /// Notify all relevant servers that a file was opened
-    pub fn did_open(&self, path: &Path, text: &str) {
+    pub fn did_open(&mut self, path: &Path, text: &str) {
         let language_id = Self::language_id_from_path(path);
+        self.open_docs.insert(
+            path.to_path_buf(),
+            OpenDoc {
+                language_id: language_id.clone(),
+                text: text.to_string(),
+                version: 0,
+            },
+        );
         if let Some(client) = self.clients.get(&language_id) {
             if let Err(e) = client.did_open(path, &language_id, text) {
                 tracing::warn!("LSP didOpen failed: {}", e);
@@ -143,8 +173,12 @@ impl LspManager {
     }
 
     /// Notify all relevant servers that a file changed
-    pub fn did_change(&self, path: &Path, version: i32, text: &str) {
+    pub fn did_change(&mut self, path: &Path, version: i32, text: &str) {
         let language_id = Self::language_id_from_path(path);
+        if let Some(doc) = self.open_docs.get_mut(path) {
+            doc.text = text.to_string();
+            doc.version = version;
+        }
         if let Some(client) = self.clients.get(&language_id) {
             if let Err(e) = client.did_change(path, version, text) {
                 tracing::warn!("LSP didChange failed: {}", e);
@@ -160,6 +194,96 @@ impl LspManager {
                 tracing::warn!("LSP didSave failed: {}", e);
             }
         }
+    }
+
+    /// Inspect every connected client; for any whose process has died, drop it
+    /// and respawn (rate-limited), then re-send `did_open` for that language's
+    /// tracked documents. Intended to be called periodically by the UI.
+    pub async fn health_check(&mut self) {
+        let dead: Vec<String> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| !client.is_alive())
+            .map(|(lang, _)| lang.clone())
+            .collect();
+
+        for lang in dead {
+            tracing::warn!("LSP server for '{lang}' died; attempting restart", lang = lang);
+            self.clients.remove(&lang);
+
+            if !self.allow_restart(&lang) {
+                tracing::error!(
+                    "LSP server for '{lang}' exceeded {} restarts in {}s; giving up",
+                    MAX_RESTARTS_PER_WINDOW,
+                    RESTART_WINDOW.as_secs()
+                );
+                self.blocked.insert(lang.clone(), Instant::now());
+                continue;
+            }
+
+            if let Err(e) = self.spawn_for_language(&lang).await {
+                tracing::error!("Failed to restart LSP for '{lang}': {e}");
+                continue;
+            }
+
+            // Replay open docs for this language so the new server has state.
+            let docs: Vec<(PathBuf, OpenDoc)> = self
+                .open_docs
+                .iter()
+                .filter(|(_, d)| d.language_id == lang)
+                .map(|(p, d)| (p.clone(), d.clone()))
+                .collect();
+            if let Some(client) = self.clients.get(&lang) {
+                for (path, doc) in docs {
+                    if let Err(e) = client.did_open(&path, &doc.language_id, &doc.text) {
+                        tracing::warn!("Replay didOpen failed for {}: {e}", path.display());
+                    }
+                    if doc.version > 0 {
+                        if let Err(e) = client.did_change(&path, doc.version, &doc.text) {
+                            tracing::warn!("Replay didChange failed for {}: {e}", path.display());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn allow_restart(&mut self, language_id: &str) -> bool {
+        let now = Instant::now();
+        let history = self.restart_history.entry(language_id.to_string()).or_default();
+        while let Some(&front) = history.front() {
+            if now.duration_since(front) > RESTART_WINDOW {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        if history.len() >= MAX_RESTARTS_PER_WINDOW {
+            return false;
+        }
+        history.push_back(now);
+        true
+    }
+
+    async fn spawn_for_language(&mut self, language_id: &str) -> Result<(), String> {
+        let configs = Self::detect_available_servers();
+        let config = configs
+            .iter()
+            .find(|c| c.language_ids.iter().any(|l| l == language_id))
+            .ok_or_else(|| format!("No LSP server available for language: {language_id}"))?;
+
+        tracing::info!("Restarting LSP server '{}' for '{language_id}'", config.command);
+
+        let client = LspClient::start(
+            &config.command,
+            &config.args,
+            &self.workspace_root,
+            self.event_tx.clone(),
+        )?;
+        client.initialize(&self.workspace_root).await?;
+        self.clients
+            .insert(language_id.to_string(), std::sync::Arc::new(client));
+        Ok(())
     }
 
     /// Shutdown all language servers

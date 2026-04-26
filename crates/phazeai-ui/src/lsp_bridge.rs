@@ -251,6 +251,10 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
             let mut pending_change: Option<(PathBuf, String, i32)> = None;
             let mut change_deadline = far_future;
 
+            // Watchdog: poll for dead language servers every 5s.
+            let mut watchdog = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
             loop {
                 tokio::select! {
                     // ── Incoming command from the UI ─────────────────────────
@@ -714,6 +718,11 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 });
                             }
                             Some(LspCommand::Shutdown) | None => break}
+                    }
+
+                    // ── Watchdog: restart any dead language servers ──────────
+                    _ = watchdog.tick() => {
+                        manager.health_check().await;
                     }
 
                     // ── Debounce flush: forward buffered ChangeFile ──────────
