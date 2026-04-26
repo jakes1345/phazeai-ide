@@ -32,13 +32,14 @@ pub struct GlobalCommandState {
 
 // ── Command Registry ──────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct CommandRegistry {
     commands: Vec<Command>,
 }
 
 impl CommandRegistry {
     pub fn new() -> Self {
-        Self { commands: Vec::new() }
+        Self::default()
     }
 
     pub fn register(&mut self, cmd: Command) {

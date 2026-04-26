@@ -590,7 +590,6 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
     };
 
     let save_fn = {
-        let active_entry = active_entry;
         move || {
             let Some((entry, _)) = active_entry() else {
                 feedback.set("Unknown provider.".into());
@@ -611,7 +610,6 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
     };
 
     let clear_fn = {
-        let active_entry = active_entry;
         move || {
             let Some((entry, _)) = active_entry() else {
                 feedback.set("Unknown provider.".into());
