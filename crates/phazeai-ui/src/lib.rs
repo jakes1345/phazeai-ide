@@ -4,6 +4,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 pub mod app;
 pub mod commands;
+pub mod editor_command;
 pub mod components;
 pub mod lsp_bridge;
 pub mod panels;

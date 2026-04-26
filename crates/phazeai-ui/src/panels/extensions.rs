@@ -53,19 +53,47 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
             let manager = state.workbench.ext_manager.clone();
             let tx = tx.clone();
             let snapshot = state.workbench.editor_snapshot.clone();
+            let editor_cmd_tx = state.workbench.editor_cmd_tx.clone();
             std::thread::spawn(move || {
                 let mut all_names: Vec<String> = Vec::new();
 
                 // 1. Scan native Rust plugins
                 if let Ok(mut mgr) = manager.lock() {
-                    // Real delegate backed by the workbench editor snapshot.
-                    // Plugins calling `get_active_file_path` see the current
-                    // open file rather than the empty string DummyDelegate
-                    // returned. `insert_text` and `execute_command` are still
-                    // logged-only — wiring them into the editor reactively is
-                    // its own session — but file metadata reads are live.
-                    let delegate =
-                        phazeai_core::ext_host::SnapshotDelegate::logging(snapshot);
+                    // Real delegate backed by the workbench editor snapshot
+                    // and the cross-thread editor-command channel. Plugins
+                    // calling `insert_text` push an `EditorCommand` that the
+                    // UI thread drains; `execute_command` blocks on a oneshot
+                    // reply channel.
+                    let insert_tx = editor_cmd_tx.clone();
+                    let exec_tx = editor_cmd_tx.clone();
+                    let delegate = phazeai_core::ext_host::SnapshotDelegate::new(
+                        snapshot,
+                        std::sync::Arc::new(move |text: &str| {
+                            let _ = insert_tx.try_send(
+                                crate::editor_command::EditorCommand::InsertText(
+                                    text.to_string(),
+                                ),
+                            );
+                        }),
+                        std::sync::Arc::new(move |cmd: &str, args: &str| {
+                            let (reply_tx, reply_rx) =
+                                std::sync::mpsc::sync_channel::<Result<String, String>>(1);
+                            if let Err(e) = exec_tx.send(
+                                crate::editor_command::EditorCommand::ExecuteCommand {
+                                    cmd: cmd.to_string(),
+                                    args: args.to_string(),
+                                    reply: reply_tx,
+                                },
+                            ) {
+                                return Err(format!("editor command channel closed: {e}"));
+                            }
+                            reply_rx
+                                .recv_timeout(std::time::Duration::from_secs(5))
+                                .unwrap_or_else(|e| {
+                                    Err(format!("editor command timed out: {e}"))
+                                })
+                        }),
+                    );
                     let host = phazeai_core::ext_host::IdeDelegateHost::new(
                         std::sync::Arc::new(delegate),
                     );

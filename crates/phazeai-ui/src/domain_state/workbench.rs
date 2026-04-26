@@ -40,4 +40,8 @@ pub struct WorkbenchState {
     /// open_file/active_text signals via create_effect; the plugin host reads
     /// from this snapshot off the UI thread.
     pub editor_snapshot: std::sync::Arc<phazeai_core::ext_host::EditorSnapshot>,
+    /// Sender for plugin-originated editor mutations. The receiver is drained
+    /// on the UI thread via `create_signal_from_channel` so all signal writes
+    /// stay on-thread.
+    pub editor_cmd_tx: std::sync::mpsc::SyncSender<crate::editor_command::EditorCommand>,
 }
