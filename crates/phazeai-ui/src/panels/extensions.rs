@@ -1,12 +1,13 @@
-use crate::domain_state::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::components::input::phaze_input;
+use crate::domain_state::IdeState;
 use crate::util::safe_get;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
-    IntoView};
+    IntoView,
+};
 use rfd::FileDialog;
 
 /// Combined extension manager panel.

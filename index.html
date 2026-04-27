@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="PhazeAI IDE — An open-source, AI-native code editor built entirely in Rust with egui. Local-first. No cloud. No subscriptions." />
+  <meta name="description" content="PhazeAI IDE — An open-source, AI-native code editor built entirely in Rust with Floem. Local-first. No cloud. No subscriptions." />
   <title>PhazeAI IDE — The AI IDE That Runs on Your Machine</title>
   <style>
     /* =========================================================
@@ -1178,7 +1178,7 @@
         </h1>
 
         <p class="hero-sub">
-          Full egui desktop editor. Local-first. Open source.
+          Full Floem desktop editor. Local-first. Open source.
           No cloud. No subscriptions. No data leaving your box.
         </p>
 
@@ -1355,7 +1355,7 @@
       <div class="section-head fade-in">
         <span class="section-label">Features</span>
         <h2 class="section-title">Everything you expect.<br>Nothing you don't need.</h2>
-        <p class="section-sub">Built from scratch in Rust. No Electron, no web views — just native egui rendering at 60fps.</p>
+        <p class="section-sub">Built from scratch in Rust. No Electron, no web views — just native Floem rendering at 60fps.</p>
       </div>
 
       <div class="features-grid fade-in">
@@ -1496,11 +1496,11 @@
                 <span class="code-block-lang">bash</span>
                 <button class="copy-btn" data-copy="# Download latest release
 curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
+./phazeai-ui">Copy</button>
               </div>
               <code><span class="c"># Download latest release</span>
 curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
-./phazeai-ide</code>
+./phazeai-ui</code>
             </div>
 
             <div class="install-divider">or install via AppImage</div>
@@ -1524,13 +1524,13 @@ chmod +x PhazeAI-IDE.AppImage
                 <span class="code-block-lang">bash</span>
                 <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-./target/release/phazeai-ide">Copy</button>
+cargo build --release -p phazeai-ui
+./target/release/phazeai-ui">Copy</button>
               </div>
               <code>git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-./target/release/phazeai-ide</code>
+cargo build --release -p phazeai-ui
+./target/release/phazeai-ui</code>
             </div>
           </div><!-- /#panel-linux -->
 
@@ -1540,10 +1540,10 @@ cargo build --release -p phazeai-ide
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
                 <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
+./phazeai-ui">Copy</button>
               </div>
               <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
-./phazeai-ide</code>
+./phazeai-ui</code>
             </div>
 
             <div class="install-divider">Intel Mac (x86_64)</div>
@@ -1552,10 +1552,10 @@ cargo build --release -p phazeai-ide
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
                 <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
+./phazeai-ui">Copy</button>
               </div>
               <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
-./phazeai-ide</code>
+./phazeai-ui</code>
             </div>
 
             <div class="install-divider">or build from source</div>
@@ -1565,13 +1565,13 @@ cargo build --release -p phazeai-ide
                 <span class="code-block-lang">bash</span>
                 <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-open target/release/phazeai-ide">Copy</button>
+cargo build --release -p phazeai-ui
+open target/release/phazeai-ui">Copy</button>
               </div>
               <code>git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-open target/release/phazeai-ide</code>
+cargo build --release -p phazeai-ui
+open target/release/phazeai-ui</code>
             </div>
           </div><!-- /#panel-macos -->
 
@@ -1586,7 +1586,7 @@ open target/release/phazeai-ide</code>
 https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-windows-x86_64.zip
 
 <span class="c"># Extract the archive, then run:</span>
-phazeai-ide.exe</code>
+phazeai-ui.exe</code>
             </div>
 
             <div class="install-divider">or install via MSI installer</div>
@@ -1594,9 +1594,9 @@ phazeai-ide.exe</code>
             <div class="code-block">
               <div class="code-block-header">
                 <span class="code-block-lang">text</span>
-                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi">Copy URL</button>
+                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ui-setup.msi">Copy URL</button>
               </div>
-              <code>https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi</code>
+              <code>https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ui-setup.msi</code>
             </div>
 
             <div class="install-divider">or build from source (PowerShell)</div>
@@ -1606,13 +1606,13 @@ phazeai-ide.exe</code>
                 <span class="code-block-lang">powershell</span>
                 <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-.\target\release\phazeai-ide.exe">Copy</button>
+cargo build --release -p phazeai-ui
+.\target\release\phazeai-ui.exe">Copy</button>
               </div>
               <code>git clone https://github.com/jakes1345/phazeai-ide
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-.\target\release\phazeai-ide.exe</code>
+cargo build --release -p phazeai-ui
+.\target\release\phazeai-ui.exe</code>
             </div>
           </div><!-- /#panel-windows -->
 
@@ -1671,7 +1671,7 @@ cargo build --release -p phazeai-ide
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
           GitHub
         </a>
-        <span class="footer-tech">Built with Rust + egui</span>
+        <span class="footer-tech">Built with Rust + Floem</span>
       </div>
     </div>
   </footer>

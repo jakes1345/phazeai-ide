@@ -1,6 +1,6 @@
 # Codebase Index
 
-Indexed on 2026-03-24 in `/home/jack/phazeai_ide`.
+Indexed on 2026-04-27 in `/app`.
 
 ## Executive Summary
 
@@ -11,6 +11,7 @@ This repository is an AI-first IDE project centered on a Rust workspace with:
 - A terminal UI in `crates/phazeai-cli`
 - Optional cloud and sidecar integrations in `crates/phazeai-cloud` and `crates/phazeai-sidecar`
 - A plugin API plus JavaScript/WASM extension-host experiments
+- A canary plugin in `crates/phazeai-plugin-canary` for testing the plugin ABI
 - Python sidecar and model-training utilities
 - Packaging and CI/release automation
 
@@ -23,7 +24,7 @@ Top-level file counts by major area:
 | Area | Approx. files |
 |---|---:|
 | `phazeai-arsenal/` | 9062 |
-| `crates/` | 214 |
+| `crates/` | 222 |
 | `python/` | 33 |
 | `ext-host/` | 11 |
 | `training/` | 8 |
@@ -60,7 +61,6 @@ Important practical boundary:
 | `assets/` | Branding and desktop launcher assets |
 | `.github/workflows/` | CI, feature, and release workflows |
 | `phazeai-arsenal/` | Large vendored/reference source tree |
-| `_archive/` | Archived older code and experiments |
 | `target/` | Rust build artifacts |
 
 ## Rust Workspace
@@ -74,6 +74,7 @@ Workspace members from the root `Cargo.toml`:
 - `crates/phazeai-cloud`
 - `crates/ollama-rs`
 - `crates/phazeai-plugin-api`
+- `crates/phazeai-plugin-canary`
 - `ext-host/wasm-extension`
 
 Shared traits/dependencies at the workspace level:
@@ -289,6 +290,10 @@ Core types:
 
 This crate defines the ABI/protocol expectations for dynamic plugin loading and command/event dispatch.
 
+### `crates/phazeai-plugin-canary`
+
+Purpose: end-to-end canary for the PhazePlugin ABI. Exercises the API to ensure stability.
+
 ### `crates/ollama-rs`
 
 Purpose: PhazeAI fork of `ollama-rs` with native tool-calling support.
@@ -302,10 +307,6 @@ Notable points:
 ### `ext-host/wasm-extension`
 
 Purpose: minimal WASM extension crate compiled as `cdylib`.
-
-Likely role:
-
-- Experimental or placeholder host/plugin target rather than a fully-developed subsystem.
 
 ## Non-Rust Runtime Subsystems
 
@@ -342,14 +343,6 @@ Capabilities described and implemented:
 - `search`
 - `analyze`
 
-Implementation notes from the code/docs:
-
-- Pure-stdlib Python
-- TF-IDF style search index
-- Regex-based symbol extraction
-- Reads/writes over stdio using JSON-RPC 2.0
-- Skips common large/build directories during indexing
-
 ### `python/`
 
 Purpose: additional Python support code outside the standalone sidecar folder.
@@ -362,11 +355,6 @@ Key files:
 | `python/embeddings.py` | Embedding-related helpers |
 | `python/sidecar_server.py` | Alternate/related sidecar server implementation |
 | `python/training/` | Expanded training, data collection, and research scripts |
-
-Notable scale:
-
-- `python/analyzer.py` is one of the larger first-party Python files
-- `python/training/advanced_collect.py`, `train_pipeline.py`, `advanced_fine_tune.py`, and `sota_fine_tune.py` are substantial script surfaces
 
 ### `training/`
 
@@ -381,51 +369,6 @@ Files:
 - `training/README.md`
 - `training/datasets/*.jsonl`
 
-Pipeline described in docs:
-
-1. Prepare data from local code + public datasets
-2. Fine-tune using QLoRA/Unsloth
-3. Export GGUF
-4. Register/test with Ollama
-
-This top-level `training/` directory is separate from the larger `python/training/` experimentation toolkit.
-
-## Packaging, Assets, And Model Files
-
-### `packaging/`
-
-| Path | Role |
-|---|---|
-| `packaging/flatpak/com.phazeai.IDE.json` | Flatpak manifest |
-| `packaging/flatpak/com.phazeai.IDE.desktop` | Desktop entry |
-| `packaging/flatpak/com.phazeai.IDE.metainfo.xml` | App metadata |
-| `packaging/macos/build-dmg.sh` | macOS DMG packaging |
-| `packaging/macos/entitlements.plist` | macOS entitlements |
-| `packaging/windows/build-msi.ps1` | Windows MSI build script |
-| `packaging/windows/phazeai-ide.wxs` | WiX installer definition |
-
-### `modelfiles/`
-
-Purpose: Ollama model definitions.
-
-Files:
-
-- `Modelfile.coder`
-- `Modelfile.planner`
-- `Modelfile.reviewer`
-- `install.sh`
-
-### `assets/`
-
-Purpose: brand and desktop-launcher assets.
-
-Files include:
-
-- `branding/logo.png`
-- `branding/icon.png`
-- `branding/icon_256.png`
-- `PhazeAI.desktop`
-
 ## CI And Release Automation
 
 Workflow files:
@@ -434,121 +377,8 @@ Workflow files:
 - `.github/workflows/feature-tests.yml`
 - `.github/workflows/release.yml`
 
-### `ci.yml`
-
-Primary checks include:
-
-- `cargo fmt --all --check`
-- `cargo clippy --workspace -- -D warnings`
-- `cargo audit`
-- Crate-specific tests for core, CLI, UI, agent, git, MCP, sidecar
-- Linux system dependency installation for GUI-related builds/tests
-
-### `feature-tests.yml`
-
-Broader scenario coverage includes:
-
-- Tool-system tests
-- Full MCP integration
-- LSP integration
-- Context-engine tests
-- Provider registry tests
-- Eval harness smoke checks
-- Settings persistence
-- Scheduled stress tests
-
-### `release.yml`
-
-Release flow:
-
-- Builds cross-platform artifacts for Linux, macOS ARM/Intel, and Windows
-- Packages both `phazeai-ui` and `phazeai`
-- Publishes GitHub Release artifacts on version tags or manual dispatch
-
 ## Vendored / Reference Source
 
 ### `phazeai-arsenal/`
 
-This directory is the biggest subtree in the repo and appears to be an internal arsenal/reference collection of upstream projects, not an active Cargo workspace member of the main product.
-
-Major groups observed:
-
-| Path | Contents |
-|---|---|
-| `phazeai-arsenal/ai-llm/async-openai` | async-openai workspace |
-| `phazeai-arsenal/ai-llm/kalosm` | kalosm project |
-| `phazeai-arsenal/ai-llm/llm-chain` | llm-chain |
-| `phazeai-arsenal/ai-llm/mistral.rs` | mistral.rs ecosystem |
-| `phazeai-arsenal/ai-llm/ollama-rs` | upstream ollama-rs |
-| `phazeai-arsenal/ai-llm/rig` | rig framework plus skills |
-| `phazeai-arsenal/ide-editor/egui` | egui |
-| `phazeai-arsenal/ide-editor/helix` | Helix editor |
-| `phazeai-arsenal/ide-editor/lapce` | Lapce editor |
-| `phazeai-arsenal/ide-editor/syntect` | syntect |
-| `phazeai-arsenal/ide-editor/zed` | Zed editor |
-
-Recommendation for future work:
-
-- Exclude `phazeai-arsenal/` from most searches, indexing, and refactors unless you explicitly need to inspect or import upstream reference code.
-
-## Archived And Generated Areas
-
-### `_archive/`
-
-Contains older assets, experiments, tests, and build outputs. Treat as historical unless a task explicitly references it.
-
-### `target/`
-
-Rust build output. Not source.
-
-### Observed untracked/generated items
-
-Current git status showed:
-
-- `.plandex-v2/`
-- `rust_out`
-
-These are not part of tracked source as of indexing time.
-
-## Entry Points And Likely Developer Starting Points
-
-Best starting files for understanding behavior:
-
-- `README.md`
-- `Cargo.toml`
-- `crates/phazeai-core/src/lib.rs`
-- `crates/phazeai-ui/src/app.rs`
-- `crates/phazeai-ui/src/bin/phazeai-ui.rs`
-- `crates/phazeai-cli/src/main.rs`
-- `crates/phazeai-sidecar/src/lib.rs`
-- `sidecar/server.py`
-- `.github/workflows/ci.yml`
-
-## Search Strategy For Future Tasks
-
-Recommended default focus order:
-
-1. `crates/phazeai-core/`
-2. `crates/phazeai-ui/`
-3. `crates/phazeai-cli/`
-4. `crates/phazeai-sidecar/`
-5. `ext-host/`
-6. `sidecar/` and `python/`
-7. `packaging/`, `modelfiles/`, workflow files
-
-Recommended default exclusions:
-
-- `phazeai-arsenal/`
-- `_archive/`
-- `target/`
-- generated datasets or binaries unless directly relevant
-
-## Current Assessment
-
-This is a mixed monorepo with three distinct layers:
-
-- Product code: Rust-first IDE/agent/runtime
-- Support code: Python sidecars, training scripts, packaging, extension host
-- Reference/vendor code: large imported arsenals for editor/LLM ecosystems
-
-The most important architectural center of gravity is `crates/phazeai-core`, with `phazeai-ui` and `phazeai-cli` acting as the two primary user-facing frontends over the same engine.
+This directory is an internal arsenal/reference collection of upstream projects, not an active Cargo workspace member.

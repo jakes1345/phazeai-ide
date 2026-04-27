@@ -6,8 +6,8 @@ Thank you for your interest in contributing to PhazeAI IDE! We welcome contribut
 
 1. **Fork and Clone**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/phazeai-ide.git
-   cd phazeai-ide
+   git clone https://github.com/YOUR_USERNAME/phazeai-ui.git
+   cd phazeai-ui
    ```
 
 2. **Install Dependencies**

@@ -1,6 +1,6 @@
-use floem::reactive::RwSignal;
-use crate::theme::PhazeTheme;
 use crate::app::Tab;
+use crate::theme::PhazeTheme;
+use floem::reactive::RwSignal;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchResult {

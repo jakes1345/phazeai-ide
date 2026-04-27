@@ -26,7 +26,8 @@ pub enum LspCommand {
     ChangeFile {
         path: PathBuf,
         text: String,
-        version: i32},
+        version: i32,
+    },
     /// Request completions at a cursor position — triggers Completions event.
     RequestCompletions { path: PathBuf, line: u32, col: u32 },
     /// Request go-to-definition at cursor position.
@@ -45,7 +46,8 @@ pub enum LspCommand {
         line: u32,
         col: u32,
         new_name: String,
-        workspace_root: PathBuf},
+        workspace_root: PathBuf,
+    },
     /// Request all symbols in the current document (outline, Ctrl+Shift+O).
     RequestDocumentSymbols { path: PathBuf },
     /// File was saved — send textDocument/didSave notification to LSP server.
@@ -66,9 +68,11 @@ pub enum LspCommand {
     RequestInlayHints {
         path: PathBuf,
         start_line: u32,
-        end_line: u32},
+        end_line: u32,
+    },
     /// Graceful shutdown.
-    Shutdown}
+    Shutdown,
+}
 
 /// An inlay hint (type annotation, parameter name, etc.) for inline display.
 #[derive(Debug, Clone)]
@@ -78,7 +82,8 @@ pub struct InlayHintEntry {
     /// 0-based column (byte offset within the line) after which the hint is shown.
     pub col: u32,
     /// Text to display, e.g. ": i32" or "name: ".
-    pub label: String}
+    pub label: String,
+}
 
 /// A code lens entry attached to a specific line.
 #[derive(Debug, Clone)]
@@ -86,7 +91,8 @@ pub struct CodeLensEntry {
     /// 1-based line number the lens appears on.
     pub line: u32,
     /// Display label (e.g. "2 references", "Run test").
-    pub label: String}
+    pub label: String,
+}
 
 /// A symbol entry from the document symbol outline.
 #[derive(Debug, Clone)]
@@ -96,7 +102,8 @@ pub struct SymbolEntry {
     /// 1-based line number.
     pub line: u32,
     /// Nesting depth (0 = top-level).
-    pub depth: u32}
+    pub depth: u32,
+}
 
 /// Parsed signature help result returned by the LSP server.
 #[derive(Debug, Clone)]
@@ -106,7 +113,8 @@ pub struct SignatureHelpResult {
     /// Index of the currently-active parameter (0-based).
     pub active_param: usize,
     /// Labels of individual parameters extracted from the signature.
-    pub params: Vec<String>}
+    pub params: Vec<String>,
+}
 
 /// A go-to-definition result (first location only; LSP may return multiple).
 #[derive(Debug, Clone)]
@@ -115,7 +123,8 @@ pub struct DefinitionResult {
     /// 1-based line number.
     pub line: u32,
     /// 1-based column.
-    pub col: u32}
+    pub col: u32,
+}
 
 /// A single find-references result entry.
 #[derive(Debug, Clone)]
@@ -124,7 +133,8 @@ pub struct ReferenceEntry {
     /// 1-based line number.
     pub line: u32,
     /// 1-based column.
-    pub col: u32}
+    pub col: u32,
+}
 
 /// A code action / quick-fix offered by the LSP server (or generated locally).
 #[derive(Debug, Clone)]
@@ -133,7 +143,8 @@ pub struct CodeAction {
     pub kind: String,
     /// Edits to apply: list of `(file_path, new_full_content)`.
     /// Empty means the action is handled procedurally (e.g. "Format Document").
-    pub edit: Option<Vec<(PathBuf, String)>>}
+    pub edit: Option<Vec<(PathBuf, String)>>,
+}
 
 /// Diagnostic severity (mirrors LSP spec without pulling in lsp-types at call sites).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +152,8 @@ pub enum DiagSeverity {
     Error,
     Warning,
     Info,
-    Hint}
+    Hint,
+}
 
 /// A single diagnostic entry, flattened for UI display.
 #[derive(Debug, Clone)]
@@ -152,7 +164,8 @@ pub struct DiagEntry {
     /// 1-based column.
     pub col: u32,
     pub message: String,
-    pub severity: DiagSeverity}
+    pub severity: DiagSeverity,
+}
 
 /// A single completion item, simplified from lsp_types::CompletionItem.
 #[derive(Debug, Clone)]
@@ -162,7 +175,8 @@ pub struct CompletionEntry {
     /// The text to insert (may include snippets; falls back to label).
     pub insert_text: String,
     /// Optional short description shown next to the label.
-    pub detail: Option<String>}
+    pub detail: Option<String>,
+}
 
 // ── Bridge result struct ──────────────────────────────────────────────────────
 
@@ -182,7 +196,8 @@ pub struct LspBridgeSignals {
     pub peek_def_lines: RwSignal<Vec<String>>,
     pub code_lens: RwSignal<Vec<CodeLensEntry>>,
     pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
-    pub inlay_hints: RwSignal<Vec<InlayHintEntry>>}
+    pub inlay_hints: RwSignal<Vec<InlayHintEntry>>,
+}
 
 // ── Bridge entry point ────────────────────────────────────────────────────────
 
@@ -947,7 +962,8 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
         peek_def_lines: peek_def_lines_sig,
         code_lens: code_lens_sig,
         folding_ranges: folding_ranges_sig,
-        inlay_hints: inlay_hints_sig}
+        inlay_hints: inlay_hints_sig,
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -962,13 +978,15 @@ fn hover_to_string(hover: lsp_types::Hover) -> String {
             .map(marked_string_to_text)
             .collect::<Vec<_>>()
             .join("\n\n"),
-        HoverContents::Markup(markup) => markup.value}
+        HoverContents::Markup(markup) => markup.value,
+    }
 }
 
 fn marked_string_to_text(ms: lsp_types::MarkedString) -> String {
     match ms {
         lsp_types::MarkedString::String(s) => s,
-        lsp_types::MarkedString::LanguageString(ls) => ls.value}
+        lsp_types::MarkedString::LanguageString(ls) => ls.value,
+    }
 }
 
 fn severity_from_lsp(s: Option<lsp_types::DiagnosticSeverity>) -> DiagSeverity {
@@ -1023,7 +1041,8 @@ fn ripgrep_references(
 ) -> Vec<ReferenceEntry> {
     let word = match word_at_position(path, line, col) {
         Some(w) if !w.is_empty() => w,
-        _ => return vec![]};
+        _ => return vec![],
+    };
 
     let output = std::process::Command::new("rg")
         .args(["--json", "-w", &word, workspace.to_string_lossy().as_ref()])
@@ -1031,7 +1050,8 @@ fn ripgrep_references(
 
     let output = match output {
         Ok(o) => o,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut entries = Vec::new();
@@ -1040,7 +1060,8 @@ fn ripgrep_references(
         // Parse each JSON line; skip anything that isn't a "match" event.
         let val: serde_json::Value = match serde_json::from_str(line_str) {
             Ok(v) => v,
-            Err(_) => continue};
+            Err(_) => continue,
+        };
         if val.get("type").and_then(|t| t.as_str()) != Some("match") {
             continue;
         }
@@ -1057,7 +1078,8 @@ fn ripgrep_references(
                 local.push(ReferenceEntry {
                     path: PathBuf::from(file_path),
                     line: line_num,
-                    col: col_start});
+                    col: col_start,
+                });
             }
             Some(local)
         })();
@@ -1086,7 +1108,8 @@ fn generate_code_actions(path: &PathBuf, line: u32, col: u32) -> Vec<CodeAction>
         actions.push(CodeAction {
             title: "Organize Imports (sort use declarations)".to_string(),
             kind: "source.organizeImports".to_string(),
-            edit: organize_rust_imports(path)});
+            edit: organize_rust_imports(path),
+        });
     }
 
     // Context-specific: if word under cursor looks like a variable, offer "Rename Symbol"
@@ -1095,7 +1118,8 @@ fn generate_code_actions(path: &PathBuf, line: u32, col: u32) -> Vec<CodeAction>
             actions.push(CodeAction {
                 title: format!("Find All References to '{word}'"),
                 kind: "refactor.findReferences".to_string(),
-                edit: None});
+                edit: None,
+            });
         }
     }
 
@@ -1258,7 +1282,8 @@ fn apply_text_edits(
         .map(|e| {
             let te = match e {
                 lsp_types::OneOf::Left(t) => t.clone(),
-                lsp_types::OneOf::Right(a) => a.text_edit.clone()};
+                lsp_types::OneOf::Right(a) => a.text_edit.clone(),
+            };
             (
                 te.range.start.line,
                 te.range.start.character,
@@ -1330,7 +1355,8 @@ fn parse_signature_help(sh: lsp_types::SignatureHelp) -> Option<SignatureHelpRes
     Some(SignatureHelpResult {
         label,
         active_param,
-        params})
+        params,
+    })
 }
 
 /// Flatten nested `lsp_types::DocumentSymbol` tree into a flat list with depth info.
@@ -1348,12 +1374,14 @@ fn flatten_symbols(syms: &[lsp_types::DocumentSymbol], depth: u32) -> Vec<Symbol
             lsp_types::SymbolKind::TYPE_PARAMETER => "type",
             lsp_types::SymbolKind::MODULE => "mod",
             lsp_types::SymbolKind::NAMESPACE => "mod",
-            _ => "item"};
+            _ => "item",
+        };
         out.push(SymbolEntry {
             name: sym.name.clone(),
             kind: kind.to_string(),
             line: sym.selection_range.start.line + 1,
-            depth});
+            depth,
+        });
         if let Some(children) = &sym.children {
             out.extend(flatten_symbols(children, depth + 1));
         }
@@ -1365,7 +1393,8 @@ fn flatten_symbols(syms: &[lsp_types::DocumentSymbol], depth: u32) -> Vec<Symbol
 fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mut symbols = Vec::new();
 
@@ -1443,7 +1472,8 @@ fn parse_symbols_from_file(path: &PathBuf) -> Vec<SymbolEntry> {
                     name,
                     kind: kind.to_string(),
                     line: (i as u32) + 1,
-                    depth});
+                    depth,
+                });
             }
         }
     }
@@ -1480,7 +1510,8 @@ fn symbol_kind_str(kind: lsp_types::SymbolKind) -> String {
         SymbolKind::EVENT => "event",
         SymbolKind::OPERATOR => "op",
         SymbolKind::TYPE_PARAMETER => "type",
-        _ => "sym"}
+        _ => "sym",
+    }
     .to_string()
 }
 
@@ -1510,7 +1541,8 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
 
     let output = match output {
         Ok(o) => o,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut entries = Vec::new();
@@ -1518,7 +1550,8 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
     for line_str in stdout.lines() {
         let val: serde_json::Value = match serde_json::from_str(line_str) {
             Ok(v) => v,
-            Err(_) => continue};
+            Err(_) => continue,
+        };
         if val.get("type").and_then(|t| t.as_str()) != Some("match") {
             continue;
         }
@@ -1543,7 +1576,8 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
                 name,
                 kind: kind_str.to_string(),
                 line: line_num,
-                depth: 0})
+                depth: 0,
+            })
         })();
 
         if let Some(entry) = parsed {
@@ -1559,7 +1593,8 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
 fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mut lenses = Vec::new();
 
@@ -1610,7 +1645,8 @@ fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
         if let Some(lbl) = label {
             lenses.push(CodeLensEntry {
                 line: line_num,
-                label: lbl});
+                label: lbl,
+            });
         }
     }
 
@@ -1675,7 +1711,8 @@ fn inlay_hints_from_file(path: &PathBuf, start_line: u32, end_line: u32) -> Vec<
                 hints.push(InlayHintEntry {
                     line: line_num,
                     col: (col + var_name.len()) as u32,
-                    label: type_hint.to_string()});
+                    label: type_hint.to_string(),
+                });
             }
         }
     }

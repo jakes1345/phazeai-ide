@@ -3,13 +3,13 @@ pub mod editor;
 pub mod project;
 pub mod workbench;
 
-use floem::reactive::RwSignal;
 use crate::theme::PhazeTheme;
+use floem::reactive::RwSignal;
 
 pub use ai::AiState;
 pub use editor::EditorState;
 pub use project::ProjectState;
-pub use workbench::{WorkbenchState, SearchResult};
+pub use workbench::{SearchResult, WorkbenchState};
 
 /// The root IDE state, decomposed into logical sub-states.
 #[derive(Clone)]
@@ -17,7 +17,8 @@ pub struct IdeState {
     pub workbench: WorkbenchState,
     pub editor: EditorState,
     pub ai: AiState,
-    pub project: ProjectState}
+    pub project: ProjectState,
+}
 
 impl IdeState {
     pub fn theme(&self) -> RwSignal<PhazeTheme> {

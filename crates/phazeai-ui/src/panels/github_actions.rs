@@ -4,7 +4,8 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
-    IntoView};
+    IntoView,
+};
 use std::sync::Arc;
 
 // ─── Data Structures ────────────────────────────────────────────────────────
@@ -17,14 +18,16 @@ pub struct WorkflowRun {
     pub head_commit_message: String,
     pub status: String,
     pub conclusion: Option<String>,
-    pub updated_at: String}
+    pub updated_at: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct WorkflowJob {
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
-    pub duration_secs: u64}
+    pub duration_secs: u64,
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -43,7 +46,8 @@ fn status_icon(status: &str, conclusion: Option<&str>) -> &'static str {
         ("completed", Some("cancelled")) => "○",
         ("in_progress", _) => "⏳",
         ("queued", _) => "·",
-        _ => "?"}
+        _ => "?",
+    }
 }
 
 fn status_color(
@@ -55,7 +59,8 @@ fn status_color(
         ("completed", Some("success")) => p.success,
         ("completed", Some("failure")) => p.error,
         ("in_progress", _) => p.warning,
-        _ => p.text_muted}
+        _ => p.text_muted,
+    }
 }
 
 fn fetch_json(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
@@ -139,7 +144,8 @@ fn parse_runs(val: &serde_json::Value) -> Vec<WorkflowRun> {
                 .collect(),
             status: r["status"].as_str().unwrap_or("").to_string(),
             conclusion: r["conclusion"].as_str().map(|s| s.to_string()),
-            updated_at: r["updated_at"].as_str().unwrap_or("").to_string()})
+            updated_at: r["updated_at"].as_str().unwrap_or("").to_string(),
+        })
         .collect()
 }
 
@@ -156,7 +162,8 @@ fn parse_jobs(val: &serde_json::Value) -> Vec<WorkflowJob> {
                 name: j["name"].as_str().unwrap_or("").to_string(),
                 status: j["status"].as_str().unwrap_or("").to_string(),
                 conclusion: j["conclusion"].as_str().map(|s| s.to_string()),
-                duration_secs}
+                duration_secs,
+            }
         })
         .collect()
 }
@@ -202,7 +209,8 @@ fn month_days(year: u64, month: u64) -> u64 {
 fn compute_duration_secs(started: &str, completed: &str) -> u64 {
     match (iso_to_secs(started), iso_to_secs(completed)) {
         (Some(s), Some(c)) if c >= s => c - s,
-        _ => 0}
+        _ => 0,
+    }
 }
 
 fn format_duration(secs: u64) -> String {
@@ -294,7 +302,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                     );
                     match fetch_json(&url, token.as_deref()) {
                         Ok(v) => Ok(parse_runs(&v)),
-                        Err(e) => Err(e)}
+                        Err(e) => Err(e),
+                    }
                 }
             };
             let _ = tx.send((label, result));
@@ -325,7 +334,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
             let label = format!("{}/{}", owner, repo);
             let result = match fetch_json(&url, token.as_deref()) {
                 Ok(v) => Ok(parse_runs(&v)),
-                Err(e) => Err(e)};
+                Err(e) => Err(e),
+            };
             if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
                 tx.try_send((label, result))
             {
@@ -362,7 +372,8 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
                         );
                         let result = match fetch_json(&url, token.as_deref()) {
                             Ok(v) => Ok(parse_runs(&v)),
-                            Err(e) => Err(e)};
+                            Err(e) => Err(e),
+                        };
                         let _ = tx.send((label, result));
                     }
                 }

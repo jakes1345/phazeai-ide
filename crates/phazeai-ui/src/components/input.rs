@@ -1,7 +1,8 @@
 use floem::{
     reactive::{RwSignal, SignalGet},
     views::{text_input, Decorators},
-    IntoView};
+    IntoView,
+};
 
 use crate::theme::PhazeTheme;
 

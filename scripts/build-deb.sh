@@ -6,16 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="${1:-0.1.0}"
 ARCH="amd64"
-PKG_NAME="phazeai-ide"
+PKG_NAME="phazeai-ui"
 BUILD_DIR="$PROJECT_ROOT/build/deb/${PKG_NAME}_${VERSION}_${ARCH}"
 
 echo "==> Building PhazeAI IDE v$VERSION .deb package"
 
 # Compile release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
-BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
+BINARY="$PROJECT_ROOT/target/release/phazeai-ui"
 
 # Set up package structure
 echo "==> Setting up package structure..."
@@ -27,29 +27,29 @@ mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$BUILD_DIR/usr/share/doc/$PKG_NAME"
 
 # Copy binary
-cp "$BINARY" "$BUILD_DIR/usr/bin/phazeai-ide"
-chmod 0755 "$BUILD_DIR/usr/bin/phazeai-ide"
+cp "$BINARY" "$BUILD_DIR/usr/bin/phazeai-ui"
+chmod 0755 "$BUILD_DIR/usr/bin/phazeai-ui"
 
 # Icon
 ICON_PNG="$PROJECT_ROOT/assets/icon-256.png"
 if [[ -f "$ICON_PNG" ]]; then
-    cp "$ICON_PNG" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png"
+    cp "$ICON_PNG" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/phazeai-ui.png"
 fi
 
 # Desktop file
-cat > "$BUILD_DIR/usr/share/applications/phazeai-ide.desktop" <<EOF
+cat > "$BUILD_DIR/usr/share/applications/phazeai-ui.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=PhazeAI IDE
 GenericName=AI-Powered IDE
 Comment=Local-first AI-native IDE with multi-model support
-Exec=phazeai-ide %F
-Icon=phazeai-ide
+Exec=phazeai-ui %F
+Icon=phazeai-ui
 Terminal=false
 Categories=Development;IDE;TextEditor;
 MimeType=text/plain;
 Keywords=ide;editor;ai;rust;python;coding;
-StartupWMClass=phazeai-ide
+StartupWMClass=phazeai-ui
 EOF
 
 # Changelog
@@ -65,7 +65,7 @@ gzip -9 "$BUILD_DIR/usr/share/doc/$PKG_NAME/changelog.Debian"
 # Copyright
 cat > "$BUILD_DIR/usr/share/doc/$PKG_NAME/copyright" <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: phazeai-ide
+Upstream-Name: phazeai-ui
 Upstream-Contact: PhazeAI Technologies <dev@phazeai.com>
 Source: https://github.com/phazeai/ide
 

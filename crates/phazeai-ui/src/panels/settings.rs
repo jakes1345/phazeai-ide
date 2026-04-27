@@ -1,22 +1,25 @@
 use floem::{
     reactive::{SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView};
+    IntoView,
+};
 use phazeai_core::{
     llm::provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
-    Settings};
+    Settings,
+};
 
 use crate::domain_state::IdeState;
 use crate::{
-    
     components::icon::{icons, phaze_icon},
-    theme::{PhazeTheme, ThemeVariant}};
+    theme::{PhazeTheme, ThemeVariant},
+};
 
 #[derive(Clone)]
 struct ProviderUiStatus {
     available: bool,
     summary: String,
-    detail: String}
+    detail: String,
+}
 
 fn provider_name_to_id(name: &str) -> Option<ProviderId> {
     match name {
@@ -28,7 +31,8 @@ fn provider_name_to_id(name: &str) -> Option<ProviderId> {
         "OpenRouter" => Some(ProviderId::OpenRouter),
         "Ollama (Local)" => Some(ProviderId::Ollama),
         "LM Studio (Local)" => Some(ProviderId::LmStudio),
-        _ => None}
+        _ => None,
+    }
 }
 
 fn provider_status(name: &str) -> ProviderUiStatus {
@@ -36,7 +40,8 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Unknown provider".into(),
-            detail: "This provider name does not map to a configured backend.".into()};
+            detail: "This provider name does not map to a configured backend.".into(),
+        };
     };
 
     let settings = Settings::load();
@@ -45,14 +50,16 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Not configured".into(),
-            detail: "No provider configuration is available for this backend.".into()};
+            detail: "No provider configuration is available for this backend.".into(),
+        };
     };
 
     if !config.enabled {
         return ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
-            detail: "This provider is disabled in settings.toml.".into()};
+            detail: "This provider is disabled in settings.toml.".into(),
+        };
     }
 
     if provider_id.needs_api_key() {
@@ -61,13 +68,15 @@ fn provider_status(name: &str) -> ProviderUiStatus {
                 return ProviderUiStatus {
                     available: true,
                     summary: "Ready".into(),
-                    detail: format!("Stored in OS keyring ({})", config.api_key_env)};
+                    detail: format!("Stored in OS keyring ({})", config.api_key_env),
+                };
             }
             ApiKeySource::Env => {
                 return ProviderUiStatus {
                     available: true,
                     summary: "Ready".into(),
-                    detail: format!("Using env var {}", config.api_key_env)};
+                    detail: format!("Using env var {}", config.api_key_env),
+                };
             }
             ApiKeySource::None => {
                 return ProviderUiStatus {
@@ -76,7 +85,8 @@ fn provider_status(name: &str) -> ProviderUiStatus {
                     detail: format!(
                         "Paste your key below (stored securely) or set {}.",
                         config.api_key_env
-                    )};
+                    ),
+                };
             }
         }
     }
@@ -84,7 +94,8 @@ fn provider_status(name: &str) -> ProviderUiStatus {
     ProviderUiStatus {
         available: true,
         summary: "Ready".into(),
-        detail: format!("Local endpoint: {}", config.base_url)}
+        detail: format!("Local endpoint: {}", config.base_url),
+    }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -606,7 +617,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
                     key_input.set(String::new());
                     feedback.set("Saved to keyring.".into());
                 }
-                Err(e) => feedback.set(format!("Save failed: {e}"))}
+                Err(e) => feedback.set(format!("Save failed: {e}")),
+            }
         }
     };
 
@@ -619,7 +631,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
             };
             match keyring_delete(&entry) {
                 Ok(()) => feedback.set("Key cleared.".into()),
-                Err(e) => feedback.set(format!("Clear failed: {e}"))}
+                Err(e) => feedback.set(format!("Clear failed: {e}")),
+            }
         }
     };
 
@@ -644,7 +657,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
                 .apply_if(!needs, |s| s.display(floem::style::Display::None))
         });
 
-    let save_btn = container(label(|| "Save")).style(move |s| {
+    let save_btn = container(label(|| "Save"))
+        .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
             s.padding_horiz(10.0)
@@ -660,7 +674,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| save_fn());
 
-    let clear_btn = container(label(|| "Clear")).style(move |s| {
+    let clear_btn = container(label(|| "Clear"))
+        .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
             s.padding_horiz(10.0)
@@ -676,8 +691,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| clear_fn());
 
-    let input_row = stack((input, save_btn, clear_btn))
-        .style(|s| s.flex_row().items_center().width_full());
+    let input_row =
+        stack((input, save_btn, clear_btn)).style(|s| s.flex_row().items_center().width_full());
 
     let feedback_line = label(move || feedback.get()).style(move |s| {
         let t = theme.get();

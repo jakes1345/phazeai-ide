@@ -9,7 +9,8 @@ fn main() {
         unsafe {
             let unlimited = libc::rlimit {
                 rlim_cur: libc::RLIM_INFINITY,
-                rlim_max: libc::RLIM_INFINITY};
+                rlim_max: libc::RLIM_INFINITY,
+            };
             libc::setrlimit(libc::RLIMIT_STACK, &unlimited);
         }
     }

@@ -103,7 +103,7 @@ jobs:
           rm -rf "dist/${CLI_NAME}"
 
           # phazeai-ui (IDE)
-          IDE_NAME="phazeai-ide-${VERSION}-${TARGET}"
+          IDE_NAME="phazeai-ui-${VERSION}-${TARGET}"
           mkdir -p "dist/${IDE_NAME}"
           cp "${BIN_DIR}/${{ matrix.ui_bin }}" "dist/${IDE_NAME}/"
           tar -C dist -czf "dist/${IDE_NAME}.tar.gz" "${IDE_NAME}"
@@ -128,7 +128,7 @@ jobs:
           Remove-Item -Recurse -Force "dist\${CLI_NAME}"
 
           # phazeai-ui (IDE)
-          $IDE_NAME = "phazeai-ide-${VERSION}-${TARGET}"
+          $IDE_NAME = "phazeai-ui-${VERSION}-${TARGET}"
           New-Item -ItemType Directory -Force "dist\${IDE_NAME}" | Out-Null
           Copy-Item "${BIN_DIR}\${{ matrix.ui_bin }}" "dist\${IDE_NAME}\"
           Compress-Archive -Path "dist\${IDE_NAME}" -DestinationPath "dist\${IDE_NAME}.zip" -Force
