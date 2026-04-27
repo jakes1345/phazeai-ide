@@ -1,5 +1,4 @@
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -49,20 +48,20 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
     let tree = parser.parse(source, None).unwrap();
     let query_scm = r#"
-        (function_item name: (identifier) @name) @func
-        (struct_item name: (type_identifier) @name) @struct
-        (enum_item name: (type_identifier) @name) @enum
-        (trait_item name: (type_identifier) @name) @trait
-        (impl_item type: (type_identifier) @name) @impl
-        (mod_item name: (identifier) @name) @mod
+        (function_item name: (_) @name) @func
+        (struct_item name: (_) @name) @struct
+        (enum_item name: (_) @name) @enum
+        (trait_item name: (_) @name) @trait
+        (impl_item type: (_) @name) @impl
+        (mod_item name: (_) @name) @mod
     "#;
 
     let query = Query::new(&language.into(), query_scm).unwrap();
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
-    let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+    let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
 
-    while let Some((m, _)) = captures.next() {
+    for (m, _) in captures {
         let mut node = None;
         let mut name_node = None;
 
@@ -75,8 +74,10 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
             }
         }
 
-        let node = node.expect("Missing node");
-        let name_node = name_node.expect("Missing name node");
+        let (node, name_node) = match (node, name_node) {
+            (Some(n), Some(nn)) => (n, nn),
+            _ => continue,
+        };
         let name = source[name_node.byte_range()].to_string();
 
         let kind = match m.pattern_index {
@@ -120,16 +121,16 @@ fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
     let tree = parser.parse(source, None).unwrap();
     let query_scm = r#"
-        (function_definition name: (identifier) @name) @func
-        (class_definition name: (identifier) @name) @class
+        (function_definition name: (_) @name) @func
+        (class_definition name: (_) @name) @class
     "#;
 
     let query = Query::new(&language.into(), query_scm).unwrap();
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
-    let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+    let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
 
-    while let Some((m, _)) = captures.next() {
+    for (m, _) in captures {
         let mut node = None;
         let mut name_node = None;
 
@@ -142,8 +143,10 @@ fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
             }
         }
 
-        let node = node.expect("Missing node");
-        let name_node = name_node.expect("Missing name node");
+        let (node, name_node) = match (node, name_node) {
+            (Some(n), Some(nn)) => (n, nn),
+            _ => continue,
+        };
         let name = source[name_node.byte_range()].to_string();
 
         let kind = match m.pattern_index {
