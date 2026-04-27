@@ -1,6 +1,6 @@
 use std::path::Path;
-use tree_sitter::{Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CodeSymbol {
@@ -43,7 +43,9 @@ pub fn extract_symbols(path: &Path, source: &str) -> Vec<CodeSymbol> {
 fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
     let mut parser = Parser::new();
     let language = tree_sitter_rust::LANGUAGE;
-    parser.set_language(&language.into()).expect("Error loading Rust grammar");
+    parser
+        .set_language(&language.into())
+        .expect("Error loading Rust grammar");
 
     let tree = parser.parse(source, None).unwrap();
     let query_scm = r#"
@@ -61,9 +63,12 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
     while let Some((m, _)) = captures.next() {
         let node = m.nodes_for_capture_index(0).next().expect("Missing node");
-        let name_node = m.nodes_for_capture_index(1).next().expect("Missing name node");
+        let name_node = m
+            .nodes_for_capture_index(1)
+            .next()
+            .expect("Missing name node");
         let name = source[name_node.byte_range()].to_string();
-        
+
         let kind = match m.pattern_index {
             0 => SymbolKind::Function,
             1 => SymbolKind::Struct,
@@ -76,7 +81,7 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
-        
+
         let signature = source[node.byte_range()]
             .lines()
             .next()
@@ -99,7 +104,9 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
     let mut parser = Parser::new();
     let language = tree_sitter_python::LANGUAGE;
-    parser.set_language(&language.into()).expect("Error loading Python grammar");
+    parser
+        .set_language(&language.into())
+        .expect("Error loading Python grammar");
 
     let tree = parser.parse(source, None).unwrap();
     let query_scm = r#"
@@ -113,9 +120,12 @@ fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
     while let Some((m, _)) = captures.next() {
         let node = m.nodes_for_capture_index(0).next().expect("Missing node");
-        let name_node = m.nodes_for_capture_index(1).next().expect("Missing name node");
+        let name_node = m
+            .nodes_for_capture_index(1)
+            .next()
+            .expect("Missing name node");
         let name = source[name_node.byte_range()].to_string();
-        
+
         let kind = match m.pattern_index {
             0 => SymbolKind::Function,
             1 => SymbolKind::Class,
@@ -124,7 +134,7 @@ fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
 
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
-        
+
         let signature = source[node.byte_range()]
             .lines()
             .next()
@@ -166,7 +176,10 @@ pub fn symbols_to_repo_map(_path: &Path, symbols: &[CodeSymbol]) -> String {
             SymbolKind::Module => "mod",
             _ => "sym",
         };
-        out.push_str(&format!("  {} {} (L{}-L{})\n", kind_str, sym.name, sym.start_line, sym.end_line));
+        out.push_str(&format!(
+            "  {} {} (L{}-L{})\n",
+            kind_str, sym.name, sym.start_line, sym.end_line
+        ));
     }
     out
 }
@@ -190,7 +203,10 @@ pub fn generate_repo_map(root: &Path) -> String {
                 };
 
                 if !symbols.is_empty() {
-                    out.push_str(&format!("{}:\n", path.strip_prefix(root).unwrap_or(path).display()));
+                    out.push_str(&format!(
+                        "{}:\n",
+                        path.strip_prefix(root).unwrap_or(path).display()
+                    ));
                     out.push_str(&symbols_to_repo_map(path, &symbols));
                     out.push_str("\n");
                 }

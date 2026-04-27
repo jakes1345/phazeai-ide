@@ -7,16 +7,19 @@ use floem::{
     keyboard::{Key, Modifiers},
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView};
+    IntoView,
+};
 use phazeai_core::{
     Agent, AgentEvent, ConversationMetadata, ConversationStore, SavedConversation, SavedMessage,
-    Settings};
+    Settings,
+};
 use phazeai_sidecar::SidecarClient;
 
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
-    util::safe_get};
+    util::safe_get,
+};
 
 // ── AI Mode ───────────────────────────────────────────────────────────────────
 
@@ -29,7 +32,8 @@ pub enum AiMode {
     Ask,
     Debug,
     Plan,
-    Edit}
+    Edit,
+}
 
 impl AiMode {
     pub fn label(self) -> &'static str {
@@ -38,7 +42,8 @@ impl AiMode {
             AiMode::Ask => "Ask",
             AiMode::Debug => "Debug",
             AiMode::Plan => "Plan",
-            AiMode::Edit => "Edit"}
+            AiMode::Edit => "Edit",
+        }
     }
 
     /// Returns a brief system-prompt prefix injected before the user message.
@@ -49,7 +54,8 @@ impl AiMode {
             AiMode::Ask => "Answer concisely and precisely. No extra prose.\n\n",
             AiMode::Debug => "You are a debugging expert. Focus on root causes and fixes.\n\n",
             AiMode::Plan => "You are a software architect. Produce clear step-by-step plans.\n\n",
-            AiMode::Edit => "You are a code editor. Produce only code changes, no commentary.\n\n"}
+            AiMode::Edit => "You are a code editor. Produce only code changes, no commentary.\n\n",
+        }
     }
 }
 
@@ -59,7 +65,8 @@ impl AiMode {
 pub enum ChatRole {
     User,
     Assistant,
-    Tool}
+    Tool,
+}
 
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
@@ -68,7 +75,8 @@ pub struct ChatMessage {
     pub content: String,
     /// True while AI is still generating this message.
     pub loading: bool,
-    pub is_error: bool}
+    pub is_error: bool,
+}
 
 /// What the background AI thread sends to the Floem UI thread.
 #[derive(Clone, Debug)]
@@ -84,7 +92,8 @@ enum ChatUpdate {
     /// An error occurred.
     Err(String),
     /// The user cancelled generation via the Stop button.
-    Cancelled(String)}
+    Cancelled(String),
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -130,10 +139,12 @@ fn save_conversation(
             role: match m.role {
                 ChatRole::User => "user".into(),
                 ChatRole::Assistant => "assistant".into(),
-                ChatRole::Tool => "tool".into()},
+                ChatRole::Tool => "tool".into(),
+            },
             content: m.content.clone(),
             timestamp: now_str(),
-            tool_name: None})
+            tool_name: None,
+        })
         .collect();
 
     let title = messages
@@ -161,12 +172,14 @@ fn save_conversation(
         updated_at: now_str(),
         message_count: saved_messages.len(),
         model: model_name.to_string(),
-        project_dir: cwd};
+        project_dir: cwd,
+    };
 
     let conversation = SavedConversation {
         metadata,
         messages: saved_messages,
-        system_prompt: None};
+        system_prompt: None,
+    };
 
     let _ = store.save(&conversation);
 }
@@ -334,7 +347,8 @@ pub fn chat_panel(
         role: ChatRole::Assistant,
         content: "Welcome to PhazeAI. How can I help you?".to_string(),
         loading: false,
-        is_error: false}];
+        is_error: false,
+    }];
     let mut initial_id = ConversationStore::generate_id();
 
     if let Ok(store) = ConversationStore::new() {
@@ -350,12 +364,14 @@ pub fn chat_panel(
                         let role = match m.role.as_str() {
                             "user" => ChatRole::User,
                             "assistant" => ChatRole::Assistant,
-                            "tool" | "system" | _ => ChatRole::Tool};
+                            "tool" | "system" | _ => ChatRole::Tool,
+                        };
                         initial_messages.push(ChatMessage {
                             role,
                             content: m.content,
                             loading: false,
-                            is_error: false});
+                            is_error: false,
+                        });
                     }
                     break;
                 }
@@ -392,7 +408,8 @@ pub fn chat_panel(
                             role: ChatRole::Tool,
                             content: format!("Running tool: {}...", name),
                             loading: true,
-                            is_error: false});
+                            is_error: false,
+                        });
                     });
                 }
                 ChatUpdate::ToolResult { name, summary } => {
@@ -449,7 +466,8 @@ pub fn chat_panel(
                             role: ChatRole::Assistant,
                             content: format!("Error: {}", e),
                             loading: false,
-                            is_error: true});
+                            is_error: true,
+                        });
                     });
                     is_loading.set(false);
                     ai_thinking.set(false);
@@ -514,12 +532,14 @@ pub fn chat_panel(
                     role: ChatRole::User,
                     content: trimmed.clone(),
                     loading: false,
-                    is_error: false});
+                    is_error: false,
+                });
                 list.push(ChatMessage {
                     role: ChatRole::Assistant,
                     content: String::new(),
                     loading: true,
-                    is_error: false});
+                    is_error: false,
+                });
             });
             input_text.set(String::new());
             is_loading.set(true);
@@ -532,10 +552,7 @@ pub fn chat_panel(
             // settings panel take effect immediately (no restart needed).
             let live_settings = Settings::load();
             let hint = mode.get_untracked().system_hint();
-            let sc_snapshot = sidecar_client
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().cloned());
+            let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
             send_to_ai(
                 prompt,
                 live_settings,
@@ -685,7 +702,8 @@ pub fn chat_panel(
                         role: ChatRole::Assistant,
                         content: String::new(),
                         loading: true,
-                        is_error: false});
+                        is_error: false,
+                    });
                 });
 
                 is_loading.set(true);
@@ -698,10 +716,7 @@ pub fn chat_panel(
                 let prompt = expand_file_mentions(&user_msg, &root);
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
-                let sc_snapshot = sidecar_client
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().cloned());
+                let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
                 send_to_ai(
                     prompt,
                     live_settings,
@@ -978,7 +993,8 @@ pub fn chat_panel(
                 let enter = match &e.key.logical_key {
                     Key::Character(ch) => ch.as_str() == "\r" || ch.as_str() == "\n",
                     Key::Named(floem::keyboard::NamedKey::Enter) => true,
-                    _ => false};
+                    _ => false,
+                };
                 if enter && !e.modifiers.contains(Modifiers::SHIFT) {
                     (do_send_key)();
                 }
@@ -1000,9 +1016,6 @@ pub fn chat_panel(
 
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, mode_tabs, messages_scroll, input_bar)).style(move |s| {
-        s.flex_col()
-            .width_full()
-            .height_full()
-    })
+    stack((header, mode_tabs, messages_scroll, input_bar))
+        .style(move |s| s.flex_col().width_full().height_full())
 }

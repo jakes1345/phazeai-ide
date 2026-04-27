@@ -13,9 +13,9 @@ echo "==> Building PhazeAI IDE v$VERSION AppImage"
 
 # 1. Compile release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
-BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
+BINARY="$PROJECT_ROOT/target/release/phazeai-ui"
 if [[ ! -f "$BINARY" ]]; then
     echo "ERROR: Binary not found at $BINARY" >&2
     exit 1
@@ -31,40 +31,40 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 
 # Copy binary
-cp "$BINARY" "$APPDIR/usr/bin/phazeai-ide"
-chmod +x "$APPDIR/usr/bin/phazeai-ide"
+cp "$BINARY" "$APPDIR/usr/bin/phazeai-ui"
+chmod +x "$APPDIR/usr/bin/phazeai-ui"
 
 # Copy icon
 ICON_PNG="$PROJECT_ROOT/assets/icon-256.png"
 ICON_SVG="$PROJECT_ROOT/assets/icon.svg"
 if [[ -f "$ICON_PNG" ]]; then
-    cp "$ICON_PNG" "$APPDIR/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png"
-    cp "$ICON_PNG" "$APPDIR/phazeai-ide.png"
+    cp "$ICON_PNG" "$APPDIR/usr/share/icons/hicolor/256x256/apps/phazeai-ui.png"
+    cp "$ICON_PNG" "$APPDIR/phazeai-ui.png"
 else
     echo "WARNING: No icon found at $ICON_PNG, using placeholder"
     # Create a minimal 1x1 placeholder PNG
-    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82' > "$APPDIR/phazeai-ide.png"
+    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82' > "$APPDIR/phazeai-ui.png"
 fi
 if [[ -f "$ICON_SVG" ]]; then
-    cp "$ICON_SVG" "$APPDIR/usr/share/icons/hicolor/scalable/apps/phazeai-ide.svg"
+    cp "$ICON_SVG" "$APPDIR/usr/share/icons/hicolor/scalable/apps/phazeai-ui.svg"
 fi
 
 # Desktop entry
-cat > "$APPDIR/usr/share/applications/phazeai-ide.desktop" <<'EOF'
+cat > "$APPDIR/usr/share/applications/phazeai-ui.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=PhazeAI IDE
 GenericName=AI-Powered IDE
 Comment=Local-first AI-native IDE with multi-model support
-Exec=phazeai-ide %F
-Icon=phazeai-ide
+Exec=phazeai-ui %F
+Icon=phazeai-ui
 Terminal=false
 Categories=Development;IDE;TextEditor;
 MimeType=text/plain;text/x-rust;text/x-python;text/javascript;application/json;
 Keywords=ide;editor;ai;rust;python;coding;
-StartupWMClass=phazeai-ide
+StartupWMClass=phazeai-ui
 EOF
-cp "$APPDIR/usr/share/applications/phazeai-ide.desktop" "$APPDIR/phazeai-ide.desktop"
+cp "$APPDIR/usr/share/applications/phazeai-ui.desktop" "$APPDIR/phazeai-ui.desktop"
 
 # AppRun launcher script
 cat > "$APPDIR/AppRun" <<'EOF'
@@ -73,7 +73,7 @@ SELF=$(readlink -f "$0")
 HERE="${SELF%/*}"
 export PATH="$HERE/usr/bin:$PATH"
 export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
-exec "$HERE/usr/bin/phazeai-ide" "$@"
+exec "$HERE/usr/bin/phazeai-ui" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"
 

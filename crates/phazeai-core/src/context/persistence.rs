@@ -123,11 +123,7 @@ impl ConversationStore {
     fn load_index_consistent(&self) -> Result<ConversationIndex, PhazeError> {
         let mut index = self.load_index()?;
         let mut changed = false;
-        let known_ids: HashSet<String> = index
-            .conversations
-            .iter()
-            .map(|m| m.id.clone())
-            .collect();
+        let known_ids: HashSet<String> = index.conversations.iter().map(|m| m.id.clone()).collect();
 
         // 1) Prune stale index entries (metadata points to missing file).
         index
@@ -138,11 +134,8 @@ impl ConversationStore {
         }
 
         // 2) Re-attach orphaned conversation files (file exists but not indexed).
-        let mut current_ids: HashSet<String> = index
-            .conversations
-            .iter()
-            .map(|m| m.id.clone())
-            .collect();
+        let mut current_ids: HashSet<String> =
+            index.conversations.iter().map(|m| m.id.clone()).collect();
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

@@ -17,7 +17,7 @@ mkdir -p ~/.local/bin
 # 3. Copy binaries
 echo "🚚 Installing binaries to ~/.local/bin/..."
 cp target/release/phazeai ~/.local/bin/phazeai
-cp target/release/phazeai-ide ~/.local/bin/phazeai-ide
+cp target/release/phazeai-ui ~/.local/bin/phazeai-ui
 
 # 4. Set up desktop entry
 echo "🖥️ Setting up desktop integration..."
@@ -38,7 +38,7 @@ cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Name=PhazeAI
 Comment=AI-powered coding assistant
-Exec=$HOME/.local/bin/phazeai-ide
+Exec=$HOME/.local/bin/phazeai-ui
 Icon=$ICON_REF
 Terminal=false
 Type=Application

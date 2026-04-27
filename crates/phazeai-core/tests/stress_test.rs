@@ -21,7 +21,7 @@ fn test_orchestrator_construction() {
 fn test_agent_task_fields() {
     let task = AgentTask {
         user_request: "Create a benchmark module".to_string(),
-        repo_map: Some("phazeai-ide/\n  src/\n    main.rs".to_string()),
+        repo_map: Some("phazeai-ui/\n  src/\n    main.rs".to_string()),
         relevant_files: vec![("src/main.rs".to_string(), "fn main() {}".to_string())],
         conversation_context: vec!["previous message".to_string()],
     };

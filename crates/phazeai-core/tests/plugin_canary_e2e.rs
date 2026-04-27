@@ -92,7 +92,12 @@ fn canary_plugin_loads_activates_and_executes_end_to_end() {
     // Scan should discover exactly one plugin.
     mgr.scan_plugins(&host);
     let loaded = mgr.get_plugins();
-    assert_eq!(loaded.len(), 1, "expected 1 loaded plugin, got {:?}", loaded);
+    assert_eq!(
+        loaded.len(),
+        1,
+        "expected 1 loaded plugin, got {:?}",
+        loaded
+    );
     let info = &loaded[0];
     assert_eq!(info.name, "phazeai_plugin_canary");
     assert!(info.active, "plugin must be active after scan");

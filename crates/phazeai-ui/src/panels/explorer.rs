@@ -8,13 +8,15 @@ use floem::{
     menu::{Menu, MenuItem},
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, Decorators},
-    IntoView};
+    IntoView,
+};
 use notify::{EventKind, RecursiveMode, Watcher};
 
 use crate::{
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
-    util::safe_get};
+    util::safe_get,
+};
 
 /// A single visible row in the file tree.
 #[derive(Clone, Debug)]
@@ -23,7 +25,8 @@ pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
     pub depth: usize,
-    pub expanded: bool}
+    pub expanded: bool,
+}
 
 impl FileEntry {
     fn id(&self) -> String {
@@ -55,14 +58,16 @@ fn load_children(parent: &PathBuf, depth: usize) -> Vec<FileEntry> {
                 name,
                 is_dir,
                 depth,
-                expanded: false})
+                expanded: false,
+            })
         })
         .collect();
 
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase())});
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
 
     entries
 }
@@ -222,7 +227,8 @@ pub fn explorer_panel(
                     }
                 }) {
                     Ok(w) => w,
-                    Err(_) => return};
+                    Err(_) => return,
+                };
 
             if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
                 return;
@@ -281,7 +287,8 @@ pub fn explorer_panel(
             match tick_tx.try_send(()) {
                 Ok(_) => {}
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break}
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+            }
         });
     }
 
@@ -372,7 +379,8 @@ pub fn explorer_panel(
                 Some('A') => "A",
                 Some('D') => "D",
                 Some('?') => "?",
-                _ => ""})
+                _ => "",
+            })
             .style({
                 let badge_key2 = entry_path_badge.to_string_lossy().to_string();
                 move |s| {
@@ -383,7 +391,8 @@ pub fn explorer_panel(
                         Some('A') => p.success,
                         Some('D') => p.error,
                         Some('?') => p.warning,
-                        _ => floem::peniko::Color::TRANSPARENT};
+                        _ => floem::peniko::Color::TRANSPARENT,
+                    };
                     s.font_size(10.0)
                         .color(color)
                         .margin_left(4.0)
@@ -710,7 +719,8 @@ pub fn explorer_panel(
                             *idx = Some(match *idx {
                                 None => 0,
                                 Some(0) => 0,
-                                Some(i) => i - 1});
+                                Some(i) => i - 1,
+                            });
                         });
                     }
                     // ── Arrow Down — move focus down ──────────────────────────
@@ -718,7 +728,8 @@ pub fn explorer_panel(
                         focused_idx.update(|idx| {
                             *idx = Some(match *idx {
                                 None => 0,
-                                Some(i) => (i + 1).min(list_len - 1)});
+                                Some(i) => (i + 1).min(list_len - 1),
+                            });
                         });
                     }
                     // ── Arrow Right — expand dir ──────────────────────────────
@@ -1030,5 +1041,6 @@ fn file_icon(name: &str) -> &'static str {
         "toml" => icons::FILE_TOML,
         "md" | "mdx" => icons::FILE_MARKDOWN,
         "lock" => icons::FILE_LOCK,
-        _ => icons::FILE}
+        _ => icons::FILE,
+    }
 }

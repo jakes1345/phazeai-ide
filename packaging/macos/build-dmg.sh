@@ -15,9 +15,9 @@ echo "==> Building $APP_NAME v$VERSION for macOS"
 
 # 1. Build release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
-BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
+BINARY="$PROJECT_ROOT/target/release/phazeai-ui"
 
 # 2. Create .app bundle
 echo "==> Creating .app bundle..."
@@ -25,8 +25,8 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-cp "$BINARY" "$APP_DIR/Contents/MacOS/phazeai-ide"
-chmod +x "$APP_DIR/Contents/MacOS/phazeai-ide"
+cp "$BINARY" "$APP_DIR/Contents/MacOS/phazeai-ui"
+chmod +x "$APP_DIR/Contents/MacOS/phazeai-ui"
 
 # Copy icon if available (must be .icns for macOS)
 ICNS="$PROJECT_ROOT/assets/icon.icns"
@@ -41,7 +41,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>phazeai-ide</string>
+    <string>phazeai-ui</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>

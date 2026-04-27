@@ -4,7 +4,8 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, Decorators},
-    IntoView};
+    IntoView,
+};
 
 use crate::domain_state::IdeState;
 
@@ -14,12 +15,14 @@ use crate::domain_state::IdeState;
 pub enum TestStatus {
     Passed,
     Failed,
-    Ignored}
+    Ignored,
+}
 
 #[derive(Clone, Debug)]
 pub struct TestResult {
     pub name: String,
-    pub status: TestStatus}
+    pub status: TestStatus,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct TestRunOutput {
@@ -29,7 +32,8 @@ pub struct TestRunOutput {
     pub ignored: usize,
     pub raw: String,
     pub running: bool,
-    pub error: Option<String>}
+    pub error: Option<String>,
+}
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
@@ -144,7 +148,8 @@ pub fn tests_panel(state: IdeState) -> impl IntoView {
                         ignored,
                         raw,
                         running: false,
-                        error: None});
+                        error: None,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(TestRunOutput {
@@ -211,14 +216,16 @@ pub fn tests_panel(state: IdeState) -> impl IntoView {
                     label(move || match status_for_icon {
                         TestStatus::Passed => "✓",
                         TestStatus::Failed => "✗",
-                        TestStatus::Ignored => "○"})
+                        TestStatus::Ignored => "○",
+                    })
                     .style(move |s| {
                         let t = theme.get();
                         let p = &t.palette;
                         let color = match status_for_color {
                             TestStatus::Passed => p.success,
                             TestStatus::Failed => p.error,
-                            TestStatus::Ignored => p.text_muted};
+                            TestStatus::Ignored => p.text_muted,
+                        };
                         s.font_size(12.0).color(color).margin_right(8.0).width(14.0)
                     }),
                     label(move || name.clone()).style(move |s| {

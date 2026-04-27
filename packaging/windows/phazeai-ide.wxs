@@ -9,8 +9,8 @@
     cargo wix --no-build --nocapture
 
   Or manually:
-    cargo build --release -p phazeai-ide
-    wix build packaging/windows/phazeai-ide.wxs -o dist/PhazeAI-IDE-0.1.0-x64.msi
+    cargo build --release -p phazeai-ui
+    wix build packaging/windows/phazeai-ui.wxs -o dist/PhazeAI-IDE-0.1.0-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -36,8 +36,8 @@
       <Directory Id="APPLICATIONFOLDER" Name="PhazeAI IDE">
         <Component Id="MainExecutable" Guid="a1b2c3d4-e5f6-7890-abcd-ef1234567890">
           <File Id="PhazeAIExe"
-                Name="phazeai-ide.exe"
-                Source="..\..\target\release\phazeai-ide.exe"
+                Name="phazeai-ui.exe"
+                Source="..\..\target\release\phazeai-ui.exe"
                 KeyPath="yes" />
           <!-- Add to PATH -->
           <Environment Id="PATH"
@@ -52,7 +52,7 @@
         <!-- App icon -->
         <Component Id="AppIcon" Guid="b2c3d4e5-f6a7-8901-bcde-f12345678901">
           <File Id="AppIconFile"
-                Name="phazeai-ide.ico"
+                Name="phazeai-ui.ico"
                 Source="..\..\assets\icon.ico"
                 KeyPath="yes" />
         </Component>
@@ -65,7 +65,7 @@
         <Shortcut Id="DesktopSC"
                   Name="PhazeAI IDE"
                   Description="AI-native development environment"
-                  Target="[APPLICATIONFOLDER]phazeai-ide.exe"
+                  Target="[APPLICATIONFOLDER]phazeai-ui.exe"
                   WorkingDirectory="APPLICATIONFOLDER"
                   Icon="PhazeAIIcon" />
         <RegistryValue Root="HKCU"
@@ -84,7 +84,7 @@
           <Shortcut Id="StartMenuSC"
                     Name="PhazeAI IDE"
                     Description="AI-native development environment"
-                    Target="[APPLICATIONFOLDER]phazeai-ide.exe"
+                    Target="[APPLICATIONFOLDER]phazeai-ui.exe"
                     WorkingDirectory="APPLICATIONFOLDER"
                     Icon="PhazeAIIcon" />
           <RemoveFolder Id="CleanupProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
