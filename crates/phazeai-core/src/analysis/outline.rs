@@ -58,15 +58,25 @@ fn extract_rust_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
     "#;
 
     let query = Query::new(&language.into(), query_scm).unwrap();
+    let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
 
     while let Some((m, _)) = captures.next() {
-        let node = m.nodes_for_capture_index(0).next().expect("Missing node");
-        let name_node = m
-            .nodes_for_capture_index(1)
-            .next()
-            .expect("Missing name node");
+        let mut node = None;
+        let mut name_node = None;
+
+        for capture in m.captures {
+            let name = capture_names[capture.index as usize];
+            if name == "name" {
+                name_node = Some(capture.node);
+            } else {
+                node = Some(capture.node);
+            }
+        }
+
+        let node = node.expect("Missing node");
+        let name_node = name_node.expect("Missing name node");
         let name = source[name_node.byte_range()].to_string();
 
         let kind = match m.pattern_index {
@@ -115,15 +125,25 @@ fn extract_python_symbols_ts(source: &str, symbols: &mut Vec<CodeSymbol>) {
     "#;
 
     let query = Query::new(&language.into(), query_scm).unwrap();
+    let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
 
     while let Some((m, _)) = captures.next() {
-        let node = m.nodes_for_capture_index(0).next().expect("Missing node");
-        let name_node = m
-            .nodes_for_capture_index(1)
-            .next()
-            .expect("Missing name node");
+        let mut node = None;
+        let mut name_node = None;
+
+        for capture in m.captures {
+            let name = capture_names[capture.index as usize];
+            if name == "name" {
+                name_node = Some(capture.node);
+            } else {
+                node = Some(capture.node);
+            }
+        }
+
+        let node = node.expect("Missing node");
+        let name_node = name_node.expect("Missing name node");
         let name = source[name_node.byte_range()].to_string();
 
         let kind = match m.pattern_index {
@@ -191,25 +211,23 @@ pub fn generate_repo_map(root: &Path) -> String {
         .git_ignore(true)
         .build();
 
-    for result in walker {
-        if let Ok(entry) = result {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                let path = entry.path();
-                let symbols = if let Ok(content) = std::fs::read_to_string(path) {
-                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    extract_symbols_generic(&content, ext)
-                } else {
-                    continue;
-                };
+    for entry in walker.flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let path = entry.path();
+            let symbols = if let Ok(content) = std::fs::read_to_string(path) {
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                extract_symbols_generic(&content, ext)
+            } else {
+                continue;
+            };
 
-                if !symbols.is_empty() {
-                    out.push_str(&format!(
-                        "{}:\n",
-                        path.strip_prefix(root).unwrap_or(path).display()
-                    ));
-                    out.push_str(&symbols_to_repo_map(path, &symbols));
-                    out.push_str("\n");
-                }
+            if !symbols.is_empty() {
+                out.push_str(&format!(
+                    "{}:\n",
+                    path.strip_prefix(root).unwrap_or(path).display()
+                ));
+                out.push_str(&symbols_to_repo_map(path, &symbols));
+                out.push('\n');
             }
         }
     }
