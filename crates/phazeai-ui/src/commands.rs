@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use crate::domain_state::IdeState;
 use floem::keyboard::{Key, Modifiers};
 use floem::reactive::{RwSignal, SignalUpdate};
-use crate::domain_state::IdeState;
+use std::sync::Arc;
 
 // ── Command definition ────────────────────────────────────────────────────────
 
@@ -123,63 +123,25 @@ pub fn match_global_shortcut(key: &Key, modifiers: &Modifiers) -> Option<String>
         Key::Character(ref ch) => {
             let c = ch.to_lowercase();
             match c.as_str() {
-                "b" if ctrl && !shift && !alt => {
-                    Some("workbench.action.toggleSidebar".into())
-                }
-                "j" if ctrl && !shift && !alt => {
-                    Some("workbench.action.toggleBottomPanel".into())
-                }
-                "p" if ctrl && !shift && !alt => {
-                    Some("workbench.action.quickOpen".into())
-                }
-                "p" if ctrl && shift && !alt => {
-                    Some("workbench.action.showCommands".into())
-                }
-                "\\" if ctrl && shift && !alt => {
-                    Some("workbench.action.toggleRightPanel".into())
-                }
-                "\\" if ctrl && alt && !shift => {
-                    Some("editor.action.splitEditor".into())
-                }
-                "z" if ctrl && shift && !alt => {
-                    Some("workbench.action.toggleZenMode".into())
-                }
-                "," if ctrl && !shift && !alt => {
-                    Some("workbench.action.openSettings".into())
-                }
-                "t" if ctrl && !shift && !alt => {
-                    Some("workbench.action.workspaceSymbols".into())
-                }
-                "e" if ctrl && shift && !alt => {
-                    Some("workbench.action.focusExplorer".into())
-                }
-                "g" if ctrl && shift && !alt => {
-                    Some("workbench.action.focusGit".into())
-                }
-                "f" if ctrl && shift && !alt => {
-                    Some("workbench.action.findInFiles".into())
-                }
-                "i" if ctrl && shift && !alt => {
-                    Some("editor.action.toggleInlayHints".into())
-                }
-                "l" if ctrl && shift && !alt => {
-                    Some("editor.action.toggleCodeLens".into())
-                }
-                "m" if ctrl && shift && !alt => {
-                    Some("editor.action.toggleMinimap".into())
-                }
-                "=" if ctrl && !shift && !alt => {
-                    Some("editor.action.fontZoomIn".into())
-                }
-                "-" if ctrl && !shift && !alt => {
-                    Some("editor.action.fontZoomOut".into())
-                }
-                "0" if ctrl && !shift && !alt => {
-                    Some("editor.action.fontZoomReset".into())
-                }
-                "k" if ctrl && !shift && !alt => {
-                    Some("editor.action.inlineEdit".into())
-                }
+                "b" if ctrl && !shift && !alt => Some("workbench.action.toggleSidebar".into()),
+                "j" if ctrl && !shift && !alt => Some("workbench.action.toggleBottomPanel".into()),
+                "p" if ctrl && !shift && !alt => Some("workbench.action.quickOpen".into()),
+                "p" if ctrl && shift && !alt => Some("workbench.action.showCommands".into()),
+                "\\" if ctrl && !shift && !alt => Some("workbench.action.toggleRightPanel".into()),
+                "\\" if ctrl && alt && !shift => Some("editor.action.splitEditor".into()),
+                "z" if ctrl && shift && !alt => Some("workbench.action.toggleZenMode".into()),
+                "," if ctrl && !shift && !alt => Some("workbench.action.openSettings".into()),
+                "t" if ctrl && !shift && !alt => Some("workbench.action.workspaceSymbols".into()),
+                "e" if ctrl && shift && !alt => Some("workbench.action.focusExplorer".into()),
+                "g" if ctrl && shift && !alt => Some("workbench.action.focusGit".into()),
+                "f" if ctrl && shift && !alt => Some("workbench.action.findInFiles".into()),
+                "i" if ctrl && shift && !alt => Some("editor.action.toggleInlayHints".into()),
+                "l" if ctrl && shift && !alt => Some("editor.action.toggleCodeLens".into()),
+                "m" if ctrl && shift && !alt => Some("editor.action.toggleMinimap".into()),
+                "=" if ctrl && !shift && !alt => Some("editor.action.fontZoomIn".into()),
+                "-" if ctrl && !shift && !alt => Some("editor.action.fontZoomOut".into()),
+                "0" if ctrl && !shift && !alt => Some("editor.action.fontZoomReset".into()),
+                "k" if ctrl && !shift && !alt => Some("editor.action.inlineEdit".into()),
                 _ => None,
             }
         }
@@ -406,7 +368,9 @@ pub fn create_default_commands() -> CommandRegistry {
         description: "Decrease editor font size",
         keybinding: Some("Ctrl+-"),
         action: Arc::new(|s| {
-            s.editor.font_size.update(|v| *v = v.saturating_sub(1).max(8));
+            s.editor
+                .font_size
+                .update(|v| *v = v.saturating_sub(1).max(8));
         }),
     });
 
