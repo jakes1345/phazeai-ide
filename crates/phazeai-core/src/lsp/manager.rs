@@ -208,7 +208,10 @@ impl LspManager {
             .collect();
 
         for lang in dead {
-            tracing::warn!("LSP server for '{lang}' died; attempting restart", lang = lang);
+            tracing::warn!(
+                "LSP server for '{lang}' died; attempting restart",
+                lang = lang
+            );
             self.clients.remove(&lang);
 
             if !self.allow_restart(&lang) {
@@ -250,7 +253,10 @@ impl LspManager {
 
     fn allow_restart(&mut self, language_id: &str) -> bool {
         let now = Instant::now();
-        let history = self.restart_history.entry(language_id.to_string()).or_default();
+        let history = self
+            .restart_history
+            .entry(language_id.to_string())
+            .or_default();
         while let Some(&front) = history.front() {
             if now.duration_since(front) > RESTART_WINDOW {
                 history.pop_front();
@@ -272,7 +278,10 @@ impl LspManager {
             .find(|c| c.language_ids.iter().any(|l| l == language_id))
             .ok_or_else(|| format!("No LSP server available for language: {language_id}"))?;
 
-        tracing::info!("Restarting LSP server '{}' for '{language_id}'", config.command);
+        tracing::info!(
+            "Restarting LSP server '{}' for '{language_id}'",
+            config.command
+        );
 
         let client = LspClient::start(
             &config.command,
@@ -385,7 +394,10 @@ mod tests {
         assert_eq!(entry.version, 0);
 
         m.did_change(&path, 4, "fn a(){ b(); }");
-        let entry = m.open_docs.get(&path).expect("did_change should keep cache");
+        let entry = m
+            .open_docs
+            .get(&path)
+            .expect("did_change should keep cache");
         assert_eq!(entry.text, "fn a(){ b(); }");
         assert_eq!(entry.version, 4);
     }

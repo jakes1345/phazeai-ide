@@ -112,81 +112,97 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 .entry(MenuItem::new("Midnight Blue").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::MidnightBlue));
                     }
                 }))
                 .entry(MenuItem::new("Cyberpunk 2077").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Cyberpunk));
                     }
                 }))
                 .entry(MenuItem::new("Synthwave '84").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Synthwave84));
                     }
                 }))
                 .entry(MenuItem::new("Andromeda").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::Andromeda));
                     }
                 }))
                 .entry(MenuItem::new("Dark").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
+                        s.workbench
+                            .theme
+                            .set(PhazeTheme::from_variant(ThemeVariant::Dark));
                     }
                 }))
                 .entry(MenuItem::new("Dracula").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
+                        s.workbench
+                            .theme
+                            .set(PhazeTheme::from_variant(ThemeVariant::Dracula));
                     }
                 }))
                 .entry(MenuItem::new("Tokyo Night").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::TokyoNight));
                     }
                 }))
                 .entry(MenuItem::new("Monokai").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
+                        s.workbench
+                            .theme
+                            .set(PhazeTheme::from_variant(ThemeVariant::Monokai));
                     }
                 }))
                 .entry(MenuItem::new("Nord Dark").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::NordDark));
                     }
                 }))
                 .entry(MenuItem::new("Matrix Green").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::MatrixGreen));
                     }
                 }))
                 .entry(MenuItem::new("Root Shell").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme
+                        s.workbench
+                            .theme
                             .set(PhazeTheme::from_variant(ThemeVariant::RootShell));
                     }
                 }))
                 .entry(MenuItem::new("Light").action({
                     let s = s.clone();
                     move || {
-                        s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
+                        s.workbench
+                            .theme
+                            .set(PhazeTheme::from_variant(ThemeVariant::Light));
                     }
                 }));
 
@@ -194,7 +210,10 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 .entry(MenuItem::new("Explorer\tCtrl+B").action(move || {
                     s_exp.workbench.show_left_panel.update(|v| *v = !*v);
                     let open = s_exp.workbench.show_left_panel.get();
-                    s_exp.workbench.left_panel_width.set(if open { 260.0 } else { 0.0 });
+                    s_exp
+                        .workbench
+                        .left_panel_width
+                        .set(if open { 260.0 } else { 0.0 });
                 }))
                 .entry(MenuItem::new("Terminal\tCtrl+J").action(move || {
                     s_term.workbench.show_bottom_panel.update(|v| *v = !*v);
@@ -207,7 +226,10 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                     s_zin.editor.font_size.update(|v| *v = (*v + 1).min(32));
                 }))
                 .entry(MenuItem::new("Zoom Out\tCtrl+-").action(move || {
-                    s_zout.editor.font_size.update(|v| *v = v.saturating_sub(1).max(8));
+                    s_zout
+                        .editor
+                        .font_size
+                        .update(|v| *v = v.saturating_sub(1).max(8));
                 }))
                 .separator()
                 .entry(MenuItem::new("Zen Mode\tCtrl+Shift+Z").action(move || {
@@ -229,10 +251,11 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
             let menu = Menu::new("Go")
                 .entry(MenuItem::new("Go to Definition\tF12").action(move || {
                     if let Some((path, line, col)) = s_def.editor.active_cursor.get() {
-                        let _ =
-                            s_def
-                                .project.lsp_cmd
-                                .send(LspCommand::RequestDefinition { path, line, col });
+                        let _ = s_def.project.lsp_cmd.send(LspCommand::RequestDefinition {
+                            path,
+                            line,
+                            col,
+                        });
                     }
                 }))
                 .entry(
@@ -252,9 +275,12 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 .entry(MenuItem::new("Workspace Symbols\tCtrl+T").action(move || {
                     s_fp.editor.ws_syms_open.set(true);
                     s_fp.editor.ws_syms_query.set(String::new());
-                    let _ = s_fp.project.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
-                        query: String::new(),
-                    });
+                    let _ = s_fp
+                        .project
+                        .lsp_cmd
+                        .send(LspCommand::RequestWorkspaceSymbols {
+                            query: String::new(),
+                        });
                 }));
             show_context_menu(menu, None);
         })

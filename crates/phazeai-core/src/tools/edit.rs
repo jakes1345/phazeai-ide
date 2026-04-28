@@ -119,9 +119,11 @@ impl Tool for EditTool {
             ));
         };
 
-        tokio::fs::write(&resolved, &new_content).await.map_err(|e| {
-            PhazeError::tool("edit_file", format!("Failed to write '{}': {}", path, e))
-        })?;
+        tokio::fs::write(&resolved, &new_content)
+            .await
+            .map_err(|e| {
+                PhazeError::tool("edit_file", format!("Failed to write '{}': {}", path, e))
+            })?;
 
         Ok(serde_json::json!({
             "path": path,

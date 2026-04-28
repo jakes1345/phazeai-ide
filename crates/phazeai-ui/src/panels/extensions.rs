@@ -1,12 +1,13 @@
-use crate::domain_state::IdeState;
 use crate::components::button::{phaze_button, ButtonVariant};
 use crate::components::input::phaze_input;
+use crate::domain_state::IdeState;
 use crate::util::safe_get;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
-    IntoView};
+    IntoView,
+};
 use rfd::FileDialog;
 
 /// Combined extension manager panel.
@@ -70,33 +71,28 @@ pub fn extensions_panel(state: IdeState) -> impl IntoView {
                         snapshot,
                         std::sync::Arc::new(move |text: &str| {
                             let _ = insert_tx.try_send(
-                                crate::editor_command::EditorCommand::InsertText(
-                                    text.to_string(),
-                                ),
+                                crate::editor_command::EditorCommand::InsertText(text.to_string()),
                             );
                         }),
                         std::sync::Arc::new(move |cmd: &str, args: &str| {
                             let (reply_tx, reply_rx) =
                                 std::sync::mpsc::sync_channel::<Result<String, String>>(1);
-                            if let Err(e) = exec_tx.send(
-                                crate::editor_command::EditorCommand::ExecuteCommand {
+                            if let Err(e) =
+                                exec_tx.send(crate::editor_command::EditorCommand::ExecuteCommand {
                                     cmd: cmd.to_string(),
                                     args: args.to_string(),
                                     reply: reply_tx,
-                                },
-                            ) {
+                                })
+                            {
                                 return Err(format!("editor command channel closed: {e}"));
                             }
                             reply_rx
                                 .recv_timeout(std::time::Duration::from_secs(5))
-                                .unwrap_or_else(|e| {
-                                    Err(format!("editor command timed out: {e}"))
-                                })
+                                .unwrap_or_else(|e| Err(format!("editor command timed out: {e}")))
                         }),
                     );
-                    let host = phazeai_core::ext_host::IdeDelegateHost::new(
-                        std::sync::Arc::new(delegate),
-                    );
+                    let host =
+                        phazeai_core::ext_host::IdeDelegateHost::new(std::sync::Arc::new(delegate));
                     mgr.scan_plugins(&host);
                     for p in mgr.get_plugins() {
                         all_names.push(format!(

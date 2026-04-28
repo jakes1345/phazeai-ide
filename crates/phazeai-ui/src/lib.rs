@@ -4,11 +4,11 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 pub mod app;
 pub mod commands;
-pub mod editor_command;
 pub mod components;
+pub mod domain_state;
+pub mod editor_command;
 pub mod lsp_bridge;
 pub mod panels;
-pub mod domain_state;
 pub mod theme;
 pub mod util;
 
@@ -21,23 +21,18 @@ pub fn init_logging() {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("phazeai")
         .join("logs");
-    
+
     std::fs::create_dir_all(&log_dir).ok();
-    
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        log_dir,
-        "phazeai-ui.log",
-    );
-    
+
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "phazeai-ui.log");
+
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
     // Keep the guard alive for the lifetime of the app
     std::mem::forget(_guard);
-    
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     tracing_subscriber::registry()
         .with(env_filter)
         .with(
@@ -45,13 +40,13 @@ pub fn init_logging() {
                 .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_target(true)
-                .with_thread_ids(true)
+                .with_thread_ids(true),
         )
         .with(
             fmt::layer()
                 .with_writer(std::io::stderr)
                 .with_ansi(true)
-                .with_target(true)
+                .with_target(true),
         )
         .init();
 }

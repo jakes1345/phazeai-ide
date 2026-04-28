@@ -112,10 +112,7 @@ pub fn resolve_within_workspace(tool_name: &str, input: &str) -> Result<PathBuf,
     // canonicalise the closest existing ancestor and re-append the rest,
     // which still defeats `..` and symlink escapes from the parent.
     let canonical = canonicalize_or_parent(raw).map_err(|e| {
-        PhazeError::tool(
-            tool_name,
-            format!("cannot resolve path '{}': {}", input, e),
-        )
+        PhazeError::tool(tool_name, format!("cannot resolve path '{}': {}", input, e))
     })?;
 
     if is_protected_system_path(&canonical) {
@@ -276,7 +273,11 @@ mod tests {
             let escape = workspace.join("..").join("..").join("..").join("etc");
             let s = escape.to_string_lossy().to_string();
             let result = resolve_within_workspace("test", &s);
-            assert!(result.is_err(), "expected ../.. to be refused, got {:?}", result);
+            assert!(
+                result.is_err(),
+                "expected ../.. to be refused, got {:?}",
+                result
+            );
         });
 
         let _ = std::fs::remove_dir_all(&workspace);

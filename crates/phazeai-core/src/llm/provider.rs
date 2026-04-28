@@ -135,16 +135,14 @@ pub fn keyring_get(entry_name: &str) -> Option<String> {
 /// Store an API key in the OS keyring. Returns the backend error as a string
 /// so UI layers can surface it to the user.
 pub fn keyring_set(entry_name: &str, value: &str) -> Result<(), String> {
-    let entry =
-        keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
     entry.set_password(value).map_err(|e| e.to_string())
 }
 
 /// Delete an API key from the OS keyring. A missing entry is treated as
 /// success (idempotent clear).
 pub fn keyring_delete(entry_name: &str) -> Result<(), String> {
-    let entry =
-        keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new(KEYRING_SERVICE, entry_name).map_err(|e| e.to_string())?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),

@@ -18,7 +18,8 @@ pub enum ThemeVariant {
     MatrixGreen,
     RootShell,
     // Light
-    Light}
+    Light,
+}
 
 impl ThemeVariant {
     pub fn all() -> &'static [ThemeVariant] {
@@ -51,7 +52,8 @@ impl ThemeVariant {
             "matrixgreen" | "matrix" => Self::MatrixGreen,
             "rootshell" | "root" => Self::RootShell,
             "light" => Self::Light,
-            _ => Self::Dark}
+            _ => Self::Dark,
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -67,7 +69,8 @@ impl ThemeVariant {
             Self::NordDark => "Nord Dark",
             Self::MatrixGreen => "Matrix Green",
             Self::RootShell => "Root Shell",
-            Self::Light => "Light"}
+            Self::Light => "Light",
+        }
     }
 }
 
@@ -163,7 +166,8 @@ pub struct PhazePalette {
     pub glass_bg: Color,
     pub glass_border: Color,
     /// Glow color for box-shadow on active/focused panels
-    pub glow: Color}
+    pub glow: Color,
+}
 
 impl PhazePalette {
     /// Derive sensible defaults for the new semantic fields from existing base
@@ -357,7 +361,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(18, 18, 18, 220),
             glass_border: Color::from_rgba8(80, 80, 80, 185),
-            glow: Color::from_rgba8(0, 122, 204, 60)}
+            glow: Color::from_rgba8(0, 122, 204, 60),
+        }
         .with_derived_defaults()
     }
 
@@ -432,7 +437,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(255, 255, 255, 210),
             glass_border: Color::from_rgba8(88, 66, 225, 185),
-            glow: Color::from_rgba8(88, 66, 225, 55)}
+            glow: Color::from_rgba8(88, 66, 225, 55),
+        }
         .with_derived_defaults()
     }
 
@@ -508,7 +514,7 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(8, 2, 22, 175), // alpha <= 180 for cosmic glass transparency
             glass_border: Color::from_rgba8(255, 240, 0, 195), // Yellow border — distinctive
-            glow: Color::from_rgba8(255, 0, 220, 130),         // Strong magenta glow
+            glow: Color::from_rgba8(255, 0, 220, 130),  // Strong magenta glow
         }
         .with_derived_defaults()
     }
@@ -585,7 +591,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(26, 10, 52, 165),
             glass_border: Color::from_rgba8(252, 86, 255, 185),
-            glow: Color::from_rgba8(252, 86, 255, 90)}
+            glow: Color::from_rgba8(252, 86, 255, 90),
+        }
         .with_derived_defaults()
     }
 
@@ -661,7 +668,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(23, 23, 33, 210), // alpha > 200 for non-cosmic opacity
             glass_border: Color::from_rgba8(120, 100, 255, 185),
-            glow: Color::from_rgba8(120, 100, 255, 80)}
+            glow: Color::from_rgba8(120, 100, 255, 80),
+        }
         .with_derived_defaults()
     }
 
@@ -737,7 +745,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(40, 42, 54, 210),
             glass_border: Color::from_rgba8(189, 147, 249, 185),
-            glow: Color::from_rgba8(189, 147, 249, 80)}
+            glow: Color::from_rgba8(189, 147, 249, 80),
+        }
         .with_derived_defaults()
     }
 
@@ -813,7 +822,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(26, 27, 38, 210),
             glass_border: Color::from_rgba8(122, 162, 247, 185),
-            glow: Color::from_rgba8(122, 162, 247, 75)}
+            glow: Color::from_rgba8(122, 162, 247, 75),
+        }
         .with_derived_defaults()
     }
 
@@ -889,7 +899,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(39, 40, 34, 215),
             glass_border: Color::from_rgba8(166, 226, 46, 180),
-            glow: Color::from_rgba8(166, 226, 46, 70)}
+            glow: Color::from_rgba8(166, 226, 46, 70),
+        }
         .with_derived_defaults()
     }
 
@@ -965,7 +976,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(46, 52, 64, 210),
             glass_border: Color::from_rgba8(136, 192, 208, 185),
-            glow: Color::from_rgba8(136, 192, 208, 75)}
+            glow: Color::from_rgba8(136, 192, 208, 75),
+        }
         .with_derived_defaults()
     }
 
@@ -1041,7 +1053,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(0, 8, 0, 210), // alpha > 200 for non-cosmic opacity
             glass_border: Color::from_rgba8(0, 255, 65, 185),
-            glow: Color::from_rgba8(0, 255, 65, 90)}
+            glow: Color::from_rgba8(0, 255, 65, 90),
+        }
         .with_derived_defaults()
     }
 
@@ -1117,7 +1130,8 @@ impl PhazePalette {
 
             glass_bg: Color::from_rgba8(0, 5, 0, 220),
             glass_border: Color::from_rgba8(0, 200, 0, 180),
-            glow: Color::from_rgba8(0, 200, 0, 85)}
+            glow: Color::from_rgba8(0, 200, 0, 85),
+        }
         .with_derived_defaults()
     }
 }
@@ -1126,7 +1140,8 @@ impl PhazePalette {
 #[derive(Debug, Clone)]
 pub struct PhazeTheme {
     pub variant: ThemeVariant,
-    pub palette: PhazePalette}
+    pub palette: PhazePalette,
+}
 
 impl Default for PhazeTheme {
     fn default() -> Self {
@@ -1138,19 +1153,22 @@ impl PhazeTheme {
     pub fn midnight_blue() -> Self {
         Self {
             variant: ThemeVariant::MidnightBlue,
-            palette: PhazePalette::midnight_blue()}
+            palette: PhazePalette::midnight_blue(),
+        }
     }
 
     pub fn dark() -> Self {
         Self {
             variant: ThemeVariant::Dark,
-            palette: PhazePalette::dark()}
+            palette: PhazePalette::dark(),
+        }
     }
 
     pub fn light() -> Self {
         Self {
             variant: ThemeVariant::Light,
-            palette: PhazePalette::light()}
+            palette: PhazePalette::light(),
+        }
     }
 
     pub fn from_variant(v: ThemeVariant) -> Self {
@@ -1166,10 +1184,12 @@ impl PhazeTheme {
             ThemeVariant::NordDark => PhazePalette::nord_dark(),
             ThemeVariant::MatrixGreen => PhazePalette::matrix_green(),
             ThemeVariant::RootShell => PhazePalette::root_shell(),
-            ThemeVariant::Light => PhazePalette::light()};
+            ThemeVariant::Light => PhazePalette::light(),
+        };
         Self {
             variant: v,
-            palette}
+            palette,
+        }
     }
 
     pub fn from_name(s: &str) -> Self {

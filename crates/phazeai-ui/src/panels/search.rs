@@ -3,7 +3,8 @@ use floem::{
     ext_event::create_ext_action,
     reactive::{create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView};
+    IntoView,
+};
 
 use crate::domain_state::SearchResult;
 use crate::util::{safe_get, safe_get_memo};
@@ -292,7 +293,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                                     }
                                     let next = match history_idx.get_untracked() {
                                         None => 0,
-                                        Some(i) => (i + 1).min(hist.len() - 1)};
+                                        Some(i) => (i + 1).min(hist.len() - 1),
+                                    };
                                     history_idx.set(Some(next));
                                     query.set(hist[next].clone());
                                 }
@@ -409,8 +411,14 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         if q.trim().is_empty() {
                             return;
                         }
-                        semantic_state.project.sidecar_query.set(q.trim().to_string());
-                        semantic_state.project.sidecar_search_nonce.update(|n| *n += 1);
+                        semantic_state
+                            .project
+                            .sidecar_query
+                            .set(q.trim().to_string());
+                        semantic_state
+                            .project
+                            .sidecar_search_nonce
+                            .update(|n| *n += 1);
                     }),
                 container(label(move || {
                     if sidecar_building.get() {
@@ -432,7 +440,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         .border_color(p.border)
                 })
                 .on_click_stop(move |_| {
-                    semantic_state2.project.sidecar_build_nonce.update(|n| *n += 1);
+                    semantic_state2
+                        .project
+                        .sidecar_build_nonce
+                        .update(|n| *n += 1);
                 }),
             ))
             .style(|s| s.flex_row().items_center().gap(6.0).width_full()),
@@ -485,7 +496,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             })
                     })
                     .on_click_stop(move |_| {
-                        semantic_state2.editor.open_file.set(Some(file_path.clone()));
+                        semantic_state2
+                            .editor
+                            .open_file
+                            .set(Some(file_path.clone()));
                         semantic_state2.editor.goto_line.set(1);
                     })
                     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
@@ -813,14 +827,16 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                         selected_idx.update(|i| {
                             *i = Some(match *i {
                                 None => 0,
-                                Some(n) => (n + 1).min(total.saturating_sub(1))});
+                                Some(n) => (n + 1).min(total.saturating_sub(1)),
+                            });
                         });
                     }
                     floem::keyboard::Key::Named(NamedKey::ArrowUp) => {
                         selected_idx.update(|i| {
                             *i = Some(match *i {
                                 None => 0,
-                                Some(n) => n.saturating_sub(1)});
+                                Some(n) => n.saturating_sub(1),
+                            });
                         });
                     }
                     floem::keyboard::Key::Named(NamedKey::Enter) => {
@@ -943,7 +959,8 @@ fn perform_search(
                         found.push(SearchResult {
                             path: root.join(parts[0]),
                             line: line_num,
-                            content: parts[2].to_string()});
+                            content: parts[2].to_string(),
+                        });
                     }
                 }
             }
@@ -971,7 +988,8 @@ fn perform_search(
                             found.push(SearchResult {
                                 path: entry.path().to_path_buf(),
                                 line: i + 1,
-                                content: line_text.to_string()});
+                                content: line_text.to_string(),
+                            });
                             if found.len() >= 500 {
                                 break;
                             }

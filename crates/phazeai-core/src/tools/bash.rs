@@ -71,10 +71,10 @@ impl Tool for BashTool {
         // rm -rf foo` over multiple turns. Per-command shell escapes are not
         // detectable here — rely on the approval gate for that.
         if let Some(root) = sandbox::workspace_root() {
-            let canonical_cwd = cwd
-                .canonicalize()
-                .unwrap_or_else(|_| cwd.clone());
-            if !canonical_cwd.starts_with(&root) && !sandbox::is_protected_system_path(&canonical_cwd) {
+            let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            if !canonical_cwd.starts_with(&root)
+                && !sandbox::is_protected_system_path(&canonical_cwd)
+            {
                 return Err(PhazeError::tool(
                     "bash",
                     format!(

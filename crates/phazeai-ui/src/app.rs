@@ -21,26 +21,29 @@ use floem::{
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, Decorators},
     window::WindowConfig,
-    Application, IntoView, Renderer};
+    Application, IntoView, Renderer,
+};
 use phazeai_core::config::LlmProvider;
 use phazeai_core::constants::ui as ui_const;
 use phazeai_core::Settings;
 use phazeai_sidecar::{SidecarClient, SidecarManager};
 
 use crate::lsp_bridge::{
-    start_lsp_bridge, DiagEntry,
-    DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry};
+    start_lsp_bridge, DiagEntry, DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry,
+};
 
 use crate::{
     commands::{execute_command, match_global_shortcut},
     components::icon::{icons, phaze_icon},
+    domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
         chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
         extensions::extensions_panel, git::git_panel, github_actions::github_actions_panel, search,
-        settings::settings_panel, terminal::terminal_panel, tests::tests_panel},
-    domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
+        settings::settings_panel, terminal::terminal_panel, tests::tests_panel,
+    },
     theme::{PhazeTheme, ThemeVariant},
-    util::safe_get};
+    util::safe_get,
+};
 
 /// Vim normal-mode motions dispatched to the active editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,7 +99,8 @@ pub enum VimMotion {
     /// Yank (copy) the current visual selection and exit visual mode.
     YankVisualSelection,
     /// Change (delete + enter insert) the current visual selection.
-    ChangeVisualSelection}
+    ChangeVisualSelection,
+}
 
 /// Global IDE state shared across all panels via Floem reactive system.
 
@@ -124,12 +128,16 @@ pub enum Tab {
     Symbols,
     GitDiff,
     TerminalOutput,
-    Tests}
+    Tests,
+}
 
 impl std::fmt::Debug for IdeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdeState")
-            .field("workspace_root", &self.project.workspace_root.get_untracked())
+            .field(
+                "workspace_root",
+                &self.project.workspace_root.get_untracked(),
+            )
             .finish()
     }
 }
@@ -177,7 +185,8 @@ struct SessionState {
     vim_mode: bool,
     theme: String,
     /// Zen mode — hides all chrome for distraction-free editing.
-    zen_mode: bool}
+    zen_mode: bool,
+}
 
 impl Default for SessionState {
     fn default() -> Self {
@@ -192,7 +201,8 @@ impl Default for SessionState {
             split_editor_down: false,
             vim_mode: false,
             theme: "Midnight Blue".to_string(),
-            zen_mode: false}
+            zen_mode: false,
+        }
     }
 }
 
@@ -289,7 +299,8 @@ fn session_commit(
         split_editor_down,
         vim_mode,
         theme,
-        zen_mode};
+        zen_mode,
+    };
     session_save_debounced(gen, ss);
 }
 
@@ -297,7 +308,9 @@ fn dirs_next_config() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
-        .inspect_err(|e| tracing::warn!(target: "phazeai_ui", error = %e, "Failed to get HOME env var"))
+        .inspect_err(
+            |e| tracing::warn!(target: "phazeai_ui", error = %e, "Failed to get HOME env var"),
+        )
         .ok()?;
     Some(home.join(".config").join("phazeai"))
 }
@@ -313,7 +326,8 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
         "OpenRouter" => Some(LlmProvider::OpenRouter),
         "LM Studio (Local)" => Some(LlmProvider::LmStudio),
         "Ollama (Local)" => Some(LlmProvider::Ollama),
-        _ => None}
+        _ => None,
+    }
 }
 
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
@@ -365,7 +379,7 @@ fn spawn_sidecar_start(
                 return;
             }
         };
-        
+
         if client_guard.clone().is_some() {
             let _ = ready_tx.send(true);
             if build_after_start {
@@ -578,7 +592,8 @@ impl IdeState {
                         if let Ok(text) = std::fs::read_to_string(&p) {
                             let _ = lsp.send(LspCommand::OpenFile {
                                 path: p.clone(),
-                                text});
+                                text,
+                            });
                         }
                     });
                 }
@@ -590,15 +605,14 @@ impl IdeState {
             let lsp_tx = lsp_cmd.clone();
             create_effect(move |_| {
                 if let Some(path) = open_file.get() {
-                    let _ = lsp_tx.send(LspCommand::RequestDocumentSymbols {
-                        path: path.clone()});
-                    let _ = lsp_tx.send(LspCommand::RequestFoldingRanges {
-                        path: path.clone()});
+                    let _ = lsp_tx.send(LspCommand::RequestDocumentSymbols { path: path.clone() });
+                    let _ = lsp_tx.send(LspCommand::RequestFoldingRanges { path: path.clone() });
                     let _ = lsp_tx.send(LspCommand::RequestCodeLens { path: path.clone() });
                     let _ = lsp_tx.send(LspCommand::RequestInlayHints {
                         path,
                         start_line: 0,
-                        end_line: 2000});
+                        end_line: 2000,
+                    });
                 }
             });
         }
@@ -801,9 +815,8 @@ impl IdeState {
                         return;
                     }
                 };
-                
-                let Some(client) = client_guard.clone()
-                else {
+
+                let Some(client) = client_guard.clone() else {
                     drop(client_guard);
                     let _ = building_tx.send(true);
                     spawn_sidecar_start(
@@ -874,7 +887,8 @@ impl IdeState {
                             Ok(g) => g,
                             Err(e) => {
                                 tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock client for search");
-                                let _ = status_tx3.send("Internal error: failed to access client".to_string());
+                                let _ = status_tx3
+                                    .send("Internal error: failed to access client".to_string());
                                 let _ = tx.send(vec![(
                                     "error".to_string(),
                                     "internal error".to_string(),
@@ -884,7 +898,7 @@ impl IdeState {
                         };
                         let client = client_guard.clone();
                         drop(client_guard);
-                        
+
                         let Some(client) = client else {
                             let _ = status_tx3.send(
                                 "Semantic search unavailable. Build the index to start the sidecar."
@@ -942,7 +956,8 @@ impl IdeState {
                                     } else {
                                         format!("semantic search failed: {e}")
                                     },
-                                )]}
+                                )],
+                            }
                         });
 
                         let _ = tx.send(results);
@@ -1191,7 +1206,8 @@ impl IdeState {
             split_open_tabs: create_rw_signal(Vec::new()),
             split_down_file: create_rw_signal(None),
             split_down_cursor: create_rw_signal(None),
-            split_down_tabs: create_rw_signal(Vec::new())};
+            split_down_tabs: create_rw_signal(Vec::new()),
+        };
 
         let ai = AiState {
             provider: ai_provider_sig,
@@ -1202,7 +1218,8 @@ impl IdeState {
             inline_edit_open: create_rw_signal(false),
             inline_edit_query: create_rw_signal(String::new()),
             token_usage_input: create_rw_signal(0),
-            token_usage_output: create_rw_signal(0)};
+            token_usage_output: create_rw_signal(0),
+        };
 
         let project = ProjectState {
             workspace_root: create_rw_signal(workspace),
@@ -1280,7 +1297,8 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
                     s.workbench.show_left_panel.set(true);
                     s.workbench.left_panel_width.set(260.0);
                 }
-            }},
+            },
+        },
         PaletteCommand {
             label: "Open Folder…",
             action: |s| {
@@ -1292,144 +1310,194 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
                     s.workbench.left_panel_width.set(300.0);
                     s.workbench.left_panel_tab.set(crate::app::Tab::Explorer);
                 }
-            }},
+            },
+        },
         PaletteCommand {
             label: "Toggle Terminal",
             action: |s| {
                 s.workbench.show_bottom_panel.update(|v| *v = !*v);
-            }},
+            },
+        },
         PaletteCommand {
             label: "Toggle Explorer",
             action: |s| {
                 s.workbench.show_left_panel.update(|v| *v = !*v);
                 let open = s.workbench.show_left_panel.get();
-                s.workbench.left_panel_width.set(if open { 260.0 } else { 0.0 });
-            }},
+                s.workbench
+                    .left_panel_width
+                    .set(if open { 260.0 } else { 0.0 });
+            },
+        },
         PaletteCommand {
             label: "Toggle AI Chat",
             action: |s| {
                 s.workbench.show_right_panel.update(|v| *v = !*v);
-            }},
+            },
+        },
         // ── All 12 themes ────────────────────────────────────────────────────
         PaletteCommand {
             label: "Theme: Midnight Blue",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::MidnightBlue));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Cyberpunk 2077",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Cyberpunk));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Synthwave '84",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Synthwave84));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Andromeda",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::Andromeda));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Dark",
             action: |s| {
-                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dark));
-            }},
+                s.workbench
+                    .theme
+                    .set(PhazeTheme::from_variant(ThemeVariant::Dark));
+            },
+        },
         PaletteCommand {
             label: "Theme: Dracula",
             action: |s| {
-                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Dracula));
-            }},
+                s.workbench
+                    .theme
+                    .set(PhazeTheme::from_variant(ThemeVariant::Dracula));
+            },
+        },
         PaletteCommand {
             label: "Theme: Tokyo Night",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::TokyoNight));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Monokai",
             action: |s| {
-                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Monokai));
-            }},
+                s.workbench
+                    .theme
+                    .set(PhazeTheme::from_variant(ThemeVariant::Monokai));
+            },
+        },
         PaletteCommand {
             label: "Theme: Nord Dark",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::NordDark));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Matrix Green",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::MatrixGreen));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Root Shell",
             action: |s| {
-                s.workbench.theme
+                s.workbench
+                    .theme
                     .set(PhazeTheme::from_variant(ThemeVariant::RootShell));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Theme: Light",
             action: |s| {
-                s.workbench.theme.set(PhazeTheme::from_variant(ThemeVariant::Light));
-            }},
+                s.workbench
+                    .theme
+                    .set(PhazeTheme::from_variant(ThemeVariant::Light));
+            },
+        },
         PaletteCommand {
             label: "Transform: To Uppercase",
-            action: |s| s.editor.transform_upper_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.transform_upper_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Transform: To Lowercase",
-            action: |s| s.editor.transform_lower_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.transform_lower_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Join Lines",
-            action: |s| s.editor.join_line_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.join_line_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Sort Lines (Ascending)",
-            action: |s| s.editor.sort_lines_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.sort_lines_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Toggle Relative Line Numbers",
-            action: |s| s.editor.relative_line_numbers.update(|v| *v = !*v)},
+            action: |s| s.editor.relative_line_numbers.update(|v| *v = !*v),
+        },
         PaletteCommand {
             label: "New Scratch File",
             action: |s| {
                 let n = s.project.scratch_counter.get() + 1;
                 s.project.scratch_counter.set(n);
                 let p = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
-                s.project.scratch_paths.update(|v: &mut Vec<PathBuf>| v.push(p.clone()));
+                s.project
+                    .scratch_paths
+                    .update(|v: &mut Vec<PathBuf>| v.push(p.clone()));
                 s.editor.open_file.set(Some(p));
-            }},
+            },
+        },
         PaletteCommand {
             label: "Go to Line/Column",
             action: |s| {
                 s.editor.goto_overlay_open.set(true);
                 s.editor.goto_overlay_input.set(String::new());
-            }},
+            },
+        },
         PaletteCommand {
             label: "Toggle Organize Imports on Save",
-            action: |s| s.editor.organize_imports_on_save.update(|v| *v = !*v)},
+            action: |s| s.editor.organize_imports_on_save.update(|v| *v = !*v),
+        },
         PaletteCommand {
             label: "Transform: To Title Case",
-            action: |s| s.editor.transform_title_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.transform_title_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Format Selection",
-            action: |s| s.editor.format_selection_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.format_selection_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Save Without Formatting",
-            action: |s| s.editor.save_no_format_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.save_no_format_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Fold All",
-            action: |s| s.editor.fold_all_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.fold_all_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Unfold All",
-            action: |s| s.editor.unfold_all_nonce.update(|v| *v += 1)},
+            action: |s| s.editor.unfold_all_nonce.update(|v| *v += 1),
+        },
         PaletteCommand {
             label: "Toggle Code Lens",
-            action: |s| s.editor.code_lens_visible.update(|v| *v = !*v)},
+            action: |s| s.editor.code_lens_visible.update(|v| *v = !*v),
+        },
     ]
 }
 
@@ -1478,7 +1546,9 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
 
 fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl IntoView {
     let is_hovered = create_rw_signal(false);
-    let active = move || state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get();
+    let active = move || {
+        state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get()
+    };
 
     let icon_color = move |p: &crate::theme::PhazePalette| {
         if active() {
@@ -1488,50 +1558,55 @@ fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl I
         }
     };
 
-    container(phaze_icon(icon_svg, 22.0, icon_color, state.workbench.theme))
-        .style(move |s| {
-            let t = state.workbench.theme.get();
-            let p = &t.palette;
-            let is_active = active();
-            let is_hov = is_hovered.get();
+    container(phaze_icon(
+        icon_svg,
+        22.0,
+        icon_color,
+        state.workbench.theme,
+    ))
+    .style(move |s| {
+        let t = state.workbench.theme.get();
+        let p = &t.palette;
+        let is_active = active();
+        let is_hov = is_hovered.get();
 
-            s.width(40.0)
-                .height(40.0)
-                .border_radius(10.0)
-                .items_center()
-                .justify_center()
-                .cursor(floem::style::CursorStyle::Pointer)
-                .margin_bottom(4.0)
-                .transition(
-                    floem::style::Background,
-                    floem::style::Transition::linear(Duration::from_millis(150)),
-                )
-                .apply_if(is_active, |s| {
-                    s.background(p.accent_dim)
-                        .box_shadow_blur(16.0)
-                        .box_shadow_color(p.glow)
-                        .box_shadow_spread(1.0)
-                })
-                .apply_if(is_hov && !is_active, |s| {
-                    s.background(p.bg_surface.with_alpha(0.3))
-                })
-        })
-        .on_click_stop(move |_| {
-            if state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get() {
-                state.workbench.show_left_panel.set(false);
-                state.workbench.left_panel_width.set(0.0);
-            } else {
-                state.workbench.left_panel_tab.set(tab);
-                state.workbench.show_left_panel.set(true);
-                state.workbench.left_panel_width.set(260.0);
-            }
-        })
-        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-            is_hovered.set(true);
-        })
-        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-            is_hovered.set(false);
-        })
+        s.width(40.0)
+            .height(40.0)
+            .border_radius(10.0)
+            .items_center()
+            .justify_center()
+            .cursor(floem::style::CursorStyle::Pointer)
+            .margin_bottom(4.0)
+            .transition(
+                floem::style::Background,
+                floem::style::Transition::linear(Duration::from_millis(150)),
+            )
+            .apply_if(is_active, |s| {
+                s.background(p.accent_dim)
+                    .box_shadow_blur(16.0)
+                    .box_shadow_color(p.glow)
+                    .box_shadow_spread(1.0)
+            })
+            .apply_if(is_hov && !is_active, |s| {
+                s.background(p.bg_surface.with_alpha(0.3))
+            })
+    })
+    .on_click_stop(move |_| {
+        if state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get() {
+            state.workbench.show_left_panel.set(false);
+            state.workbench.left_panel_width.set(0.0);
+        } else {
+            state.workbench.left_panel_tab.set(tab);
+            state.workbench.show_left_panel.set(true);
+            state.workbench.left_panel_width.set(260.0);
+        }
+    })
+    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+        is_hovered.set(true);
+    })
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+        is_hovered.set(false);
+    })
 }
 
 fn activity_bar(state: IdeState) -> impl IntoView {
@@ -1704,11 +1779,10 @@ fn left_panel(state: IdeState) -> impl IntoView {
     let extensions_wrap = container(extensions_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
-            s.width_full()
-                .height_full()
-                .apply_if(state.workbench.left_panel_tab.get() != Tab::Extensions, |s| {
-                    s.display(floem::style::Display::None)
-                })
+            s.width_full().height_full().apply_if(
+                state.workbench.left_panel_tab.get() != Tab::Extensions,
+                |s| s.display(floem::style::Display::None),
+            )
         }
     });
 
@@ -1736,11 +1810,10 @@ fn left_panel(state: IdeState) -> impl IntoView {
     .style({
         let state = state.clone();
         move |s| {
-            s.width_full()
-                .height_full()
-                .apply_if(state.workbench.left_panel_tab.get() != Tab::Containers, |s| {
-                    s.display(floem::style::Display::None)
-                })
+            s.width_full().height_full().apply_if(
+                state.workbench.left_panel_tab.get() != Tab::Containers,
+                |s| s.display(floem::style::Display::None),
+            )
         }
     });
 
@@ -2047,7 +2120,12 @@ fn status_bar(state: IdeState) -> impl IntoView {
     let left = stack((
         branch_btn,
         label(|| "   ").style(|s| s.font_size(11.0)),
-        phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.workbench.theme),
+        phaze_icon(
+            icons::BRANCH,
+            12.0,
+            move |p| p.accent,
+            state.workbench.theme,
+        ),
         label(move || format!(" {}", state.ai.model.get())).style(move |s| {
             s.color(state.workbench.theme.get().palette.text_secondary)
                 .font_size(11.0)
@@ -2135,7 +2213,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .style(move |s| {
             let p = state.workbench.theme.get().palette;
-            let has_errs = state.editor.diagnostics
+            let has_errs = state
+                .editor
+                .diagnostics
                 .get()
                 .iter()
                 .any(|d| d.severity == DiagSeverity::Error);
@@ -2157,7 +2237,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
                         DiagSeverity::Error => "⊗ ",
                         DiagSeverity::Warning => "⚠ ",
                         DiagSeverity::Info => "ℹ ",
-                        DiagSeverity::Hint => "💡 "};
+                        DiagSeverity::Hint => "💡 ",
+                    };
                     let msg = if d.message.len() > 60 {
                         let end = d.message.floor_char_boundary(60);
                         format!("{}{}…  ", prefix, &d.message[..end])
@@ -2171,7 +2252,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .style(move |s| {
             let p = state.workbench.theme.get().palette;
-            let has_err = state.editor.active_cursor
+            let has_err = state
+                .editor
+                .active_cursor
                 .get()
                 .map(|(ref path, line, _)| {
                     state.editor.diagnostics.get().iter().any(|d| {
@@ -2184,7 +2267,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
         }),
         // LSP progress indicator — shown while indexing, hidden when idle.
         label(move || {
-            state.project.lsp_progress
+            state
+                .project
+                .lsp_progress
                 .get()
                 .map(|msg| {
                     if msg.len() > 40 {
@@ -2203,8 +2288,10 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     s.display(floem::style::Display::None)
                 })
         }),
-        label(|| "AI Ready  ")
-            .style(move |s| s.color(state.workbench.theme.get().palette.success).font_size(11.0)),
+        label(|| "AI Ready  ").style(move |s| {
+            s.color(state.workbench.theme.get().palette.success)
+                .font_size(11.0)
+        }),
         // Git blame for current cursor line
         label(move || {
             let blame = state.editor.active_blame.get();
@@ -2228,12 +2315,14 @@ fn status_bar(state: IdeState) -> impl IntoView {
             let le_theme = state.workbench.theme;
             let le_hov = create_rw_signal(false);
             container(
-                label(move || format!("UTF-8 {}  ", le_state.editor.line_ending.get())).style(move |s| {
-                    let p = le_theme.get().palette;
-                    s.color(if le_hov.get() { p.accent } else { p.text_muted })
-                        .font_size(11.0)
-                        .cursor(floem::style::CursorStyle::Pointer)
-                }),
+                label(move || format!("UTF-8 {}  ", le_state.editor.line_ending.get())).style(
+                    move |s| {
+                        let p = le_theme.get().palette;
+                        s.color(if le_hov.get() { p.accent } else { p.text_muted })
+                            .font_size(11.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                    },
+                ),
             )
             .on_click_stop(move |_| {
                 // Toggle line ending and convert file bytes
@@ -2274,7 +2363,9 @@ fn status_bar(state: IdeState) -> impl IntoView {
             .on_event_stop(EventListener::PointerLeave, move |_| le_hov.set(false))
         },
         label(move || {
-            state.editor.open_file
+            state
+                .editor
+                .open_file
                 .get()
                 .as_ref()
                 .and_then(|p| p.extension())
@@ -2284,7 +2375,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     "js" | "ts" => "TypeScript  ",
                     "toml" => "TOML  ",
                     "md" => "Markdown  ",
-                    _ => "Text  "})
+                    _ => "Text  ",
+                })
                 .unwrap_or("  ")
                 .to_string()
         })
@@ -2420,7 +2512,8 @@ fn problems_view(state: IdeState) -> impl IntoView {
                     .filter(|d| match d.severity {
                         DiagSeverity::Error => show_errors.get(),
                         DiagSeverity::Warning => show_warnings.get(),
-                        _ => true})
+                        _ => true,
+                    })
                     .enumerate()
                     .collect::<Vec<_>>()
             },
@@ -2433,7 +2526,8 @@ fn problems_view(state: IdeState) -> impl IntoView {
                         DiagSeverity::Error => "⊗",
                         DiagSeverity::Warning => "⚠",
                         DiagSeverity::Info => "ℹ",
-                        DiagSeverity::Hint => "○"};
+                        DiagSeverity::Hint => "○",
+                    };
                     let filename = entry
                         .path
                         .file_name()
@@ -2453,7 +2547,8 @@ fn problems_view(state: IdeState) -> impl IntoView {
                                     DiagSeverity::Error => p.error,
                                     DiagSeverity::Warning => p.warning,
                                     DiagSeverity::Info => p.accent,
-                                    _ => p.text_muted};
+                                    _ => p.text_muted,
+                                };
                                 s.font_size(13.0).color(c).margin_right(8.0)
                             }),
                             label(move || msg.clone()).style(move |s| {
@@ -2810,7 +2905,8 @@ fn symbol_outline_panel(state: IdeState) -> impl IntoView {
                         "trait" => pal.syn_function,
                         "impl" => pal.syn_string,
                         "mod" => pal.syn_number,
-                        _ => pal.text_muted};
+                        _ => pal.text_muted,
+                    };
 
                     container(
                         stack((
@@ -2929,12 +3025,14 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
                     1 => pal.diff_added_fg,
                     2 => pal.diff_removed_fg,
                     3 => pal.diff_header_fg,
-                    _ => pal.text_secondary};
+                    _ => pal.text_secondary,
+                };
                 let bg = match kind {
                     1 => pal.diff_added_bg,
                     2 => pal.diff_removed_bg,
                     3 => pal.diff_header_bg,
-                    _ => floem::peniko::Color::TRANSPARENT};
+                    _ => floem::peniko::Color::TRANSPARENT,
+                };
                 container(label(move || text.clone()).style(move |s| {
                     s.font_size(12.0)
                         .color(color)
@@ -2970,7 +3068,8 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
         .output();
     let output = match out {
         Ok(o) => o,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
         // Try diff against staged (index) as fallback
@@ -2980,7 +3079,8 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
             .output();
         let text2 = match out2 {
             Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-            Err(_) => return vec![]};
+            Err(_) => return vec![],
+        };
         if text2.trim().is_empty() {
             return vec![];
         }
@@ -3037,15 +3137,20 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
                 bottom_panel_tab("DEBUG CONSOLE", Tab::DebugConsole, state.clone()),
                 bottom_panel_tab("PORTS", Tab::Ports, state.clone()),
                 // Close button
-                phaze_icon(icons::CLOSE, 12.0, move |p| p.text_muted, state.workbench.theme)
-                    .style(move |s| {
-                        s.margin_left(floem::unit::PxPctAuto::Auto)
-                            .padding(4.0)
-                            .cursor(floem::style::CursorStyle::Pointer)
-                    })
-                    .on_click_stop(move |_| {
-                        state.workbench.show_bottom_panel.set(false);
-                    }),
+                phaze_icon(
+                    icons::CLOSE,
+                    12.0,
+                    move |p| p.text_muted,
+                    state.workbench.theme,
+                )
+                .style(move |s| {
+                    s.margin_left(floem::unit::PxPctAuto::Auto)
+                        .padding(4.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                })
+                .on_click_stop(move |_| {
+                    state.workbench.show_bottom_panel.set(false);
+                }),
             ))
             .style(move |s| {
                 let t = state.workbench.theme.get();
@@ -3244,8 +3349,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),                     // shrink_selection
         create_rw_signal(false),                    // relative_line_numbers
         create_rw_signal(Vec::<String>::new()),     // yank_ring
-        state.editor.tab_size,                             // tab_size
-        state.editor.line_ending,                          // line_ending_out
+        state.editor.tab_size,                      // tab_size
+        state.editor.line_ending,                   // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (split pane)
         create_rw_signal(0u64),                     // transform_title_nonce
         create_rw_signal(0u64),                     // format_selection_nonce
@@ -3306,19 +3411,18 @@ fn ide_root(state: IdeState) -> impl IntoView {
                             .separator()
                             .entry(MenuItem::new("Go to Definition\tF12").action(move || {
                                 if let Some((path, line, col)) = s3.editor.active_cursor.get() {
-                                    let _ = s3.project.lsp_cmd.send(LspCommand::RequestDefinition {
-                                        path,
-                                        line,
-                                        col});
+                                    let _ = s3
+                                        .project
+                                        .lsp_cmd
+                                        .send(LspCommand::RequestDefinition { path, line, col });
                                 }
                             }))
                             .entry(MenuItem::new("Find All References\tShift+F12").action(
                                 move || {
                                     if let Some((path, line, col)) = s4.editor.active_cursor.get() {
-                                        let _ = s4.project.lsp_cmd.send(LspCommand::RequestReferences {
-                                            path,
-                                            line,
-                                            col});
+                                        let _ = s4.project.lsp_cmd.send(
+                                            LspCommand::RequestReferences { path, line, col },
+                                        );
                                         s4.workbench.show_bottom_panel.set(true);
                                         s4.workbench.bottom_panel_tab.set(Tab::References);
                                     }
@@ -3329,10 +3433,10 @@ fn ide_root(state: IdeState) -> impl IntoView {
                             }))
                             .entry(MenuItem::new("Code Actions\tCtrl+.").action(move || {
                                 if let Some((path, line, col)) = s6.editor.active_cursor.get() {
-                                    let _ = s6.project.lsp_cmd.send(LspCommand::RequestCodeActions {
-                                        path,
-                                        line,
-                                        col});
+                                    let _ = s6
+                                        .project
+                                        .lsp_cmd
+                                        .send(LspCommand::RequestCodeActions { path, line, col });
                                 }
                             }))
                             .separator()
@@ -3348,7 +3452,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) = s_explain.editor.active_cursor.get() {
+                                if let Some((ref path, line, _)) =
+                                    s_explain.editor.active_cursor.get()
+                                {
                                     let fname = path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
@@ -3362,7 +3468,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                 }
                             }))
                             .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) = s_tests.editor.active_cursor.get() {
+                                if let Some((ref path, line, _)) =
+                                    s_tests.editor.active_cursor.get()
+                                {
                                     let fname = path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
@@ -3376,14 +3484,16 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                 }
                             }))
                             .entry(MenuItem::new("🔧 Fix with AI").action(move || {
-                                if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get() {
+                                if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get()
+                                {
                                     let diags = s_fix.editor.diagnostics.get();
                                     let cur_diag = diags
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
                                         s_fix
-                                            .ai.pending_chat_inject
+                                            .ai
+                                            .pending_chat_inject
                                             .set(Some(format!("Fix this error: {}", d.message)));
                                         s_fix.workbench.show_right_panel.set(true);
                                     } else {
@@ -3407,7 +3517,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                 };
                                 if !text.trim().is_empty() {
                                     s_run
-                                        .workbench.run_in_terminal_text
+                                        .workbench
+                                        .run_in_terminal_text
                                         .set(Some(text.trim().to_string()));
                                     s_run.workbench.show_bottom_panel.set(true);
                                     s_run.workbench.bottom_panel_tab.set(Tab::Terminal);
@@ -3427,7 +3538,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         "sh" => format!("bash {}", path_str),
                                         "rb" => format!("ruby {}", path_str),
                                         "go" => format!("go run {}", path_str),
-                                        _ => format!("./{}", path_str)};
+                                        _ => format!("./{}", path_str),
+                                    };
                                     s_run_file.workbench.run_in_terminal_text.set(Some(cmd));
                                     s_run_file.workbench.show_bottom_panel.set(true);
                                     s_run_file.workbench.bottom_panel_tab.set(Tab::Terminal);
@@ -3491,7 +3603,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
                     down_s.workbench.panel_drag_active.set(true);
                     down_s.workbench.panel_drag_start_x.set(pe.pos.x);
                     down_s
-                        .workbench.panel_drag_start_width
+                        .workbench
+                        .panel_drag_start_width
                         .set(down_s.workbench.left_panel_width.get());
                 }
             })
@@ -3549,8 +3662,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),
         create_rw_signal(false),                    // relative_line_numbers
         create_rw_signal(Vec::<String>::new()),     // yank_ring
-        state.editor.tab_size,                             // tab_size
-        state.editor.line_ending,                          // line_ending_out
+        state.editor.tab_size,                      // tab_size
+        state.editor.line_ending,                   // line_ending_out
         create_rw_signal(Vec::<(u32, u32)>::new()), // lsp_folding_ranges (down pane)
         create_rw_signal(0u64),                     // transform_title_nonce
         create_rw_signal(0u64),                     // format_selection_nonce
@@ -3628,7 +3741,6 @@ fn ide_root(state: IdeState) -> impl IntoView {
             .color(p.text_primary)
     })
 }
-
 
 /// Launch the PhazeAI IDE.
 pub fn launch_phaze_ide() {
@@ -3737,7 +3849,10 @@ pub fn launch_phaze_ide() {
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
 
                             // ── Global shortcut dispatch (unified via execute_command) ──
-                            if let Some(cmd) = match_global_shortcut(&key_event.key.logical_key, &key_event.modifiers) {
+                            if let Some(cmd) = match_global_shortcut(
+                                &key_event.key.logical_key,
+                                &key_event.modifiers,
+                            ) {
                                 execute_command(&cmd, &state);
                                 return;
                             }
@@ -3783,7 +3898,10 @@ pub fn launch_phaze_ide() {
                                         }
                                         if state.workbench.command_palette_open.get() {
                                             state.workbench.command_palette_open.set(false);
-                                            state.workbench.command_palette_query.set(String::new());
+                                            state
+                                                .workbench
+                                                .command_palette_query
+                                                .set(String::new());
                                             return;
                                         }
                                         // Vim: Escape enters Normal mode / exits ex/visual
@@ -3805,7 +3923,10 @@ pub fn launch_phaze_ide() {
                                         // Tab accepts ghost text (FIM) suggestion first.
                                         if let Some(suggestion) = state.ai.ghost_text.get() {
                                             // Ghost text: insert at cursor, no prefix to delete.
-                                            state.editor.pending_completion.set(Some((suggestion, 0)));
+                                            state
+                                                .editor
+                                                .pending_completion
+                                                .set(Some((suggestion, 0)));
                                             state.ai.ghost_text.set(None);
                                             return;
                                         }
@@ -3813,14 +3934,17 @@ pub fn launch_phaze_ide() {
                                         if state.editor.completion_open.get() {
                                             let items = state.editor.completions.get();
                                             let sel = state.editor.completion_selected.get();
-                                            let prefix_b = state.editor.completion_filter_text.get().len();
+                                            let prefix_b =
+                                                state.editor.completion_filter_text.get().len();
                                             if let Some(entry) = items.get(sel) {
                                                 let text = if entry.insert_text.is_empty() {
                                                     entry.label.clone()
                                                 } else {
                                                     entry.insert_text.clone()
                                                 };
-                                                state.editor.pending_completion
+                                                state
+                                                    .editor
+                                                    .pending_completion
                                                     .set(Some((text, prefix_b)));
                                             }
                                             state.editor.completion_open.set(false);
@@ -3832,14 +3956,17 @@ pub fn launch_phaze_ide() {
                                         if state.editor.completion_open.get() {
                                             let items = state.editor.completions.get();
                                             let sel = state.editor.completion_selected.get();
-                                            let prefix_b = state.editor.completion_filter_text.get().len();
+                                            let prefix_b =
+                                                state.editor.completion_filter_text.get().len();
                                             if let Some(entry) = items.get(sel) {
                                                 let text = if entry.insert_text.is_empty() {
                                                     entry.label.clone()
                                                 } else {
                                                     entry.insert_text.clone()
                                                 };
-                                                state.editor.pending_completion
+                                                state
+                                                    .editor
+                                                    .pending_completion
                                                     .set(Some((text, prefix_b)));
                                             }
                                             state.editor.completion_open.set(false);
@@ -3849,14 +3976,17 @@ pub fn launch_phaze_ide() {
                                     }
                                     // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition; Ctrl+F12 — go to implementation
                                     floem::keyboard::NamedKey::F12 => {
-                                        if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                                        if let Some((path, line, col)) =
+                                            state.editor.active_cursor.get()
+                                        {
                                             if ctrl {
                                                 // Ctrl+F12: go to implementation
                                                 let _ = state.project.lsp_cmd.send(
                                                     LspCommand::RequestImplementation {
                                                         path,
                                                         line,
-                                                        col},
+                                                        col,
+                                                    },
                                                 );
                                             } else if shift {
                                                 // Shift+F12: find all references
@@ -3864,11 +3994,15 @@ pub fn launch_phaze_ide() {
                                                     LspCommand::RequestReferences {
                                                         path,
                                                         line,
-                                                        col},
+                                                        col,
+                                                    },
                                                 );
                                                 state.editor.references_visible.set(true);
                                                 state.workbench.show_bottom_panel.set(true);
-                                                state.workbench.bottom_panel_tab.set(Tab::References);
+                                                state
+                                                    .workbench
+                                                    .bottom_panel_tab
+                                                    .set(Tab::References);
                                             } else if alt {
                                                 // Alt+F12: peek definition
                                                 state.editor.peek_def_lines.set(vec![]);
@@ -3877,7 +4011,8 @@ pub fn launch_phaze_ide() {
                                                     LspCommand::RequestPeekDefinition {
                                                         path,
                                                         line,
-                                                        col},
+                                                        col,
+                                                    },
                                                 );
                                             } else {
                                                 // F12: go to definition
@@ -3885,7 +4020,8 @@ pub fn launch_phaze_ide() {
                                                     LspCommand::RequestDefinition {
                                                         path,
                                                         line,
-                                                        col},
+                                                        col,
+                                                    },
                                                 );
                                             }
                                         }
@@ -3897,24 +4033,23 @@ pub fn launch_phaze_ide() {
                                             if let Some((path, line, col)) =
                                                 state.editor.active_cursor.get()
                                             {
-                                                let _ =
-                                                    state.project.lsp_cmd.send(LspCommand::RequestHover {
-                                                        path,
-                                                        line,
-                                                        col});
+                                                let _ = state.project.lsp_cmd.send(
+                                                    LspCommand::RequestHover { path, line, col },
+                                                );
                                             }
                                             return;
                                         }
                                     }
                                     // F2 — rename symbol at cursor
                                     floem::keyboard::NamedKey::F2 => {
-                                        if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                                        if let Some((path, line, col)) =
+                                            state.editor.active_cursor.get()
+                                        {
                                             let word = std::fs::read_to_string(&path)
                                                 .ok()
                                                 .and_then(|content| {
-                                                    let target_line = content
-                                                        .lines()
-                                                        .nth(line as usize)?;
+                                                    let target_line =
+                                                        content.lines().nth(line as usize)?;
                                                     let col = (col as usize).min(target_line.len());
                                                     let start = target_line[..col]
                                                         .char_indices()
@@ -3997,10 +4132,10 @@ pub fn launch_phaze_ide() {
                                         })
                                         .unwrap_or_default();
                                     state.editor.completion_filter_text.set(prefix);
-                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestCompletions {
-                                        path,
-                                        line,
-                                        col});
+                                    let _ = state
+                                        .project
+                                        .lsp_cmd
+                                        .send(LspCommand::RequestCompletions { path, line, col });
                                 }
                                 state.editor.completion_selected.set(0);
                                 state.editor.completion_open.set(true);
@@ -4054,7 +4189,10 @@ pub fn launch_phaze_ide() {
                                 state.project.scratch_counter.set(n);
                                 let scratch_path =
                                     std::path::PathBuf::from(format!("scratch://untitled-{n}"));
-                                state.project.scratch_paths.update(|v: &mut Vec<PathBuf>| v.push(scratch_path.clone()));
+                                state
+                                    .project
+                                    .scratch_paths
+                                    .update(|v: &mut Vec<PathBuf>| v.push(scratch_path.clone()));
                                 state.editor.open_file.set(Some(scratch_path));
                                 return;
                             }
@@ -4069,9 +4207,11 @@ pub fn launch_phaze_ide() {
                                 if !open {
                                     state.editor.ws_syms_query.set(String::new());
                                     // Kick off an empty-query search to pre-populate list.
-                                    let _ =
-                                        state.project.lsp_cmd.send(LspCommand::RequestWorkspaceSymbols {
-                                            query: String::new()});
+                                    let _ = state.project.lsp_cmd.send(
+                                        LspCommand::RequestWorkspaceSymbols {
+                                            query: String::new(),
+                                        },
+                                    );
                                 }
                                 return;
                             }
@@ -4079,10 +4219,10 @@ pub fn launch_phaze_ide() {
                             // Ctrl+. → code actions
                             if ctrl && key_event.key.logical_key == Key::Character(".".into()) {
                                 if let Some((path, line, col)) = state.editor.active_cursor.get() {
-                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestCodeActions {
-                                        path,
-                                        line,
-                                        col});
+                                    let _ = state
+                                        .project
+                                        .lsp_cmd
+                                        .send(LspCommand::RequestCodeActions { path, line, col });
                                 }
                                 state.editor.code_actions_open.set(true);
                                 return;
@@ -4095,10 +4235,10 @@ pub fn launch_phaze_ide() {
                                     == Key::Named(floem::keyboard::NamedKey::Space)
                             {
                                 if let Some((path, line, col)) = state.editor.active_cursor.get() {
-                                    let _ = state.project.lsp_cmd.send(LspCommand::RequestSignatureHelp {
-                                        path,
-                                        line,
-                                        col});
+                                    let _ = state
+                                        .project
+                                        .lsp_cmd
+                                        .send(LspCommand::RequestSignatureHelp { path, line, col });
                                 }
                                 return;
                             }
@@ -4122,12 +4262,17 @@ pub fn launch_phaze_ide() {
                                     match ch.as_str() {
                                         // Ctrl+= / Ctrl++ — zoom in editor font
                                         "=" | "+" => {
-                                            state.editor.font_size.update(|v| *v = (*v + 1).min(40));
+                                            state
+                                                .editor
+                                                .font_size
+                                                .update(|v| *v = (*v + 1).min(40));
                                             return;
                                         }
                                         // Ctrl+- — zoom out editor font
                                         "-" => {
-                                            state.editor.font_size
+                                            state
+                                                .editor
+                                                .font_size
                                                 .update(|v| *v = v.saturating_sub(1).max(8));
                                             return;
                                         }
@@ -4138,8 +4283,13 @@ pub fn launch_phaze_ide() {
                                         }
                                         // Ctrl+D — vim half-page down OR multi-cursor
                                         "d" => {
-                                            if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
-                                                state.editor.vim_motion.set(Some(VimMotion::HalfPageDown));
+                                            if state.editor.vim_mode.get()
+                                                && state.editor.vim_normal_mode.get()
+                                            {
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::HalfPageDown));
                                             } else {
                                                 state.editor.ctrl_d_nonce.update(|v| *v += 1);
                                             }
@@ -4147,8 +4297,13 @@ pub fn launch_phaze_ide() {
                                         }
                                         // Ctrl+U — vim half-page up
                                         "u" => {
-                                            if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
-                                                state.editor.vim_motion.set(Some(VimMotion::HalfPageUp));
+                                            if state.editor.vim_mode.get()
+                                                && state.editor.vim_normal_mode.get()
+                                            {
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::HalfPageUp));
                                                 return;
                                             }
                                         }
@@ -4208,7 +4363,8 @@ pub fn launch_phaze_ide() {
                                     if ch.as_str() == "v" {
                                         let ring = state.editor.yank_ring.get();
                                         if !ring.is_empty() {
-                                            let idx = (state.editor.yank_ring_idx.get() + 1) % ring.len();
+                                            let idx =
+                                                (state.editor.yank_ring_idx.get() + 1) % ring.len();
                                             state.editor.yank_ring_idx.set(idx);
                                             let text = ring[idx].clone();
                                             state.editor.pending_completion.set(Some((text, 0)));
@@ -4237,46 +4393,74 @@ pub fn launch_phaze_ide() {
                                         state.editor.vim_pending_key.set(None);
                                         match (prev, ch_str) {
                                             ('d', "d") => {
-                                                state.editor.vim_motion.set(Some(VimMotion::DeleteLine));
-                                                state.editor.vim_last_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::DeleteLine));
+                                                state
+                                                    .editor
+                                                    .vim_last_motion
                                                     .set(Some(VimMotion::DeleteLine));
                                             }
                                             ('g', "g") => {
-                                                state.editor.vim_motion.set(Some(VimMotion::GotoFileTop));
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::GotoFileTop));
                                             }
                                             ('y', "y") => {
-                                                state.editor.vim_motion.set(Some(VimMotion::YankLine));
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::YankLine));
                                             }
                                             ('c', "c") => {
                                                 state.editor.vim_normal_mode.set(false);
-                                                state.editor.vim_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
                                                     .set(Some(VimMotion::ChangeWholeLine));
-                                                state.editor.vim_last_motion
+                                                state
+                                                    .editor
+                                                    .vim_last_motion
                                                     .set(Some(VimMotion::ChangeWholeLine));
                                             }
                                             ('c', "w") => {
                                                 state.editor.vim_normal_mode.set(false);
-                                                state.editor.vim_motion.set(Some(VimMotion::ChangeWord));
-                                                state.editor.vim_last_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
+                                                    .set(Some(VimMotion::ChangeWord));
+                                                state
+                                                    .editor
+                                                    .vim_last_motion
                                                     .set(Some(VimMotion::ChangeWord));
                                             }
                                             ('r', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.editor.vim_motion
+                                                    state
+                                                        .editor
+                                                        .vim_motion
                                                         .set(Some(VimMotion::ReplaceChar(c)));
-                                                    state.editor.vim_last_motion
+                                                    state
+                                                        .editor
+                                                        .vim_last_motion
                                                         .set(Some(VimMotion::ReplaceChar(c)));
                                                 }
                                             }
                                             ('m', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.editor.vim_motion
+                                                    state
+                                                        .editor
+                                                        .vim_motion
                                                         .set(Some(VimMotion::SetMark(c)));
                                                 }
                                             }
                                             ('`', _) => {
                                                 if let Some(c) = ch_str.chars().next() {
-                                                    state.editor.vim_motion
+                                                    state
+                                                        .editor
+                                                        .vim_motion
                                                         .set(Some(VimMotion::GotoMark(c)));
                                                 }
                                             }
@@ -4289,15 +4473,21 @@ pub fn launch_phaze_ide() {
                                     if state.editor.vim_visual_mode.get_untracked() {
                                         match ch_str {
                                             "d" | "x" => {
-                                                state.editor.vim_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
                                                     .set(Some(VimMotion::DeleteVisualSelection));
                                                 state.editor.vim_visual_mode.set(false);
-                                                state.editor.vim_last_motion
+                                                state
+                                                    .editor
+                                                    .vim_last_motion
                                                     .set(Some(VimMotion::DeleteVisualSelection));
                                                 return;
                                             }
                                             "y" => {
-                                                state.editor.vim_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
                                                     .set(Some(VimMotion::YankVisualSelection));
                                                 state.editor.vim_visual_mode.set(false);
                                                 return;
@@ -4305,9 +4495,13 @@ pub fn launch_phaze_ide() {
                                             "c" => {
                                                 state.editor.vim_visual_mode.set(false);
                                                 state.editor.vim_normal_mode.set(false);
-                                                state.editor.vim_motion
+                                                state
+                                                    .editor
+                                                    .vim_motion
                                                     .set(Some(VimMotion::ChangeVisualSelection));
-                                                state.editor.vim_last_motion
+                                                state
+                                                    .editor
+                                                    .vim_last_motion
                                                     .set(Some(VimMotion::ChangeVisualSelection));
                                                 return;
                                             }
@@ -4330,10 +4524,16 @@ pub fn launch_phaze_ide() {
                                             state.editor.vim_motion.set(Some(VimMotion::Right));
                                         }
                                         "w" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::WordForward));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::WordForward));
                                         }
                                         "b" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::WordBackward));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::WordBackward));
                                         }
                                         "0" => {
                                             state.editor.vim_motion.set(Some(VimMotion::LineStart));
@@ -4342,19 +4542,30 @@ pub fn launch_phaze_ide() {
                                             state.editor.vim_motion.set(Some(VimMotion::LineEnd));
                                         }
                                         "x" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::DeleteChar));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::DeleteChar));
                                         }
                                         "i" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion.set(Some(VimMotion::EnterInsert));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::EnterInsert));
                                         }
                                         "a" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion.set(Some(VimMotion::EnterInsertAfter));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::EnterInsertAfter));
                                         }
                                         "o" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion
+                                            state
+                                                .editor
+                                                .vim_motion
                                                 .set(Some(VimMotion::EnterInsertNewlineBelow));
                                         }
                                         // p / P — paste from vim register
@@ -4362,50 +4573,77 @@ pub fn launch_phaze_ide() {
                                             state.editor.vim_motion.set(Some(VimMotion::Paste));
                                         }
                                         "P" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::PasteBefore));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::PasteBefore));
                                         }
                                         // G — go to end of file
                                         "G" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::GotoFileBottom));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::GotoFileBottom));
                                         }
                                         // A — insert at end of line
                                         "A" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion.set(Some(VimMotion::InsertAtLineEnd));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::InsertAtLineEnd));
                                         }
                                         // I — insert at start of line
                                         "I" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion
+                                            state
+                                                .editor
+                                                .vim_motion
                                                 .set(Some(VimMotion::InsertAtLineStart));
                                         }
                                         // C — change to end of line (delete + insert)
                                         "C" => {
                                             state.editor.vim_normal_mode.set(false);
-                                            state.editor.vim_motion.set(Some(VimMotion::ChangeToLineEnd));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::ChangeToLineEnd));
                                         }
                                         // D — delete to end of line
                                         "D" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::DeleteToLineEnd));
-                                            state.editor.vim_last_motion
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::DeleteToLineEnd));
+                                            state
+                                                .editor
+                                                .vim_last_motion
                                                 .set(Some(VimMotion::DeleteToLineEnd));
                                         }
                                         // % — jump to matching bracket
                                         "%" => {
-                                            state.editor.vim_motion
+                                            state
+                                                .editor
+                                                .vim_motion
                                                 .set(Some(VimMotion::JumpMatchingBracket));
                                         }
                                         // v — start char-wise visual mode
                                         "v" => {
                                             state.editor.vim_visual_mode.set(true);
                                             state.editor.vim_visual_line.set(false);
-                                            state.editor.vim_motion.set(Some(VimMotion::VisualCharStart));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::VisualCharStart));
                                         }
                                         // V — start line-wise visual mode
                                         "V" => {
                                             state.editor.vim_visual_mode.set(true);
                                             state.editor.vim_visual_line.set(true);
-                                            state.editor.vim_motion.set(Some(VimMotion::VisualLineStart));
+                                            state
+                                                .editor
+                                                .vim_motion
+                                                .set(Some(VimMotion::VisualLineStart));
                                         }
                                         // Escape in visual mode — return to normal
                                         // (handled in NamedKey::Escape section below)
@@ -4466,8 +4704,15 @@ pub fn launch_phaze_ide() {
                             split_editor: state.editor.split_editor.get_untracked(),
                             split_editor_down: state.editor.split_editor_down.get_untracked(),
                             vim_mode: state.editor.vim_mode.get_untracked(),
-                            theme: state.workbench.theme.get_untracked().variant.name().to_string(),
-                            zen_mode: state.workbench.zen_mode.get_untracked()});
+                            theme: state
+                                .workbench
+                                .theme
+                                .get_untracked()
+                                .variant
+                                .name()
+                                .to_string(),
+                            zen_mode: state.workbench.zen_mode.get_untracked(),
+                        });
                     }
                 })
             },

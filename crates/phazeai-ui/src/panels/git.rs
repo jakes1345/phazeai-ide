@@ -8,15 +8,17 @@ use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
-    IntoView};
+    IntoView,
+};
 use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
 use crate::domain_state::IdeState;
 use crate::{
-    app::{show_toast},
+    app::show_toast,
     components::icon::{icons, phaze_icon},
     theme::PhazeTheme,
-    util::safe_get};
+    util::safe_get,
+};
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -26,13 +28,15 @@ pub enum GitFileStatus {
     Added,
     Deleted,
     Untracked,
-    Renamed}
+    Renamed,
+}
 
 #[derive(Clone, Debug)]
 pub struct GitFileEntry {
     pub status: GitFileStatus,
     pub path: String,
-    pub staged: bool}
+    pub staged: bool,
+}
 
 impl GitFileEntry {
     fn badge(&self) -> &'static str {
@@ -41,7 +45,8 @@ impl GitFileEntry {
             GitFileStatus::Added => "A",
             GitFileStatus::Deleted => "D",
             GitFileStatus::Untracked => "U",
-            GitFileStatus::Renamed => "R"}
+            GitFileStatus::Renamed => "R",
+        }
     }
 
     fn badge_color(&self, p: &crate::theme::PhazePalette) -> floem::peniko::Color {
@@ -50,7 +55,8 @@ impl GitFileEntry {
             GitFileStatus::Added => p.git_added,
             GitFileStatus::Deleted => p.git_deleted,
             GitFileStatus::Untracked => p.git_untracked,
-            GitFileStatus::Renamed => p.warning}
+            GitFileStatus::Renamed => p.warning,
+        }
     }
 }
 
@@ -58,7 +64,8 @@ impl GitFileEntry {
 pub struct GitStatusData {
     pub staged: Vec<GitFileEntry>,
     pub unstaged: Vec<GitFileEntry>,
-    pub untracked: Vec<GitFileEntry>}
+    pub untracked: Vec<GitFileEntry>,
+}
 
 /// A single commit entry from `git log`.
 #[derive(Clone, Debug)]
@@ -66,7 +73,8 @@ pub struct CommitEntry {
     pub hash: String,
     pub message: String,
     pub author: String,
-    pub date: String}
+    pub date: String,
+}
 
 /// A commit log entry with both full and short hash, for the COMMIT LOG section.
 #[derive(Clone, Debug)]
@@ -80,7 +88,8 @@ pub struct CommitLogEntry {
     /// Author name.
     pub author: String,
     /// Human-readable relative time ("2 hours ago").
-    pub relative_time: String}
+    pub relative_time: String,
+}
 
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
@@ -98,7 +107,8 @@ fn parse_porcelain(output: &str) -> GitStatusData {
             data.untracked.push(GitFileEntry {
                 status: GitFileStatus::Untracked,
                 path,
-                staged: false});
+                staged: false,
+            });
             continue;
         }
 
@@ -109,13 +119,15 @@ fn parse_porcelain(output: &str) -> GitStatusData {
             data.staged.push(GitFileEntry {
                 status: s,
                 path: path.clone(),
-                staged: true});
+                staged: true,
+            });
         }
         if let Some(s) = unstaged_status {
             data.unstaged.push(GitFileEntry {
                 status: s,
                 path,
-                staged: false});
+                staged: false,
+            });
         }
     }
     data
@@ -127,7 +139,8 @@ fn char_to_status(c: char) -> Option<GitFileStatus> {
         'A' => Some(GitFileStatus::Added),
         'D' => Some(GitFileStatus::Deleted),
         'R' => Some(GitFileStatus::Renamed),
-        _ => None}
+        _ => None,
+    }
 }
 
 fn run_git_status(root: &std::path::Path) -> GitStatusData {
@@ -137,7 +150,8 @@ fn run_git_status(root: &std::path::Path) -> GitStatusData {
         .output();
     match out {
         Ok(o) if o.status.success() => parse_porcelain(&String::from_utf8_lossy(&o.stdout)),
-        _ => GitStatusData::default()}
+        _ => GitStatusData::default(),
+    }
 }
 
 fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
@@ -459,7 +473,8 @@ fn run_git_diff_head(root: &std::path::Path) -> String {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
-        Err(e) => e.to_string()}
+        Err(e) => e.to_string(),
+    }
 }
 
 /// A single rendered line from a diff, carrying enough context to extract a hunk patch.
@@ -470,7 +485,8 @@ struct DiffDisplayLine {
     /// The character that classifies the line: '+', '-', '@', 'd' (diff/---/+++ header), ' '
     kind: char,
     /// Index into the hunk list: Some(n) means this is hunk header n, None otherwise.
-    hunk_index: Option<usize>}
+    hunk_index: Option<usize>,
+}
 
 /// Parse a raw `git diff` string into display lines.
 /// Also returns a parallel `hunks` vec where each entry is the patch text for that hunk
@@ -507,14 +523,16 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: 'd',
-                hunk_index: None});
+                hunk_index: None,
+            });
         } else if line.starts_with("--- ") || line.starts_with("+++ ") {
             file_header.push(line.to_string());
             let kind = if line.starts_with("--- ") { '-' } else { '+' };
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind,
-                hunk_index: None});
+                hunk_index: None,
+            });
         } else if line.starts_with("@@ ") {
             // Flush previous hunk body.
             if in_hunk && !current_hunk_body.is_empty() {
@@ -536,19 +554,22 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: '@',
-                hunk_index: Some(hunk_idx)});
+                hunk_index: Some(hunk_idx),
+            });
         } else if in_hunk {
             current_hunk_body.push(line.to_string());
             let kind = line.chars().next().unwrap_or(' ');
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind,
-                hunk_index: None});
+                hunk_index: None,
+            });
         } else {
             lines.push(DiffDisplayLine {
                 text: line.to_string(),
                 kind: ' ',
-                hunk_index: None});
+                hunk_index: None,
+            });
         }
     }
 
@@ -612,7 +633,8 @@ fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
-        Err(e) => e.to_string()}
+        Err(e) => e.to_string(),
+    }
 }
 
 /// Loads the 50 most recent commits via `git log`.
@@ -634,7 +656,8 @@ fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
                     hash: parts[0].to_string(),
                     message: parts[1].to_string(),
                     author: parts[2].to_string(),
-                    date: parts[3].to_string()})
+                    date: parts[3].to_string(),
+                })
             } else {
                 None
             }
@@ -663,7 +686,8 @@ fn run_git_log_full(root: &std::path::Path, limit: usize) -> Vec<CommitLogEntry>
                     short_hash: parts[1].to_string(),
                     message: parts[2].to_string(),
                     author: parts[3].to_string(),
-                    relative_time: parts[4].to_string()})
+                    relative_time: parts[4].to_string(),
+                })
             } else {
                 None
             }
@@ -685,7 +709,8 @@ pub struct BlameEntry {
     /// Commit date `YYYY-MM-DD`.
     pub date: String,
     /// The source line content.
-    pub content: String}
+    pub content: String,
+}
 
 fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
     // Format (from `git blame --date=short`):
@@ -726,7 +751,8 @@ fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
         hash,
         author,
         date,
-        content}
+        content,
+    }
 }
 
 /// Run `git blame --date=short <path>` and return per-line blame info.
@@ -738,7 +764,8 @@ fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return vec![]};
+        Err(_) => return vec![],
+    };
     if !out.status.success() || out.stdout.is_empty() {
         return vec![];
     }
@@ -863,14 +890,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         let root_for_watch = state.project.workspace_root.get_untracked();
         std::thread::spawn(move || {
             let git_index = root_for_watch.join(".git").join("index");
-            let mut last_mtime = git_index.metadata()
-                .ok()
-                .and_then(|m| m.modified().ok());
+            let mut last_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                let current_mtime = git_index.metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok());
+                let current_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
                 if current_mtime != last_mtime {
                     tracing::debug!(target: "phazeai_ui", "Git index changed, triggering refresh");
                     last_mtime = current_mtime;
@@ -2046,7 +2069,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let result = rt.block_on(async move {
                 let client = match settings.build_llm_client() {
                     Ok(c) => c,
-                    Err(_) => return String::new()};
+                    Err(_) => return String::new(),
+                };
                 let agent = Agent::new(client);
                 let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
                 let mut accumulated = String::new();
@@ -2246,7 +2270,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 Err(e) => status_msg.set(format!(
                     "Cherry-pick error: {}",
                     e.lines().next().unwrap_or("?")
-                ))}
+                )),
+            }
         }
     });
 
@@ -2675,7 +2700,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 match result {
                     Ok(_) => stash_list_status.set(format!("Applied stash@{{{idx}}}")),
                     Err(e) => stash_list_status
-                        .set(format!("Apply error: {}", e.lines().next().unwrap_or("?")))}
+                        .set(format!("Apply error: {}", e.lines().next().unwrap_or("?"))),
+                }
                 let root = root_sa.get();
                 let tx = reload_tx.clone();
                 std::thread::spawn(move || {
@@ -2696,7 +2722,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 match result {
                     Ok(_) => stash_list_status.set(format!("Dropped stash@{{{idx}}}")),
                     Err(e) => stash_list_status
-                        .set(format!("Drop error: {}", e.lines().next().unwrap_or("?")))}
+                        .set(format!("Drop error: {}", e.lines().next().unwrap_or("?"))),
+                }
                 let root = root_sd.get();
                 let tx = reload_tx.clone();
                 std::thread::spawn(move || {
@@ -3110,7 +3137,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 Err(e) => tag_status.set(format!(
                     "Push tags error: {}",
                     e.lines().next().unwrap_or("?")
-                ))}
+                )),
+            }
         }
     });
     let push_tags_hov = create_rw_signal(false);
@@ -3636,7 +3664,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     '-' => p.git_deleted,
                     '@' => p.info,
                     'd' => p.text_muted,
-                    _ => p.text_primary};
+                    _ => p.text_primary,
+                };
                 s.font_size(10.0)
                     .color(col)
                     .font_family("monospace".to_string())
@@ -4036,7 +4065,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 enum SectionKind {
     Staged,
     Unstaged,
-    Untracked}
+    Untracked,
+}
 
 fn git_section(
     title: &'static str,
@@ -4062,7 +4092,8 @@ fn git_section(
                 let count = match kind {
                     SectionKind::Staged => data.staged.len(),
                     SectionKind::Unstaged => data.unstaged.len(),
-                    SectionKind::Untracked => data.untracked.len()};
+                    SectionKind::Untracked => data.untracked.len(),
+                };
                 format!("{title} ({count})")
             })
             .style(move |s| {
@@ -4140,7 +4171,8 @@ fn git_section(
             match kind {
                 SectionKind::Staged => data.staged,
                 SectionKind::Unstaged => data.unstaged,
-                SectionKind::Untracked => data.untracked}
+                SectionKind::Untracked => data.untracked,
+            }
         },
         |entry| entry.path.clone(),
         {
@@ -4173,7 +4205,8 @@ fn git_section(
                 let primary_label = match kind {
                     SectionKind::Staged => "−",
                     SectionKind::Unstaged => "+",
-                    SectionKind::Untracked => "+"};
+                    SectionKind::Untracked => "+",
+                };
                 let primary_btn = container(label(move || primary_label).style(move |s| {
                     let t = theme.get();
                     let p = &t.palette;
@@ -4207,7 +4240,8 @@ fn git_section(
                         let result = match kind {
                             SectionKind::Staged => run_git_reset(&r, &path),
                             SectionKind::Unstaged => run_git_add(&r, &path),
-                            SectionKind::Untracked => run_git_add(&r, &path)};
+                            SectionKind::Untracked => run_git_add(&r, &path),
+                        };
                         let _ = tx.send(result);
                     });
                 })
@@ -4340,7 +4374,8 @@ fn git_section(
     let empty_label_text = match kind {
         SectionKind::Staged => "No staged changes",
         SectionKind::Unstaged => "No unstaged changes",
-        SectionKind::Untracked => "No untracked files"};
+        SectionKind::Untracked => "No untracked files",
+    };
 
     let empty_state = label(move || empty_label_text.to_string()).style(move |s| {
         let t = theme.get();
@@ -4348,7 +4383,8 @@ fn git_section(
         let is_empty = match kind {
             SectionKind::Staged => git_data.get().staged.is_empty(),
             SectionKind::Unstaged => git_data.get().unstaged.is_empty(),
-            SectionKind::Untracked => git_data.get().untracked.is_empty()};
+            SectionKind::Untracked => git_data.get().untracked.is_empty(),
+        };
         s.font_size(11.0)
             .color(p.text_muted)
             .padding_left(16.0)

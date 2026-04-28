@@ -91,7 +91,9 @@ impl ToolApprovalManager {
                 // output_path, url) means approving "bash echo hi" doesn't blanket
                 // approve "bash rm -rf /". Falls back to full params hash for
                 // tools we don't know structurally.
-                !self.approved_tools.contains(&Self::approval_key(tool_name, params))
+                !self
+                    .approved_tools
+                    .contains(&Self::approval_key(tool_name, params))
             }
         }
     }
@@ -110,8 +112,7 @@ impl ToolApprovalManager {
                     .unwrap_or("")
                     .hash(&mut hasher);
             }
-            "edit_file" | "write_file" | "read_file" | "delete_path"
-            | "create_directory" => {
+            "edit_file" | "write_file" | "read_file" | "delete_path" | "create_directory" => {
                 params
                     .get("path")
                     .and_then(|v| v.as_str())

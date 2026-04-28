@@ -1,9 +1,10 @@
-use std::path::PathBuf;
-use floem::reactive::RwSignal;
 use crate::app::VimMotion;
 use crate::lsp_bridge::{
-    CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry,
-    ReferenceEntry, SymbolEntry, InlayHintEntry};
+    CodeAction, CodeLensEntry, CompletionEntry, DefinitionResult, DiagEntry, InlayHintEntry,
+    ReferenceEntry, SymbolEntry,
+};
+use floem::reactive::RwSignal;
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct EditorState {
@@ -27,7 +28,7 @@ pub struct EditorState {
     pub relative_line_numbers: RwSignal<bool>,
     pub line_ending: RwSignal<&'static str>,
     pub active_readonly: RwSignal<bool>,
-    
+
     // LSP & Intelligence
     pub diagnostics: RwSignal<Vec<DiagEntry>>,
     pub completions: RwSignal<Vec<CompletionEntry>>,
@@ -45,7 +46,7 @@ pub struct EditorState {
     pub inlay_hints: RwSignal<Vec<InlayHintEntry>>,
     pub code_lens: RwSignal<Vec<CodeLensEntry>>,
     pub folding_ranges: RwSignal<Vec<(u32, u32)>>,
-    
+
     // Nonces & Actions
     pub comment_toggle_nonce: RwSignal<u64>,
     pub ctrl_d_nonce: RwSignal<u64>,
@@ -69,7 +70,7 @@ pub struct EditorState {
     pub yank_ring: RwSignal<Vec<String>>,
     pub yank_ring_idx: RwSignal<usize>,
     pub split_editor_down: RwSignal<bool>,
-    
+
     // LSP & Overlays
     pub rename_open: RwSignal<bool>,
     pub rename_query: RwSignal<String>,
@@ -82,7 +83,7 @@ pub struct EditorState {
     pub goto_overlay_input: RwSignal<String>,
     pub peek_def_open: RwSignal<bool>,
     pub peek_def_lines: RwSignal<Vec<String>>,
-    
+
     // Nonces & Toggles
     pub col_cursor_up_nonce: RwSignal<u64>,
     pub col_cursor_down_nonce: RwSignal<u64>,
@@ -94,11 +95,12 @@ pub struct EditorState {
     pub organize_imports_on_save: RwSignal<bool>,
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     pub inlay_hints_toggle: RwSignal<bool>,
-    
+
     // Split View State
     pub split_open_file: RwSignal<Option<PathBuf>>,
     pub split_active_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
     pub split_open_tabs: RwSignal<Vec<PathBuf>>,
     pub split_down_file: RwSignal<Option<PathBuf>>,
     pub split_down_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
-    pub split_down_tabs: RwSignal<Vec<PathBuf>>}
+    pub split_down_tabs: RwSignal<Vec<PathBuf>>,
+}

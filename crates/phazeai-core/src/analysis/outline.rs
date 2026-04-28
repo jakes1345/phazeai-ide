@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::path::Path;
-use tree_sitter::{Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 /// Reparent any symbol whose byte range is fully inside another symbol's byte range
 /// as a child of the outer one. Functions nested inside impl/class become `Method`.

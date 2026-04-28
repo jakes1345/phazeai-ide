@@ -1,6 +1,5 @@
 mod approval;
 mod bash;
-pub mod sandbox;
 mod browse;
 pub mod copy_path;
 mod create_directory;
@@ -19,6 +18,7 @@ mod memory;
 mod move_path;
 mod now;
 mod open;
+pub mod sandbox;
 mod screenshot;
 mod traits;
 mod web_search;

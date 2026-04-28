@@ -129,7 +129,10 @@ impl LspClient {
         thread::spawn(move || {
             Self::reader_loop(stdout, event_tx_clone, pending_clone);
             alive_clone.store(false, Ordering::SeqCst);
-            tracing::warn!("LSP server '{}' reader loop exited (process likely died)", server_name_clone);
+            tracing::warn!(
+                "LSP server '{}' reader loop exited (process likely died)",
+                server_name_clone
+            );
         });
 
         Ok(client)

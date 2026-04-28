@@ -8,13 +8,13 @@
 /// Protocol spec: https://modelcontextprotocol.io/specification
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
 
 const MAX_RESTARTS_PER_WINDOW: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);

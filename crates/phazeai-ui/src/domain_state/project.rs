@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use floem::reactive::RwSignal;
 use phazeai_sidecar::SidecarClient;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ProjectState {

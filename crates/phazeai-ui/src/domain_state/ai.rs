@@ -10,4 +10,5 @@ pub struct AiState {
     pub inline_edit_open: RwSignal<bool>,
     pub inline_edit_query: RwSignal<String>,
     pub token_usage_input: RwSignal<u64>,
-    pub token_usage_output: RwSignal<u64>}
+    pub token_usage_output: RwSignal<u64>,
+}

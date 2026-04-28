@@ -1,7 +1,8 @@
 use floem::{
     reactive::{create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, Decorators},
-    IntoView};
+    IntoView,
+};
 
 use crate::theme::PhazeTheme;
 use crate::util::safe_get;
@@ -10,14 +11,16 @@ use crate::util::safe_get;
 pub struct TabItem {
     pub id: String,
     pub label: String,
-    pub icon: Option<String>}
+    pub icon: Option<String>,
+}
 
 impl TabItem {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
-            icon: None}
+            icon: None,
+        }
     }
 
     pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
