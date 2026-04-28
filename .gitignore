@@ -69,6 +69,9 @@ final_ui_v*.png
 # Sisyphus internal state
 .sisyphus/
 
+# Claude Code harness state (per-project agent locks, hidden FUSE files, etc.)
+.claude/
+
 # Training datasets (too large for git)
 training/datasets/*.jsonl
 training/datasets/**/*.jsonl
