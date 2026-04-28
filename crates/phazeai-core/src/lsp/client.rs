@@ -85,6 +85,23 @@ impl LspClient {
 
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
+        let stderr = child.stderr.take().ok_or("No stderr")?;
+
+        // Drain stderr into the log so language-server crashes are visible
+        // (and so the OS pipe never fills and blocks the child's writes).
+        let stderr_name = server_cmd.to_string();
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    tracing::warn!(
+                        target: "phazeai_core::lsp::stderr",
+                        server = %stderr_name,
+                        "{line}"
+                    );
+                }
+            }
+        });
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(stdin)));
         let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>> =

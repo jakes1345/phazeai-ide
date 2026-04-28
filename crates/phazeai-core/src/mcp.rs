@@ -140,12 +140,16 @@ impl McpClient {
             .stdout
             .take()
             .ok_or_else(|| "Failed to get stdout of MCP server".to_string())?;
+        let stderr = process
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to get stderr of MCP server".to_string())?;
 
         let stdin = Arc::new(Mutex::new(Box::new(stdin) as Box<dyn Write + Send>));
         let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        // Spawn reader thread
+        // Spawn reader thread for stdout (JSON-RPC framing).
         let pending_clone = pending.clone();
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
@@ -154,6 +158,24 @@ impl McpClient {
             Self::read_loop(stdout, pending_clone);
             alive_clone.store(false, Ordering::SeqCst);
             tracing::warn!("MCP server '{name_clone}' reader loop exited (EOF)");
+        });
+
+        // Drain stderr into the structured log so server crashes/diagnostics
+        // are visible. Without this the pipe fills and the child blocks on
+        // its own stderr writes; the only way to see MCP failures becomes
+        // staring at "no tools registered" with no actionable error.
+        let stderr_name = config.name.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    tracing::warn!(
+                        target: "phazeai_core::mcp::stderr",
+                        server = %stderr_name,
+                        "{line}"
+                    );
+                }
+            }
         });
 
         let mut client = Self {
@@ -678,3 +700,27 @@ impl Default for McpManager {
 }
 
 use std::io::Read;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_restart_caps_at_three_per_window() {
+        let mut m = McpManager::new();
+        assert!(m.allow_restart("server-a"));
+        assert!(m.allow_restart("server-a"));
+        assert!(m.allow_restart("server-a"));
+        assert!(!m.allow_restart("server-a"));
+    }
+
+    #[test]
+    fn allow_restart_is_per_server_name() {
+        let mut m = McpManager::new();
+        for _ in 0..MAX_RESTARTS_PER_WINDOW {
+            assert!(m.allow_restart("a"));
+        }
+        assert!(!m.allow_restart("a"));
+        assert!(m.allow_restart("b"));
+    }
+}

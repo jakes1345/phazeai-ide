@@ -343,3 +343,50 @@ impl LspManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_manager() -> LspManager {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        LspManager::new(PathBuf::from("/tmp"), tx)
+    }
+
+    #[test]
+    fn allow_restart_caps_at_three_per_window() {
+        let mut m = empty_manager();
+        // First three are allowed, fourth is denied within the same window.
+        assert!(m.allow_restart("rust"));
+        assert!(m.allow_restart("rust"));
+        assert!(m.allow_restart("rust"));
+        assert!(!m.allow_restart("rust"));
+    }
+
+    #[test]
+    fn allow_restart_is_per_language() {
+        let mut m = empty_manager();
+        // Burning the rust budget should not affect python.
+        for _ in 0..MAX_RESTARTS_PER_WINDOW {
+            assert!(m.allow_restart("rust"));
+        }
+        assert!(!m.allow_restart("rust"));
+        assert!(m.allow_restart("python"));
+    }
+
+    #[test]
+    fn document_cache_tracks_open_and_change() {
+        let mut m = empty_manager();
+        let path = PathBuf::from("/tmp/foo.rs");
+        m.did_open(&path, "fn a(){}");
+        let entry = m.open_docs.get(&path).expect("did_open should cache");
+        assert_eq!(entry.language_id, "rust");
+        assert_eq!(entry.text, "fn a(){}");
+        assert_eq!(entry.version, 0);
+
+        m.did_change(&path, 4, "fn a(){ b(); }");
+        let entry = m.open_docs.get(&path).expect("did_change should keep cache");
+        assert_eq!(entry.text, "fn a(){ b(); }");
+        assert_eq!(entry.version, 4);
+    }
+}
