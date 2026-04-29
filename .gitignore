@@ -72,6 +72,29 @@ final_ui_v*.png
 # Claude Code harness state (per-project agent locks, hidden FUSE files, etc.)
 .claude/
 
+# Other AI / agent harness state — kept out of the repo for the same reason
+.cursor/
+.kiro/
+.plandex-v2/
+.crush/
+
+# Local reference clones of upstream projects (zed, helix, lapce, etc.) used
+# only for reading, not built — never belonged in the IDE repo
+/phazeai-arsenal/
+
+# Stray top-level binaries
+/rust_out
+
+# Internal scratch / LLM-context dumps — kept locally, not shipped
+/TODO.md
+/TODO-IDE-PHASE3.md
+/TODO-CLOUD-PHASE3.md
+/CODEBASE_INDEX.md
+/CORE_UI_ARCHITECTURE_MAP.md
+/REPO_KNOWLEDGE_PACK.md
+/PROJECT_SUMMARY_REPORT.md
+"/waht's been done total so far ig.txt"
+
 # Training datasets (too large for git)
 training/datasets/*.jsonl
 training/datasets/**/*.jsonl

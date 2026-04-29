@@ -70,7 +70,7 @@ cargo test --workspace
 ## What to Work On?
 - Look for issues labeled **"good first issue"** or **"help wanted"**.
 - Check the [Roadmap](./README.md#roadmap) in the README to see current priorities.
-- Join our [Discord](https://discord.gg/phazeai) to discuss larger architectural changes before starting.
+- For larger architectural changes, open a GitHub Discussion first so we can sanity-check the direction before you sink time into it.
 
 ## License
 By contributing to PhazeAI IDE, you agree that your contributions will be licensed under the **MIT License**.
