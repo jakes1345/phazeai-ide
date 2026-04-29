@@ -582,6 +582,13 @@ impl LspClient {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// PID of the spawned language-server process, when known. Useful for
+    /// integration tests that need to SIGKILL the child externally and
+    /// for diagnostics.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+
     /// Shutdown the language server
     pub async fn shutdown(&mut self) -> Result<(), String> {
         let _ = self.send_request::<request::Shutdown>(()).await;
