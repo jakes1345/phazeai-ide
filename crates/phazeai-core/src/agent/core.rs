@@ -46,6 +46,8 @@ pub struct Agent {
     cancel_token: Option<Arc<AtomicBool>>,
     /// Filled for the duration of `run_with_events`; MCP bridges emit here.
     mcp_event_sink: Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>,
+    /// Builder-provided system prompt, applied at run start under the async lock.
+    system_prompt: Option<String>,
 }
 
 struct McpEventSinkGuard(Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>);
@@ -69,6 +71,7 @@ impl Agent {
             approval_fn: None,
             cancel_token: None,
             mcp_event_sink: Arc::new(StdMutex::new(None)),
+            system_prompt: None,
         }
     }
 
@@ -119,32 +122,9 @@ impl Agent {
         self
     }
 
-    pub fn with_system_prompt(self, prompt: impl Into<String>) -> Self {
-        // Set system prompt synchronously by accessing the inner mutex
-        // This avoids the race condition of the old tokio::spawn approach
-        let conversation = self.conversation.clone();
-        let prompt = prompt.into();
-        // Retry `try_lock` briefly to handle transient construction contention.
-        for _ in 0..50 {
-            if let Ok(mut conv) = conversation.try_lock() {
-                conv.set_system_prompt(prompt.clone());
-                return self;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        // If still contended, apply asynchronously instead of panicking.
-        // This preserves prompt intent even under rare lock contention.
-        std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                rt.block_on(async move {
-                    let mut conv = conversation.lock().await;
-                    conv.set_system_prompt(prompt);
-                });
-            }
-        });
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        // Store and apply at run start to avoid races with async lock acquisition.
+        self.system_prompt = Some(prompt.into());
         self
     }
 
@@ -197,6 +177,9 @@ impl Agent {
 
         {
             let mut conversation = self.conversation.lock().await;
+            if let Some(prompt) = &self.system_prompt {
+                conversation.set_system_prompt(prompt.clone());
+            }
             conversation.add_user_message(&user_input);
         }
 

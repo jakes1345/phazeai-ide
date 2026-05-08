@@ -127,15 +127,17 @@ fn now_str() -> String {
     let hours = rem / 3600;
     let mins = (rem % 3600) / 60;
     let s = rem % 60;
-    let a = days.saturating_sub(32044);
-    let b = (4 * a + 3) / 146097;
-    let c = a - (146097 * b) / 4;
-    let d = (4 * c + 3) / 1461;
-    let e = c - (1461 * d) / 4;
-    let m = (5 * e + 2) / 153;
-    let day = (e - (153 * m + 2) / 5) + 1;
-    let month = (m + 3) % 12 + 1;
-    let year = 2000 + b * 100 + d - 4800 + (m >= 10) as u64;
+    // Convert Unix days-since-epoch to civil date using Howard Hinnant's algorithm.
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = mp + if mp < 10 { 3 } else { -9 }; // [1, 12]
+    let year = y + if month <= 2 { 1 } else { 0 };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hours, mins, s
@@ -469,10 +471,15 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
     let mut context_blocks = Vec::new();
     let mut clean_msg = message.to_string();
 
+    let canonical_root = root.canonicalize().ok();
     for cap in re.captures_iter(message) {
         let mention = &cap[1];
         let file_path = root.join(mention);
-        if file_path.is_file() {
+        let in_workspace = match (&canonical_root, file_path.canonicalize().ok()) {
+            (Some(root), Some(path)) => path.starts_with(root),
+            _ => false,
+        };
+        if file_path.is_file() && in_workspace {
             if let Ok(contents) = std::fs::read_to_string(&file_path) {
                 // Truncate very large files
                 let truncated = if contents.len() > 30_000 {

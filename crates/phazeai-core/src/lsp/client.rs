@@ -12,6 +12,10 @@ use lsp_types::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
+
+type PendingResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
+type PendingMap = Arc<Mutex<HashMap<u64, PendingResponse>>>;
 
 /// Convert a filesystem path to a file:// URI string
 fn path_to_uri(path: &Path) -> Result<Uri, String> {
@@ -58,7 +62,7 @@ pub enum LspEvent {
 pub struct LspClient {
     id_counter: AtomicU64,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>,
+    pending: PendingMap,
     server_name: String,
     child: Option<Child>,
     event_tx: mpsc::UnboundedSender<LspEvent>,
@@ -104,8 +108,7 @@ impl LspClient {
         });
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(stdin)));
-        let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
         let server_name = server_cmd.to_string();
         let alive = Arc::new(AtomicBool::new(true));
@@ -127,7 +130,13 @@ impl LspClient {
         let alive_clone = alive.clone();
         let server_name_clone = server_name.clone();
         thread::spawn(move || {
-            Self::reader_loop(stdout, event_tx_clone, pending_clone);
+            Self::reader_loop(
+                stdout,
+                event_tx_clone,
+                pending_clone,
+                writer.clone(),
+                server_name_clone.clone(),
+            );
             alive_clone.store(false, Ordering::SeqCst);
             tracing::warn!(
                 "LSP server '{}' reader loop exited (process likely died)",
@@ -626,9 +635,32 @@ impl LspClient {
             pending.insert(id, tx);
         }
 
-        self.write_message(&msg)?;
+        if let Err(e) = self.write_message(&msg) {
+            if let Ok(mut pending) = self.pending.lock() {
+                let _ = pending.remove(&id);
+            }
+            return Err(e);
+        }
 
-        let result = rx.await.map_err(|_| "LSP response channel closed")?;
+        let result = match timeout(Duration::from_secs(20), rx).await {
+            Ok(Ok(inner)) => inner?,
+            Ok(Err(_)) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    let _ = pending.remove(&id);
+                }
+                return Err(if self.is_alive() {
+                    "LSP response channel closed".to_string()
+                } else {
+                    "LSP server exited before responding".to_string()
+                });
+            }
+            Err(_) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    let _ = pending.remove(&id);
+                }
+                return Err(format!("LSP request '{}' timed out", R::METHOD));
+            }
+        };
         serde_json::from_value(result).map_err(|e| format!("Failed to parse LSP response: {}", e))
     }
 
@@ -668,7 +700,9 @@ impl LspClient {
     fn reader_loop(
         stdout: impl Read + Send + 'static,
         event_tx: mpsc::UnboundedSender<LspEvent>,
-        pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Value>>>>,
+        pending: PendingMap,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        server_name: String,
     ) {
         let mut reader = BufReader::new(stdout);
 
@@ -695,14 +729,17 @@ impl LspClient {
                 if let Some(result) = msg.get("result") {
                     if let Ok(mut pending) = pending.lock() {
                         if let Some(tx) = pending.remove(&id) {
-                            let _ = tx.send(result.clone());
+                            let _ = tx.send(Ok(result.clone()));
                         }
                     }
                 } else if let Some(error) = msg.get("error") {
                     tracing::warn!("LSP error for request {}: {:?}", id, error);
                     if let Ok(mut pending) = pending.lock() {
                         if let Some(tx) = pending.remove(&id) {
-                            let _ = tx.send(Value::Null);
+                            let _ = tx.send(Err(format!(
+                                "LSP error for request {}: {}",
+                                id, error
+                            )));
                         }
                     }
                 }
@@ -748,8 +785,15 @@ impl LspClient {
                     }
                     "window/workDoneProgress/create" => {
                         // Acknowledge the server request to create a progress token.
-                        // We emit a log event so lsp_bridge can see the creation request.
-                        if msg.get("id").is_some() {
+                        // We emit a log event so lsp_bridge can see the creation request,
+                        // and we must send a valid JSON-RPC response.
+                        if let Some(id) = msg.get("id") {
+                            let response = json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {}
+                            });
+                            let _ = Self::write_message_with_writer(&writer, &response);
                             let _ = event_tx.send(LspEvent::Log("__progress_create__".to_string()));
                         }
                     }
@@ -759,6 +803,33 @@ impl LspClient {
                 }
             }
         }
+
+        // Reader exited: fail all pending requests so awaiters don't hang forever.
+        if let Ok(mut pending) = pending.lock() {
+            let drained = std::mem::take(&mut *pending);
+            for (_, tx) in drained {
+                let _ = tx.send(Err(format!(
+                    "LSP server '{}' disconnected before response",
+                    server_name
+                )));
+            }
+        }
+    }
+
+    fn write_message_with_writer(
+        writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+        msg: &Value,
+    ) -> Result<(), String> {
+        let body = serde_json::to_string(msg).map_err(|e| e.to_string())?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut guard = writer.lock().map_err(|e| e.to_string())?;
+        guard
+            .write_all(header.as_bytes())
+            .map_err(|e| e.to_string())?;
+        guard
+            .write_all(body.as_bytes())
+            .map_err(|e| e.to_string())?;
+        guard.flush().map_err(|e| e.to_string())
     }
 
     /// Parse the Content-Length header from LSP message stream

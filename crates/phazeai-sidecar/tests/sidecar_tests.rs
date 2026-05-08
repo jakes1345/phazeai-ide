@@ -228,14 +228,14 @@ fn test_jsonrpc_error_serialization_roundtrip() {
 
 #[test]
 fn test_sidecar_manager_new_creates_non_running_manager() {
-    let manager = SidecarManager::new("python3", PathBuf::from("/tmp/script.py"));
+    let mut manager = SidecarManager::new("python3", PathBuf::from("/tmp/script.py"));
 
     assert!(!manager.is_running());
 }
 
 #[test]
 fn test_sidecar_manager_is_running_returns_false_initially() {
-    let manager = SidecarManager::new("python3", PathBuf::from("/tmp/test.py"));
+    let mut manager = SidecarManager::new("python3", PathBuf::from("/tmp/test.py"));
 
     assert_eq!(manager.is_running(), false);
 }

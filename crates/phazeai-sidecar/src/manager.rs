@@ -19,8 +19,18 @@ impl SidecarManager {
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        self.process.is_some()
+    pub fn is_running(&mut self) -> bool {
+        let Some(process) = self.process.as_mut() else {
+            return false;
+        };
+        match process.try_wait() {
+            Ok(Some(_status)) => {
+                self.process = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => true,
+        }
     }
 
     pub async fn start(&mut self) -> Result<(), String> {
@@ -87,6 +97,7 @@ impl Drop for SidecarManager {
         if let Some(mut process) = self.process.take() {
             warn!("Sidecar process dropped without explicit stop");
             let _ = process.start_kill();
+            let _ = process.try_wait();
         }
     }
 }
