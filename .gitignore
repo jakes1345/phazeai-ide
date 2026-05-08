@@ -98,3 +98,9 @@ final_ui_v*.png
 # Training datasets (too large for git)
 training/datasets/*.jsonl
 training/datasets/**/*.jsonl
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
