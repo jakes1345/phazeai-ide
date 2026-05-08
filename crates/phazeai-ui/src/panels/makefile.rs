@@ -41,6 +41,12 @@ fn parse_targets(contents: &str) -> Vec<String> {
             {
                 continue;
             }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '%' | '+' | '@'))
+            {
+                continue;
+            }
             out.push(name.to_string());
         }
     }
@@ -196,7 +202,7 @@ pub fn makefile_panel(state: IdeState) -> impl IntoView {
                         let cmd = format!(
                             "cd {} && make {}",
                             shell_quote_single(&ws.to_string_lossy()),
-                            t_clone
+                            shell_quote_single(&t_clone)
                         );
                         append_debug_console(
                             st.workbench.debug_console_log,
@@ -234,4 +240,27 @@ pub fn makefile_panel(state: IdeState) -> impl IntoView {
         let p = theme.get().palette;
         s.width_full().height_full().background(p.glass_bg)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_targets;
+
+    #[test]
+    fn parse_targets_keeps_safe_names() {
+        let src = "build:\ncheck-test:\nfoo/bar:\n";
+        let out = parse_targets(src);
+        assert!(out.contains(&"build".to_string()));
+        assert!(out.contains(&"check-test".to_string()));
+        assert!(out.contains(&"foo/bar".to_string()));
+    }
+
+    #[test]
+    fn parse_targets_rejects_unsafe_names() {
+        let src = "bad;rm -rf /:\n`oops`:\nname with space:\n";
+        let out = parse_targets(src);
+        assert!(!out.iter().any(|t| t.contains("bad")));
+        assert!(!out.iter().any(|t| t.contains("oops")));
+        assert!(!out.iter().any(|t| t.contains("name with space")));
+    }
 }

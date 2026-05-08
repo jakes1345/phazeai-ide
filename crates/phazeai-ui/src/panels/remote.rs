@@ -21,13 +21,25 @@ fn parse_ssh_hosts(text: &str) -> Vec<String> {
     let mut hosts = Vec::new();
     for line in text.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("Host ") {
-            for h in rest.split_whitespace() {
-                if h == "*" || h.starts_with('!') {
-                    continue;
-                }
-                hosts.push(h.to_string());
+        let mut parts = t.split_whitespace();
+        let Some(keyword) = parts.next() else {
+            continue;
+        };
+        if !keyword.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        for h in parts {
+            if h == "*"
+                || h.starts_with('!')
+                || h.contains('*')
+                || h.contains('?')
+                || !h
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+            {
+                continue;
             }
+            hosts.push(h.to_string());
         }
     }
     hosts.sort_unstable();
@@ -192,4 +204,24 @@ pub fn remote_panel(state: IdeState) -> impl IntoView {
         let p = theme.get().palette;
         s.width_full().height_full().background(p.glass_bg)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ssh_hosts;
+
+    #[test]
+    fn parse_hosts_supports_case_insensitive_keyword() {
+        let src = "Host app-prod\nHOST app-dev\n";
+        let out = parse_ssh_hosts(src);
+        assert!(out.contains(&"app-prod".to_string()));
+        assert!(out.contains(&"app-dev".to_string()));
+    }
+
+    #[test]
+    fn parse_hosts_rejects_wildcards_and_negations() {
+        let src = "Host * !bad ok-host host?.example.com\n";
+        let out = parse_ssh_hosts(src);
+        assert_eq!(out, vec!["ok-host".to_string()]);
+    }
 }

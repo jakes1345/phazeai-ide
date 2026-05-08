@@ -18,17 +18,70 @@ struct RunPreset {
 }
 
 fn strip_line_comments(raw: &str) -> String {
-    raw.lines()
-        .filter_map(|line| {
-            let t = line.trim_start();
-            if t.starts_with("//") || t.starts_with("/*") {
-                None
-            } else {
-                Some(line.to_string())
+    // Remove `// ...` and `/* ... */` comments while preserving quoted strings.
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                out.push('\n');
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' && matches!(chars.peek(), Some('/')) {
+                let _ = chars.next();
+                in_block_comment = false;
+            } else if ch == '\n' {
+                // Preserve line structure for easier debugging and parsing errors.
+                out.push('\n');
+            }
+            continue;
+        }
+
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+        if ch == '/' && matches!(chars.peek(), Some('/')) {
+            let _ = chars.next();
+            in_line_comment = true;
+            continue;
+        }
+        if ch == '/' && matches!(chars.peek(), Some('*')) {
+            let _ = chars.next();
+            in_block_comment = true;
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
+fn sanitize_shell_fragment(raw: &str) -> String {
+    raw.replace(['\r', '\n'], " ").trim().to_string()
 }
 
 fn expand_vars(s: &str, workspace: &Path) -> String {
@@ -55,7 +108,10 @@ fn launch_config_to_command(cfg: &Value, workspace: &Path) -> Option<String> {
     };
 
     if let Some(cmd) = cfg.get("command").and_then(|x| x.as_str()) {
-        let c = expand_vars(cmd, workspace);
+        let c = sanitize_shell_fragment(&expand_vars(cmd, workspace));
+        if c.is_empty() {
+            return None;
+        }
         return Some(format!("cd {} && {}", shell_quote_single(&cwd), c));
     }
 
@@ -70,13 +126,22 @@ fn launch_config_to_command(cfg: &Value, workspace: &Path) -> Option<String> {
     parts.extend(value_array_strings(cfg.get("args")));
 
     if !parts.is_empty() {
+        parts = parts.into_iter().map(|p| sanitize_shell_fragment(&p)).collect();
+        parts.retain(|p| !p.is_empty());
+        if parts.is_empty() {
+            return None;
+        }
         let inner = shell_join_args(&parts);
         return Some(format!("cd {} && {}", shell_quote_single(&cwd), inner));
     }
 
     if let Some(prog) = cfg.get("program").and_then(|x| x.as_str()) {
-        let p = expand_vars(prog, workspace);
-        return Some(format!("cd {} && {}", shell_quote_single(&cwd), p));
+        let p = sanitize_shell_fragment(&expand_vars(prog, workspace));
+        if p.is_empty() {
+            return None;
+        }
+        let inner = shell_join_args(&[p]);
+        return Some(format!("cd {} && {}", shell_quote_single(&cwd), inner));
     }
 
     None
@@ -241,4 +306,39 @@ pub fn run_debug_panel(state: IdeState) -> impl IntoView {
             let p = theme.get().palette;
             s.width_full().height_full().background(p.glass_bg)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_shell_fragment, strip_line_comments};
+
+    #[test]
+    fn strip_comments_preserves_strings() {
+        let src = r#"{
+  // comment
+  "url": "https://example.com/x//y",
+  "cmd": "echo /*not-comment*/"
+}"#;
+        let cleaned = strip_line_comments(src);
+        assert!(cleaned.contains(r#""url": "https://example.com/x//y""#));
+        assert!(cleaned.contains(r#""cmd": "echo /*not-comment*/""#));
+    }
+
+    #[test]
+    fn strip_comments_removes_block_and_line_comments() {
+        let src = "{\n/* first */\n\"a\":1,\n// second\n\"b\":2\n}";
+        let cleaned = strip_line_comments(src);
+        assert!(!cleaned.contains("first"));
+        assert!(!cleaned.contains("second"));
+        assert!(cleaned.contains("\"a\":1"));
+        assert!(cleaned.contains("\"b\":2"));
+    }
+
+    #[test]
+    fn sanitize_shell_fragment_flattens_newlines() {
+        assert_eq!(
+            sanitize_shell_fragment("  cargo run\r\n--release  "),
+            "cargo run  --release"
+        );
+    }
 }
