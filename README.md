@@ -44,6 +44,9 @@ First launch creates `~/.config/phazeai/settings.toml`. Open the Settings panel 
 - Real PTY terminal (portable-pty + VTE), 256-color, multi-tab
 - Git panel: status, stage/discard with confirmation, commit, branch picker, diff view, blame
 - Workspace search (ripgrep-backed), problems panel from LSP diagnostics
+- Run & Debug panel (Cargo presets + `.vscode/launch.json` launch command parsing)
+- Ops panels: Makefile targets, Docker containers/logs/shell, SSH hosts from `~/.ssh/config`
+- Account panel: PhazeAI Cloud token + status wiring (keyring-backed)
 - MCP (Model Context Protocol) client for plugging in external tool servers
 - Watchdog: dead LSP and MCP servers are detected and restarted with rate-cap, with cached `did_open` replay
 
@@ -130,7 +133,7 @@ crates/
 ├── phazeai-ui/            desktop GUI (Floem + GPU)  ← PRIMARY
 ├── phazeai-cli/           terminal UI (ratatui)
 ├── phazeai-cloud/         cloud-tier client skeleton (in development)
-├── phazeai-sidecar/       Python keyword-search subprocess
+├── phazeai-sidecar/       Python semantic-search subprocess
 ├── phazeai-plugin-api/    plugin ABI for native cdylib plugins
 ├── phazeai-plugin-canary/ smoke-test plugin used by tests
 └── ollama-rs/             local fork with streaming + chat history
@@ -157,10 +160,11 @@ If you want PhazeAI to host inference for you, **track this in [BETA_AUDIT_TODO.
 | ✅ | Composer with approval modes, MCP integration, cancel + diff cards |
 | ✅ | Git panel, terminal, problems, workspace search |
 | ✅ | LSP/MCP watchdog with rate-capped restart and `did_open` replay |
+| ✅ | Run & Debug + Makefile + Containers + Remote + Account side panels |
 | ✅ | Tool sandbox confined to workspace root |
 | 🚧 | Single canonical AI surface (consolidate `chat_panel` and `ai_panel`) |
 | 🚧 | Conversation persistence for chat (composer chat is ephemeral by design) |
-| 🚧 | Unified global keyboard-shortcut dispatch layer |
+| ✅ | Unified global keyboard-shortcut dispatch in terminal and editor contexts |
 | 🚧 | Cloud tier (architecture undecided — see above) |
 | 📋 | Multi-line find, terminal split, multi-repo workspaces |
 | 📋 | Integrated debugger (DAP) |
