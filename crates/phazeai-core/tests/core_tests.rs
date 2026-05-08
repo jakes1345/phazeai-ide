@@ -11,7 +11,7 @@ fn test_settings_default_values() {
     let settings = Settings::default();
 
     // Check LLM defaults
-    assert_eq!(settings.llm.model, "phaze-beast");
+    assert_eq!(settings.llm.model, "llama3.2:3b");
     assert_eq!(settings.llm.api_key_env, "");
     assert_eq!(settings.llm.max_tokens, 8192);
     assert!(settings.llm.base_url.is_none());

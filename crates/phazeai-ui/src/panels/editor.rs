@@ -991,6 +991,7 @@ pub fn editor_panel(
     organize_imports_on_save: RwSignal<bool>,
     inlay_hints: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     inlay_hints_toggle: RwSignal<bool>,
+    minimap_visible: RwSignal<bool>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -4154,6 +4155,12 @@ pub fn editor_panel(
         s.width(60.0).height_full().min_width(60.0).background(bg)
     });
 
+    let minimap_strip = container(heatmap).style(move |s| {
+        s.apply_if(!minimap_visible.get(), |s| {
+            s.display(floem::style::Display::None)
+        })
+    });
+
     // ── Welcome screen ─────────────────────────────────────────────────────
     let welcome = container(
         stack((
@@ -4183,7 +4190,7 @@ pub fn editor_panel(
     let content_area = stack((welcome, editor_body))
         .style(|s| s.flex_grow(1.0).min_height(0.0).min_width(0.0).width_full());
 
-    let editor_row = stack((sentient_gutter, content_area, heatmap))
+    let editor_row = stack((sentient_gutter, content_area, minimap_strip))
         .style(|s| s.flex_grow(1.0).min_height(0.0).min_width(0.0).width_full());
 
     // ── Find bar (Ctrl+F) ─────────────────────────────────────────────────────

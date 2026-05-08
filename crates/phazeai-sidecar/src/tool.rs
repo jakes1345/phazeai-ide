@@ -4,7 +4,7 @@ use phazeai_core::{Tool, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Semantic search tool powered by the Python sidecar's embedding index.
+/// Natural-language code search tool backed by the Python sidecar's TF-IDF index.
 /// Falls back to a helpful error if the sidecar is unavailable.
 pub struct SemanticSearchTool {
     client: Arc<SidecarClient>,
@@ -23,9 +23,9 @@ impl Tool for SemanticSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the codebase using natural language semantic search powered by embeddings. \
-         Use this when grep is insufficient - e.g. finding code by concept rather than exact text. \
-         Returns ranked file snippets matching the query by meaning."
+        "Search the codebase using natural language keyword matching (TF-IDF ranking). \
+         Use this when exact grep patterns are too rigid and you need concept-adjacent matches. \
+         Returns ranked file snippets by textual relevance."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -59,17 +59,41 @@ impl Tool for SemanticSearchTool {
             .unwrap_or(5)
             .min(20) as usize;
 
-        let result = self
-            .client
-            .search_embeddings(query, top_k)
-            .await
-            .map_err(|e| PhazeError::tool("semantic_search", format!("Sidecar error: {e}")))?;
+        let result = match self.client.search_embeddings(query, top_k).await {
+            Ok(result) => result,
+            Err(e) if e.contains("Index not built") => {
+                self.client
+                    .build_index(&[".".to_string()])
+                    .await
+                    .map_err(|idx_err| {
+                        PhazeError::tool(
+                            "semantic_search",
+                            format!("Failed to build search index automatically: {idx_err}"),
+                        )
+                    })?;
+                self.client
+                    .search_embeddings(query, top_k)
+                    .await
+                    .map_err(|retry_err| {
+                        PhazeError::tool(
+                            "semantic_search",
+                            format!("Sidecar search failed after auto-indexing: {retry_err}"),
+                        )
+                    })?
+            }
+            Err(e) => {
+                return Err(PhazeError::tool(
+                    "semantic_search",
+                    format!("Sidecar error: {e}"),
+                ));
+            }
+        };
 
         Ok(result)
     }
 }
 
-/// Tool to build the semantic search index for the project.
+/// Tool to build the sidecar TF-IDF search index for the project.
 pub struct BuildIndexTool {
     client: Arc<SidecarClient>,
 }
@@ -87,7 +111,7 @@ impl Tool for BuildIndexTool {
     }
 
     fn description(&self) -> &str {
-        "Build or rebuild the semantic search index for the project. \
+        "Build or rebuild the sidecar TF-IDF search index for the project. \
          Call this before using semantic_search if search returns no results, \
          or after significant code changes."
     }

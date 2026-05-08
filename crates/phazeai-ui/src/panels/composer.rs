@@ -97,6 +97,8 @@ enum ComposerUpdate {
     Err(String),
     /// Git diff output after completion.
     DiffOutput(Vec<DiffCard>),
+    /// MCP stdio server(s) restarted.
+    McpStatus(String),
 }
 
 #[derive(Clone, Debug)]
@@ -277,6 +279,19 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     is_running.set(false);
                     state.ai.thinking.set(false);
                     cancel_token.set(None);
+                }
+                ComposerUpdate::McpStatus(msg) => {
+                    event_log.update(|log| {
+                        log.push(EventLogEntry {
+                            kind: EventKind::Warning,
+                            text: msg.clone(),
+                            path: None,
+                        });
+                        if log.len() > 500 {
+                            log.drain(0..log.len() - 500);
+                        }
+                    });
+                    state.workbench.status_toast.set(Some(msg));
                 }
                 ComposerUpdate::DiffOutput(cards) => {
                     diff_cards.set(cards);
@@ -459,6 +474,14 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                 AgentEvent::ToolApprovalRequest { name, params } => {
                                     let _ = tx2
                                         .send(ComposerUpdate::ToolApprovalRequest { name, params });
+                                }
+                                AgentEvent::McpReconnected { servers } => {
+                                    let msg = if servers.len() == 1 {
+                                        format!("MCP server '{}' reconnected", servers[0])
+                                    } else {
+                                        format!("MCP servers reconnected: {}", servers.join(", "))
+                                    };
+                                    let _ = tx2.send(ComposerUpdate::McpStatus(msg));
                                 }
                                 AgentEvent::Complete { iterations } => {
                                     let _ = tx2.send(ComposerUpdate::Done { iterations });

@@ -1,4 +1,5 @@
 use phazeai_cli::commands::{handle_command, CommandResult};
+use serde_json::json;
 
 // ========================================================================
 // Command Parsing Tests (commands.rs)
@@ -6,6 +7,17 @@ use phazeai_cli::commands::{handle_command, CommandResult};
 
 // NOTE: The handle_command function is public and can be tested.
 // The function returns CommandResult enum variants based on slash command input.
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
+}
 
 // --- BASIC SLASH COMMANDS ---
 
@@ -18,6 +30,14 @@ fn test_help_command() {
         assert!(msg.contains("PhazeAI CLI Commands"));
         assert!(msg.contains("/help"));
     }
+    // #region agent log
+    debug_log(
+        "H6",
+        "command_tests.rs:test_help_command",
+        "cli help command parsed successfully",
+        json!({ "command": "/help" }),
+    );
+    // #endregion
 }
 
 #[test]

@@ -4,11 +4,15 @@
 /// `McpToolBridge` that implements the `Tool` trait. This means the AI agent
 /// can call MCP tools exactly the same way it calls built-in tools like
 /// `read_file` or `bash` — no special handling needed.
+use crate::agent_event::AgentEvent;
 use crate::error::PhazeError;
 use crate::mcp::McpManager;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+
+/// Shared handle for MCP bridges to emit [`AgentEvent::McpReconnected`] while a run is active.
+pub type McpAgentEventSink = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>;
 
 /// Wraps a single MCP tool so it implements the `Tool` trait.
 /// The agent sees it as a normal tool with a prefixed name like `mcp__serverName__toolName`.
@@ -25,6 +29,8 @@ pub struct McpToolBridge {
     input_schema: Value,
     /// Shared reference to the MCP manager for making calls
     manager: Arc<Mutex<McpManager>>,
+    /// When the agent run has wired `run_with_events`, reconnects are surfaced to the UI/CLI.
+    event_sink: Option<McpAgentEventSink>,
 }
 
 impl McpToolBridge {
@@ -34,6 +40,7 @@ impl McpToolBridge {
         description: String,
         input_schema: Value,
         manager: Arc<Mutex<McpManager>>,
+        event_sink: Option<McpAgentEventSink>,
     ) -> Self {
         let tool_name = format!("mcp__{}__{}", server_name, mcp_tool_name);
         Self {
@@ -43,6 +50,7 @@ impl McpToolBridge {
             tool_description: description,
             input_schema,
             manager,
+            event_sink,
         }
     }
 }
@@ -65,17 +73,46 @@ impl Tool for McpToolBridge {
         let server_name = self.server_name.clone();
         let tool_name = self.mcp_tool_name.clone();
         let manager = self.manager.clone();
+        let event_sink = self.event_sink.clone();
 
-        // MCP calls use blocking_recv internally, so run on a blocking thread
+        // MCP transport is synchronous stdio; execute on a blocking worker thread.
+        // Never hold the global manager mutex across a blocking tool call — another
+        // server's MCP bridge must remain callable while one server is slow or wedged.
         let result = tokio::task::spawn_blocking(move || {
-            let mut mgr = manager
-                .lock()
-                .map_err(|e| PhazeError::tool("mcp", format!("Manager lock poisoned: {e}")))?;
+            let restarted: Vec<String> = {
+                let mut mgr = manager
+                    .lock()
+                    .map_err(|e| PhazeError::tool("mcp", format!("Manager lock poisoned: {e}")))?;
+                mgr.health_check()
+            };
 
-            // Restart any servers whose stdio EOF'd since the last call.
-            mgr.health_check();
+            if !restarted.is_empty() {
+                if let Some(sink) = event_sink.as_ref() {
+                    if let Ok(g) = sink.lock() {
+                        if let Some(tx) = g.as_ref() {
+                            let _ = tx.send(AgentEvent::McpReconnected { servers: restarted });
+                        }
+                    }
+                }
+            }
 
-            mgr.call_tool(&server_name, &tool_name, params)
+            let client_arc = {
+                let mgr = manager
+                    .lock()
+                    .map_err(|e| PhazeError::tool("mcp", format!("Manager lock poisoned: {e}")))?;
+                mgr.client_handle(&server_name)
+                    .map_err(|e| PhazeError::tool("mcp", e))?
+            };
+
+            let client_guard = client_arc.lock().map_err(|e| {
+                PhazeError::tool(
+                    "mcp",
+                    format!("MCP client mutex poisoned ({server_name}): {e}"),
+                )
+            })?;
+
+            client_guard
+                .call_tool(&tool_name, params)
                 .map_err(|e| PhazeError::tool("mcp", e))
         })
         .await
@@ -117,7 +154,10 @@ impl Tool for McpToolBridge {
 
 /// Create Tool-trait-compatible bridges for all tools from an McpManager.
 /// Returns boxed Tool objects that can be directly registered into a ToolRegistry.
-pub fn create_mcp_tool_bridges(manager: Arc<Mutex<McpManager>>) -> Vec<Box<dyn Tool>> {
+pub fn create_mcp_tool_bridges(
+    manager: Arc<Mutex<McpManager>>,
+    event_sink: Option<McpAgentEventSink>,
+) -> Vec<Box<dyn Tool>> {
     let mgr = match manager.lock() {
         Ok(m) => m,
         Err(e) => {
@@ -138,6 +178,7 @@ pub fn create_mcp_tool_bridges(manager: Arc<Mutex<McpManager>>) -> Vec<Box<dyn T
             tool_def.description,
             tool_def.input_schema,
             manager.clone(),
+            event_sink.clone(),
         );
         bridges.push(Box::new(bridge));
     }
@@ -159,6 +200,7 @@ mod tests {
             "Create a GitHub issue".to_string(),
             serde_json::json!({"type": "object"}),
             manager,
+            None,
         );
 
         assert_eq!(bridge.name(), "mcp__github__create_issue");

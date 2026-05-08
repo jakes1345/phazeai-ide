@@ -1,3 +1,4 @@
+use crate::agent_event::AgentEvent;
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
@@ -8,50 +9,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
-
-/// Events emitted during agent execution - the shared CLI/IDE interface.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    Thinking {
-        iteration: usize,
-    },
-    TextDelta(String),
-    ToolApprovalRequest {
-        name: String,
-        params: Value,
-    },
-    ToolStart {
-        name: String,
-    },
-    ToolResult {
-        name: String,
-        success: bool,
-        summary: String,
-    },
-    Complete {
-        iterations: usize,
-    },
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-    },
-    Error(String),
-    // Browser Integration
-    BrowserFetchStart {
-        url: String,
-    },
-    BrowserFetchComplete {
-        url: String,
-        title: String,
-        content: String,
-    },
-    BrowserFetchError {
-        url: String,
-        error: String,
-    },
-}
 
 #[derive(Debug, Clone)]
 pub struct AgentResponse {
@@ -85,6 +44,18 @@ pub struct Agent {
     approval_fn: Option<ApprovalFn>,
     /// Optional cancellation token — set to `true` to abort the running loop.
     cancel_token: Option<Arc<AtomicBool>>,
+    /// Filled for the duration of `run_with_events`; MCP bridges emit here.
+    mcp_event_sink: Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>,
+}
+
+struct McpEventSinkGuard(Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>);
+
+impl Drop for McpEventSinkGuard {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = None;
+        }
+    }
 }
 
 impl Agent {
@@ -97,6 +68,7 @@ impl Agent {
             max_context_tokens: 32768, // Default budget
             approval_fn: None,
             cancel_token: None,
+            mcp_event_sink: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -184,7 +156,15 @@ impl Agent {
         &mut self,
         manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
     ) {
-        self.tools.register_mcp_tools(manager);
+        use crate::tools::mcp_bridge::create_mcp_tool_bridges;
+        let bridges = create_mcp_tool_bridges(manager, Some(self.mcp_event_sink.clone()));
+        let count = bridges.len();
+        for bridge in bridges {
+            self.tools.register(bridge);
+        }
+        if count > 0 {
+            tracing::info!("Registered {count} MCP tools into tool registry");
+        }
     }
 
     pub fn swap_llm(&mut self, new_llm: Box<dyn LlmClient>) {
@@ -208,6 +188,12 @@ impl Agent {
         let mut tool_executions = Vec::new();
         let mut total_input_tokens: u64 = 0;
         let mut total_output_tokens: u64 = 0;
+
+        {
+            let mut g = self.mcp_event_sink.lock().unwrap();
+            *g = Some(event_tx.clone());
+        }
+        let _mcp_sink_guard = McpEventSinkGuard(self.mcp_event_sink.clone());
 
         {
             let mut conversation = self.conversation.lock().await;

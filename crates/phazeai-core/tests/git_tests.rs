@@ -1,5 +1,6 @@
 use phazeai_core::git::{FileState, GitOps};
 use phazeai_core::project::{FileChangeKind, FileWatcher};
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -35,6 +36,17 @@ fn init_git_repo(dir: &Path) {
 fn create_file(dir: &Path, name: &str, content: &str) {
     let file_path = dir.join(name);
     fs::write(&file_path, content).expect("Failed to create file");
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
 }
 
 // ============================================================================
@@ -115,6 +127,14 @@ async fn test_status_detects_untracked_files() {
     assert_eq!(status.files.len(), 1);
     assert_eq!(status.files[0].path, "new_file.txt");
     assert_eq!(status.files[0].status, FileState::Untracked);
+    // #region agent log
+    debug_log(
+        "H5",
+        "git_tests.rs:test_status_detects_untracked_files",
+        "git untracked file detection passed",
+        json!({ "fileCount": status.files.len(), "status": "Untracked" }),
+    );
+    // #endregion
 }
 
 #[tokio::test]
@@ -416,6 +436,14 @@ async fn test_watcher_detects_file_creation() {
 
     assert_eq!(event.kind, FileChangeKind::Created);
     assert!(event.path.ends_with("new_file.txt"));
+    // #region agent log
+    debug_log(
+        "H10",
+        "git_tests.rs:test_watcher_detects_file_creation",
+        "file watcher creation event observed",
+        json!({ "kind": "Created", "pathEndsWith": "new_file.txt" }),
+    );
+    // #endregion
 }
 
 #[tokio::test]

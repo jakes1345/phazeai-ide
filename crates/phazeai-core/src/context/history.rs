@@ -101,15 +101,34 @@ impl ConversationHistory {
     fn trim_if_needed(&mut self) {
         // Keep message count within limits
         while self.messages.len() > self.max_messages {
-            self.messages.pop_front();
+            self.drop_oldest_message_group();
         }
     }
 
     /// Trim conversation to stay within a token budget while preserving the system prompt and recent context.
     pub fn trim_to_token_budget(&mut self, max_tokens: usize) {
         while self.estimate_tokens() > max_tokens && !self.messages.is_empty() {
-            // Remove the oldest message
-            self.messages.pop_front();
+            self.drop_oldest_message_group();
+        }
+    }
+
+    fn drop_oldest_message_group(&mut self) {
+        let Some(front) = self.messages.pop_front() else {
+            return;
+        };
+
+        // Keep tool-call sequences valid by evicting both sides together.
+        // If we drop an assistant tool-call message but keep its tool results,
+        // some providers reject the resulting malformed conversation.
+        if let Some(tool_calls) = front.tool_calls {
+            let evicted_ids: std::collections::HashSet<String> =
+                tool_calls.into_iter().map(|tc| tc.id).collect();
+            self.messages.retain(|msg| {
+                msg.tool_call_id
+                    .as_ref()
+                    .map(|id| !evicted_ids.contains(id))
+                    .unwrap_or(true)
+            });
         }
     }
 
@@ -135,5 +154,32 @@ impl ConversationHistory {
 impl Default for ConversationHistory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{FunctionCall, ToolCall};
+
+    #[test]
+    fn trim_removes_tool_results_with_evicted_tool_call() {
+        let mut history = ConversationHistory::new().with_max_messages(2);
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+            },
+        };
+
+        history.add_message(Message::assistant_with_tools("tooling", vec![tool_call]));
+        history.add_tool_result("call_1", "file contents");
+        history.add_user_message("next turn");
+
+        let conversation = history.get_conversation_messages();
+        assert_eq!(conversation.len(), 1);
+        assert_eq!(conversation[0].content, "next turn");
     }
 }

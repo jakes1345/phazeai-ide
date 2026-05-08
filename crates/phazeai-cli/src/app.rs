@@ -78,6 +78,9 @@ pub async fn run_single_prompt(
             }
             AgentEvent::Complete { .. } => println!(),
             AgentEvent::Error(e) => eprintln!("\nError: {e}"),
+            AgentEvent::McpReconnected { servers } => {
+                eprintln!("\n[MCP] Reconnected: {}", servers.join(", "));
+            }
             _ => {}
         }
     }
@@ -1742,6 +1745,13 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::BrowserFetchStart { .. }
         | AgentEvent::BrowserFetchComplete { .. }
         | AgentEvent::BrowserFetchError { .. } => {}
+        AgentEvent::McpReconnected { servers } => {
+            state.status_text = if servers.len() == 1 {
+                format!("MCP '{}' reconnected", servers[0])
+            } else {
+                format!("MCP reconnected: {}", servers.join(", "))
+            };
+        }
     }
 }
 

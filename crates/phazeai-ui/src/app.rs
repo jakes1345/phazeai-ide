@@ -37,9 +37,11 @@ use crate::{
     components::icon::{icons, phaze_icon},
     domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
-        chat::chat_panel, editor::editor_panel, explorer::explorer_panel,
-        extensions::extensions_panel, git::git_panel, github_actions::github_actions_panel, search,
-        settings::settings_panel, terminal::terminal_panel, tests::tests_panel,
+        account::account_panel, chat::chat_panel, containers::containers_panel,
+        editor::editor_panel, explorer::explorer_panel, extensions::extensions_panel,
+        git::git_panel, github_actions::github_actions_panel, makefile::makefile_panel,
+        remote::remote_panel, run_debug::run_debug_panel, search, settings::settings_panel,
+        terminal::terminal_panel, tests::tests_panel,
     },
     theme::{PhazeTheme, ThemeVariant},
     util::safe_get,
@@ -153,6 +155,7 @@ impl IdeState {
         crate::commands::GlobalCommandState {
             show_left_panel: self.workbench.show_left_panel,
             left_panel_width: self.workbench.left_panel_width,
+            left_panel_tab: self.workbench.left_panel_tab,
             show_bottom_panel: self.workbench.show_bottom_panel,
             show_right_panel: self.workbench.show_right_panel,
             file_picker_open: self.workbench.file_picker_open,
@@ -160,6 +163,13 @@ impl IdeState {
             command_palette_open: self.workbench.command_palette_open,
             zen_mode: self.workbench.zen_mode,
             split_editor: self.editor.split_editor,
+            font_size: self.editor.font_size,
+            ws_syms_open: self.editor.ws_syms_open,
+            ws_syms_query: self.editor.ws_syms_query,
+            inlay_hints_toggle: self.editor.inlay_hints_toggle,
+            code_lens_visible: self.editor.code_lens_visible,
+            minimap_visible: self.editor.minimap_visible,
+            inline_edit_open: self.ai.inline_edit_open,
         }
     }
 }
@@ -1114,6 +1124,7 @@ impl IdeState {
             search_results: create_rw_signal(Vec::new()),
             output_log: create_rw_signal(Vec::new()),
             run_in_terminal_text: create_rw_signal(None),
+            debug_console_log: create_rw_signal(String::new()),
             panel_drag_start_width: create_rw_signal(0.0),
             extensions: create_rw_signal(Vec::new()),
             ext_loading: create_rw_signal(false),
@@ -1201,6 +1212,7 @@ impl IdeState {
             organize_imports_on_save: create_rw_signal(true),
             inlay_hints_sig: create_rw_signal(Vec::new()),
             inlay_hints_toggle: create_rw_signal(true),
+            minimap_visible: create_rw_signal(true),
             split_open_file: create_rw_signal(None),
             split_active_cursor: create_rw_signal(None),
             split_open_tabs: create_rw_signal(Vec::new()),
@@ -1648,77 +1660,6 @@ fn activity_bar(state: IdeState) -> impl IntoView {
     })
 }
 
-fn coming_soon_panel(
-    name: &'static str,
-    description: &'static str,
-    theme: RwSignal<PhazeTheme>,
-) -> impl IntoView {
-    let header = container(label(move || name.to_uppercase()).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(11.0)
-            .font_weight(floem::text::Weight::BOLD)
-            .color(p.text_muted)
-            .padding_horiz(12.0)
-            .padding_vert(8.0)
-    }))
-    .style(move |s| {
-        let p = theme.get().palette;
-        s.width_full()
-            .border_bottom(1.0)
-            .border_color(p.glass_border)
-    });
-
-    let icon = container(label(move || "◇".to_string()).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(32.0).color(p.accent).margin_bottom(12.0)
-    }));
-
-    let title = label(move || name.to_string()).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(14.0)
-            .font_weight(floem::text::Weight::BOLD)
-            .color(p.text_primary)
-            .margin_bottom(6.0)
-    });
-
-    let desc = label(move || description.to_string()).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(11.5)
-            .color(p.text_secondary)
-            .margin_bottom(16.0)
-    });
-
-    let badge = container(label(|| "Coming Soon".to_string()).style(move |s| {
-        let p = theme.get().palette;
-        s.font_size(10.0)
-            .font_weight(floem::text::Weight::BOLD)
-            .color(p.accent)
-            .padding_horiz(10.0)
-            .padding_vert(4.0)
-    }))
-    .style(move |s| {
-        let p = theme.get().palette;
-        s.border(1.0).border_color(p.accent).border_radius(12.0)
-    });
-
-    let body = container(
-        stack((icon, title, desc, badge)).style(|s| s.flex_col().items_center().gap(0.0)),
-    )
-    .style(|s| {
-        s.flex_grow(1.0)
-            .width_full()
-            .items_center()
-            .justify_center()
-    });
-
-    container(stack((header, body)).style(|s| s.flex_col().width_full().height_full())).style(
-        move |s| {
-            let t = theme.get();
-            s.width_full().height_full().background(t.palette.glass_bg)
-        },
-    )
-}
-
 fn left_panel(state: IdeState) -> impl IntoView {
     let explorer = explorer_panel(
         state.project.workspace_root,
@@ -1760,12 +1701,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let debug_wrap = container(coming_soon_panel(
-        "Run and Debug",
-        "Run, step, and inspect your code with integrated debugger support.",
-        state.workbench.theme,
-    ))
-    .style({
+    let debug_wrap = container(run_debug_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1786,12 +1722,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let remote_wrap = container(coming_soon_panel(
-        "Remote Explorer",
-        "Connect to remote machines, containers, and cloud environments via SSH.",
-        state.workbench.theme,
-    ))
-    .style({
+    let remote_wrap = container(remote_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1802,12 +1733,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let container_wrap = container(coming_soon_panel(
-        "Containers",
-        "Manage Docker containers, images, and compose services.",
-        state.workbench.theme,
-    ))
-    .style({
+    let container_wrap = container(containers_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full().height_full().apply_if(
@@ -1817,12 +1743,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let makefile_wrap = container(coming_soon_panel(
-        "Makefile",
-        "Browse and run Makefile targets with a single click.",
-        state.workbench.theme,
-    ))
-    .style({
+    let makefile_wrap = container(makefile_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -1888,12 +1809,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let account_wrap = container(coming_soon_panel(
-        "Account",
-        "Sign in to sync settings, manage PhazeAI Cloud features, and collaborate with your team.",
-        state.workbench.theme,
-    ))
-    .style({
+    let account_wrap = container(account_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
             s.width_full()
@@ -2792,38 +2708,196 @@ fn output_view(state: IdeState) -> impl IntoView {
 
 fn debug_console_view(state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
-    container(
-        stack((
-            label(|| "▷  No active debug session").style(move |s| {
-                let p = theme.get().palette;
-                s.font_size(13.0).color(p.text_muted)
-            }),
-            label(|| "Run a debug configuration to start a session.").style(move |s| {
-                let p = theme.get().palette;
-                s.font_size(11.0).color(p.text_muted).margin_top(4.0)
-            }),
-        ))
-        .style(|s| s.flex_col().gap(4.0).items_center()),
+    let log_sig = state.workbench.debug_console_log;
+
+    let clear_btn = container(label(|| "Clear".to_string()))
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0)
+                .padding_horiz(10.0)
+                .padding_vert(4.0)
+                .border_radius(4.0)
+                .border(1.0)
+                .border_color(p.border)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .color(p.accent)
+        })
+        .on_click_stop(move |_| log_sig.set(String::new()));
+
+    let hint = container(label(|| {
+        "Output from Makefile / Containers / SSH / Run & Debug presets is echoed here.".to_string()
+    }))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(10.5)
+            .color(p.text_muted)
+            .padding_left(12.0)
+            .flex_grow(1.0)
+    });
+
+    let toolbar = stack((hint, clear_btn)).style(move |s| {
+        let p = theme.get().palette;
+        s.flex_row()
+            .items_center()
+            .justify_between()
+            .width_full()
+            .padding_horiz(8.0)
+            .padding_vert(6.0)
+            .border_bottom(1.0)
+            .border_color(p.border)
+    });
+
+    let list = scroll(
+        dyn_stack(
+            move || {
+                let text = log_sig.get();
+                if text.trim().is_empty() {
+                    vec![(
+                        0usize,
+                        "No output yet — use Makefile, Run & Debug, Containers, or Remote."
+                            .to_string(),
+                    )]
+                } else {
+                    text.lines()
+                        .enumerate()
+                        .map(|(i, line)| (i + 1, line.to_string()))
+                        .collect()
+                }
+            },
+            |(i, _)| *i,
+            move |(num, txt)| {
+                let muted = num == 0 && txt.starts_with("No output yet");
+                let lbl = txt.clone();
+                container(label(move || {
+                    let prefix = if num == 0 {
+                        String::new()
+                    } else {
+                        format!("{:>4} │ ", num)
+                    };
+                    format!("{}{}", prefix, lbl)
+                }))
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(11.5)
+                        .color(if muted {
+                            p.text_muted
+                        } else {
+                            p.text_secondary
+                        })
+                        .font_family(
+                            "JetBrains Mono, Fira Code, ui-monospace, monospace".to_string(),
+                        )
+                        .padding_horiz(10.0)
+                        .padding_vert(1.0)
+                        .width_full()
+                })
+            },
+        )
+        .style(|s| s.flex_col().width_full()),
     )
-    .style(|s| s.width_full().height_full().items_center().justify_center())
+    .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+
+    container(stack((toolbar, list)).style(|s| {
+        s.flex_col()
+            .width_full()
+            .height_full()
+            .background(floem::peniko::Color::TRANSPARENT)
+    }))
 }
 
 fn ports_view(state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
-    container(
-        stack((
-            label(|| "No forwarded ports").style(move |s| {
+    let lines = create_rw_signal(Vec::<String>::new());
+    let err_msg = create_rw_signal(String::new());
+    let (ports_tx, ports_rx) = std::sync::mpsc::sync_channel::<Result<Vec<String>, String>>(4);
+    let ports_result = create_signal_from_channel(ports_rx);
+    create_effect(move |_| {
+        if let Some(res) = ports_result.get() {
+            match res {
+                Ok(ls) => {
+                    lines.set(ls);
+                    err_msg.set(String::new());
+                }
+                Err(e) => err_msg.set(e),
+            }
+        }
+    });
+
+    let refresh_lbl = container(label(|| "⟳ Refresh".to_string())).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.0)
+            .padding_horiz(10.0)
+            .padding_vert(4.0)
+            .border_radius(4.0)
+            .border(1.0)
+            .border_color(p.border)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .color(p.accent)
+    });
+
+    let hdr = refresh_lbl.on_click_stop(move |_| {
+        let tx = ports_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::util::snapshot_listening_ports());
+        });
+    });
+
+    let hint = container(label(|| {
+        "Processes bound to TCP listening sockets (requires `ss` on Linux or `lsof` on macOS)."
+            .to_string()
+    }))
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(10.5)
+            .color(p.text_muted)
+            .flex_grow(1.0)
+            .padding_right(8.0)
+    });
+
+    let toolbar = stack((hint, hdr)).style(move |s| {
+        let p = theme.get().palette;
+        s.flex_row()
+            .items_center()
+            .justify_between()
+            .width_full()
+            .padding_horiz(12.0)
+            .padding_vert(6.0)
+            .border_bottom(1.0)
+            .border_color(p.border)
+    });
+
+    let err_label = label(move || err_msg.get()).style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(11.0)
+            .color(p.warning)
+            .padding_horiz(12.0)
+            .padding_vert(4.0)
+            .apply_if(err_msg.get().is_empty(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    let rows = dyn_stack(
+        move || lines.get().into_iter().enumerate().collect::<Vec<_>>(),
+        |(i, _)| *i,
+        move |(i, line)| {
+            let ln = line.clone();
+            container(label(move || format!("{}. {}", i + 1, ln))).style(move |s| {
                 let p = theme.get().palette;
-                s.font_size(13.0).color(p.text_muted)
-            }),
-            label(|| "Ports forwarded by running processes will appear here.").style(move |s| {
-                let p = theme.get().palette;
-                s.font_size(11.0).color(p.text_muted).margin_top(4.0)
-            }),
-        ))
-        .style(|s| s.flex_col().gap(4.0).items_center()),
-    )
-    .style(|s| s.width_full().height_full().items_center().justify_center())
+                s.font_size(11.5)
+                    .color(p.text_secondary)
+                    .font_family("JetBrains Mono, Fira Code, ui-monospace, monospace".to_string())
+                    .padding_horiz(10.0)
+                    .padding_vert(1.0)
+                    .width_full()
+            })
+        },
+    );
+
+    let list = scroll(rows.style(|s| s.flex_col().width_full()))
+        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full());
+
+    container(stack((toolbar, err_label, list)).style(|s| s.flex_col().width_full().height_full()))
 }
 
 /// Symbol outline panel — displayed in the left sidebar under the "Symbols" tab.
@@ -3306,6 +3380,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.organize_imports_on_save,
         state.editor.inlay_hints_sig,
         state.editor.inlay_hints_toggle,
+        state.editor.minimap_visible,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3362,6 +3437,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // organize_imports_on_save
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
+        state.editor.minimap_visible,
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3557,6 +3633,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.ai.pending_chat_inject,
         state.project.workspace_root,
         state.project.sidecar_client.clone(),
+        state.workbench.status_toast,
     );
 
     let chat_wrap = container(chat).style(move |s| {
@@ -3675,6 +3752,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // organize_imports_on_save
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
+        state.editor.minimap_visible,
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

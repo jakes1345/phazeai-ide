@@ -5,6 +5,17 @@
 //!
 //! Run: `cargo test --test terminal_tests`
 
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
+}
+
 // ── ANSI escape stripping ─────────────────────────────────────────────────────
 
 /// Strip ANSI/VT escape sequences from a string, leaving only printable text.
@@ -55,6 +66,14 @@ fn strip_ansi_codes(s: &str) -> String {
 #[test]
 fn ansi_strip_green_text() {
     assert_eq!(strip_ansi_codes("\x1b[32mhello\x1b[0m"), "hello");
+    // #region agent log
+    debug_log(
+        "H8",
+        "terminal_tests.rs:ansi_strip_green_text",
+        "terminal ansi stripping passed",
+        serde_json::json!({"inputKind":"green_text"}),
+    );
+    // #endregion
 }
 
 #[test]

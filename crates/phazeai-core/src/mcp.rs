@@ -13,11 +13,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_RESTARTS_PER_WINDOW: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An MCP tool definition received from a server
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +109,7 @@ pub struct McpClient {
     process: Child,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
     server_info: Option<McpServerInfo>,
     tools: Vec<McpToolDef>,
     resources: Vec<McpResource>,
@@ -146,7 +148,7 @@ impl McpClient {
             .ok_or_else(|| "Failed to get stderr of MCP server".to_string())?;
 
         let stdin = Arc::new(Mutex::new(Box::new(stdin) as Box<dyn Write + Send>));
-        let pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>> =
+        let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn reader thread for stdout (JSON-RPC framing).
@@ -361,7 +363,7 @@ impl McpClient {
             "params": params,
         });
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = mpsc::channel();
 
         {
             let mut pending = self
@@ -371,12 +373,27 @@ impl McpClient {
             pending.insert(id, tx);
         }
 
-        self.send_raw(&request)?;
+        if let Err(e) = self.send_raw(&request) {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(e);
+        }
 
-        // Block waiting for response (with timeout)
-        let response = rx
-            .blocking_recv()
-            .map_err(|_| format!("MCP server '{}' did not respond to '{method}'", self.name))?;
+        // Block waiting for response with a real timeout.
+        let response = rx.recv_timeout(REQUEST_TIMEOUT).map_err(|_| {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            // Mark unhealthy so `health_check` can recycle wedged-but-alive processes.
+            self.alive.store(false, Ordering::SeqCst);
+            format!(
+                "MCP server '{}' timed out after {}s while calling '{}'",
+                self.name,
+                REQUEST_TIMEOUT.as_secs(),
+                method
+            )
+        })?;
 
         // Check for JSON-RPC error
         if let Some(error) = response.get("error") {
@@ -428,7 +445,7 @@ impl McpClient {
 
     fn read_loop(
         stdout: impl std::io::Read + Send + 'static,
-        pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+        pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
     ) {
         let mut reader = BufReader::new(stdout);
 
@@ -510,7 +527,9 @@ impl Drop for McpClient {
 /// Manages multiple MCP server connections.
 /// Loads server configs from `.phazeai/mcp.json` and connects to them.
 pub struct McpManager {
-    clients: HashMap<String, McpClient>,
+    /// Each server is isolated behind its own mutex so one slow/hung tool call
+    /// cannot block every other MCP server while waiting on stdio.
+    clients: HashMap<String, Arc<Mutex<McpClient>>>,
     /// Configs kept by name so dead servers can be restarted with the same launch params.
     configs: HashMap<String, McpServerConfig>,
     /// Restart timestamps per server-name for rate-cap.
@@ -570,7 +589,8 @@ impl McpManager {
                         config.name,
                         client.tools().len()
                     );
-                    self.clients.insert(config.name.clone(), client);
+                    self.clients
+                        .insert(config.name.clone(), Arc::new(Mutex::new(client)));
                 }
                 Err(e) => {
                     tracing::error!("Failed to connect to MCP server '{}': {e}", config.name);
@@ -580,13 +600,15 @@ impl McpManager {
     }
 
     /// Detect dead MCP clients and respawn them (rate-limited).
+    /// Returns server names that were successfully reconnected this call.
     /// Capabilities (tools/resources/prompts) are re-discovered automatically by
     /// `McpClient::connect` → `initialize`.
-    pub fn health_check(&mut self) {
+    pub fn health_check(&mut self) -> Vec<String> {
+        let mut reconnected = Vec::new();
         let dead: Vec<String> = self
             .clients
             .iter()
-            .filter(|(_, c)| !c.is_alive())
+            .filter(|(_, arc)| arc.lock().map(|c| !c.is_alive()).unwrap_or(true))
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -615,13 +637,15 @@ impl McpManager {
                         "Reconnected MCP server '{name}': {} tools",
                         client.tools().len()
                     );
-                    self.clients.insert(name, client);
+                    reconnected.push(name.clone());
+                    self.clients.insert(name, Arc::new(Mutex::new(client)));
                 }
                 Err(e) => {
                     tracing::error!("Failed to restart MCP server '{name}': {e}");
                 }
             }
         }
+        reconnected
     }
 
     fn allow_restart(&mut self, name: &str) -> bool {
@@ -644,7 +668,10 @@ impl McpManager {
     /// Get all tools from all connected MCP servers (prefixed with server name)
     pub fn all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut tools = Vec::new();
-        for (server_name, client) in &self.clients {
+        for (server_name, arc) in &self.clients {
+            let Ok(client) = arc.lock() else {
+                continue;
+            };
             for tool in client.tools() {
                 tools.push((server_name.clone(), tool.clone()));
             }
@@ -659,17 +686,29 @@ impl McpManager {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResult, String> {
-        let client = self
-            .clients
-            .get(server_name)
-            .ok_or_else(|| format!("No MCP server connected with name '{server_name}'"))?;
+        let arc = self.client_handle(server_name)?;
+        let client = arc
+            .lock()
+            .map_err(|e| format!("MCP client mutex poisoned ({server_name}): {e}"))?;
         client.call_tool(tool_name, arguments)
+    }
+
+    /// Resolve a connected server handle without invoking tools — callers should
+    /// drop the manager lock before blocking on per-client I/O.
+    pub fn client_handle(&self, server_name: &str) -> Result<Arc<Mutex<McpClient>>, String> {
+        self.clients
+            .get(server_name)
+            .cloned()
+            .ok_or_else(|| format!("No MCP server connected with name '{server_name}'"))
     }
 
     /// Get all resources from all connected MCP servers
     pub fn all_resources(&self) -> Vec<(String, McpResource)> {
         let mut resources = Vec::new();
-        for (server_name, client) in &self.clients {
+        for (server_name, arc) in &self.clients {
+            let Ok(client) = arc.lock() else {
+                continue;
+            };
             for resource in client.resources() {
                 resources.push((server_name.clone(), resource.clone()));
             }

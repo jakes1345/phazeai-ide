@@ -126,7 +126,14 @@ impl Default for Settings {
 
 impl Settings {
     pub fn config_path() -> PathBuf {
-        dirs::config_dir()
+        let config_root = dirs::config_dir().or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                let mut p = PathBuf::from(home);
+                p.push(".config");
+                p
+            })
+        });
+        config_root
             .unwrap_or_else(|| PathBuf::from("."))
             .join(paths::CONFIG_DIR)
             .join(paths::CONFIG_FILE)
@@ -139,6 +146,10 @@ impl Settings {
                 if let Ok(config) = toml::from_str(&content) {
                     return config;
                 }
+                eprintln!(
+                    "Warning: failed to parse settings at '{}'; using defaults",
+                    config_path.display()
+                );
             }
         }
         Self::default()

@@ -3,6 +3,7 @@ use phazeai_core::{
     Agent, AgentEvent, LlmClient, LlmResponse, Message, PhazeError, Role, StreamEvent, Tool,
     ToolDefinition, ToolRegistry, ToolResult,
 };
+use serde_json::json;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::unbounded_channel;
@@ -10,6 +11,17 @@ use tokio::sync::mpsc::unbounded_channel;
 /// Mock LLM that returns pre-programmed stream event sequences.
 struct MockLlm {
     responses: Arc<Mutex<Vec<Vec<StreamEvent>>>>,
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
 }
 
 impl MockLlm {
@@ -105,6 +117,14 @@ impl Tool for ErrorTool {
 
 #[tokio::test]
 async fn test_simple_text_response() {
+    // #region agent log
+    debug_log(
+        "H4",
+        "agent_tests.rs:test_simple_text_response",
+        "starting simple response test",
+        json!({}),
+    );
+    // #endregion
     let mock = MockLlm::new(vec![vec![
         StreamEvent::TextDelta("Hello".to_string()),
         StreamEvent::Done,
@@ -116,6 +136,14 @@ async fn test_simple_text_response() {
     assert_eq!(response.content, "Hello");
     assert_eq!(response.iterations, 1);
     assert!(response.tool_calls.is_empty());
+    // #region agent log
+    debug_log(
+        "H4",
+        "agent_tests.rs:test_simple_text_response",
+        "simple response test passed",
+        json!({ "content": response.content, "iterations": response.iterations }),
+    );
+    // #endregion
 }
 
 #[tokio::test]

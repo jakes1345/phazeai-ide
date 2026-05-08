@@ -68,12 +68,13 @@ Supported providers: Anthropic Claude, OpenAI, Groq, Together.ai, OpenRouter, Ge
 
 ### IDE Architecture (`phazeai-ui/src/`)
 
-`IdeState` (in `app.rs`) is a `#[derive(Clone)]` struct of `RwSignal<T>` fields shared across all panels via Floem's reactive system. No `Arc<Mutex<>>` needed — signals are `Copy` and UI-thread-only.
+`IdeState` (in `domain_state/mod.rs`) is a `#[derive(Clone)]` struct of `RwSignal<T>` fields shared across all panels via Floem's reactive system. No `Arc<Mutex<>>` needed — signals are `Copy` and UI-thread-only.
 
 Panels: `editor`, `chat`, `explorer`, `git`, `terminal`, `search`, `settings`, `ai_panel`.
 
 Key files:
-- `app.rs` — `IdeState`, all overlay views (command palette, file picker, completion popup, Ctrl+K inline edit), key handler, `launch_phaze_ide()`
+- `domain_state/mod.rs` — `IdeState` decomposition (`WorkbenchState`, `EditorState`, `AiState`, `ProjectState`)
+- `app.rs` — overlay views (command palette, file picker, completion popup, Ctrl+K inline edit), key handler, `launch_phaze_ide()`
 - `panels/editor.rs` — multi-tab code editor with syntect highlighting, LSP, find/replace, reactive font-size
 - `panels/terminal.rs` — PTY via `portable-pty` + VTE parser, 256-color rendering, clipboard
 - `panels/chat.rs` — AI chat with real streaming via `Agent::run_with_events()`
@@ -137,7 +138,7 @@ Planner → Coder → Reviewer pipeline, each backed by independently configured
 |---------|-------|
 | Async runtime | `tokio` (full features) |
 | GUI | `floem` (rev `e0dd862`, Lapce fork) |
-| TUI | `ratatui 0.28` |
+| TUI | `ratatui 0.29` |
 | PTY | `portable-pty` |
 | Terminal parsing | `vte` |
 | Syntax highlighting | `syntect` |

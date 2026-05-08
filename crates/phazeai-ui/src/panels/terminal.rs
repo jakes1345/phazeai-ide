@@ -752,7 +752,7 @@ fn single_terminal(
                 *guard = Some(pair.master);
             }
 
-            let _child = child;
+            let mut child = child;
             let mut parser = vte::Parser::new();
             let mut performer = VtePerformer {
                 state: Arc::clone(&term_state_t),
@@ -771,6 +771,7 @@ fn single_terminal(
                     Err(_) => break,
                 }
             }
+            let _ = child.wait();
 
             if let Ok(mut s) = term_state_t.lock() {
                 if !s.current_line.is_empty() {

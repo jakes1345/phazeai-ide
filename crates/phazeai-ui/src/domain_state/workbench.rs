@@ -32,6 +32,8 @@ pub struct WorkbenchState {
     pub search_results: RwSignal<Vec<SearchResult>>,
     pub output_log: RwSignal<Vec<String>>,
     pub run_in_terminal_text: RwSignal<Option<String>>,
+    /// Text shown in the Debug Console bottom tab (run/debug, Makefile, etc.).
+    pub debug_console_log: RwSignal<String>,
     pub panel_drag_start_width: RwSignal<f64>,
     pub extensions: RwSignal<Vec<String>>,
     pub ext_loading: RwSignal<bool>,

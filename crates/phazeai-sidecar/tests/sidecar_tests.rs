@@ -3,6 +3,17 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
+}
+
 // ============================================================================
 // Protocol Tests - JsonRpcRequest
 // ============================================================================
@@ -25,6 +36,14 @@ fn test_jsonrpc_request_serializes_to_valid_json() {
     assert_eq!(json["jsonrpc"], "2.0");
     assert_eq!(json["id"], 42);
     assert_eq!(json["method"], "initialize");
+    // #region agent log
+    debug_log(
+        "H7",
+        "sidecar_tests.rs:test_jsonrpc_request_serializes_to_valid_json",
+        "sidecar jsonrpc serialization passed",
+        json!({ "id": 42, "method": "initialize" }),
+    );
+    // #endregion
 }
 
 #[test]

@@ -95,6 +95,7 @@ pub struct EditorState {
     pub organize_imports_on_save: RwSignal<bool>,
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     pub inlay_hints_toggle: RwSignal<bool>,
+    pub minimap_visible: RwSignal<bool>,
 
     // Split View State
     pub split_open_file: RwSignal<Option<PathBuf>>,

@@ -21,6 +21,7 @@ pub struct Command {
 pub struct GlobalCommandState {
     pub show_left_panel: RwSignal<bool>,
     pub left_panel_width: RwSignal<f64>,
+    pub left_panel_tab: RwSignal<crate::app::Tab>,
     pub show_bottom_panel: RwSignal<bool>,
     pub show_right_panel: RwSignal<bool>,
     pub file_picker_open: RwSignal<bool>,
@@ -28,6 +29,13 @@ pub struct GlobalCommandState {
     pub command_palette_open: RwSignal<bool>,
     pub zen_mode: RwSignal<bool>,
     pub split_editor: RwSignal<bool>,
+    pub font_size: RwSignal<u32>,
+    pub ws_syms_open: RwSignal<bool>,
+    pub ws_syms_query: RwSignal<String>,
+    pub inlay_hints_toggle: RwSignal<bool>,
+    pub code_lens_visible: RwSignal<bool>,
+    pub minimap_visible: RwSignal<bool>,
+    pub inline_edit_open: RwSignal<bool>,
 }
 
 // ── Command Registry ──────────────────────────────────────────────────────────
@@ -173,6 +181,49 @@ pub fn execute_command_global(id: &str, state: &GlobalCommandState) {
         }
         "editor.action.splitEditor" => {
             state.split_editor.update(|v| *v = !*v);
+        }
+        "workbench.action.openSettings" => {
+            state.show_left_panel.set(true);
+            state.left_panel_tab.set(crate::app::Tab::Settings);
+        }
+        "workbench.action.workspaceSymbols" => {
+            state.ws_syms_open.set(true);
+            state.ws_syms_query.set(String::new());
+        }
+        "workbench.action.focusExplorer" => {
+            state.show_left_panel.set(true);
+            state.left_panel_tab.set(crate::app::Tab::Explorer);
+        }
+        "workbench.action.focusGit" => {
+            state.show_left_panel.set(true);
+            state.left_panel_tab.set(crate::app::Tab::Git);
+        }
+        "workbench.action.findInFiles" => {
+            state.show_left_panel.set(true);
+            state.left_panel_tab.set(crate::app::Tab::Search);
+        }
+        "editor.action.toggleInlayHints" => {
+            state.inlay_hints_toggle.update(|v| *v = !*v);
+        }
+        "editor.action.toggleCodeLens" => {
+            state.code_lens_visible.update(|v| *v = !*v);
+        }
+        "editor.action.toggleMinimap" => {
+            state.minimap_visible.update(|v| *v = !*v);
+        }
+        "editor.action.fontZoomIn" => {
+            state.font_size.update(|v| *v = (*v + 1).min(32));
+        }
+        "editor.action.fontZoomOut" => {
+            state
+                .font_size
+                .update(|v| *v = v.saturating_sub(1).max(8));
+        }
+        "editor.action.fontZoomReset" => {
+            state.font_size.set(14);
+        }
+        "editor.action.inlineEdit" => {
+            state.inline_edit_open.update(|v| *v = !*v);
         }
         _ => {}
     }
@@ -439,6 +490,17 @@ pub fn create_default_commands() -> CommandRegistry {
         keybinding: Some("Ctrl+Shift+L"),
         action: Arc::new(|s| {
             s.editor.code_lens_visible.update(|v| *v = !*v);
+        }),
+    });
+
+    reg.register(Command {
+        id: "editor.action.toggleMinimap",
+        label: "Toggle Minimap",
+        category: "Editor",
+        description: "Show or hide the editor minimap strip",
+        keybinding: Some("Ctrl+Shift+M"),
+        action: Arc::new(|s| {
+            s.editor.minimap_visible.update(|v| *v = !*v);
         }),
     });
 

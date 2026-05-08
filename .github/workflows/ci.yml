@@ -64,8 +64,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --quiet
-      - name: Run security audit (warn only — deno_core/wasmtime may have advisories)
-        run: cargo audit || true
+      - name: Run security audit
+        run: cargo audit --deny warnings
 
   # ─────────────────────────────────────────────
   # 4. CORE ENGINE TESTS
@@ -149,9 +149,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
-            libudev-dev libinput-dev libdbus-1-dev python3
+            libudev-dev libinput-dev libdbus-1-dev python3 \
+            xvfb xdotool scrot imagemagick fluxbox
       - name: Test phazeai-ui (state + integration)
         run: cargo test -p phazeai-ui
+      - name: Test phazeai-ui tier2 (xvfb screenshot tests)
+        run: xvfb-run -a cargo test -p phazeai-ui --test tier2_integration -- --ignored
       - name: Build UI binary
         run: cargo build -p phazeai-ui
 
@@ -273,7 +276,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends python3 python3-pip
-          pip3 install --quiet sentence-transformers numpy 2>/dev/null || true
       - name: Test sidecar
         run: cargo test -p phazeai-sidecar
 

@@ -8,9 +8,21 @@
 //! Run with `cargo test -p phazeai-core --test plugin_canary_e2e`.
 
 use phazeai_core::ext_host::{DummyDelegate, ExtensionManager, IdeDelegateHost, PluginEvent};
+use serde_json::json;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
+}
 
 /// Locate (or build) the canary `cdylib`. Returns the path to the shared
 /// object on the current platform.
@@ -111,6 +123,14 @@ fn canary_plugin_loads_activates_and_executes_end_to_end() {
         .execute_command("canary.echo", r#"{"msg":"hi"}"#)
         .expect("canary.echo must succeed");
     assert_eq!(out, r#"{"msg":"hi"}"#);
+    // #region agent log
+    debug_log(
+        "H12",
+        "plugin_canary_e2e.rs:canary_plugin_loads_activates_and_executes_end_to_end",
+        "plugin canary command roundtrip passed",
+        json!({ "command": "canary.echo", "output": out }),
+    );
+    // #endregion
 
     // Unknown command on a loaded plugin should not panic; it returns Err
     // from somewhere in the dispatch chain.

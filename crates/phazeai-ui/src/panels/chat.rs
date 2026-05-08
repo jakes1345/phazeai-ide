@@ -10,8 +10,8 @@ use floem::{
     IntoView,
 };
 use phazeai_core::{
-    Agent, AgentEvent, ConversationMetadata, ConversationStore, SavedConversation, SavedMessage,
-    Settings,
+    Agent, AgentEvent, ConversationHistory, ConversationMetadata, ConversationStore,
+    SavedConversation, SavedMessage, Settings,
 };
 use phazeai_sidecar::SidecarClient;
 
@@ -93,6 +93,23 @@ enum ChatUpdate {
     Err(String),
     /// The user cancelled generation via the Stop button.
     Cancelled(String),
+    /// MCP server process(es) were restarted (stdio recovery).
+    McpStatus(String),
+}
+
+fn format_chat_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("ollama") && lower.contains("not found") && lower.contains("model") {
+        return format!(
+            "Error: {raw}\n\nHint: selected Ollama model is missing.\nTry:\n- ollama pull llama3.2:3b\n- open Settings and switch to an installed model"
+        );
+    }
+    if lower.contains("connection refused") && lower.contains("11434") {
+        return format!(
+            "Error: {raw}\n\nHint: Ollama may not be running.\nStart it with `ollama serve`."
+        );
+    }
+    format!("Error: {raw}")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -184,15 +201,50 @@ fn save_conversation(
     let _ = store.save(&conversation);
 }
 
-fn send_to_ai(
+fn shape_retry_prior_messages(
+    messages: &[ChatMessage],
+    retry_user_message: &str,
+) -> Vec<ChatMessage> {
+    let mut prior_messages = messages.to_vec();
+    while let Some(last) = prior_messages.last() {
+        if last.role == ChatRole::User {
+            break;
+        }
+        prior_messages.pop();
+    }
+    if prior_messages
+        .last()
+        .map(|m| m.role == ChatRole::User && m.content == retry_user_message)
+        .unwrap_or(false)
+    {
+        prior_messages.pop();
+    }
+    prior_messages
+}
+
+struct SendToAiJob {
     user_message: String,
+    prior_messages: Vec<ChatMessage>,
     settings: Settings,
     workspace_root: std::path::PathBuf,
     mode_hint: &'static str,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
     sidecar_client: Option<Arc<SidecarClient>>,
-) {
+}
+
+fn send_to_ai(job: SendToAiJob) {
+    let SendToAiJob {
+        user_message,
+        prior_messages,
+        settings,
+        workspace_root,
+        mode_hint,
+        update_tx,
+        cancel_token,
+        sidecar_client,
+    } = job;
+
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -206,6 +258,20 @@ fn send_to_ai(
         };
 
         rt.block_on(async move {
+            // #region agent log
+            phazeai_core::debug_ndjson::log(
+                "0179af",
+                "full-ide-sweep",
+                "H13",
+                "chat.rs:send_to_ai",
+                "send_to_ai started",
+                serde_json::json!({
+                    "userMessageLen": user_message.len(),
+                    "priorMessages": prior_messages.len(),
+                    "modeHintEmpty": mode_hint.is_empty(),
+                }),
+            );
+            // #endregion
             let client = match settings.build_llm_client() {
                 Ok(c) => c,
                 Err(e) => {
@@ -213,7 +279,69 @@ fn send_to_ai(
                     return;
                 }
             };
-            let mut agent = Agent::new(client).with_cancel_token(cancel_token);
+            let base_conversation = if mode_hint.is_empty() {
+                ConversationHistory::new()
+            } else {
+                ConversationHistory::new().with_system_prompt(mode_hint)
+            };
+            let shared_conversation =
+                std::sync::Arc::new(tokio::sync::Mutex::new(base_conversation));
+            {
+                let mut conv = shared_conversation.lock().await;
+                let prior_len = prior_messages.len();
+                let mut restored_users = 0usize;
+                let mut restored_assistants = 0usize;
+                let mut skipped_loading = 0usize;
+                let mut skipped_duplicate_retry = 0usize;
+                for (idx, msg) in prior_messages.into_iter().enumerate() {
+                    if msg.loading {
+                        skipped_loading += 1;
+                        continue;
+                    }
+                    let is_duplicated_retry_user = idx + 1 == prior_len
+                        && msg.role == ChatRole::User
+                        && msg.content == user_message;
+                    if is_duplicated_retry_user {
+                        skipped_duplicate_retry += 1;
+                        continue;
+                    }
+                    match msg.role {
+                        ChatRole::User => {
+                            restored_users += 1;
+                            conv.add_user_message(msg.content);
+                        }
+                        ChatRole::Assistant => {
+                            if msg.is_error {
+                                continue;
+                            }
+                            restored_assistants += 1;
+                            conv.add_assistant_message(msg.content);
+                        }
+                        // Tool bubbles are UI-level status cards and are not part
+                        // of the strict role schema expected by providers.
+                        ChatRole::Tool => {}
+                    }
+                }
+                // #region agent log
+                phazeai_core::debug_ndjson::log(
+                    "0179af",
+                    "full-ide-sweep",
+                    "H14",
+                    "chat.rs:send_to_ai",
+                    "conversation restored before run",
+                    serde_json::json!({
+                        "restoredUsers": restored_users,
+                        "restoredAssistants": restored_assistants,
+                        "skippedLoading": skipped_loading,
+                        "skippedDuplicateRetry": skipped_duplicate_retry,
+                    }),
+                );
+                // #endregion
+            }
+
+            let mut agent = Agent::new(client)
+                .with_cancel_token(cancel_token)
+                .with_shared_conversation(shared_conversation);
 
             // Register semantic search tools if sidecar is running.
             if let Some(sc) = sidecar_client {
@@ -230,16 +358,20 @@ fn send_to_ai(
                 mcp_manager.connect_all(&mcp_configs);
                 agent.register_mcp_tools(std::sync::Arc::new(std::sync::Mutex::new(mcp_manager)));
             }
+            // #region agent log
+            phazeai_core::debug_ndjson::log(
+                "0179af",
+                "full-ide-sweep",
+                "H15",
+                "chat.rs:send_to_ai",
+                "mcp config load/connect stage complete",
+                serde_json::json!({ "mcpConfigCount": mcp_configs.len() }),
+            );
+            // #endregion
 
             let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-            // Prepend the mode system hint (empty for default Chat mode).
-            let full_prompt = if mode_hint.is_empty() {
-                user_message.clone()
-            } else {
-                format!("{}{}", mode_hint, user_message)
-            };
-            let run_fut = agent.run_with_events(&full_prompt, agent_tx);
+            let run_fut = agent.run_with_events(&user_message, agent_tx);
             let drain_fut = async {
                 let mut accumulated = String::new();
                 while let Some(event) = agent_rx.recv().await {
@@ -254,16 +386,54 @@ fn send_to_ai(
                         AgentEvent::ToolResult { name, summary, .. } => {
                             let _ = update_tx.send(ChatUpdate::ToolResult { name, summary });
                         }
+                        AgentEvent::McpReconnected { servers } => {
+                            let msg = if servers.len() == 1 {
+                                format!("MCP server '{}' reconnected", servers[0])
+                            } else {
+                                format!("MCP servers reconnected: {}", servers.join(", "))
+                            };
+                            let _ = update_tx.send(ChatUpdate::McpStatus(msg));
+                        }
                         AgentEvent::Complete { .. } => {
                             let _ = update_tx.send(ChatUpdate::Done(accumulated.clone()));
+                            // #region agent log
+                            phazeai_core::debug_ndjson::log(
+                                "0179af",
+                                "full-ide-sweep",
+                                "H16",
+                                "chat.rs:send_to_ai",
+                                "agent stream completed",
+                                serde_json::json!({ "finalTextLen": accumulated.len() }),
+                            );
+                            // #endregion
                             break;
                         }
                         AgentEvent::Error(e) => {
                             // Cancellation is a normal user action — don't treat it as an error.
                             if e == "Cancelled" {
                                 let _ = update_tx.send(ChatUpdate::Cancelled(accumulated.clone()));
+                                // #region agent log
+                                phazeai_core::debug_ndjson::log(
+                                    "0179af",
+                                    "full-ide-sweep",
+                                    "H16",
+                                    "chat.rs:send_to_ai",
+                                    "agent stream cancelled",
+                                    serde_json::json!({ "partialTextLen": accumulated.len() }),
+                                );
+                                // #endregion
                             } else {
                                 let _ = update_tx.send(ChatUpdate::Err(e));
+                                // #region agent log
+                                phazeai_core::debug_ndjson::log(
+                                    "0179af",
+                                    "full-ide-sweep",
+                                    "H16",
+                                    "chat.rs:send_to_ai",
+                                    "agent stream errored",
+                                    serde_json::json!({ "partialTextLen": accumulated.len() }),
+                                );
+                                // #endregion
                             }
                             break;
                         }
@@ -342,6 +512,7 @@ pub fn chat_panel(
     chat_inject: RwSignal<Option<String>>,
     workspace_root: RwSignal<std::path::PathBuf>,
     sidecar_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
+    status_toast: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let mut initial_messages = vec![ChatMessage {
         role: ChatRole::Assistant,
@@ -378,6 +549,20 @@ pub fn chat_panel(
             }
         }
     }
+
+    // #region agent log
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        "H25",
+        "chat.rs:chat_panel",
+        "chat panel initialized",
+        serde_json::json!({
+            "initialMessageCount": initial_messages.len(),
+            "initialConversationId": initial_id,
+        }),
+    );
+    // #endregion
 
     let conversation_id = create_rw_signal(initial_id);
     let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(initial_messages);
@@ -464,7 +649,7 @@ pub fn chat_panel(
                         }
                         list.push(ChatMessage {
                             role: ChatRole::Assistant,
-                            content: format!("Error: {}", e),
+                            content: format_chat_error(&e),
                             loading: false,
                             is_error: true,
                         });
@@ -478,6 +663,9 @@ pub fn chat_panel(
                         &Settings::load().llm.model,
                         &workspace_root.get_untracked(),
                     );
+                }
+                ChatUpdate::McpStatus(msg) => {
+                    status_toast.set(Some(msg));
                 }
                 ChatUpdate::Cancelled(partial) => {
                     messages.update(|list| {
@@ -520,8 +708,22 @@ pub fn chat_panel(
             let text = input_text.get();
             let trimmed = text.trim().to_string();
             if trimmed.is_empty() || is_loading.get() {
+                // #region agent log
+                phazeai_core::debug_ndjson::log(
+                    "0179af",
+                    "full-ide-sweep",
+                    "H20",
+                    "chat.rs:do_send",
+                    "send blocked before dispatch",
+                    serde_json::json!({
+                        "trimmedEmpty": trimmed.is_empty(),
+                        "isLoading": is_loading.get(),
+                    }),
+                );
+                // #endregion
                 return;
             }
+            let prior_messages = messages.get_untracked();
 
             // Expand @file mentions into context blocks before sending to AI
             let root = workspace_root.get_untracked();
@@ -553,15 +755,31 @@ pub fn chat_panel(
             let live_settings = Settings::load();
             let hint = mode.get_untracked().system_hint();
             let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
-            send_to_ai(
-                prompt,
-                live_settings,
-                root,
-                hint,
-                (*update_tx).clone(),
-                token,
-                sc_snapshot,
+            // #region agent log
+            phazeai_core::debug_ndjson::log(
+                "0179af",
+                "full-ide-sweep",
+                "H21",
+                "chat.rs:do_send",
+                "dispatching send_to_ai from do_send",
+                serde_json::json!({
+                    "promptLen": prompt.len(),
+                    "priorMessages": prior_messages.len(),
+                    "modeHintEmpty": hint.is_empty(),
+                    "hasSidecar": sc_snapshot.is_some(),
+                }),
             );
+            // #endregion
+            send_to_ai(SendToAiJob {
+                user_message: prompt,
+                prior_messages,
+                settings: live_settings,
+                workspace_root: root,
+                mode_hint: hint,
+                update_tx: (*update_tx).clone(),
+                cancel_token: token,
+                sidecar_client: sc_snapshot,
+            });
         }
     });
 
@@ -677,6 +895,16 @@ pub fn chat_panel(
         let sidecar_client = sidecar_client.clone();
         move || {
             if is_loading.get() {
+                // #region agent log
+                phazeai_core::debug_ndjson::log(
+                    "0179af",
+                    "full-ide-sweep",
+                    "H22",
+                    "chat.rs:do_retry",
+                    "retry blocked due to loading state",
+                    serde_json::json!({ "isLoading": true }),
+                );
+                // #endregion
                 return;
             }
 
@@ -690,6 +918,7 @@ pub fn chat_panel(
             }
 
             if let Some(user_msg) = last_user_msg {
+                let prior_messages = shape_retry_prior_messages(&msgs, &user_msg);
                 messages.update(|list| {
                     while let Some(last) = list.last() {
                         if last.role != ChatRole::User {
@@ -717,15 +946,43 @@ pub fn chat_panel(
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
                 let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
-                send_to_ai(
-                    prompt,
-                    live_settings,
-                    root,
-                    hint,
-                    (*update_tx).clone(),
-                    token,
-                    sc_snapshot,
+                // #region agent log
+                phazeai_core::debug_ndjson::log(
+                    "0179af",
+                    "full-ide-sweep",
+                    "H23",
+                    "chat.rs:do_retry",
+                    "dispatching send_to_ai from retry",
+                    serde_json::json!({
+                        "promptLen": prompt.len(),
+                        "sourceMessages": msgs.len(),
+                        "priorMessages": prior_messages.len(),
+                        "modeHintEmpty": hint.is_empty(),
+                        "hasSidecar": sc_snapshot.is_some(),
+                    }),
                 );
+                // #endregion
+                send_to_ai(SendToAiJob {
+                    user_message: prompt,
+                    prior_messages,
+                    settings: live_settings,
+                    workspace_root: root,
+                    mode_hint: hint,
+                    update_tx: (*update_tx).clone(),
+                    cancel_token: token,
+                    sidecar_client: sc_snapshot,
+                });
+            } else {
+                // #region agent log
+                phazeai_core::debug_ndjson::log(
+                    "0179af",
+                    "full-ide-sweep",
+                    "H24",
+                    "chat.rs:do_retry",
+                    "retry requested but no user message found",
+                    serde_json::json!({ "messageCount": msgs.len() }),
+                );
+                // #endregion
             }
         }
     });
@@ -1018,4 +1275,64 @@ pub fn chat_panel(
 
     stack((header, mode_tabs, messages_scroll, input_bar))
         .style(move |s| s.flex_col().width_full().height_full())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shape_retry_prior_messages, ChatMessage, ChatRole};
+
+    fn msg(role: ChatRole, content: &str, loading: bool, is_error: bool) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.to_string(),
+            loading,
+            is_error,
+        }
+    }
+
+    #[test]
+    fn shape_retry_drops_trailing_assistant_and_tool_messages() {
+        let messages = vec![
+            msg(ChatRole::User, "u1", false, false),
+            msg(ChatRole::Assistant, "a1", false, false),
+            msg(ChatRole::User, "u2", false, false),
+            msg(ChatRole::Tool, "tool", false, false),
+            msg(ChatRole::Assistant, "Error: timeout", false, true),
+        ];
+
+        let shaped = shape_retry_prior_messages(&messages, "u2");
+        assert_eq!(shaped.len(), 2);
+        assert_eq!(shaped[0].content, "u1");
+        assert_eq!(shaped[1].content, "a1");
+    }
+
+    #[test]
+    fn shape_retry_handles_pending_user_bubble() {
+        let messages = vec![
+            msg(ChatRole::User, "u1", false, false),
+            msg(ChatRole::Assistant, "a1", false, false),
+            msg(ChatRole::User, "u2", false, false),
+        ];
+
+        let shaped = shape_retry_prior_messages(&messages, "u2");
+        assert_eq!(shaped.len(), 2);
+        assert_eq!(shaped[0].content, "u1");
+        assert_eq!(shaped[1].content, "a1");
+    }
+
+    #[test]
+    fn shape_retry_keeps_history_when_retrying_older_user() {
+        let messages = vec![
+            msg(ChatRole::User, "u1", false, false),
+            msg(ChatRole::Assistant, "a1", false, false),
+            msg(ChatRole::User, "u2", false, false),
+            msg(ChatRole::Assistant, "a2", false, false),
+        ];
+
+        let shaped = shape_retry_prior_messages(&messages, "u1");
+        assert_eq!(shaped.len(), 3);
+        assert_eq!(shaped[0].content, "u1");
+        assert_eq!(shaped[1].content, "a1");
+        assert_eq!(shaped[2].content, "u2");
+    }
 }

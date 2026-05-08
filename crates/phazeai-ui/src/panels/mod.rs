@@ -1,10 +1,15 @@
+pub mod account;
 pub mod chat;
 pub mod composer;
+pub mod containers;
 pub mod editor;
 pub mod explorer;
 pub mod extensions;
 pub mod git;
 pub mod github_actions;
+pub mod makefile;
+pub mod remote;
+pub mod run_debug;
 pub mod search;
 pub mod settings;
 pub mod terminal;

@@ -8,6 +8,7 @@
 use phazeai_core::ext_host::{
     DummyDelegate, ExtensionManager, IdeDelegate, IdeDelegateHost, PluginEvent,
 };
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
@@ -17,6 +18,17 @@ use std::sync::{Arc, Mutex};
 struct RecordingDelegate {
     log_lines: Arc<Mutex<Vec<String>>>,
     messages: Arc<Mutex<Vec<String>>>,
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
 }
 
 impl IdeDelegate for RecordingDelegate {
@@ -42,6 +54,14 @@ fn test_extension_manager_new_has_no_plugins() {
         manager.get_plugins().is_empty(),
         "A freshly created manager should have no plugins loaded"
     );
+    // #region agent log
+    debug_log(
+        "H11",
+        "ext_host_tests.rs:test_extension_manager_new_has_no_plugins",
+        "extension manager empty-state passed",
+        json!({ "pluginCount": manager.get_plugins().len() }),
+    );
+    // #endregion
 }
 
 #[test]

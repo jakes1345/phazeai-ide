@@ -123,22 +123,6 @@ impl ToolRegistry {
         registry
     }
 
-    /// Register all tools from connected MCP servers.
-    /// Each MCP tool becomes a normal tool with name `mcp__serverName__toolName`.
-    pub fn register_mcp_tools(
-        &mut self,
-        manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
-    ) {
-        let bridges = super::mcp_bridge::create_mcp_tool_bridges(manager);
-        let count = bridges.len();
-        for bridge in bridges {
-            self.register(bridge);
-        }
-        if count > 0 {
-            tracing::info!("Registered {count} MCP tools into tool registry");
-        }
-    }
-
     /// Total number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()

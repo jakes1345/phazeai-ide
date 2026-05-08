@@ -1,9 +1,10 @@
 //! Tier 2: Full GUI integration tests — real window, real keystrokes.
 //!
-//! Uses `xdotool` (key events via window ID) + `scrot` (screenshots).
+//! Uses `xdotool` (key events via window ID) + ImageMagick `import -window` (screenshots).
+//! CI installs `imagemagick`; `scrot` stays listed for optional local workflows.
 //! Zero GPU/DRI3 requirements — works under xvfb-run with software rendering.
 //!
-//! Run locally (needs X11 display + fluxbox + xdotool + scrot):
+//! Run locally (needs X11 display + fluxbox + xdotool + ImageMagick `import`):
 //!   BIN=$(cargo test --test tier2_integration -p phazeai-ui --no-run 2>&1 | grep -oP 'deps/tier2_integration-\w+')
 //!   ./target/debug/deps/$BIN --ignored --test-threads=1
 //!
@@ -15,6 +16,7 @@
 //!     "$BIN" --ignored --test-threads=1
 
 use image::{DynamicImage, GenericImageView, Rgba};
+use serde_json::json;
 use std::{
     path::PathBuf,
     process::{Child, Command},
@@ -26,6 +28,17 @@ use std::{
 
 fn display() -> String {
     std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())
+}
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
 }
 
 fn binary_path() -> PathBuf {
@@ -101,6 +114,14 @@ fn launch_ide() -> (Child, u64) {
         wid > 0,
         "IDE window never appeared (xdotool search timed out)"
     );
+    // #region agent log
+    debug_log(
+        "H3",
+        "tier2_integration.rs:launch_ide",
+        "ide window detected",
+        json!({ "windowId": wid, "display": dpy }),
+    );
+    // #endregion
 
     // Give the window time to fully render before interacting.
     // The first visible frame can still be the splash/loading state.
@@ -151,6 +172,14 @@ fn xdotool(args: &[&str]) {
 /// Send a key combo to a specific window ID via XTEST (real events, not synthetic).
 /// Requires fluxbox WM to be running for proper focus handling.
 fn send_keys(wid: u64, combo: &str) {
+    // #region agent log
+    debug_log(
+        "H1",
+        "tier2_integration.rs:send_keys",
+        "sending key combo",
+        json!({ "windowId": wid, "combo": combo }),
+    );
+    // #endregion
     // Click into window to force real OS-level focus for XTEST key events
     xdotool(&["windowraise", &wid.to_string()]);
     xdotool(&["mousemove", "--window", &wid.to_string(), "400", "300"]);
@@ -176,6 +205,14 @@ fn send_keys(wid: u64, combo: &str) {
 
 /// Type a string into a specific window via XTEST.
 fn type_text(wid: u64, text: &str) {
+    // #region agent log
+    debug_log(
+        "H2",
+        "tier2_integration.rs:type_text",
+        "typing text",
+        json!({ "windowId": wid, "length": text.len() }),
+    );
+    // #endregion
     xdotool(&["windowraise", &wid.to_string()]);
     xdotool(&["mousemove", "--window", &wid.to_string(), "400", "300"]);
     xdotool(&["click", "1"]);
@@ -185,9 +222,9 @@ fn type_text(wid: u64, text: &str) {
     thread::sleep(Duration::from_millis(700));
 }
 
-// ── Screenshot via scrot ──────────────────────────────────────────────────────
+// ── Screenshot via ImageMagick import ──────────────────────────────────────────
 
-fn screenshot(name: &str) -> DynamicImage {
+fn screenshot(wid: u64, name: &str) -> DynamicImage {
     let dir = format!("{}/tests/snapshots", env!("CARGO_MANIFEST_DIR"));
     std::fs::create_dir_all(&dir).ok();
     let path = format!("{dir}/{name}.png");
@@ -195,28 +232,9 @@ fn screenshot(name: &str) -> DynamicImage {
     // Delete existing file so scrot doesn't append _001, _002, etc.
     std::fs::remove_file(&path).ok();
 
-    for attempt in 0..3 {
-        // -o = overwrite, -z = silent
-        let ok = Command::new("scrot")
-            .args(["-oz", &path])
-            .env("DISPLAY", display())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if ok {
-            if let Ok(img) = image::open(&path) {
-                return img;
-            }
-        }
-        if attempt < 2 {
-            thread::sleep(Duration::from_millis(400));
-        }
-    }
-
-    // Fallback: import (ImageMagick)
+    // Prefer a window-scoped capture to avoid display-level noise.
     Command::new("import")
-        .args(["-window", "root", &path])
+        .args(["-window", &wid.to_string(), &path])
         .env("DISPLAY", display())
         .status()
         .ok();
@@ -250,6 +268,46 @@ fn diff_percent(a: &DynamicImage, b: &DynamicImage) -> f64 {
     (diff as f64 / total) * 100.0
 }
 
+fn diff_stats(a: &DynamicImage, b: &DynamicImage) -> (f64, Option<(u32, u32, u32, u32)>) {
+    let (aw, ah) = a.dimensions();
+    let (bw, bh) = b.dimensions();
+    if aw != bw || ah != bh {
+        return (100.0, None);
+    }
+
+    let total = (aw * ah) as f64;
+    let mut diff = 0u64;
+    let mut min_x = aw;
+    let mut min_y = ah;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+
+    for y in 0..ah {
+        for x in 0..aw {
+            let Rgba([r1, g1, b1, _]) = a.get_pixel(x, y);
+            let Rgba([r2, g2, b2, _]) = b.get_pixel(x, y);
+            if (r1 as i32 - r2 as i32).unsigned_abs() > 10
+                || (g1 as i32 - g2 as i32).unsigned_abs() > 10
+                || (b1 as i32 - b2 as i32).unsigned_abs() > 10
+            {
+                diff += 1;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    let percent = (diff as f64 / total) * 100.0;
+    let bbox = if diff > 0 {
+        Some((min_x, min_y, max_x, max_y))
+    } else {
+        None
+    };
+    (percent, bbox)
+}
+
 fn is_blank(img: &DynamicImage) -> bool {
     let (w, h) = img.dimensions();
     let mut non_black = 0u32;
@@ -274,14 +332,14 @@ fn is_blank(img: &DynamicImage) -> bool {
 fn scenario_toggle_terminal() {
     let (mut child, wid) = launch_ide();
 
-    let baseline = screenshot("s1_baseline");
+    let baseline = screenshot(wid, "s1_baseline");
     assert!(
         !is_blank(&baseline),
         "App rendered a blank screen — software rendering may not be active"
     );
 
     send_keys(wid, "ctrl+j");
-    let open = screenshot("s1_terminal_open");
+    let open = screenshot(wid, "s1_terminal_open");
     let diff_open = diff_percent(&baseline, &open);
     assert!(
         diff_open > 3.0,
@@ -289,7 +347,7 @@ fn scenario_toggle_terminal() {
     );
 
     send_keys(wid, "ctrl+j");
-    let closed = screenshot("s1_terminal_closed");
+    let closed = screenshot(wid, "s1_terminal_closed");
     let diff_close = diff_percent(&baseline, &closed);
     assert!(
         diff_close < 8.0,
@@ -306,11 +364,11 @@ fn scenario_toggle_terminal() {
 fn scenario_command_palette_open_and_close() {
     let (mut child, wid) = launch_ide();
 
-    let baseline = screenshot("s2_baseline");
+    let baseline = screenshot(wid, "s2_baseline");
     assert!(!is_blank(&baseline), "App rendered blank screen");
 
     send_keys(wid, "ctrl+p");
-    let open = screenshot("s2_palette_open");
+    let open = screenshot(wid, "s2_palette_open");
     let diff_open = diff_percent(&baseline, &open);
     assert!(
         diff_open > 5.0,
@@ -318,7 +376,7 @@ fn scenario_command_palette_open_and_close() {
     );
 
     send_keys(wid, "escape");
-    let closed = screenshot("s2_palette_closed");
+    let closed = screenshot(wid, "s2_palette_closed");
     let diff_close = diff_percent(&baseline, &closed);
     assert!(
         diff_close < 8.0,
@@ -335,11 +393,11 @@ fn scenario_command_palette_open_and_close() {
 fn scenario_toggle_explorer() {
     let (mut child, wid) = launch_ide();
 
-    let open = screenshot("s3_explorer_open");
+    let open = screenshot(wid, "s3_explorer_open");
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+b");
-    let closed = screenshot("s3_explorer_closed");
+    let closed = screenshot(wid, "s3_explorer_closed");
     let diff = diff_percent(&open, &closed);
     assert!(
         diff > 3.0,
@@ -347,7 +405,7 @@ fn scenario_toggle_explorer() {
     );
 
     send_keys(wid, "ctrl+b");
-    let reopened = screenshot("s3_explorer_reopened");
+    let reopened = screenshot(wid, "s3_explorer_reopened");
     let diff2 = diff_percent(&open, &reopened);
     assert!(
         diff2 < 10.0,
@@ -364,11 +422,11 @@ fn scenario_toggle_explorer() {
 fn scenario_toggle_chat_panel() {
     let (mut child, wid) = launch_ide();
 
-    let open = screenshot("s4_chat_open");
+    let open = screenshot(wid, "s4_chat_open");
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+backslash");
-    let closed = screenshot("s4_chat_closed");
+    let closed = screenshot(wid, "s4_chat_closed");
     let diff = diff_percent(&open, &closed);
     assert!(diff > 1.0, "Chat close: expected >1% diff, got {diff:.2}%");
 
@@ -384,11 +442,11 @@ fn scenario_command_palette_type_filter() {
 
     send_keys(wid, "ctrl+p");
     thread::sleep(Duration::from_millis(400));
-    let empty = screenshot("s5_palette_empty");
+    let empty = screenshot(wid, "s5_palette_empty");
     assert!(!is_blank(&empty), "App rendered blank screen");
 
     type_text(wid, "toggle");
-    let filtered = screenshot("s5_palette_filtered");
+    let filtered = screenshot(wid, "s5_palette_filtered");
     let diff = diff_percent(&empty, &filtered);
     assert!(
         diff > 0.5,
@@ -406,18 +464,48 @@ fn scenario_command_palette_type_filter() {
 fn scenario_panel_stability_sequence() {
     let (mut child, wid) = launch_ide();
 
-    let initial = screenshot("s6_initial");
+    let initial = screenshot(wid, "s6_initial");
     assert!(!is_blank(&initial), "App rendered blank screen");
 
     send_keys(wid, "ctrl+j"); // open terminal
     send_keys(wid, "ctrl+j"); // close terminal
+    let after_terminal_pair = screenshot(wid, "s6_after_terminal_pair");
+    let (after_terminal_diff, after_terminal_bbox) = diff_stats(&initial, &after_terminal_pair);
+    // #region agent log
+    debug_log(
+        "H17",
+        "tier2_integration.rs:scenario_panel_stability_sequence",
+        "after terminal toggle pair",
+        json!({ "diffPercent": after_terminal_diff, "bbox": after_terminal_bbox }),
+    );
+    // #endregion
+
     send_keys(wid, "ctrl+b"); // close explorer
     send_keys(wid, "ctrl+b"); // reopen explorer
+    let after_explorer_pair = screenshot(wid, "s6_after_explorer_pair");
+    let (after_explorer_diff, after_explorer_bbox) = diff_stats(&initial, &after_explorer_pair);
+    // #region agent log
+    debug_log(
+        "H18",
+        "tier2_integration.rs:scenario_panel_stability_sequence",
+        "after explorer toggle pair",
+        json!({ "diffPercent": after_explorer_diff, "bbox": after_explorer_bbox }),
+    );
+    // #endregion
+
     send_keys(wid, "ctrl+p"); // open palette
     send_keys(wid, "escape"); // close palette
 
-    let final_state = screenshot("s6_final");
-    let diff = diff_percent(&initial, &final_state);
+    let final_state = screenshot(wid, "s6_final");
+    let (diff, bbox) = diff_stats(&initial, &final_state);
+    // #region agent log
+    debug_log(
+        "H19",
+        "tier2_integration.rs:scenario_panel_stability_sequence",
+        "stability scenario diff computed",
+        json!({ "diffPercent": diff, "bbox": bbox }),
+    );
+    // #endregion
     assert!(
         diff < 10.0,
         "Stability: expected <10% diff after paired toggles, got {diff:.2}%"

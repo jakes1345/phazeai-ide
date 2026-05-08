@@ -10,6 +10,17 @@
 
 use std::path::PathBuf;
 
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    phazeai_core::debug_ndjson::log(
+        "0179af",
+        "full-ide-sweep",
+        hypothesis_id,
+        location,
+        message,
+        data,
+    );
+}
+
 // ── InlayHintEntry ────────────────────────────────────────────────────────────
 
 /// Mirror of `InlayHintEntry` from lsp_bridge.rs.
@@ -33,6 +44,14 @@ fn inlay_hint_entry_fields() {
     assert_eq!(hint.line, 5);
     assert_eq!(hint.col, 12);
     assert_eq!(hint.label, ": i32");
+    // #region agent log
+    debug_log(
+        "H9",
+        "lsp_tests.rs:inlay_hint_entry_fields",
+        "lsp inlay hint structure passed",
+        serde_json::json!({"line": hint.line, "col": hint.col}),
+    );
+    // #endregion
 }
 
 #[test]

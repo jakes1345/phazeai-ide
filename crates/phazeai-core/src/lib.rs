@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_event;
 pub mod analysis;
 pub mod companion;
 pub mod config;
@@ -14,8 +15,11 @@ pub mod project;
 pub mod telemetry;
 pub mod tools;
 
+pub mod debug_ndjson;
+
 // Re-export key types
-pub use agent::{Agent, AgentEvent, AgentResponse, ApprovalFn};
+pub use agent::{Agent, AgentResponse, ApprovalFn};
+pub use agent_event::AgentEvent;
 pub use config::Settings;
 pub use context::{
     collect_git_info, ContextBuilder, ConversationHistory, ConversationMetadata, ConversationStore,

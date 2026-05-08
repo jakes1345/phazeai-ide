@@ -11,8 +11,9 @@ pub fn phaze_input(
     placeholder: impl Into<String>,
     theme: RwSignal<PhazeTheme>,
 ) -> impl IntoView {
-    let _placeholder = placeholder.into();
+    let placeholder = placeholder.into();
     text_input(value)
+        .placeholder(placeholder)
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;

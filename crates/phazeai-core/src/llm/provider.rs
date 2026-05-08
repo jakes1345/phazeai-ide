@@ -549,7 +549,7 @@ fn default_model_for(id: &ProviderId) -> &str {
     match id {
         ProviderId::Claude => models::DEFAULT_CLAUDE_MODEL,
         ProviderId::OpenAI => models::DEFAULT_OPENAI_MODEL,
-        ProviderId::Ollama => models::PHAZE_BEAST,
+        ProviderId::Ollama => models::BASE_PLANNER,
         ProviderId::Groq => models::DEFAULT_GROQ_MODEL,
         ProviderId::Together => models::DEFAULT_TOGETHER_MODEL,
         ProviderId::OpenRouter => models::DEFAULT_OPENROUTER_MODEL,
