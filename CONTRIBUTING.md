@@ -11,8 +11,8 @@ Thank you for your interest in contributing to PhazeAI IDE! We welcome contribut
    ```
 
 2. **Install Dependencies**
-   - **Rust 1.70+** is required.
-   - **Linux**: `sudo apt install build-essential libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`
+   - **Rust 1.93+** is required.
+   - **Linux**: `sudo apt install build-essential libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev`
    - **macOS**: Xcode Command Line Tools.
    - **Windows**: MSVC or MinGW toolchain.
 

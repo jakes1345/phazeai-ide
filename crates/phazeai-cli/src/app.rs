@@ -181,7 +181,7 @@ struct AppState {
     session_picker_index: usize,
 
     // Tool approval
-    approval_manager: ToolApprovalManager,
+    approval_manager: Arc<std::sync::Mutex<ToolApprovalManager>>,
 
     /// Current AI mode (chat, ask, debug, plan, edit)
     ai_mode: String,
@@ -255,7 +255,7 @@ impl AppState {
             session_picker_list: Vec::new(),
             session_picker_index: 0,
 
-            approval_manager: ToolApprovalManager::default(),
+            approval_manager: Arc::new(std::sync::Mutex::new(ToolApprovalManager::default())),
             ai_mode: "chat".into(),
             last_user_input: String::new(),
 
@@ -553,8 +553,7 @@ pub async fn run_tui(
         let approval_tx_shared = state.approval_tx.clone();
 
         // Create approval callback
-        let approval_manager_clone =
-            Arc::new(std::sync::Mutex::new(ToolApprovalManager::default()));
+        let approval_manager_clone = state.approval_manager.clone();
         let approval_mgr = approval_manager_clone.clone();
         let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(move |tool_name, params| {
             let mgr = approval_mgr.clone();
@@ -1535,7 +1534,12 @@ fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: 
         })
         .unwrap_or_else(|_| ".".into());
 
-    let approval_label = match state.approval_manager.mode() {
+    let approval_mode = state
+        .approval_manager
+        .lock()
+        .map(|m| m.mode().clone())
+        .unwrap_or(ToolApprovalMode::AlwaysAsk);
+    let approval_label = match approval_mode {
         ToolApprovalMode::AutoApprove => "auto",
         ToolApprovalMode::AlwaysAsk => "ask",
         ToolApprovalMode::AskOnce => "once",
@@ -2089,9 +2093,9 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
         }
         KeyCode::Char('a') | KeyCode::Char('A') => {
             // Auto-approve this and all future tools.
-            state
-                .approval_manager
-                .set_mode(ToolApprovalMode::AutoApprove);
+            if let Ok(mut mgr) = state.approval_manager.lock() {
+                mgr.set_mode(ToolApprovalMode::AutoApprove);
+            }
             send_approval(state, true);
             state.pending_approval = None;
             state.add_message(
@@ -2102,9 +2106,9 @@ fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('s') | KeyCode::Char('S') => {
             // Allow this one tool for the session (record then approve).
             if let Some(ref approval) = state.pending_approval {
-                state
-                    .approval_manager
-                    .record_approval(&approval.tool_name, &approval.params);
+                if let Ok(mut mgr) = state.approval_manager.lock() {
+                    mgr.record_approval(&approval.tool_name, &approval.params);
+                }
             }
             send_approval(state, true);
             state.pending_approval = None;
@@ -2380,7 +2384,9 @@ fn handle_command_result(
                     return;
                 }
             };
-            state.approval_manager.set_mode(new_mode);
+            if let Ok(mut mgr) = state.approval_manager.lock() {
+                mgr.set_mode(new_mode);
+            }
             state.add_message(
                 MessageRole::System,
                 format!("Tool approval mode set to: {mode}"),
@@ -2950,7 +2956,7 @@ jobs:
                 }
             }
         }
-        CommandResult::Undo => {
+        CommandResult::UndoConfirmed => {
             let output = std::process::Command::new("git")
                 .args(["diff", "--stat", "HEAD"])
                 .output();
@@ -3076,7 +3082,6 @@ fn complete_command(input: &str) -> Option<String> {
         "/conversations",
         "/history",
         "/new",
-        "/config",
         "/status",
         "/approve",
         "/diff",
@@ -3095,6 +3100,7 @@ fn complete_command(input: &str) -> Option<String> {
         "/edit",
         "/chat",
         "/add",
+        "/undo",
         "/retry",
         "/cancel",
         "/grep",

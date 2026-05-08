@@ -59,8 +59,8 @@ pub enum CommandResult {
     RunSkill { name: String, args: String },
     /// Set up a PhazeAI GitHub Action workflow.
     InstallGithubApp,
-    /// Undo the last AI-made file changes via git.
-    Undo,
+    /// Undo the last AI-made file changes via git (requires explicit confirmation).
+    UndoConfirmed,
 }
 
 pub fn handle_command(input: &str) -> CommandResult {
@@ -204,7 +204,17 @@ pub fn handle_command(input: &str) -> CommandResult {
         }
         "/retry" => CommandResult::Retry,
         "/cancel" | "/stop" => CommandResult::Cancel,
-        "/undo" => CommandResult::Undo,
+        "/undo" => {
+            if matches!(arg, "confirm" | "--confirm") {
+                CommandResult::UndoConfirmed
+            } else {
+                CommandResult::Message(
+                    "Undo is destructive and discards all uncommitted changes.\n\
+                     Run `/undo confirm` to proceed."
+                        .into(),
+                )
+            }
+        }
         "/yolo" => CommandResult::SetApprovalMode("auto".into()),
         "/grep" => {
             if arg.is_empty() {
@@ -287,6 +297,7 @@ fn show_help() -> CommandResult {
   SESSION CONTROL
     /retry                    Resend the last user message
     /cancel, /stop            Cancel the current agent run
+    /undo confirm             Discard all uncommitted file changes
 
   QUICK TOGGLES
     /yolo                     Auto-approve all tools (no more confirmations)

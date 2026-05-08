@@ -164,7 +164,7 @@ If you want PhazeAI to host inference for you, **track this in [BETA_AUDIT_TODO.
 | ✅ | Tool sandbox confined to workspace root |
 | 🚧 | Single canonical AI surface (consolidate `chat_panel` and `ai_panel`) |
 | 🚧 | Conversation persistence for chat (composer chat is ephemeral by design) |
-| ✅ | Unified global keyboard-shortcut dispatch in terminal and editor contexts |
+| 🚧 | Unified global keyboard-shortcut dispatch in terminal and editor contexts |
 | 🚧 | Cloud tier (architecture undecided — see above) |
 | 📋 | Multi-line find, terminal split, multi-repo workspaces |
 | 📋 | Integrated debugger (DAP) |
@@ -193,7 +193,7 @@ MIT. See [LICENSE](./LICENSE). All workspace dependencies are MIT or Apache-2.0.
 No. It's pre-beta — usable for daily coding on a single repo, but the BETA_AUDIT_TODO list still has open P0/P1 items. Don't ship anything mission-critical with it yet.
 
 **Does PhazeAI phone home?**
-A single anonymous launch ping (no payload, no IP retention) is sent for usage counting, behind a settings toggle. No code, prompts, or telemetry beyond that ever leaves your machine.
+Telemetry is opt-in and off by default. If enabled (`PHAZEAI_TELEMETRY=1` or `~/.config/phazeai/telemetry.toml`), startup sends a launch ping containing app kind, version, OS, arch, and a per-launch random session ID. No source code or prompt content is sent.
 
 **Can I use it offline?**
 Yes — point it at a local Ollama or LM Studio instance. The IDE itself never needs the network.
