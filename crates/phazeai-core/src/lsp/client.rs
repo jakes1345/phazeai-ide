@@ -736,10 +736,8 @@ impl LspClient {
                     tracing::warn!("LSP error for request {}: {:?}", id, error);
                     if let Ok(mut pending) = pending.lock() {
                         if let Some(tx) = pending.remove(&id) {
-                            let _ = tx.send(Err(format!(
-                                "LSP error for request {}: {}",
-                                id, error
-                            )));
+                            let _ =
+                                tx.send(Err(format!("LSP error for request {}: {}", id, error)));
                         }
                     }
                 }

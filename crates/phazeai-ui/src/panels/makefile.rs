@@ -41,10 +41,9 @@ fn parse_targets(contents: &str) -> Vec<String> {
             {
                 continue;
             }
-            if !name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '%' | '+' | '@'))
-            {
+            if !name.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '%' | '+' | '@')
+            }) {
                 continue;
             }
             out.push(name.to_string());

@@ -126,7 +126,10 @@ fn launch_config_to_command(cfg: &Value, workspace: &Path) -> Option<String> {
     parts.extend(value_array_strings(cfg.get("args")));
 
     if !parts.is_empty() {
-        parts = parts.into_iter().map(|p| sanitize_shell_fragment(&p)).collect();
+        parts = parts
+            .into_iter()
+            .map(|p| sanitize_shell_fragment(&p))
+            .collect();
         parts.retain(|p| !p.is_empty());
         if parts.is_empty() {
             return None;

@@ -215,9 +215,7 @@ pub fn execute_command_global(id: &str, state: &GlobalCommandState) {
             state.font_size.update(|v| *v = (*v + 1).min(32));
         }
         "editor.action.fontZoomOut" => {
-            state
-                .font_size
-                .update(|v| *v = v.saturating_sub(1).max(8));
+            state.font_size.update(|v| *v = v.saturating_sub(1).max(8));
         }
         "editor.action.fontZoomReset" => {
             state.font_size.set(14);
