@@ -1,6 +1,6 @@
 use crate::domain_state::IdeState;
 use floem::keyboard::{Key, Modifiers};
-use floem::reactive::{RwSignal, SignalUpdate};
+use floem::reactive::SignalUpdate;
 use std::sync::Arc;
 
 // ── Command definition ────────────────────────────────────────────────────────
@@ -13,29 +13,6 @@ pub struct Command {
     pub description: &'static str,
     pub keybinding: Option<&'static str>,
     pub action: Arc<dyn Fn(&IdeState) + Send + Sync>,
-}
-
-// ── Global command state (for terminal panel etc.) ────────────────────────────
-
-#[derive(Clone)]
-pub struct GlobalCommandState {
-    pub show_left_panel: RwSignal<bool>,
-    pub left_panel_width: RwSignal<f64>,
-    pub left_panel_tab: RwSignal<crate::app::Tab>,
-    pub show_bottom_panel: RwSignal<bool>,
-    pub show_right_panel: RwSignal<bool>,
-    pub file_picker_open: RwSignal<bool>,
-    pub file_picker_query: RwSignal<String>,
-    pub command_palette_open: RwSignal<bool>,
-    pub zen_mode: RwSignal<bool>,
-    pub split_editor: RwSignal<bool>,
-    pub font_size: RwSignal<u32>,
-    pub ws_syms_open: RwSignal<bool>,
-    pub ws_syms_query: RwSignal<String>,
-    pub inlay_hints_toggle: RwSignal<bool>,
-    pub code_lens_visible: RwSignal<bool>,
-    pub minimap_visible: RwSignal<bool>,
-    pub inline_edit_open: RwSignal<bool>,
 }
 
 // ── Command Registry ──────────────────────────────────────────────────────────
@@ -154,76 +131,6 @@ pub fn match_global_shortcut(key: &Key, modifiers: &Modifiers) -> Option<String>
             }
         }
         _ => None,
-    }
-}
-
-/// Execute a global command using only `GlobalCommandState` signals.
-/// Used in contexts where the full `IdeState` is not available (e.g. terminal panel).
-pub fn execute_command_global(id: &str, state: &GlobalCommandState) {
-    match id {
-        "workbench.action.toggleSidebar" => {
-            state.show_left_panel.update(|v| *v = !*v);
-        }
-        "workbench.action.toggleBottomPanel" => {
-            state.show_bottom_panel.update(|v| *v = !*v);
-        }
-        "workbench.action.toggleRightPanel" => {
-            state.show_right_panel.update(|v| *v = !*v);
-        }
-        "workbench.action.quickOpen" => {
-            state.file_picker_open.set(true);
-        }
-        "workbench.action.showCommands" => {
-            state.command_palette_open.set(true);
-        }
-        "workbench.action.toggleZenMode" => {
-            state.zen_mode.update(|v| *v = !*v);
-        }
-        "editor.action.splitEditor" => {
-            state.split_editor.update(|v| *v = !*v);
-        }
-        "workbench.action.openSettings" => {
-            state.show_left_panel.set(true);
-            state.left_panel_tab.set(crate::app::Tab::Settings);
-        }
-        "workbench.action.workspaceSymbols" => {
-            state.ws_syms_open.set(true);
-            state.ws_syms_query.set(String::new());
-        }
-        "workbench.action.focusExplorer" => {
-            state.show_left_panel.set(true);
-            state.left_panel_tab.set(crate::app::Tab::Explorer);
-        }
-        "workbench.action.focusGit" => {
-            state.show_left_panel.set(true);
-            state.left_panel_tab.set(crate::app::Tab::Git);
-        }
-        "workbench.action.findInFiles" => {
-            state.show_left_panel.set(true);
-            state.left_panel_tab.set(crate::app::Tab::Search);
-        }
-        "editor.action.toggleInlayHints" => {
-            state.inlay_hints_toggle.update(|v| *v = !*v);
-        }
-        "editor.action.toggleCodeLens" => {
-            state.code_lens_visible.update(|v| *v = !*v);
-        }
-        "editor.action.toggleMinimap" => {
-            state.minimap_visible.update(|v| *v = !*v);
-        }
-        "editor.action.fontZoomIn" => {
-            state.font_size.update(|v| *v = (*v + 1).min(32));
-        }
-        "editor.action.fontZoomOut" => {
-            state.font_size.update(|v| *v = v.saturating_sub(1).max(8));
-        }
-        "editor.action.fontZoomReset" => {
-            state.font_size.set(14);
-        }
-        "editor.action.inlineEdit" => {
-            state.inline_edit_open.update(|v| *v = !*v);
-        }
-        _ => {}
     }
 }
 

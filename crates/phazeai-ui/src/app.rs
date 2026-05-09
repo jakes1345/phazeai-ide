@@ -144,35 +144,7 @@ impl std::fmt::Debug for IdeState {
     }
 }
 
-impl IdeState {
-    /// Build a `GlobalCommandState` snapshot from this `IdeState`.
-    ///
-    /// The returned struct can be passed to `execute_command` in any context
-    /// where `IdeState` is available.  The `on_persist` callback captures the
-    /// current signal values and writes them to `session.toml` via
-    /// `session_update`.
-    pub fn as_global_command_state(&self) -> crate::commands::GlobalCommandState {
-        crate::commands::GlobalCommandState {
-            show_left_panel: self.workbench.show_left_panel,
-            left_panel_width: self.workbench.left_panel_width,
-            left_panel_tab: self.workbench.left_panel_tab,
-            show_bottom_panel: self.workbench.show_bottom_panel,
-            show_right_panel: self.workbench.show_right_panel,
-            file_picker_open: self.workbench.file_picker_open,
-            file_picker_query: self.workbench.file_picker_query,
-            command_palette_open: self.workbench.command_palette_open,
-            zen_mode: self.workbench.zen_mode,
-            split_editor: self.editor.split_editor,
-            font_size: self.editor.font_size,
-            ws_syms_open: self.editor.ws_syms_open,
-            ws_syms_query: self.editor.ws_syms_query,
-            inlay_hints_toggle: self.editor.inlay_hints_toggle,
-            code_lens_visible: self.editor.code_lens_visible,
-            minimap_visible: self.editor.minimap_visible,
-            inline_edit_open: self.ai.inline_edit_open,
-        }
-    }
-}
+impl IdeState {}
 
 /// Persisted layout state from ~/.config/phazeai/session.toml.
 /// Uses serde + toml for reliable serialization.
@@ -3248,8 +3220,7 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
             // Content
             stack((
                 container(terminal_panel(
-                    state.workbench.theme,
-                    state.as_global_command_state(),
+                    state.clone(),
                     state.workbench.run_in_terminal_text,
                 ))
                 .style(move |s| {

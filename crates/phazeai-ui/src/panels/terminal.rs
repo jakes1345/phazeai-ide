@@ -17,7 +17,8 @@ use floem::{
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use vte::{Params, Perform};
 
-use crate::commands::{execute_command_global, match_global_shortcut, GlobalCommandState};
+use crate::commands::{execute_command, match_global_shortcut};
+use crate::domain_state::IdeState;
 use crate::util::safe_get;
 use phazeai_core::constants::terminal as term_consts;
 
@@ -631,9 +632,7 @@ fn single_terminal(
     clear_nonce: RwSignal<u64>,
     shell: String,
     cwd_out: RwSignal<String>,
-    // Unified global command state — used to dispatch Ctrl+B/J/\/P/Shift+P etc.
-    // identically from inside the terminal regardless of which other widget has focus.
-    cmd_state: GlobalCommandState,
+    state: IdeState,
     term_font_size: RwSignal<u32>,
     find_open: RwSignal<bool>,
     find_query: RwSignal<String>,
@@ -996,10 +995,10 @@ fn single_terminal(
                 let ctrl = e.modifiers.contains(Modifiers::CONTROL);
                 let shift = e.modifiers.contains(Modifiers::SHIFT);
 
-                // Global shortcuts are dispatched via the unified execute_command so
-                // the behaviour is identical to the root key handler in app.rs.
+                // Global shortcuts route through the same execute_command as the root
+                // key handler in app.rs — single dispatch, no drift.
                 if let Some(cmd) = match_global_shortcut(&e.key.logical_key, &e.modifiers) {
-                    execute_command_global(&cmd, &cmd_state);
+                    execute_command(&cmd, &state);
                     return;
                 }
 
@@ -1227,13 +1226,10 @@ fn single_terminal(
 /// right-click → "Run in Terminal"), writes `text\n` to the active PTY and
 /// resets the signal to `None`.
 pub fn terminal_panel(
-    theme: RwSignal<PhazeTheme>,
-    // Unified global command state carrying all signals needed to dispatch
-    // Ctrl+B / Ctrl+J / Ctrl+\ / Ctrl+P / Ctrl+Shift+P / Ctrl+Shift+Z /
-    // Ctrl+Alt+\ from inside the terminal PTY canvas.
-    cmd_state: GlobalCommandState,
+    state: IdeState,
     run_in_terminal_text: RwSignal<Option<String>>,
 ) -> impl IntoView {
+    let theme = state.workbench.theme;
     // Shell selector index (cycles through SHELLS)
     let shell_idx: RwSignal<usize> = create_rw_signal(0usize);
 
@@ -1694,7 +1690,7 @@ pub fn terminal_panel(
         split_clear,
         "bash".to_string(),
         split_cwd,
-        cmd_state.clone(),
+        state.clone(),
         term_font_size,
         term_find_open,
         term_find_query,
@@ -1717,7 +1713,7 @@ pub fn terminal_panel(
                 clear_sig,
                 shell,
                 cwd_sig,
-                cmd_state.clone(),
+                state.clone(),
                 term_font_size,
                 term_find_open,
                 term_find_query,
