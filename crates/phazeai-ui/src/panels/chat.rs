@@ -1006,7 +1006,7 @@ pub fn chat_panel(
                 .collect::<Vec<_>>()
         },
         |(i, _, _)| *i,
-        move |(_, msg, is_last)| {
+        move |(i, msg, is_last)| {
             let is_user = msg.role == ChatRole::User;
             let content = msg.content.clone();
             let loading = msg.loading;
@@ -1048,6 +1048,28 @@ pub fn chat_panel(
                 (do_retry_btn)();
             });
 
+            // ✕ dismiss button — removes this error bubble from the message list.
+            let dismiss_btn = container(
+                label(|| "✕")
+                    .style(move |s| s.font_size(10.0).color(theme.get().palette.text_muted)),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.padding(4.0)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .hover(|s| s.background(p.error.with_alpha(0.15)))
+                    .apply_if(!is_error, |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                messages.update(|list| {
+                    if i < list.len() {
+                        list.remove(i);
+                    }
+                });
+            });
+
             // "Retry" text button shown inside error bubbles.
             let error_retry_btn = container(
                 stack((
@@ -1078,7 +1100,7 @@ pub fn chat_panel(
 
             container(
                 stack((
-                    // Row: tool-chip + message text + icon retry button (non-error AI messages)
+                    // Row: tool-chip + message text + action buttons
                     stack((
                         stack((
                             phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
@@ -1107,7 +1129,8 @@ pub fn chat_panel(
                             }),
                         ))
                         .style(|s| s.items_center().flex_grow(1.0)),
-                        icon_retry_btn,
+                        // Retry icon (non-error AI messages) + dismiss ✕ (error messages)
+                        stack((icon_retry_btn, dismiss_btn)).style(|s| s.items_center().gap(2.0)),
                     ))
                     .style(|s| s.items_center().justify_between().width_full()),
                     // Error retry button below the error text (only for error bubbles)
@@ -1254,13 +1277,24 @@ pub fn chat_panel(
         })
         .on_event_stop(EventListener::KeyDown, move |event| {
             if let Event::KeyDown(e) = event {
-                let enter = match &e.key.logical_key {
-                    Key::Character(ch) => ch.as_str() == "\r" || ch.as_str() == "\n",
-                    Key::Named(floem::keyboard::NamedKey::Enter) => true,
-                    _ => false,
-                };
-                if enter && !e.modifiers.contains(Modifiers::SHIFT) {
-                    (do_send_key)();
+                match &e.key.logical_key {
+                    Key::Named(floem::keyboard::NamedKey::Escape) => {
+                        if is_loading.get() {
+                            if let Some(token) = current_cancel_token.get_untracked() {
+                                token.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    key => {
+                        let enter = match key {
+                            Key::Character(ch) => ch.as_str() == "\r" || ch.as_str() == "\n",
+                            Key::Named(floem::keyboard::NamedKey::Enter) => true,
+                            _ => false,
+                        };
+                        if enter && !e.modifiers.contains(Modifiers::SHIFT) {
+                            (do_send_key)();
+                        }
+                    }
                 }
             }
         });
