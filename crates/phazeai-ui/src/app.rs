@@ -145,32 +145,28 @@ impl std::fmt::Debug for IdeState {
 impl IdeState {}
 
 /// Persisted layout state from ~/.config/phazeai/session.toml.
-/// Uses serde + toml for reliable serialization.
+/// `version` lets migrate() handle old files without panic.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct SessionState {
-    /// All open tab paths (files that no longer exist are filtered out on load).
+    version: u32,
     open_tabs: Vec<PathBuf>,
-    /// Index of the active (focused) tab, if any.
     active_tab_index: Option<usize>,
     left_panel_width: f64,
-    /// Whether the left panel (explorer) is open.
     show_left_panel: bool,
-    /// Whether the right panel (chat/AI) is open.
     show_right_panel: bool,
-    /// Whether the bottom panel (terminal/output) is open.
     show_bottom_panel: bool,
     split_editor: bool,
     split_editor_down: bool,
     vim_mode: bool,
     theme: String,
-    /// Zen mode — hides all chrome for distraction-free editing.
     zen_mode: bool,
 }
 
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            version: Self::CURRENT_VERSION,
             open_tabs: Vec::new(),
             active_tab_index: None,
             left_panel_width: 260.0,
@@ -187,101 +183,126 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    /// Returns the active file path based on active_tab_index, filtered to existing files.
+    const CURRENT_VERSION: u32 = 1;
+
+    /// Apply any forward migrations and stamp the current version.
+    fn migrate(mut self) -> Self {
+        // v0 → v1: no field changes; just stamp the version.
+        self.version = Self::CURRENT_VERSION;
+        self
+    }
+
     fn active_file(&self) -> Option<PathBuf> {
         let idx = self.active_tab_index?;
         self.open_tabs.get(idx).cloned()
     }
-}
 
-/// Load session from `~/.config/phazeai/session.toml`.
-/// Returns graceful defaults for missing or corrupt files.
-/// Tabs for files that no longer exist on disk are silently dropped.
-fn load_session() -> SessionState {
-    let Some(dir) = dirs_next_config() else {
-        return SessionState::default();
-    };
-    let Ok(text) = std::fs::read_to_string(dir.join("session.toml")) else {
-        return SessionState::default();
-    };
-    let mut state: SessionState = toml::from_str(&text).unwrap_or_default();
-    // Drop tabs for files that no longer exist on disk.
-    state.open_tabs.retain(|p| p.exists());
-    // Clamp active_tab_index to the surviving tab list.
-    if let Some(idx) = state.active_tab_index {
-        if state.open_tabs.is_empty() {
-            state.active_tab_index = None;
-        } else if idx >= state.open_tabs.len() {
-            state.active_tab_index = Some(state.open_tabs.len().saturating_sub(1));
+    /// Load from disk, migrate, and apply validity fixes (dead tab paths, bad index).
+    fn load() -> Self {
+        let Some(dir) = dirs_next_config() else {
+            return Self::default();
+        };
+        let Ok(text) = std::fs::read_to_string(dir.join("session.toml")) else {
+            return Self::default();
+        };
+        let mut s: Self = toml::from_str(&text).unwrap_or_default();
+        s = s.migrate();
+        s.open_tabs.retain(|p| p.exists());
+        if let Some(idx) = s.active_tab_index {
+            if s.open_tabs.is_empty() {
+                s.active_tab_index = None;
+            } else if idx >= s.open_tabs.len() {
+                s.active_tab_index = Some(s.open_tabs.len().saturating_sub(1));
+            }
+        }
+        s
+    }
+
+    /// Synchronous write to disk. Use `save_debounced` for reactive effects.
+    fn save(&self) {
+        let Some(dir) = dirs_next_config() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(content) = toml::to_string_pretty(self) {
+            let _ = std::fs::write(dir.join("session.toml"), content);
         }
     }
-    state
-}
 
-/// Save session to `~/.config/phazeai/session.toml` (synchronous, direct write).
-/// Callers that need debounced writes should use `session_save_debounced` instead.
-fn save_session(state: &SessionState) {
-    let Some(dir) = dirs_next_config() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(content) = toml::to_string_pretty(state) {
-        let _ = std::fs::write(dir.join("session.toml"), content);
+    /// Debounced write: collapses rapid signal changes into one disk write per second.
+    fn save_debounced(self, gen: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        use std::sync::atomic::Ordering;
+        let ticket = gen.fetch_add(1, Ordering::Relaxed) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            if gen.load(Ordering::Relaxed) == ticket {
+                self.save();
+            }
+        });
     }
-}
 
-/// Schedule a debounced session save. Cancels any pending save and schedules a new
-/// one 1 second later so that rapid signal changes (e.g. resizing, typing) collapse
-/// into a single disk write.
-///
-/// `gen` is a shared `Arc<AtomicU64>` cancel token: we increment it to cancel the
-/// previous pending write, then check it again after the sleep.
-fn session_save_debounced(gen: std::sync::Arc<std::sync::atomic::AtomicU64>, ss: SessionState) {
-    use std::sync::atomic::Ordering;
-    let ticket = gen.fetch_add(1, Ordering::Relaxed) + 1;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
-        // Only write if no newer save has been requested since we started.
-        if gen.load(Ordering::Relaxed) == ticket {
-            save_session(&ss);
+    /// Build a snapshot from live signals — call inside `create_effect` so the
+    /// `.get()` calls register reactive subscriptions.
+    fn from_signals(
+        open_tabs: Vec<PathBuf>,
+        active_file: Option<PathBuf>,
+        left_panel_width: f64,
+        show_left_panel: bool,
+        show_right_panel: bool,
+        show_bottom_panel: bool,
+        split_editor: bool,
+        split_editor_down: bool,
+        vim_mode: bool,
+        theme: String,
+        zen_mode: bool,
+    ) -> Self {
+        let active_tab_index = active_file
+            .as_ref()
+            .and_then(|f| open_tabs.iter().position(|t| t == f));
+        Self {
+            version: Self::CURRENT_VERSION,
+            open_tabs,
+            active_tab_index,
+            left_panel_width,
+            show_left_panel,
+            show_right_panel,
+            show_bottom_panel,
+            split_editor,
+            split_editor_down,
+            vim_mode,
+            theme,
+            zen_mode,
         }
-    });
-}
+    }
 
-/// Build a `SessionState` snapshot from the live `IdeState` signals and schedule a
-/// debounced write. Designed to be called from a reactive `create_effect`.
-#[allow(clippy::too_many_arguments)]
-fn session_commit(
-    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    open_tabs: Vec<PathBuf>,
-    active_file: Option<PathBuf>,
-    left_panel_width: f64,
-    show_left_panel: bool,
-    show_right_panel: bool,
-    show_bottom_panel: bool,
-    split_editor: bool,
-    split_editor_down: bool,
-    vim_mode: bool,
-    theme: String,
-    zen_mode: bool,
-) {
-    let active_tab_index = active_file
-        .as_ref()
-        .and_then(|f| open_tabs.iter().position(|t| t == f));
-    let ss = SessionState {
-        open_tabs,
-        active_tab_index,
-        left_panel_width,
-        show_left_panel,
-        show_right_panel,
-        show_bottom_panel,
-        split_editor,
-        split_editor_down,
-        vim_mode,
-        theme,
-        zen_mode,
-    };
-    session_save_debounced(gen, ss);
+    /// Build an untracked snapshot from IdeState — use in WindowClosed handler.
+    fn from_ide_state_untracked(state: &IdeState) -> Self {
+        let open_tabs = state.editor.open_tabs.get_untracked();
+        let active_file = state.editor.open_file.get_untracked();
+        let active_tab_index = active_file
+            .as_ref()
+            .and_then(|f| open_tabs.iter().position(|t| t == f));
+        Self {
+            version: Self::CURRENT_VERSION,
+            open_tabs,
+            active_tab_index,
+            left_panel_width: state.workbench.left_panel_width.get_untracked(),
+            show_left_panel: state.workbench.show_left_panel.get_untracked(),
+            show_right_panel: state.workbench.show_right_panel.get_untracked(),
+            show_bottom_panel: state.workbench.show_bottom_panel.get_untracked(),
+            split_editor: state.editor.split_editor.get_untracked(),
+            split_editor_down: state.editor.split_editor_down.get_untracked(),
+            vim_mode: state.editor.vim_mode.get_untracked(),
+            theme: state
+                .workbench
+                .theme
+                .get_untracked()
+                .variant
+                .name()
+                .to_string(),
+            zen_mode: state.workbench.zen_mode.get_untracked(),
+        }
+    }
 }
 
 fn dirs_next_config() -> Option<PathBuf> {
@@ -501,7 +522,7 @@ impl IdeState {
         });
 
         // Restore last session.
-        let session = load_session();
+        let session = SessionState::load();
 
         // Load editor config from ~/.config/phazeai/config.toml via toml crate.
         let editor_cfg = load_editor_settings();
@@ -1037,31 +1058,20 @@ impl IdeState {
         {
             let gen = session_gen.clone();
             create_effect(move |_| {
-                let open_tabs = open_tabs_sig.get();
-                let active_file = open_file.get();
-                let left_panel_width = left_panel_width_sig.get();
-                let show_left_panel = show_left_panel_sig.get();
-                let show_right_panel = show_right_panel_sig.get();
-                let show_bottom_panel = show_bottom_panel_sig.get();
-                let split_editor = split_editor_sig.get();
-                let split_editor_down = split_editor_down_sig.get();
-                let vim_mode = vim_mode_sig.get();
-                let theme = theme_signal.get().variant.name().to_string();
-                let zen_mode = zen_mode_sig.get();
-                session_commit(
-                    gen.clone(),
-                    open_tabs,
-                    active_file,
-                    left_panel_width,
-                    show_left_panel,
-                    show_right_panel,
-                    show_bottom_panel,
-                    split_editor,
-                    split_editor_down,
-                    vim_mode,
-                    theme,
-                    zen_mode,
-                );
+                SessionState::from_signals(
+                    open_tabs_sig.get(),
+                    open_file.get(),
+                    left_panel_width_sig.get(),
+                    show_left_panel_sig.get(),
+                    show_right_panel_sig.get(),
+                    show_bottom_panel_sig.get(),
+                    split_editor_sig.get(),
+                    split_editor_down_sig.get(),
+                    vim_mode_sig.get(),
+                    theme_signal.get().variant.name().to_string(),
+                    zen_mode_sig.get(),
+                )
+                .save_debounced(gen.clone());
             });
         }
 
@@ -4734,32 +4744,9 @@ pub fn launch_phaze_ide() {
                                 }
                             }
                         }
-                        // Save complete session state synchronously on close so the
-                        // 1-second debounce timer cannot miss the final state.
-                        let open_tabs = state.editor.open_tabs.get_untracked();
-                        let active_file = state.editor.open_file.get_untracked();
-                        let active_tab_index = active_file
-                            .as_ref()
-                            .and_then(|f| open_tabs.iter().position(|t| t == f));
-                        save_session(&SessionState {
-                            open_tabs,
-                            active_tab_index,
-                            left_panel_width: state.workbench.left_panel_width.get_untracked(),
-                            show_left_panel: state.workbench.show_left_panel.get_untracked(),
-                            show_right_panel: state.workbench.show_right_panel.get_untracked(),
-                            show_bottom_panel: state.workbench.show_bottom_panel.get_untracked(),
-                            split_editor: state.editor.split_editor.get_untracked(),
-                            split_editor_down: state.editor.split_editor_down.get_untracked(),
-                            vim_mode: state.editor.vim_mode.get_untracked(),
-                            theme: state
-                                .workbench
-                                .theme
-                                .get_untracked()
-                                .variant
-                                .name()
-                                .to_string(),
-                            zen_mode: state.workbench.zen_mode.get_untracked(),
-                        });
+                        // Synchronous save on close — bypasses the debounce so the
+                        // final state is never lost.
+                        SessionState::from_ide_state_untracked(&state).save();
                     }
                 })
             },
