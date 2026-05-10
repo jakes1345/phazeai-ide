@@ -114,7 +114,6 @@ pub enum Tab {
     Composer,
     Settings,
     Terminal,
-    Chat,
     Extensions,
     Account,
     Debug,
@@ -129,7 +128,6 @@ pub enum Tab {
     References,
     Symbols,
     GitDiff,
-    TerminalOutput,
     Tests,
 }
 
