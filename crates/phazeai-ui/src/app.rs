@@ -360,6 +360,37 @@ fn load_editor_settings() -> phazeai_core::config::EditorSettings {
     Settings::load().editor
 }
 
+fn check_provider_ready(settings: &Settings) -> bool {
+    match settings.llm.provider {
+        LlmProvider::Ollama | LlmProvider::LmStudio => true,
+        _ => {
+            !settings.llm.api_key_env.is_empty()
+                && std::env::var(&settings.llm.api_key_env)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+        }
+    }
+}
+
+fn check_python_ready(settings: &Settings) -> bool {
+    let bins = [settings.sidecar.python_path.as_str(), "python3", "python"];
+    bins.iter().any(|bin| {
+        std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn check_lsp_ready() -> bool {
+    std::process::Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_sidecar_start(
     python_path: String,
@@ -707,9 +738,9 @@ impl IdeState {
         // the repo-relative path, then ~/.config/phazeai/sidecar/server.py.
         let sidecar_ready_sig = create_rw_signal(false);
         let sidecar_status_sig = create_rw_signal(if !settings.sidecar.enabled {
-            "Semantic search disabled in settings.".to_string()
+            "Code search disabled in settings.".to_string()
         } else {
-            "Semantic search not started.".to_string()
+            "Code search not started.".to_string()
         });
         let sidecar_building_sig = create_rw_signal(false);
         let sidecar_results_sig: RwSignal<Vec<(String, String)>> = create_rw_signal(Vec::new());
@@ -902,12 +933,12 @@ impl IdeState {
 
                         let Some(client) = client else {
                             let _ = status_tx3.send(
-                                "Semantic search unavailable. Build the index to start the sidecar."
+                                "Code search unavailable. Build the index to start the sidecar."
                                     .to_string(),
                             );
                             let _ = tx.send(vec![(
                                 "sidecar unavailable".to_string(),
-                                "semantic search is not connected".to_string(),
+                                "code search is not connected".to_string(),
                             )]);
                             return;
                         };
@@ -927,7 +958,7 @@ impl IdeState {
                         };
 
                         let results = rt.block_on(async move {
-                            match client.search_embeddings(&query, 8).await {
+                            match client.search_code(&query, 8).await {
                                 Ok(value) => value
                                     .get("matches")
                                     .and_then(|v| v.as_array())
@@ -953,9 +984,9 @@ impl IdeState {
                                 Err(e) => vec![(
                                     "sidecar error".to_string(),
                                     if e.contains("Index not built") {
-                                        "semantic index not built yet — click Reindex".to_string()
+                                        "code index not built yet — click Reindex".to_string()
                                     } else {
-                                        format!("semantic search failed: {e}")
+                                        format!("code search failed: {e}")
                                     },
                                 )],
                             }
@@ -975,7 +1006,7 @@ impl IdeState {
             });
 
             if settings.sidecar.auto_start {
-                sidecar_status_sig.set("Starting semantic search...".to_string());
+                sidecar_status_sig.set("Starting code search...".to_string());
                 spawn_sidecar_start(
                     settings.sidecar.python_path.clone(),
                     script,
@@ -987,12 +1018,11 @@ impl IdeState {
                     true,
                 );
             } else {
-                sidecar_status_sig.set(
-                    "Semantic search idle. Click Reindex to start and build the index.".into(),
-                );
+                sidecar_status_sig
+                    .set("Code search idle. Click Reindex to start and build the index.".into());
             }
         } else {
-            sidecar_status_sig.set("Semantic search sidecar script not found.".to_string());
+            sidecar_status_sig.set("Code search sidecar script not found.".to_string());
         }
 
         // AI provider / model signals — initialized from current settings file.
@@ -3804,7 +3834,31 @@ pub fn launch_phaze_ide() {
     // Anonymous telemetry — single fire-and-forget ping, no personal data
     phazeai_core::telemetry::report_launch(phazeai_core::telemetry::AppKind::Ide);
 
+    let is_first_run = !Settings::config_path().exists();
     let settings = Settings::load();
+
+    // Compute readiness items before entering the reactive scope (fast, synchronous).
+    let readiness_items: Vec<(&'static str, bool, &'static str)> = if is_first_run {
+        vec![
+            (
+                "AI provider configured",
+                check_provider_ready(&settings),
+                "Set your API key env var in Settings → AI Provider",
+            ),
+            (
+                "Python available",
+                check_python_ready(&settings),
+                "Install Python 3 or set sidecar.python_path in settings.toml",
+            ),
+            (
+                "rust-analyzer found",
+                check_lsp_ready(),
+                "Install rust-analyzer for LSP features (cargo install rust-analyzer)",
+            ),
+        ]
+    } else {
+        vec![]
+    };
 
     Application::new()
         .window(
@@ -3876,6 +3930,96 @@ pub fn launch_phaze_ide() {
                         .pointer_events(floem::style::PointerEvents::None)
                 });
 
+                // First-run readiness banner — shown once if any checks fail.
+                let readiness_banner = {
+                    let items = readiness_items.clone();
+                    let has_issues = items.iter().any(|(_, ok, _)| !ok);
+                    let visible_sig = create_rw_signal(is_first_run && has_issues);
+                    let theme = state.workbench.theme;
+
+                    let rows = {
+                        let items2 = items.clone();
+                        dyn_stack(
+                            move || items2.clone().into_iter().enumerate(),
+                            |(i, _)| *i,
+                            move |(_, (name, ok, hint))| {
+                                let status = if ok {
+                                    format!("✓  {name}")
+                                } else {
+                                    format!("✗  {name}")
+                                };
+                                let detail = if ok {
+                                    String::new()
+                                } else {
+                                    format!("   {hint}")
+                                };
+                                let is_ok = ok;
+                                stack((
+                                    label(move || status.clone()).style(move |s| {
+                                        let p = theme.get().palette;
+                                        let c = if is_ok { p.success } else { p.error };
+                                        s.font_size(12.0).color(c)
+                                    }),
+                                    label(move || detail.clone()).style(move |s| {
+                                        let p = theme.get().palette;
+                                        s.font_size(10.5).color(p.text_muted).apply_if(is_ok, |s| {
+                                            s.display(floem::style::Display::None)
+                                        })
+                                    }),
+                                ))
+                                .style(|s| s.flex_col().margin_bottom(6.0))
+                            },
+                        )
+                        .style(|s| s.flex_col())
+                    };
+
+                    let title_theme = theme;
+                    let header = stack((
+                        label(|| "First Run Setup".to_string()).style(move |s| {
+                            let p = title_theme.get().palette;
+                            s.font_size(13.0).color(p.text_primary)
+                        }),
+                        container(label(|| "Dismiss".to_string()).style(move |s| {
+                            let p = title_theme.get().palette;
+                            s.font_size(11.0).color(p.text_muted)
+                        }))
+                        .on_click_stop(move |_| visible_sig.set(false))
+                        .style(|s| {
+                            s.padding_horiz(8.0)
+                                .padding_vert(3.0)
+                                .cursor(floem::style::CursorStyle::Pointer)
+                        }),
+                    ))
+                    .style(|s| {
+                        s.items_center()
+                            .justify_between()
+                            .width_full()
+                            .margin_bottom(10.0)
+                    });
+
+                    container(stack((header, rows)).style(|s| s.flex_col().width(300.0))).style(
+                        move |s| {
+                            let p = theme.get().palette;
+                            let shown = visible_sig.get();
+                            s.absolute()
+                                .inset_bottom(60.0)
+                                .inset_right(20.0)
+                                .z_index(ui_const::Z_TOAST)
+                                .padding(16.0)
+                                .background(p.bg_elevated)
+                                .border_radius(10.0)
+                                .border(1.0)
+                                .border_color(p.border)
+                                .box_shadow_h_offset(0.0)
+                                .box_shadow_v_offset(4.0)
+                                .box_shadow_blur(20.0)
+                                .box_shadow_color(p.glow)
+                                .box_shadow_spread(0.0)
+                                .apply_if(!shown, |s| s.display(floem::style::Display::None))
+                        },
+                    )
+                };
+
                 stack((
                     cosmic_bg_canvas(state.workbench.theme),
                     ide_with_menu,
@@ -3890,6 +4034,7 @@ pub fn launch_phaze_ide() {
                     toast_popup,         // Z_TOAST(450) — toast notifications
                     ws_syms_popup,       // Z_WS_SYMBOLS(460) — workspace symbols (Ctrl+T)
                     branch_picker_popup, // Z_BRANCH_PICKER(470) — branch switcher
+                    readiness_banner,    // Z_TOAST(450) — first-run checklist
                     overlays_b,
                 ))
                 .style(move |s| {

@@ -347,9 +347,7 @@ fn send_to_ai(job: SendToAiJob) {
 
             // Register semantic search tools if sidecar is running.
             if let Some(sc) = sidecar_client {
-                agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
-                    sc.clone(),
-                )));
+                agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(sc.clone())));
                 agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(sc)));
             }
 

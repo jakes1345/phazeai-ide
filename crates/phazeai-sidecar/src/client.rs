@@ -118,7 +118,7 @@ impl SidecarClient {
         }
     }
 
-    pub async fn search_embeddings(&self, query: &str, top_k: usize) -> Result<Value, String> {
+    pub async fn search_code(&self, query: &str, top_k: usize) -> Result<Value, String> {
         self.call(
             "search",
             Some(serde_json::json!({

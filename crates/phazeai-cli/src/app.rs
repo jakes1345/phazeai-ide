@@ -51,7 +51,7 @@ pub async fn run_single_prompt(
     // Try to start sidecar for semantic search
     if let Some(client) = try_start_sidecar().await {
         let client = Arc::new(client);
-        agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
+        agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
             client.clone(),
         )));
         agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));
@@ -605,7 +605,7 @@ pub async fn run_tui(
             // Try to start the Python sidecar for semantic search
             if let Some(client) = try_start_sidecar().await {
                 let client = Arc::new(client);
-                agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
+                agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
                     client.clone(),
                 )));
                 agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));

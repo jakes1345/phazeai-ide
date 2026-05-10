@@ -4,26 +4,26 @@ use phazeai_core::{Tool, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Natural-language code search tool backed by the Python sidecar's TF-IDF index.
+/// Keyword-based code search tool backed by the Python sidecar's TF-IDF index.
 /// Falls back to a helpful error if the sidecar is unavailable.
-pub struct SemanticSearchTool {
+pub struct CodeSearchTool {
     client: Arc<SidecarClient>,
 }
 
-impl SemanticSearchTool {
+impl CodeSearchTool {
     pub fn new(client: Arc<SidecarClient>) -> Self {
         Self { client }
     }
 }
 
 #[async_trait::async_trait]
-impl Tool for SemanticSearchTool {
+impl Tool for CodeSearchTool {
     fn name(&self) -> &str {
-        "semantic_search"
+        "code_search"
     }
 
     fn description(&self) -> &str {
-        "Search the codebase using natural language keyword matching (TF-IDF ranking). \
+        "Search the codebase using keyword matching (TF-IDF ranking). \
          Use this when exact grep patterns are too rigid and you need concept-adjacent matches. \
          Returns ranked file snippets by textual relevance."
     }
@@ -34,7 +34,7 @@ impl Tool for SemanticSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language description of what to search for"
+                    "description": "Keywords or a short phrase describing what to search for"
                 },
                 "top_k": {
                     "type": "integer",
@@ -49,9 +49,7 @@ impl Tool for SemanticSearchTool {
         let query = params
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PhazeError::tool("semantic_search", "Missing required parameter: query")
-            })?;
+            .ok_or_else(|| PhazeError::tool("code_search", "Missing required parameter: query"))?;
 
         let top_k = params
             .get("top_k")
@@ -59,7 +57,7 @@ impl Tool for SemanticSearchTool {
             .unwrap_or(5)
             .min(20) as usize;
 
-        let result = match self.client.search_embeddings(query, top_k).await {
+        let result = match self.client.search_code(query, top_k).await {
             Ok(result) => result,
             Err(e) if e.contains("Index not built") => {
                 self.client
@@ -67,23 +65,23 @@ impl Tool for SemanticSearchTool {
                     .await
                     .map_err(|idx_err| {
                         PhazeError::tool(
-                            "semantic_search",
+                            "code_search",
                             format!("Failed to build search index automatically: {idx_err}"),
                         )
                     })?;
                 self.client
-                    .search_embeddings(query, top_k)
+                    .search_code(query, top_k)
                     .await
                     .map_err(|retry_err| {
                         PhazeError::tool(
-                            "semantic_search",
+                            "code_search",
                             format!("Sidecar search failed after auto-indexing: {retry_err}"),
                         )
                     })?
             }
             Err(e) => {
                 return Err(PhazeError::tool(
-                    "semantic_search",
+                    "code_search",
                     format!("Sidecar error: {e}"),
                 ));
             }
@@ -112,7 +110,7 @@ impl Tool for BuildIndexTool {
 
     fn description(&self) -> &str {
         "Build or rebuild the sidecar TF-IDF search index for the project. \
-         Call this before using semantic_search if search returns no results, \
+         Call this before using code_search if search returns no results, \
          or after significant code changes."
     }
 

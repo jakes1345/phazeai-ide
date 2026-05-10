@@ -6,4 +6,4 @@ mod tool;
 pub use client::SidecarClient;
 pub use manager::SidecarManager;
 pub use protocol::{JsonRpcRequest, JsonRpcResponse};
-pub use tool::{BuildIndexTool, SemanticSearchTool};
+pub use tool::{BuildIndexTool, CodeSearchTool};

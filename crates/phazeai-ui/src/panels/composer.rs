@@ -388,7 +388,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
                     // Register semantic search tools if sidecar is running.
                     if let Some(sc) = sidecar_client_snapshot {
-                        agent.register_tool(Box::new(phazeai_sidecar::SemanticSearchTool::new(
+                        agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
                             sc.clone(),
                         )));
                         agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(sc)));
