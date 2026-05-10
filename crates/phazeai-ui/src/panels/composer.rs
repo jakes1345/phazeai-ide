@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -302,9 +303,12 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
     // ── Run action ───────────────────────────────────────────────────────────
 
+    // Set to true when Run is clicked in a non-git workspace — shows confirm widget.
+    let needs_git_confirm: RwSignal<bool> = create_rw_signal(false);
+
     let update_tx = Arc::new(update_tx);
 
-    let run_action = {
+    let run_action: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
         let approval_tx = approval_tx.clone();
         let approval_rx_arc = approval_rx_arc.clone();
@@ -515,7 +519,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 });
             });
         }
-    };
+    });
 
     let stop_action = {
         let approval_tx = approval_tx.clone();
@@ -643,6 +647,50 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             .apply_if(!show, |s| s.display(floem::style::Display::None))
     });
 
+    // ── Non-git confirmation widget ───────────────────────────────────────────
+    // Shown when Run is clicked in a workspace with no git repo.
+    let git_confirm_widget = {
+        let run = run_action.clone();
+        container(
+            v_stack((
+                label(|| "Run without git?").style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(12.0)
+                        .font_weight(floem::text::Weight::BOLD)
+                        .color(p.warning)
+                        .margin_bottom(4.0)
+                }),
+                label(|| "No git repo detected — changes cannot be undone with git restore.")
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.font_size(11.0).color(p.text_secondary).margin_bottom(8.0)
+                    }),
+                h_stack((
+                    phaze_button("Run anyway", ButtonVariant::Primary, theme, move || {
+                        needs_git_confirm.set(false);
+                        run();
+                    }),
+                    phaze_button("Cancel", ButtonVariant::Secondary, theme, move || {
+                        needs_git_confirm.set(false);
+                    }),
+                ))
+                .style(|s| s.gap(8.0)),
+            ))
+            .style(|s| s.width_full()),
+        )
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.width_full()
+                .padding(12.0)
+                .background(p.warning.with_alpha(0.10))
+                .border_bottom(1.0)
+                .border_color(p.warning.with_alpha(0.4))
+                .apply_if(!needs_git_confirm.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        })
+    };
+
     // ── Task input ────────────────────────────────────────────────────────────
     let input_area = container(
         v_stack((
@@ -666,7 +714,14 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             h_stack((
                 phaze_button("Run", ButtonVariant::Primary, theme, {
                     let run = run_action.clone();
-                    move || run()
+                    move || {
+                        if !is_git_repo.get() {
+                            // Intercept: show confirmation widget instead of running directly.
+                            needs_git_confirm.set(true);
+                        } else {
+                            run();
+                        }
+                    }
                 }),
                 phaze_button("Stop", ButtonVariant::Secondary, theme, stop_action),
             ))
@@ -869,7 +924,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 });
                 let file = card.file.clone();
                 let diff = card.diff.clone();
-                let expanded = create_rw_signal(false);
+                let expanded = create_rw_signal(true);
 
                 let file_row = container(
                     h_stack((
@@ -954,6 +1009,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             header,
             workspace_bar,
             no_git_banner,
+            git_confirm_widget,
             input_area,
             status_line,
             approval_widget,
