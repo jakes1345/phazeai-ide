@@ -577,6 +577,79 @@ pub fn chat_panel(
     let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> =
         create_rw_signal(None);
 
+    // ── Conversation history UI state (ROADMAP 2.2) ───────────────────────────
+    let show_history: RwSignal<bool> = create_rw_signal(false);
+    let history_items: RwSignal<Vec<ConversationMetadata>> = create_rw_signal(Vec::new());
+
+    let refresh_history: Rc<dyn Fn()> = Rc::new(move || {
+        if let Ok(store) = ConversationStore::new() {
+            if let Ok(list) = store.list_recent(50) {
+                history_items.set(list);
+            }
+        }
+    });
+
+    let welcome_msg = || ChatMessage {
+        role: ChatRole::Assistant,
+        content: "Welcome to PhazeAI. How can I help you?".to_string(),
+        loading: false,
+        is_error: false,
+    };
+
+    let new_conv: Rc<dyn Fn()> = Rc::new(move || {
+        if is_loading.get_untracked() {
+            return;
+        }
+        messages.set(vec![welcome_msg()]);
+        conversation_id.set(ConversationStore::generate_id());
+        show_history.set(false);
+    });
+
+    let load_conv: Rc<dyn Fn(String)> = Rc::new(move |id: String| {
+        if is_loading.get_untracked() {
+            return;
+        }
+        if let Ok(store) = ConversationStore::new() {
+            if let Ok(conv) = store.load(&id) {
+                let new_msgs: Vec<ChatMessage> = conv
+                    .messages
+                    .into_iter()
+                    .map(|m| {
+                        #[allow(clippy::wildcard_in_or_patterns)]
+                        let role = match m.role.as_str() {
+                            "user" => ChatRole::User,
+                            "assistant" => ChatRole::Assistant,
+                            "tool" | "system" | _ => ChatRole::Tool,
+                        };
+                        ChatMessage {
+                            role,
+                            content: m.content,
+                            loading: false,
+                            is_error: false,
+                        }
+                    })
+                    .collect();
+                messages.set(new_msgs);
+                conversation_id.set(id);
+                show_history.set(false);
+            }
+        }
+    });
+
+    let delete_conv: Rc<dyn Fn(String)> = {
+        let refresh = refresh_history.clone();
+        Rc::new(move |id: String| {
+            if let Ok(store) = ConversationStore::new() {
+                let _ = store.delete(&id);
+            }
+            if conversation_id.get_untracked() == id {
+                messages.set(vec![welcome_msg()]);
+                conversation_id.set(ConversationStore::generate_id());
+            }
+            (refresh)();
+        })
+    };
+
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<ChatUpdate>(256);
     let update_signal = create_signal_from_channel(update_rx);
 
@@ -809,16 +882,90 @@ pub fn chat_panel(
             .background(theme.get().palette.accent)
     });
 
+    let new_btn = {
+        let new_conv = new_conv.clone();
+        let hov = create_rw_signal(false);
+        container(label(|| "+ New").style(move |s| {
+            s.font_size(11.0).color(theme.get().palette.text_muted)
+        }))
+        .style(move |s| {
+            let p = &theme.get().palette;
+            s.padding_horiz(8.0)
+                .padding_vert(3.0)
+                .border(1.0)
+                .border_color(p.glass_border)
+                .border_radius(4.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .margin_right(6.0)
+                .background(if hov.get() {
+                    p.bg_elevated
+                } else {
+                    floem::peniko::Color::TRANSPARENT
+                })
+        })
+        .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+        .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+        .on_click_stop(move |_| (new_conv)())
+    };
+
+    let history_btn = {
+        let refresh = refresh_history.clone();
+        let hov = create_rw_signal(false);
+        container(label(move || {
+            if show_history.get() {
+                "History ▴".to_string()
+            } else {
+                "History ▾".to_string()
+            }
+        }).style(move |s| {
+            s.font_size(11.0).color(theme.get().palette.text_muted)
+        }))
+        .style(move |s| {
+            let p = &theme.get().palette;
+            let active = show_history.get();
+            s.padding_horiz(8.0)
+                .padding_vert(3.0)
+                .border(1.0)
+                .border_color(if active { p.accent } else { p.glass_border })
+                .border_radius(4.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .background(if active {
+                    p.accent_dim
+                } else if hov.get() {
+                    p.bg_elevated
+                } else {
+                    floem::peniko::Color::TRANSPARENT
+                })
+        })
+        .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+        .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+        .on_click_stop(move |_| {
+            let open = !show_history.get_untracked();
+            show_history.set(open);
+            if open {
+                (refresh)();
+            }
+        })
+    };
+
     let header_content = container(
         stack((
-            phaze_icon(icons::AI, 14.0, move |p| p.accent, theme),
-            label(|| "  PHAZEAI").style(move |s| {
-                s.font_size(11.0)
-                    .color(theme.get().palette.accent)
-                    .font_weight(floem::text::Weight::BOLD)
-            }),
+            container(
+                stack((
+                    phaze_icon(icons::AI, 14.0, move |p| p.accent, theme),
+                    label(|| "  PHAZEAI").style(move |s| {
+                        s.font_size(11.0)
+                            .color(theme.get().palette.accent)
+                            .font_weight(floem::text::Weight::BOLD)
+                    }),
+                ))
+                .style(|s| s.items_center()),
+            )
+            .style(|s| s.flex_grow(1.0)),
+            new_btn,
+            history_btn,
         ))
-        .style(|s| s.items_center()),
+        .style(|s| s.items_center().width_full()),
     )
     .style(move |s| {
         let t = theme.get();
@@ -1310,9 +1457,91 @@ pub fn chat_panel(
             .background(p.glass_bg)
     });
 
+    // ── Conversation history panel (collapsible) ─────────────────────────────
+
+    let history_panel = {
+        let load_conv = load_conv.clone();
+        let delete_conv = delete_conv.clone();
+        let list = dyn_stack(
+            move || history_items.get(),
+            |meta: &ConversationMetadata| meta.id.clone(),
+            move |meta: ConversationMetadata| {
+                let id_load = meta.id.clone();
+                let id_del = meta.id.clone();
+                let title = if meta.title.is_empty() {
+                    "(untitled)".to_string()
+                } else {
+                    meta.title.clone()
+                };
+                let subtitle = format!("{} msgs · {}", meta.message_count, meta.updated_at);
+                let load_conv = load_conv.clone();
+                let delete_conv = delete_conv.clone();
+                let row_hov = create_rw_signal(false);
+                let is_active = conversation_id.get_untracked() == meta.id;
+
+                stack((
+                    container(
+                        stack((
+                            label(move || title.clone()).style(move |s| {
+                                s.font_size(12.0)
+                                    .color(theme.get().palette.text_primary)
+                                    .font_weight(floem::text::Weight::MEDIUM)
+                            }),
+                            label(move || subtitle.clone()).style(move |s| {
+                                s.font_size(10.0).color(theme.get().palette.text_muted)
+                            }),
+                        ))
+                        .style(|s| s.flex_col()),
+                    )
+                    .style(|s| s.flex_grow(1.0))
+                    .on_click_stop(move |_| (load_conv)(id_load.clone())),
+                    label(|| "×")
+                        .style(move |s| {
+                            s.font_size(16.0)
+                                .color(theme.get().palette.text_muted)
+                                .padding_horiz(10.0)
+                                .cursor(floem::style::CursorStyle::Pointer)
+                        })
+                        .on_click_stop(move |_| (delete_conv)(id_del.clone())),
+                ))
+                .style(move |s| {
+                    let p = &theme.get().palette;
+                    s.items_center()
+                        .width_full()
+                        .padding_horiz(10.0)
+                        .padding_vert(6.0)
+                        .border_bottom(1.0)
+                        .border_color(p.glass_border)
+                        .background(if is_active {
+                            p.accent_dim
+                        } else if row_hov.get() {
+                            p.bg_elevated
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                        .cursor(floem::style::CursorStyle::Pointer)
+                })
+                .on_event_stop(EventListener::PointerEnter, move |_| row_hov.set(true))
+                .on_event_stop(EventListener::PointerLeave, move |_| row_hov.set(false))
+            },
+        )
+        .style(|s| s.flex_col().width_full());
+
+        container(scroll(list).style(|s| s.height(220.0).width_full())).style(move |s| {
+            let p = &theme.get().palette;
+            s.width_full()
+                .background(p.glass_bg)
+                .border_bottom(1.0)
+                .border_color(p.glass_border)
+                .apply_if(!show_history.get(), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        })
+    };
+
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, mode_tabs, messages_scroll, input_bar))
+    stack((header, history_panel, mode_tabs, messages_scroll, input_bar))
         .style(move |s| s.flex_col().width_full().height_full())
 }
 
