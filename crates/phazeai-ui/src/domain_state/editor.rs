@@ -104,4 +104,7 @@ pub struct EditorState {
     pub split_down_file: RwSignal<Option<PathBuf>>,
     pub split_down_cursor: RwSignal<Option<(PathBuf, u32, u32)>>,
     pub split_down_tabs: RwSignal<Vec<PathBuf>>,
+
+    // Bumped to request closing the currently active tab (Ctrl+W).
+    pub close_active_tab_nonce: RwSignal<u64>,
 }

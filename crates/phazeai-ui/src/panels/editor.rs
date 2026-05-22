@@ -992,6 +992,7 @@ pub fn editor_panel(
     inlay_hints: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     inlay_hints_toggle: RwSignal<bool>,
     minimap_visible: RwSignal<bool>,
+    close_active_tab_nonce: RwSignal<u64>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1025,7 +1026,9 @@ pub fn editor_panel(
             }
             tabs.update(|list| disambiguate_tab_names(list));
             let n = tabs.get_untracked().len();
-            if n > 0 {
+            // Only seed active tab if the user hasn't already clicked something —
+            // otherwise we override an in-flight file-open from the explorer.
+            if n > 0 && active_idx.get_untracked().is_none() {
                 active_idx.set(Some(n - 1));
             }
         });
@@ -1167,14 +1170,18 @@ pub fn editor_panel(
         }
     });
 
-    // React to file-open requests from the explorer
-    let _ = create_memo(move |_| {
+    // React to file-open requests from the explorer.
+    //
+    // Canonicalize incoming paths so a tab opened via a relative path (e.g.
+    // "src/foo.rs") and one opened via its absolute path resolve to the same
+    // entry — otherwise dedupe by `path` fails and we get duplicate tabs.
+    create_effect(move |_| {
         let path = open_file.get();
-        if let Some(p) = path {
-            // Don't open tabs for files that no longer exist
-            if !p.exists() {
+        if let Some(raw) = path {
+            if !raw.exists() {
                 return;
             }
+            let p = std::fs::canonicalize(&raw).unwrap_or(raw);
             let existing = tabs.get().iter().position(|t| t.path == p);
             if let Some(idx) = existing {
                 active_idx.set(Some(idx));
@@ -1196,6 +1203,30 @@ pub fn editor_panel(
                 active_idx.set(Some(new_idx.get()));
             }
         }
+    });
+
+    // Ctrl+W — close the currently active tab. Triggered via the
+    // `close_active_tab_nonce` signal from the command registry.
+    create_effect(move |prev: Option<u64>| {
+        let n = close_active_tab_nonce.get();
+        // Skip the initial run (no actual close requested yet).
+        if prev.is_some() && Some(n) != prev {
+            if let Some(idx) = active_idx.get_untracked() {
+                let len_before = tabs.get_untracked().len();
+                if idx < len_before {
+                    tabs.update(|list| {
+                        list.remove(idx);
+                    });
+                    let len = tabs.get_untracked().len();
+                    if len == 0 {
+                        active_idx.set(None);
+                    } else {
+                        active_idx.set(Some(idx.min(len - 1)));
+                    }
+                }
+            }
+        }
+        n
     });
 
     // Ctrl+S save handler

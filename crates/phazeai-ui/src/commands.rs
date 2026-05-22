@@ -127,6 +127,7 @@ pub fn match_global_shortcut(key: &Key, modifiers: &Modifiers) -> Option<String>
                 "-" if ctrl && !shift && !alt => Some("editor.action.fontZoomOut".into()),
                 "0" if ctrl && !shift && !alt => Some("editor.action.fontZoomReset".into()),
                 "k" if ctrl && !shift && !alt => Some("editor.action.inlineEdit".into()),
+                "w" if ctrl && !shift && !alt => Some("workbench.action.closeActiveTab".into()),
                 _ => None,
             }
         }
@@ -160,6 +161,17 @@ pub fn create_default_commands() -> CommandRegistry {
         keybinding: Some("Ctrl+J"),
         action: Arc::new(|s| {
             s.workbench.show_bottom_panel.update(|v| *v = !*v);
+        }),
+    });
+
+    reg.register(Command {
+        id: "workbench.action.closeActiveTab",
+        label: "Close Active Tab",
+        category: "Workbench",
+        description: "Close the currently focused editor tab",
+        keybinding: Some("Ctrl+W"),
+        action: Arc::new(|s| {
+            s.editor.close_active_tab_nonce.update(|v| *v += 1);
         }),
     });
 

@@ -1229,6 +1229,7 @@ impl IdeState {
             split_down_file: create_rw_signal(None),
             split_down_cursor: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
+            close_active_tab_nonce: create_rw_signal(0u64),
         };
 
         let ai = AiState {
@@ -3390,6 +3391,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.inlay_hints_sig,
         state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
+        state.editor.close_active_tab_nonce,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3447,6 +3449,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
+        create_rw_signal(0u64),                     // close_active_tab_nonce (split: no-op)
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3762,6 +3765,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
+        create_rw_signal(0u64),                     // close_active_tab_nonce (split: no-op)
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
