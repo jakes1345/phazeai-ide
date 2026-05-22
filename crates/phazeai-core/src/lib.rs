@@ -12,6 +12,7 @@ pub mod llm;
 pub mod lsp;
 pub mod mcp;
 pub mod project;
+pub mod syntax;
 pub mod telemetry;
 pub mod tools;
 
