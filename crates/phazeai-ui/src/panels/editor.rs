@@ -4917,6 +4917,9 @@ fn tab_bar_view(
     _save_fn: Rc<dyn Fn()>,
     diagnostics: RwSignal<Vec<crate::lsp_bridge::DiagEntry>>,
 ) -> impl IntoView {
+    // Right-click context menu: Some(tab_index) when open, None when closed.
+    let ctx_menu_tab: RwSignal<Option<usize>> = create_rw_signal(None);
+
     let tab_list = dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(i, _)| *i,
@@ -5045,6 +5048,13 @@ fn tab_bar_view(
                     .items_center()
             })
             .on_click_stop(move |_| active_idx.set(Some(i)))
+            .on_event_stop(floem::event::EventListener::PointerDown, move |event| {
+                if let floem::event::Event::PointerDown(pe) = event {
+                    if pe.button.is_secondary() {
+                        ctx_menu_tab.set(Some(i));
+                    }
+                }
+            })
             .on_event_stop(floem::event::EventListener::PointerUp, move |event| {
                 if let floem::event::Event::PointerUp(pe) = event {
                     if pe.button.is_auxiliary() {
@@ -5203,8 +5213,130 @@ fn tab_bar_view(
     let tab_scroll = scroll(tab_list)
         .style(move |s: floem::style::Style| s.height_full().flex_grow(1.0).min_width(0.0));
 
+    // ── Right-click context menu overlay ────────────────────────────────────
+    let ctx_menu_item = |label_text: &'static str, action: Box<dyn Fn() + 'static>| {
+        let hov = create_rw_signal(false);
+        container(label(move || label_text).style(move |s| {
+            let p = &theme.get().palette;
+            s.font_size(12.0)
+                .color(if hov.get() { p.accent } else { p.text_primary })
+                .width_full()
+        }))
+        .style(move |s| {
+            let p = &theme.get().palette;
+            s.padding_horiz(12.0)
+                .padding_vert(5.0)
+                .width_full()
+                .cursor(floem::style::CursorStyle::Pointer)
+                .background(if hov.get() {
+                    p.bg_elevated
+                } else {
+                    floem::peniko::Color::TRANSPARENT
+                })
+        })
+        .on_click_stop(move |_| {
+            (action)();
+            ctx_menu_tab.set(None);
+        })
+        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+            hov.set(true)
+        })
+        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+            hov.set(false)
+        })
+    };
+
+    let close_this = ctx_menu_item(
+        "Close",
+        Box::new(move || {
+            if let Some(idx) = ctx_menu_tab.get_untracked() {
+                tabs.update(|list| {
+                    if idx < list.len() {
+                        list.remove(idx);
+                    }
+                });
+                let len = tabs.get_untracked().len();
+                if len == 0 {
+                    active_idx.set(None);
+                } else {
+                    active_idx.update(|cur| *cur = Some(cur.unwrap_or(0).min(len - 1)));
+                }
+            }
+        }),
+    );
+
+    let close_others = ctx_menu_item(
+        "Close Others",
+        Box::new(move || {
+            if let Some(idx) = ctx_menu_tab.get_untracked() {
+                tabs.update(|list| {
+                    if idx < list.len() {
+                        let keep = list.remove(idx);
+                        list.clear();
+                        list.push(keep);
+                    }
+                });
+                active_idx.set(Some(0));
+            }
+        }),
+    );
+
+    let close_to_right = ctx_menu_item(
+        "Close to the Right",
+        Box::new(move || {
+            if let Some(idx) = ctx_menu_tab.get_untracked() {
+                tabs.update(|list| {
+                    if idx + 1 < list.len() {
+                        list.truncate(idx + 1);
+                    }
+                });
+                active_idx.update(|cur| {
+                    let len = tabs.get_untracked().len();
+                    if len == 0 {
+                        *cur = None;
+                    } else {
+                        *cur = Some(cur.unwrap_or(0).min(len - 1));
+                    }
+                });
+            }
+        }),
+    );
+
+    let close_all = ctx_menu_item(
+        "Close All",
+        Box::new(move || {
+            tabs.update(|list| list.clear());
+            active_idx.set(None);
+        }),
+    );
+
+    let ctx_menu = container(
+        stack((close_this, close_others, close_to_right, close_all))
+            .style(|s| s.flex_col().width(160.0)),
+    )
+    .style(move |s| {
+        let p = &theme.get().palette;
+        s.position(floem::style::Position::Absolute)
+            .inset_top(34.0)
+            .inset_left(0.0)
+            .z_index(100)
+            .background(p.bg_panel)
+            .border(1.0)
+            .border_color(p.glass_border)
+            .border_radius(6.0)
+            .box_shadow_blur(12.0)
+            .box_shadow_color(p.glow)
+            .padding_vert(4.0)
+            .apply_if(ctx_menu_tab.get().is_none(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    })
+    .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+        ctx_menu_tab.set(None);
+    });
+
     container(
-        stack((tab_scroll, tab_dropdown_btn, tab_dropdown_list)).style(|s| {
+        stack((tab_scroll, tab_dropdown_btn, tab_dropdown_list, ctx_menu)).style(|s| {
             s.flex_row()
                 .width_full()
                 .height_full()
