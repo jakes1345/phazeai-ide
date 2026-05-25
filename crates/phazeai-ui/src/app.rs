@@ -3449,7 +3449,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
-        create_rw_signal(0u64),                     // close_active_tab_nonce (split: no-op)
+        create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3765,7 +3765,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(vec![]),                   // inlay_hints_sig
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
-        create_rw_signal(0u64),                     // close_active_tab_nonce (split: no-op)
+        create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

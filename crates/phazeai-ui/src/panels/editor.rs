@@ -193,7 +193,7 @@ impl SyntaxStyle {
     fn ts_class_color(class: usize) -> floem::peniko::Color {
         use floem::peniko::Color;
         match syntax::HIGHLIGHT_NAMES.get(class).copied().unwrap_or("") {
-            "keyword" => Color::from_rgba8(180, 142, 173, 255),   // purple
+            "keyword" => Color::from_rgba8(180, 142, 173, 255), // purple
             "function" | "function.builtin" | "function.macro" => {
                 Color::from_rgba8(143, 161, 179, 255) // steel blue
             }
@@ -209,12 +209,12 @@ impl SyntaxStyle {
                 Color::from_rgba8(192, 197, 206, 255) // light grey
             }
             "attribute" | "label" => Color::from_rgba8(150, 181, 180, 255), // teal
-            "property" => Color::from_rgba8(191, 97, 106, 255),            // red
+            "property" => Color::from_rgba8(191, 97, 106, 255),             // red
             "variable.builtin" | "variable.parameter" => {
                 Color::from_rgba8(191, 97, 106, 255) // red
             }
-            "tag" => Color::from_rgba8(191, 97, 106, 255),  // red
-            _ => Color::from_rgba8(197, 200, 198, 255),      // default text
+            "tag" => Color::from_rgba8(191, 97, 106, 255), // red
+            _ => Color::from_rgba8(197, 200, 198, 255),    // default text
         }
     }
 }

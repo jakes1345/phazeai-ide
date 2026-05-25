@@ -885,9 +885,10 @@ pub fn chat_panel(
     let new_btn = {
         let new_conv = new_conv.clone();
         let hov = create_rw_signal(false);
-        container(label(|| "+ New").style(move |s| {
-            s.font_size(11.0).color(theme.get().palette.text_muted)
-        }))
+        container(
+            label(|| "+ New")
+                .style(move |s| s.font_size(11.0).color(theme.get().palette.text_muted)),
+        )
         .style(move |s| {
             let p = &theme.get().palette;
             s.padding_horiz(8.0)
@@ -911,15 +912,16 @@ pub fn chat_panel(
     let history_btn = {
         let refresh = refresh_history.clone();
         let hov = create_rw_signal(false);
-        container(label(move || {
-            if show_history.get() {
-                "History ▴".to_string()
-            } else {
-                "History ▾".to_string()
-            }
-        }).style(move |s| {
-            s.font_size(11.0).color(theme.get().palette.text_muted)
-        }))
+        container(
+            label(move || {
+                if show_history.get() {
+                    "History ▴".to_string()
+                } else {
+                    "History ▾".to_string()
+                }
+            })
+            .style(move |s| s.font_size(11.0).color(theme.get().palette.text_muted)),
+        )
         .style(move |s| {
             let p = &theme.get().palette;
             let active = show_history.get();
