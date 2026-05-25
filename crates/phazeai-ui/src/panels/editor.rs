@@ -4919,6 +4919,8 @@ fn tab_bar_view(
 ) -> impl IntoView {
     // Right-click context menu: Some(tab_index) when open, None when closed.
     let ctx_menu_tab: RwSignal<Option<usize>> = create_rw_signal(None);
+    // Drag-to-reorder: index of the tab being dragged.
+    let drag_from: RwSignal<Option<usize>> = create_rw_signal(None);
 
     let tab_list = dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
@@ -5047,11 +5049,16 @@ fn tab_bar_view(
                     })
                     .items_center()
             })
-            .on_click_stop(move |_| active_idx.set(Some(i)))
+            .on_click_stop(move |_| {
+                active_idx.set(Some(i));
+                drag_from.set(None);
+            })
             .on_event_stop(floem::event::EventListener::PointerDown, move |event| {
                 if let floem::event::Event::PointerDown(pe) = event {
                     if pe.button.is_secondary() {
                         ctx_menu_tab.set(Some(i));
+                    } else if pe.button.is_primary() {
+                        drag_from.set(Some(i));
                     }
                 }
             })
@@ -5075,7 +5082,26 @@ fn tab_bar_view(
                 }
             })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-                is_hovered.set(true)
+                is_hovered.set(true);
+                // Drag-to-reorder: if we enter a different tab while dragging, swap.
+                if let Some(src) = drag_from.get_untracked() {
+                    if src != i {
+                        tabs.update(|list| {
+                            if src < list.len() && i < list.len() {
+                                list.swap(src, i);
+                            }
+                        });
+                        // Update active_idx if the active tab was involved in the swap.
+                        active_idx.update(|cur| {
+                            if *cur == Some(src) {
+                                *cur = Some(i);
+                            } else if *cur == Some(i) {
+                                *cur = Some(src);
+                            }
+                        });
+                        drag_from.set(Some(i));
+                    }
+                }
             })
             .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
                 is_hovered.set(false)
@@ -5353,6 +5379,9 @@ fn tab_bar_view(
             .border_bottom(1.0)
             .border_color(p.border)
             .min_width(0.0)
+    })
+    .on_event_stop(floem::event::EventListener::PointerUp, move |_| {
+        drag_from.set(None);
     })
 }
 
