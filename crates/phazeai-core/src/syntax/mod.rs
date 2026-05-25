@@ -54,6 +54,14 @@ pub struct HighlightSpan {
 pub enum SyntaxLang {
     Rust,
     Python,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Go,
+    C,
+    Cpp,
+    Json,
+    Bash,
 }
 
 impl SyntaxLang {
@@ -61,6 +69,14 @@ impl SyntaxLang {
         match ext.to_ascii_lowercase().as_str() {
             "rs" => Some(Self::Rust),
             "py" | "pyi" => Some(Self::Python),
+            "js" | "mjs" | "cjs" | "jsx" => Some(Self::JavaScript),
+            "ts" => Some(Self::TypeScript),
+            "tsx" => Some(Self::Tsx),
+            "go" => Some(Self::Go),
+            "c" | "h" => Some(Self::C),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(Self::Cpp),
+            "json" | "jsonc" => Some(Self::Json),
+            "sh" | "bash" | "zsh" => Some(Self::Bash),
             _ => None,
         }
     }
@@ -92,12 +108,124 @@ fn python_config() -> Option<HighlightConfiguration> {
     Some(config)
 }
 
+fn javascript_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_javascript::LANGUAGE.into(),
+        "javascript",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::INJECTIONS_QUERY,
+        tree_sitter_javascript::LOCALS_QUERY,
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn typescript_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "typescript",
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        "",
+        tree_sitter_typescript::LOCALS_QUERY,
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn tsx_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "tsx",
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        "",
+        tree_sitter_typescript::LOCALS_QUERY,
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn go_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_go::LANGUAGE.into(),
+        "go",
+        tree_sitter_go::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn c_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_c::LANGUAGE.into(),
+        "c",
+        tree_sitter_c::HIGHLIGHT_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn cpp_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_cpp::LANGUAGE.into(),
+        "cpp",
+        tree_sitter_cpp::HIGHLIGHT_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn json_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_json::LANGUAGE.into(),
+        "json",
+        tree_sitter_json::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn bash_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_bash::LANGUAGE.into(),
+        "bash",
+        tree_sitter_bash::HIGHLIGHT_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
 /// Highlight a source string into class-tagged spans. Returns an empty Vec
 /// on any tree-sitter error so callers can safely fall back to plain text.
 pub fn highlight(source: &str, lang: SyntaxLang) -> Vec<HighlightSpan> {
     let Some(config) = (match lang {
         SyntaxLang::Rust => rust_config(),
         SyntaxLang::Python => python_config(),
+        SyntaxLang::JavaScript => javascript_config(),
+        SyntaxLang::TypeScript => typescript_config(),
+        SyntaxLang::Tsx => tsx_config(),
+        SyntaxLang::Go => go_config(),
+        SyntaxLang::C => c_config(),
+        SyntaxLang::Cpp => cpp_config(),
+        SyntaxLang::Json => json_config(),
+        SyntaxLang::Bash => bash_config(),
     }) else {
         return Vec::new();
     };
