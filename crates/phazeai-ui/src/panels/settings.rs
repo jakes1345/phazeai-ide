@@ -128,7 +128,7 @@ fn section_header(text: &'static str, state: IdeState) -> impl IntoView {
 
 /// A small +/- stepper button.
 fn stepper_btn(
-    icon: &'static str,
+    text: &'static str,
     state: IdeState,
     on_click: impl Fn() + 'static,
 ) -> impl IntoView {
@@ -136,18 +136,18 @@ fn stepper_btn(
     let theme = state.workbench.theme;
     let is_hovered = create_rw_signal(false);
 
-    container(phaze_icon(
-        icon,
-        14.0,
-        move |p| {
-            if is_hovered.get() {
-                p.accent
-            } else {
-                p.text_secondary
-            }
-        },
-        theme,
-    ))
+    container(label(move || text).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        let color = if is_hovered.get() {
+            p.accent
+        } else {
+            p.text_secondary
+        };
+        s.font_size(16.0)
+            .color(color)
+            .font_weight(floem::text::Weight::BOLD)
+    }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;

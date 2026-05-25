@@ -4960,6 +4960,25 @@ fn tab_bar_view(
                     .items_center()
             })
             .on_click_stop(move |_| active_idx.set(Some(i)))
+            .on_event_stop(floem::event::EventListener::PointerUp, move |event| {
+                if let floem::event::Event::PointerUp(pe) = event {
+                    if pe.button.is_auxiliary() {
+                        tabs.update(|list| {
+                            if i < list.len() {
+                                list.remove(i);
+                            }
+                        });
+                        active_idx.update(|cur| {
+                            let len = tabs.get().len();
+                            if len == 0 {
+                                *cur = None;
+                            } else {
+                                *cur = Some(cur.unwrap_or(0).min(len - 1));
+                            }
+                        });
+                    }
+                }
+            })
             .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                 is_hovered.set(true)
             })
