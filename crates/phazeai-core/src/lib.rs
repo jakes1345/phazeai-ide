@@ -5,6 +5,7 @@ pub mod companion;
 pub mod config;
 pub mod constants;
 pub mod context;
+pub mod dap;
 pub mod error;
 pub mod ext_host;
 pub mod git;
