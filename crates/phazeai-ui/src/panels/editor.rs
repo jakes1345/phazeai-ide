@@ -44,7 +44,11 @@ use syntect::{
     parsing::{ParseState, ScopeStack, SyntaxSet},
 };
 
-use phazeai_core::{llm::Message, Settings};
+use phazeai_core::{
+    llm::Message,
+    syntax::{self, SyntaxLang},
+    Settings,
+};
 
 use crate::{
     components::icon::{icons, phaze_icon},
@@ -102,6 +106,12 @@ struct SyntaxStyle {
     /// Last known rope length for cache invalidation. If rope length changes,
     /// the entire states cache is cleared to prevent stale highlighting.
     last_rope_len: std::cell::Cell<usize>,
+    /// Tree-sitter language (Some = use tree-sitter instead of syntect).
+    ts_lang: Option<SyntaxLang>,
+    /// Cached tree-sitter highlight spans for the current document content.
+    ts_spans: RefCell<Vec<syntax::HighlightSpan>>,
+    /// Rope length at which ts_spans was last computed (for invalidation).
+    ts_computed_len: std::cell::Cell<usize>,
 }
 
 impl SyntaxStyle {
@@ -144,6 +154,8 @@ impl SyntaxStyle {
 
         let parse_state_proto = ParseState::new(syntax);
 
+        let ts_lang = SyntaxLang::from_extension(ext);
+
         Self {
             inner,
             highlighter,
@@ -166,11 +178,44 @@ impl SyntaxStyle {
             blame_line: None,
             bracket_pair_guides: Vec::new(),
             last_rope_len: std::cell::Cell::new(0),
+            ts_lang,
+            ts_spans: RefCell::new(Vec::new()),
+            ts_computed_len: std::cell::Cell::new(0),
         }
     }
 
     fn set_doc(&mut self, doc: Rc<dyn Document>) {
         self.doc = Some(doc);
+    }
+
+    /// Map a tree-sitter highlight class index to a color.
+    /// Palette matches base16-ocean.dark so it blends with the syntect fallback.
+    fn ts_class_color(class: usize) -> floem::peniko::Color {
+        use floem::peniko::Color;
+        match syntax::HIGHLIGHT_NAMES.get(class).copied().unwrap_or("") {
+            "keyword" => Color::from_rgba8(180, 142, 173, 255),   // purple
+            "function" | "function.builtin" | "function.macro" => {
+                Color::from_rgba8(143, 161, 179, 255) // steel blue
+            }
+            "string" | "string.special" => Color::from_rgba8(163, 190, 140, 255), // green
+            "comment" => Color::from_rgba8(101, 115, 126, 255),                   // grey
+            "type" | "type.builtin" | "constructor" => {
+                Color::from_rgba8(235, 203, 139, 255) // yellow
+            }
+            "number" | "constant" | "constant.builtin" => {
+                Color::from_rgba8(208, 135, 112, 255) // orange
+            }
+            "operator" | "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => {
+                Color::from_rgba8(192, 197, 206, 255) // light grey
+            }
+            "attribute" | "label" => Color::from_rgba8(150, 181, 180, 255), // teal
+            "property" => Color::from_rgba8(191, 97, 106, 255),            // red
+            "variable.builtin" | "variable.parameter" => {
+                Color::from_rgba8(191, 97, 106, 255) // red
+            }
+            "tag" => Color::from_rgba8(191, 97, 106, 255),  // red
+            _ => Color::from_rgba8(197, 200, 198, 255),      // default text
+        }
     }
 }
 
@@ -424,56 +469,96 @@ impl Styling for SyntaxStyle {
         let Some(doc) = &self.doc else { return };
 
         // Invalidate cache when rope length changes (edit happened between saves)
-        if let Some(doc) = &self.doc {
-            let current_len = doc.rope_text().len();
-            if current_len != self.last_rope_len.get() {
-                self.states.borrow_mut().clear();
-                self.last_rope_len.set(current_len);
-            }
+        let current_len = doc.rope_text().len();
+        if current_len != self.last_rope_len.get() {
+            self.states.borrow_mut().clear();
+            self.last_rope_len.set(current_len);
         }
 
-        let mut states_cache = self.states.borrow_mut();
-        // Rebuild cache up to the nearest 16-line boundary before `line`
-        let start = (line >> 4).min(states_cache.len());
-        states_cache.truncate(start);
-
-        // Seed from the cached state or from scratch
-        let mut states = states_cache.last().cloned().unwrap_or_else(|| {
-            (
-                self.parse_state_proto.clone(),
-                HighlightState::new(&self.highlighter, ScopeStack::new()),
-            )
-        });
-
-        let rope = doc.rope_text();
-        for line_no in start..=line {
-            let text = rope.line_content(line_no).to_string();
-            if let Ok(ops) = states.0.parse_line(&text, &SYNTAX_SET) {
-                if line_no == line {
-                    for (style, _text, range) in
-                        RangedHighlightIterator::new(&mut states.1, &ops, &text, &self.highlighter)
-                    {
-                        let mut attr = default.clone();
-                        if style.font_style.contains(FontStyle::ITALIC) {
-                            attr = attr.style(TextStyle::Italic);
-                        }
-                        if style.font_style.contains(FontStyle::BOLD) {
-                            attr = attr.weight(Weight::BOLD);
-                        }
-                        attr = attr.color(floem::peniko::Color::from_rgba8(
-                            style.foreground.r,
-                            style.foreground.g,
-                            style.foreground.b,
-                            style.foreground.a,
-                        ));
-                        attrs.add_span(range, attr);
-                    }
-                }
+        // ── Tree-sitter path (Rust, Python) ──────────────────────────────────
+        if let Some(lang) = self.ts_lang {
+            // Recompute spans if doc has changed
+            if current_len != self.ts_computed_len.get() {
+                let rope = doc.rope_text();
+                let full_text: String = (0..rope.num_lines())
+                    .map(|l| rope.line_content(l).to_string())
+                    .collect();
+                let spans = syntax::highlight(&full_text, lang);
+                *self.ts_spans.borrow_mut() = spans;
+                self.ts_computed_len.set(current_len);
             }
 
-            // Cache state every 16 lines
-            if line_no & 0xF == 0xF {
-                states_cache.push(states.clone());
+            let rope = doc.rope_text();
+            let line_start = rope.offset_of_line(line);
+            let line_end = if line + 1 < rope.num_lines() {
+                rope.offset_of_line(line + 1)
+            } else {
+                rope.len()
+            };
+
+            let spans = self.ts_spans.borrow();
+            for span in spans.iter() {
+                if span.end <= line_start {
+                    continue;
+                }
+                if span.start >= line_end {
+                    break;
+                }
+                let local_start = span.start.saturating_sub(line_start);
+                let local_end = span.end.min(line_end) - line_start;
+                if local_start >= local_end {
+                    continue;
+                }
+                if let Some(class) = span.class {
+                    let color = Self::ts_class_color(class);
+                    attrs.add_span(local_start..local_end, default.clone().color(color));
+                }
+            }
+        } else {
+            // ── Syntect fallback (all other languages) ───────────────────────
+            let mut states_cache = self.states.borrow_mut();
+            let start = (line >> 4).min(states_cache.len());
+            states_cache.truncate(start);
+
+            let mut states = states_cache.last().cloned().unwrap_or_else(|| {
+                (
+                    self.parse_state_proto.clone(),
+                    HighlightState::new(&self.highlighter, ScopeStack::new()),
+                )
+            });
+
+            let rope = doc.rope_text();
+            for line_no in start..=line {
+                let text = rope.line_content(line_no).to_string();
+                if let Ok(ops) = states.0.parse_line(&text, &SYNTAX_SET) {
+                    if line_no == line {
+                        for (style, _text, range) in RangedHighlightIterator::new(
+                            &mut states.1,
+                            &ops,
+                            &text,
+                            &self.highlighter,
+                        ) {
+                            let mut attr = default.clone();
+                            if style.font_style.contains(FontStyle::ITALIC) {
+                                attr = attr.style(TextStyle::Italic);
+                            }
+                            if style.font_style.contains(FontStyle::BOLD) {
+                                attr = attr.weight(Weight::BOLD);
+                            }
+                            attr = attr.color(floem::peniko::Color::from_rgba8(
+                                style.foreground.r,
+                                style.foreground.g,
+                                style.foreground.b,
+                                style.foreground.a,
+                            ));
+                            attrs.add_span(range, attr);
+                        }
+                    }
+                }
+
+                if line_no & 0xF == 0xF {
+                    states_cache.push(states.clone());
+                }
             }
         }
 
