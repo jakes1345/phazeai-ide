@@ -37,7 +37,7 @@ use crate::{
     components::icon::{icons, phaze_icon},
     domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
-        account::account_panel, chat::chat_panel, containers::containers_panel,
+        chat::chat_panel, containers::containers_panel,
         editor::editor_panel, explorer::explorer_panel, extensions::extensions_panel,
         git::git_panel, github_actions::github_actions_panel, makefile::makefile_panel,
         remote::remote_panel, run_debug::run_debug_panel, search, settings::settings_panel,
@@ -115,7 +115,6 @@ pub enum Tab {
     Settings,
     Terminal,
     Extensions,
-    Account,
     Debug,
     Remote,
     Containers,
@@ -1664,7 +1663,6 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         stack((
             activity_bar_btn(icons::EXTENSIONS, Tab::Extensions, state.clone()),
             activity_bar_btn(icons::SETTINGS, Tab::Settings, state.clone()),
-            activity_bar_btn(icons::ACCOUNT, Tab::Account, state.clone()),
         ))
         .style(|s| s.flex_col().margin_top(floem::unit::PxPctAuto::Auto)),
     ))
@@ -1836,17 +1834,6 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let account_wrap = container(account_panel(state.clone())).style({
-        let state = state.clone();
-        move |s| {
-            s.width_full()
-                .height_full()
-                .apply_if(state.workbench.left_panel_tab.get() != Tab::Account, |s| {
-                    s.display(floem::style::Display::None)
-                })
-        }
-    });
-
     container(
         stack((
             explorer_wrap,
@@ -1862,7 +1849,6 @@ fn left_panel(state: IdeState) -> impl IntoView {
             tests_wrap,
             composer_wrap,
             settings_wrap,
-            account_wrap,
         ))
         .style(|s| s.width_full().height_full()),
     )
@@ -1962,37 +1948,6 @@ where
 }
 
 fn status_bar(state: IdeState) -> impl IntoView {
-    // Cloud sign-in indicator (left-most element)
-    // let cloud_btn = container(label(|| "☁ Sign in"))
-    //     .style(move |s| {
-    //         let p = state.workbench.theme.get().palette;
-    //         s.font_size(10.0)
-    //             .padding_horiz(8.0)
-    //             .padding_vert(2.0)
-    //             .margin_right(8.0)
-    //             .border_radius(3.0)
-    //             .cursor(floem::style::CursorStyle::Pointer)
-    //             .color(p.accent)
-    //             .background(p.accent_dim)
-    //     })
-    //     .on_click_stop(|_| {
-    //         // Open PhazeAI cloud sign-in in the system browser.
-    //         let url = phazeai_cloud::auth::login_url();
-    //         let opener = if cfg!(target_os = "macos") {
-    //             "open"
-    //         } else if cfg!(target_os = "windows") {
-    //             "cmd"
-    //         } else {
-    //             "xdg-open"
-    //         };
-    //         let mut cmd = std::process::Command::new(opener);
-    //         if cfg!(target_os = "windows") {
-    //             cmd.args(["/C", "start", "", url]);
-    //         } else {
-    //             cmd.arg(url);
-    //         }
-    //         let _ = cmd.spawn();
-    //     });
 
     // Branch clickable button — click to open branch picker overlay
     let branch_btn = {

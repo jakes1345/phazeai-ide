@@ -5,7 +5,6 @@ members = [
     "crates/phazeai-sidecar",
     "crates/phazeai-cli",
     "crates/phazeai-ui",
-    "crates/phazeai-cloud",
     "crates/ollama-rs",
     "crates/phazeai-plugin-api",
     "crates/phazeai-plugin-canary",
