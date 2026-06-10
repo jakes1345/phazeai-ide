@@ -1599,8 +1599,8 @@ pub fn editor_panel(
                 .unwrap_or("")
                 .to_string();
 
-            // `use_wrap` passed at call time so this closure doesn't capture `word_wrap`.
-            let make_base_styling = |fs: usize, use_wrap: bool| -> Rc<dyn Styling> {
+            // Signals passed at call time so this closure doesn't capture them.
+            let make_base_styling = |fs: usize, use_wrap: bool, tab_w: usize| -> Rc<dyn Styling> {
                 let wrap = if use_wrap {
                     WrapMethod::EditorWidth
                 } else {
@@ -1610,6 +1610,7 @@ pub fn editor_panel(
                     SimpleStylingBuilder::default()
                         .wrap(wrap)
                         .font_size(fs)
+                        .tab_width(tab_w.max(1))
                         .font_family(vec![
                             FamilyOwned::Name("JetBrains Mono".to_string()),
                             FamilyOwned::Name("Fira Code".to_string()),
@@ -3969,7 +3970,11 @@ pub fn editor_panel(
                 .unwrap_or(false);
 
             // Build initial syntect-based styling for this file's language
-            let base_styling = make_base_styling(initial_fs, word_wrap.get_untracked());
+            let base_styling = make_base_styling(
+                initial_fs,
+                word_wrap.get_untracked(),
+                tab_size.get_untracked() as usize,
+            );
             let mut syn_style =
                 SyntaxStyle::for_extension(if is_large_file { "" } else { &tab_ext }, base_styling);
             syn_style.set_doc(doc.clone());
@@ -4071,6 +4076,7 @@ pub fn editor_panel(
                 create_effect(move |_| {
                     let fs = font_size.get() as usize;
                     let use_wrap = word_wrap.get(); // tracked — triggers rebuild when toggled
+                    let tab_w = tab_size.get() as usize; // tracked — Settings stepper applies live
                     let all_diags = diagnostics.get();
                     let hl_ranges = word_hl.get();
                     let git_chgs = git_changes.get();
@@ -4088,7 +4094,7 @@ pub fn editor_panel(
                         .filter(|d| d.path == path_for_diag)
                         .map(|d| (d.line.saturating_sub(1) as usize, d.severity))
                         .collect();
-                    let new_base = make_base_styling(fs, use_wrap);
+                    let new_base = make_base_styling(fs, use_wrap, tab_w);
                     let mut new_style = SyntaxStyle::for_extension(
                         if is_large_file { "" } else { &ext_for_style },
                         new_base,

@@ -332,9 +332,15 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
     }
 }
 
+/// Serializes all settings.toml load-mutate-save cycles. Both the editor
+/// settings effect and the provider/model effect write from background
+/// threads; without this lock concurrent writers clobber each other's fields.
+pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
 /// This preserves all other settings (LLM, sidecar, providers, etc.).
 pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::EditorSettings)) {
+    let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
     let mut settings = Settings::load();
     mutate(&mut settings.editor);
     let _ = settings.save();
@@ -1059,6 +1065,7 @@ impl IdeState {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
             std::thread::spawn(move || {
+                let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
                 let mut s = Settings::load();
                 let Some(provider) = provider_name_to_llm_provider(&provider_name) else {
                     return;
