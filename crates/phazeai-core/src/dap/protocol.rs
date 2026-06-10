@@ -133,7 +133,7 @@ pub enum StopReason {
 }
 
 impl StopReason {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "breakpoint" => Self::Breakpoint,
             "step" => Self::Step,

@@ -243,6 +243,7 @@ impl SessionState {
 
     /// Build a snapshot from live signals — call inside `create_effect` so the
     /// `.get()` calls register reactive subscriptions.
+    #[allow(clippy::too_many_arguments)]
     fn from_signals(
         open_tabs: Vec<PathBuf>,
         active_file: Option<PathBuf>,
@@ -1266,6 +1267,10 @@ impl IdeState {
             debug_thread_id: create_rw_signal(0u64),
             debug_output: create_rw_signal(Vec::new()),
             breakpoints: create_rw_signal(Vec::new()),
+            debug_stopped_at: create_rw_signal(None),
+            debug_frames: create_rw_signal(Vec::new()),
+            debug_vars: create_rw_signal(Vec::new()),
+            debug_cmd: create_rw_signal(None),
         };
 
         let state = Self {
@@ -3396,6 +3401,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
         state.editor.close_active_tab_nonce,
+        state.project.breakpoints,
+        state.project.debug_stopped_at,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3454,6 +3461,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
+        state.project.breakpoints,
+        state.project.debug_stopped_at,
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3770,6 +3779,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // inlay_hints_toggle
         state.editor.minimap_visible,
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
+        state.project.breakpoints,
+        state.project.debug_stopped_at,
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4181,6 +4192,55 @@ pub fn launch_phaze_ide() {
                                             }
                                             state.editor.completion_open.set(false);
                                             state.editor.completion_filter_text.set(String::new());
+                                            return;
+                                        }
+                                    }
+                                    // F9 — toggle breakpoint on the cursor line
+                                    floem::keyboard::NamedKey::F9 => {
+                                        if let Some((path, line, _col)) =
+                                            state.editor.active_cursor.get()
+                                        {
+                                            let line1 = line as u64 + 1; // DAP lines are 1-based
+                                            state.project.breakpoints.update(|bps| {
+                                                if let Some(pos) = bps
+                                                    .iter()
+                                                    .position(|(p, l)| *p == path && *l == line1)
+                                                {
+                                                    bps.remove(pos);
+                                                } else {
+                                                    bps.push((path.clone(), line1));
+                                                }
+                                            });
+                                        }
+                                        return;
+                                    }
+                                    // F5 — continue; Shift+F5 — stop debug session
+                                    floem::keyboard::NamedKey::F5 => {
+                                        if let Some(tx) = state.project.debug_cmd.get() {
+                                            let _ = tx.send(if shift {
+                                                crate::debug_session::DebugCmd::Stop
+                                            } else {
+                                                crate::debug_session::DebugCmd::Continue
+                                            });
+                                        }
+                                        return;
+                                    }
+                                    // F10 — step over
+                                    floem::keyboard::NamedKey::F10 => {
+                                        if let Some(tx) = state.project.debug_cmd.get() {
+                                            let _ =
+                                                tx.send(crate::debug_session::DebugCmd::StepOver);
+                                        }
+                                        return;
+                                    }
+                                    // F11 — step into; Shift+F11 — step out
+                                    floem::keyboard::NamedKey::F11 => {
+                                        if let Some(tx) = state.project.debug_cmd.get() {
+                                            let _ = tx.send(if shift {
+                                                crate::debug_session::DebugCmd::StepOut
+                                            } else {
+                                                crate::debug_session::DebugCmd::StepIn
+                                            });
                                             return;
                                         }
                                     }

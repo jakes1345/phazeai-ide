@@ -106,6 +106,10 @@ struct SyntaxStyle {
     /// Last known rope length for cache invalidation. If rope length changes,
     /// the entire states cache is cleared to prevent stale highlighting.
     last_rope_len: std::cell::Cell<usize>,
+    /// Breakpoint lines for this file (0-based) — red dot in the gutter.
+    breakpoint_lines: HashSet<usize>,
+    /// 0-based line where the debugger is stopped — full-line highlight.
+    debug_stopped_line: Option<usize>,
     /// Tree-sitter language (Some = use tree-sitter instead of syntect).
     ts_lang: Option<SyntaxLang>,
     /// Cached tree-sitter highlight spans for the current document content.
@@ -178,6 +182,8 @@ impl SyntaxStyle {
             blame_line: None,
             bracket_pair_guides: Vec::new(),
             last_rope_len: std::cell::Cell::new(0),
+            breakpoint_lines: HashSet::new(),
+            debug_stopped_line: None,
             ts_lang,
             ts_spans: RefCell::new(Vec::new()),
             ts_computed_len: std::cell::Cell::new(0),
@@ -675,6 +681,36 @@ impl Styling for SyntaxStyle {
             });
         }
 
+        // Debugger stopped line: full-width highlight so the paused position
+        // is obvious even without the gutter marker.
+        if self.debug_stopped_line == Some(line) {
+            let line_h = self.inner.line_height(edid, line) as f64;
+            layout_line.extra_style.push(LineExtraStyle {
+                x: 0.0,
+                y: 0.0,
+                width: None, // full line width
+                height: line_h,
+                bg_color: Some(floem::peniko::Color::from_rgba8(255, 200, 60, 38)),
+                under_line: None,
+                wave_line: None,
+            });
+        }
+
+        // Breakpoint marker: red dot in the gutter area (toggle with F9).
+        if self.breakpoint_lines.contains(&line) {
+            let line_h = self.inner.line_height(edid, line) as f64;
+            let dot = 8.0_f64;
+            layout_line.extra_style.push(LineExtraStyle {
+                x: -24.0, // negative x → gutter area, left of fold indicators
+                y: (line_h - dot).max(0.0) * 0.5,
+                width: Some(dot),
+                height: dot,
+                bg_color: Some(floem::peniko::Color::from_rgba8(229, 78, 78, 235)),
+                under_line: None,
+                wave_line: None,
+            });
+        }
+
         // Draw fold indicator (bright = collapsed, dim = expanded) in gutter.
         self.paint_fold_indicator(edid, line, layout_line);
 
@@ -1078,6 +1114,8 @@ pub fn editor_panel(
     inlay_hints_toggle: RwSignal<bool>,
     minimap_visible: RwSignal<bool>,
     close_active_tab_nonce: RwSignal<u64>,
+    breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
+    debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -4043,6 +4081,8 @@ pub fn editor_panel(
                     let find_offs = find_match_offsets.get();
                     let find_q = find_query.get();
                     let blame_entries = blame_data.get();
+                    let all_bps = breakpoints.get();
+                    let stopped_at = debug_stopped_at.get();
                     let my_diags: Vec<(usize, DiagSeverity)> = all_diags
                         .iter()
                         .filter(|d| d.path == path_for_diag)
@@ -4084,6 +4124,17 @@ pub fn editor_panel(
                         new_style.bracket_pair_guides = guides;
                     }
                     new_style.matching_bracket = match_brkt;
+                    // Breakpoints + debugger stopped line for this file
+                    // (stored 1-based for DAP, painted 0-based).
+                    new_style.breakpoint_lines = all_bps
+                        .iter()
+                        .filter(|(p, _)| *p == path_for_diag)
+                        .map(|(_, l)| (*l as usize).saturating_sub(1))
+                        .collect();
+                    new_style.debug_stopped_line = stopped_at
+                        .as_ref()
+                        .filter(|(p, _)| *p == path_for_diag)
+                        .map(|(_, l)| (*l as usize).saturating_sub(1));
                     // Inline blame for the current cursor line
                     new_style.blame_line = if cur_line < blame_entries.len() {
                         let (ref author, ref date) = blame_entries[cur_line];

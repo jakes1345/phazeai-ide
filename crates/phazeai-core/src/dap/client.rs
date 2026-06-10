@@ -5,7 +5,6 @@ use crate::error::PhazeError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -127,7 +126,7 @@ impl DapClient {
     /// Set breakpoints for a source file.
     pub fn set_breakpoints(
         &self,
-        path: &PathBuf,
+        path: &std::path::Path,
         breakpoints: &[SourceBreakpoint],
     ) -> Result<DapResponse, PhazeError> {
         let args = serde_json::json!({
@@ -243,7 +242,7 @@ impl DapClient {
                             .unwrap_or("unknown");
                         let thread_id = body.get("threadId").and_then(|v| v.as_u64()).unwrap_or(1);
                         Some(DebugEvent::Stopped {
-                            reason: StopReason::from_str(reason),
+                            reason: StopReason::parse(reason),
                             thread_id,
                         })
                     }
