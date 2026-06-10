@@ -62,6 +62,10 @@ pub enum SyntaxLang {
     Cpp,
     Json,
     Bash,
+    Html,
+    Css,
+    Ruby,
+    Java,
 }
 
 impl SyntaxLang {
@@ -77,6 +81,10 @@ impl SyntaxLang {
             "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(Self::Cpp),
             "json" | "jsonc" => Some(Self::Json),
             "sh" | "bash" | "zsh" => Some(Self::Bash),
+            "html" | "htm" => Some(Self::Html),
+            "css" | "scss" => Some(Self::Css),
+            "rb" | "rake" | "gemspec" => Some(Self::Ruby),
+            "java" => Some(Self::Java),
             _ => None,
         }
     }
@@ -212,6 +220,58 @@ fn bash_config() -> Option<HighlightConfiguration> {
     Some(config)
 }
 
+fn html_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_html::LANGUAGE.into(),
+        "html",
+        tree_sitter_html::HIGHLIGHTS_QUERY,
+        tree_sitter_html::INJECTIONS_QUERY,
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn css_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_css::LANGUAGE.into(),
+        "css",
+        tree_sitter_css::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn ruby_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_ruby::LANGUAGE.into(),
+        "ruby",
+        tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        "",
+        tree_sitter_ruby::LOCALS_QUERY,
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
+fn java_config() -> Option<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_java::LANGUAGE.into(),
+        "java",
+        tree_sitter_java::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .ok()?;
+    config.configure(HIGHLIGHT_NAMES);
+    Some(config)
+}
+
 /// Highlight a source string into class-tagged spans. Returns an empty Vec
 /// on any tree-sitter error so callers can safely fall back to plain text.
 pub fn highlight(source: &str, lang: SyntaxLang) -> Vec<HighlightSpan> {
@@ -226,6 +286,10 @@ pub fn highlight(source: &str, lang: SyntaxLang) -> Vec<HighlightSpan> {
         SyntaxLang::Cpp => cpp_config(),
         SyntaxLang::Json => json_config(),
         SyntaxLang::Bash => bash_config(),
+        SyntaxLang::Html => html_config(),
+        SyntaxLang::Css => css_config(),
+        SyntaxLang::Ruby => ruby_config(),
+        SyntaxLang::Java => java_config(),
     }) else {
         return Vec::new();
     };

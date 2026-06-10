@@ -1262,6 +1262,10 @@ impl IdeState {
             scratch_paths: create_rw_signal(Vec::new()),
             scratch_counter: create_rw_signal(0),
             initial_tabs: initial_tabs.clone(),
+            debug_status: create_rw_signal(crate::domain_state::project::DebugStatus::Idle),
+            debug_thread_id: create_rw_signal(0u64),
+            debug_output: create_rw_signal(Vec::new()),
+            breakpoints: create_rw_signal(Vec::new()),
         };
 
         let state = Self {

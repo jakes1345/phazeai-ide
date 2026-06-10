@@ -3,6 +3,14 @@ use phazeai_sidecar::SidecarClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Debug session state (DAP).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugStatus {
+    Idle,
+    Running,
+    Stopped,
+}
+
 #[derive(Clone)]
 pub struct ProjectState {
     pub workspace_root: RwSignal<PathBuf>,
@@ -22,4 +30,10 @@ pub struct ProjectState {
     pub scratch_paths: RwSignal<Vec<std::path::PathBuf>>,
     pub scratch_counter: RwSignal<u32>,
     pub initial_tabs: Vec<PathBuf>,
+
+    // DAP debugger state
+    pub debug_status: RwSignal<DebugStatus>,
+    pub debug_thread_id: RwSignal<u64>,
+    pub debug_output: RwSignal<Vec<String>>,
+    pub breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
 }
