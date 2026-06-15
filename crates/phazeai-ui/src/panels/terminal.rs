@@ -21,6 +21,7 @@ use crate::commands::{execute_command, match_global_shortcut};
 use crate::domain_state::IdeState;
 use crate::util::safe_get;
 use phazeai_core::constants::terminal as term_consts;
+use phazeai_core::Settings;
 
 use crate::theme::PhazeTheme;
 use std::time::{Duration, Instant};
@@ -657,6 +658,7 @@ fn single_terminal(
     term_font_size: RwSignal<u32>,
     find_open: RwSignal<bool>,
     find_query: RwSignal<String>,
+    ai_cmd_open: RwSignal<bool>,
     pty_writer_out: Option<RwSignal<Option<SharedPtyWriter>>>,
     prompt_positions_out: Option<RwSignal<Vec<usize>>>,
 ) -> impl IntoView {
@@ -1213,6 +1215,10 @@ fn single_terminal(
                                 find_open.update(|v| *v = !*v);
                                 return;
                             }
+                            "k" | "K" => {
+                                ai_cmd_open.update(|v| *v = !*v);
+                                return;
+                            }
                             _ => {}
                         }
                     }
@@ -1444,6 +1450,13 @@ pub fn terminal_panel(
     let term_find_open: RwSignal<bool> = create_rw_signal(false);
     let term_find_query: RwSignal<String> = create_rw_signal(String::new());
 
+    // AI command bar — Warp-style natural-language → shell command
+    let ai_cmd_open: RwSignal<bool> = create_rw_signal(false);
+    let ai_cmd_query: RwSignal<String> = create_rw_signal(String::new());
+    let ai_cmd_thinking: RwSignal<bool> = create_rw_signal(false);
+    let (ai_cmd_tx, ai_cmd_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(4);
+    let ai_cmd_result = create_signal_from_channel(ai_cmd_rx);
+
     // Feature 3: active terminal's PTY writer — set by single_terminal once PTY is ready.
     // Writing bytes to this sends them directly to the active shell.
     let active_pty_writer: RwSignal<Option<SharedPtyWriter>> = create_rw_signal(None);
@@ -1473,6 +1486,34 @@ pub fn terminal_panel(
                     }
                 }
                 run_in_terminal_text.set(None);
+            }
+        });
+    }
+
+    // AI command bar: when AI returns a command, write it to the active PTY (no newline).
+    {
+        let writer = active_pty_writer;
+        create_effect(move |_| {
+            let Some(res) = ai_cmd_result.get() else { return };
+            ai_cmd_thinking.set(false);
+            match res {
+                Ok(cmd) => {
+                    let cmd = cmd.trim().trim_matches('`').to_string();
+                    if let Some(ref arc) = writer.get_untracked() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(ref mut w) = *guard {
+                                let _ = w.write_all(cmd.as_bytes());
+                                let _ = w.flush();
+                            }
+                        }
+                    }
+                    ai_cmd_open.set(false);
+                    ai_cmd_query.set(String::new());
+                }
+                Err(e) => {
+                    eprintln!("[PhazeAI] AI cmd error: {e}");
+                    ai_cmd_open.set(false);
+                }
             }
         });
     }
@@ -1807,6 +1848,24 @@ pub fn terminal_panel(
             .on_click_stop(move |_| {
                 term_font_size.update(|v| *v = (*v + 1).min(32));
             }),
+        // "✦" AI command button — opens natural-language → shell command bar (Ctrl+K)
+        container(label(move || if ai_cmd_thinking.get() { "⏳" } else { "✦" }))
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let active = ai_cmd_open.get();
+                s.padding_horiz(8.0)
+                    .padding_vert(5.0)
+                    .font_size(13.0)
+                    .color(if active { p.accent } else { p.text_muted })
+                    .cursor(CursorStyle::Pointer)
+                    .border(1.0)
+                    .border_color(if active { p.accent } else { p.border })
+                    .border_radius(3.0)
+                    .margin_right(4.0)
+                    .hover(|s| s.color(p.accent))
+            })
+            .on_click_stop(move |_| ai_cmd_open.update(|v| *v = !*v)),
         // "⊟" split button — toggle side-by-side split
         container(label(|| "⊟"))
             .style(move |s| {
@@ -1921,6 +1980,7 @@ pub fn terminal_panel(
         term_font_size,
         term_find_open,
         term_find_query,
+        ai_cmd_open,
         None,
         None,
     );
@@ -1944,6 +2004,7 @@ pub fn terminal_panel(
                 term_font_size,
                 term_find_open,
                 term_find_query,
+                ai_cmd_open,
                 Some(pw_sig),
                 Some(pp_sig),
             )
@@ -1979,7 +2040,130 @@ pub fn terminal_panel(
     ))
     .style(|s| s.flex_row().flex_grow(1.0).min_height(0.0).width_full());
 
-    stack((tab_bar, content_area)).style(move |s| {
+    // ── AI command bar (Ctrl+K) ─────────────────────────────────────────────
+    // Shown between tab_bar and content_area when ai_cmd_open is true.
+    let ai_cmd_tx_bar = ai_cmd_tx.clone();
+    let ai_cmd_bar = {
+        let input = text_input(ai_cmd_query)
+            .placeholder("Describe a command… e.g. \"find all Rust files changed today\"")
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.flex_grow(1.0)
+                    .min_width(0.0)
+                    .font_size(13.0)
+                    .padding_horiz(10.0)
+                    .padding_vert(5.0)
+                    .color(p.text_primary)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.accent)
+                    .border_radius(4.0)
+            })
+            .on_event_stop(EventListener::KeyDown, move |ev| {
+                if let Event::KeyDown(e) = ev {
+                    use floem::keyboard::NamedKey;
+                    match &e.key.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            ai_cmd_open.set(false);
+                            ai_cmd_query.set(String::new());
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let desc = ai_cmd_query.get();
+                            let desc = desc.trim().to_string();
+                            if desc.is_empty() || ai_cmd_thinking.get() {
+                                return;
+                            }
+                            ai_cmd_thinking.set(true);
+                            let tx = ai_cmd_tx_bar.clone();
+                            std::thread::spawn(move || {
+                                let settings = Settings::load();
+                                let client = match settings.build_llm_client() {
+                                    Ok(c) => c,
+                                    Err(e) => { let _ = tx.send(Err(format!("LLM: {e}"))); return; }
+                                };
+                                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                    Ok(r) => r,
+                                    Err(e) => { let _ = tx.send(Err(format!("Runtime: {e}"))); return; }
+                                };
+                                rt.block_on(async move {
+                                    use phazeai_core::{Agent, AgentEvent};
+                                    let agent = Agent::new(client);
+                                    let prompt = format!(
+                                        "Generate a single bash/shell command that does the following: {desc}\n\
+                                         Rules: respond with ONLY the command, no explanation, no markdown, no backticks."
+                                    );
+                                    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+                                    let run_fut = agent.run_with_events(&prompt, agent_tx);
+                                    let collect_fut = async move {
+                                        let mut s = String::new();
+                                        while let Some(ev) = agent_rx.recv().await {
+                                            if let AgentEvent::TextDelta(d) = ev { s.push_str(&d); }
+                                        }
+                                        s
+                                    };
+                                    let (_, collected) = tokio::join!(run_fut, collect_fut);
+                                    let cmd = collected.trim().trim_matches('`').to_string();
+                                    let _ = tx.send(if cmd.is_empty() {
+                                        Err("AI returned empty command".into())
+                                    } else {
+                                        Ok(cmd)
+                                    });
+                                });
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+        let hint = label(move || {
+            if ai_cmd_thinking.get() { "Generating…".to_string() }
+            else { "Enter to generate · Esc to close".to_string() }
+        }).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0).color(p.text_muted).padding_horiz(10.0)
+        });
+
+        let close_btn = container(label(|| "✕"))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(12.0).color(p.text_muted).padding_horiz(8.0)
+                    .padding_vert(4.0).cursor(CursorStyle::Pointer)
+                    .hover(|s| s.color(p.text_primary))
+            })
+            .on_click_stop(move |_| {
+                ai_cmd_open.set(false);
+                ai_cmd_query.set(String::new());
+            });
+
+        container(
+            stack((
+                label(|| "✦ AI Command").style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(11.0).font_weight(floem::text::Weight::BOLD)
+                     .color(p.accent).margin_right(8.0)
+                }),
+                input,
+                hint,
+                close_btn,
+            ))
+            .style(|s| s.flex_row().items_center().gap(4.0)),
+        )
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.width_full()
+                .padding_horiz(10.0)
+                .padding_vert(6.0)
+                .background(p.bg_elevated)
+                .border_bottom(1.0)
+                .border_color(p.accent.with_alpha(0.4))
+                .apply_if(!ai_cmd_open.get(), |s| s.display(Display::None))
+        })
+    };
+
+    stack((tab_bar, ai_cmd_bar, content_area)).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.flex_col()
