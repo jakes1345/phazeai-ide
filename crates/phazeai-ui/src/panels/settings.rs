@@ -31,6 +31,16 @@ fn provider_name_to_id(name: &str) -> Option<ProviderId> {
         "OpenRouter" => Some(ProviderId::OpenRouter),
         "Ollama (Local)" => Some(ProviderId::Ollama),
         "LM Studio (Local)" => Some(ProviderId::LmStudio),
+        "Mistral AI" => Some(ProviderId::Mistral),
+        "DeepSeek" => Some(ProviderId::DeepSeek),
+        "xAI (Grok)" => Some(ProviderId::Xai),
+        "Cohere" => Some(ProviderId::Cohere),
+        "Perplexity" => Some(ProviderId::Perplexity),
+        "Azure OpenAI" => Some(ProviderId::Azure),
+        "Cerebras" => Some(ProviderId::Cerebras),
+        "Fireworks AI" => Some(ProviderId::Fireworks),
+        "SambaNova" => Some(ProviderId::SambaNova),
+        "GitHub Models" => Some(ProviderId::GithubModels),
         _ => None,
     }
 }
@@ -470,14 +480,24 @@ fn ai_section(state: IdeState) -> impl IntoView {
     let ai_provider = state.ai.provider;
     let ai_model = state.ai.model;
 
-    // Provider tiles
+    // Provider tiles — ordered: flagship → fast/cheap → specialized → local
     const PROVIDERS: &[&str] = &[
         "Claude (Anthropic)",
         "OpenAI",
         "Google Gemini",
+        "Mistral AI",
+        "DeepSeek",
+        "xAI (Grok)",
         "Groq",
+        "Cerebras",
         "Together.ai",
+        "Fireworks AI",
+        "SambaNova",
         "OpenRouter",
+        "Perplexity",
+        "Cohere",
+        "Azure OpenAI",
+        "GitHub Models",
         "Ollama (Local)",
         "LM Studio (Local)",
     ];

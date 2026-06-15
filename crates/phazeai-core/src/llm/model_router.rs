@@ -198,6 +198,16 @@ impl ModelRouter {
             "openrouter" => ProviderId::OpenRouter,
             "lmstudio" | "lm_studio" => ProviderId::LmStudio,
             "gemini" => ProviderId::Gemini,
+            "mistral" => ProviderId::Mistral,
+            "deepseek" => ProviderId::DeepSeek,
+            "xai" | "grok" => ProviderId::Xai,
+            "cohere" => ProviderId::Cohere,
+            "perplexity" => ProviderId::Perplexity,
+            "azure" | "azure_openai" => ProviderId::Azure,
+            "cerebras" => ProviderId::Cerebras,
+            "fireworks" => ProviderId::Fireworks,
+            "sambanova" => ProviderId::SambaNova,
+            "github" | "github_models" | "githubmodels" => ProviderId::GithubModels,
             other => ProviderId::Custom(other.to_string()),
         }
     }

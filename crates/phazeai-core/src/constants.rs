@@ -35,6 +35,27 @@ pub mod models {
     pub const GEMINI_15_PRO_MODEL: &str = "gemini-1.5-pro";
     pub const GEMINI_15_FLASH_MODEL: &str = "gemini-1.5-flash";
     pub const GEMINI_EMBEDDING_MODEL: &str = "text-embedding-004";
+
+    /// Mistral AI
+    pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-large-latest";
+    /// DeepSeek (direct API, cheaper than via Together/OpenRouter)
+    pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
+    /// xAI Grok
+    pub const DEFAULT_XAI_MODEL: &str = "grok-3";
+    /// Cohere Command
+    pub const DEFAULT_COHERE_MODEL: &str = "command-r-plus-08-2024";
+    /// Perplexity Sonar (web-grounded)
+    pub const DEFAULT_PERPLEXITY_MODEL: &str = "sonar-pro";
+    /// Azure OpenAI — deployment name set by user in base URL
+    pub const DEFAULT_AZURE_MODEL: &str = "gpt-4o";
+    /// Cerebras (fast Llama inference)
+    pub const DEFAULT_CEREBRAS_MODEL: &str = "llama3.1-70b";
+    /// Fireworks AI
+    pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/llama-v3p1-70b-instruct";
+    /// SambaNova Cloud
+    pub const DEFAULT_SAMBANOVA_MODEL: &str = "Meta-Llama-3.1-405B-Instruct";
+    /// GitHub Models (Azure-hosted OSS + OpenAI models, free with GitHub token)
+    pub const DEFAULT_GITHUB_MODELS_MODEL: &str = "gpt-4o";
 }
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
@@ -55,6 +76,19 @@ pub mod endpoints {
     /// Pi Ollama LAN endpoint (configured via setup script)
     pub const PI_OLLAMA_LAN_URL: &str = "http://192.168.1.155:8080";
     pub const SEARCH_ENGINE_URL: &str = "https://html.duckduckgo.com/html/?q={}";
+
+    pub const MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
+    pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
+    pub const XAI_BASE_URL: &str = "https://api.x.ai/v1";
+    pub const COHERE_BASE_URL: &str = "https://api.cohere.com/compatibility/v1";
+    pub const PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
+    /// Azure OpenAI: user must set base_url = https://{resource}.openai.azure.com/openai/deployments/{deployment}
+    pub const AZURE_BASE_URL: &str = "";
+    pub const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
+    pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
+    pub const SAMBANOVA_BASE_URL: &str = "https://fast-api.snova.ai/v1";
+    /// GitHub Models — free OSS + OpenAI models via GitHub token
+    pub const GITHUB_MODELS_BASE_URL: &str = "https://models.inference.ai.azure.com";
 }
 
 // ─── Default Settings ─────────────────────────────────────────────────────────

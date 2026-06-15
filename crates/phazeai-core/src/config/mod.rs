@@ -178,7 +178,7 @@ impl Settings {
         // Apply any custom provider configs from settings
         for entry in &self.providers {
             let id = match entry.name.to_lowercase().as_str() {
-                "claude" => ProviderId::Claude,
+                "claude" | "anthropic" => ProviderId::Claude,
                 "openai" => ProviderId::OpenAI,
                 "ollama" => ProviderId::Ollama,
                 "groq" => ProviderId::Groq,
@@ -186,6 +186,16 @@ impl Settings {
                 "openrouter" => ProviderId::OpenRouter,
                 "lmstudio" | "lm_studio" => ProviderId::LmStudio,
                 "gemini" => ProviderId::Gemini,
+                "mistral" => ProviderId::Mistral,
+                "deepseek" => ProviderId::DeepSeek,
+                "xai" | "grok" => ProviderId::Xai,
+                "cohere" => ProviderId::Cohere,
+                "perplexity" => ProviderId::Perplexity,
+                "azure" | "azure_openai" => ProviderId::Azure,
+                "cerebras" => ProviderId::Cerebras,
+                "fireworks" => ProviderId::Fireworks,
+                "sambanova" => ProviderId::SambaNova,
+                "github" | "github_models" | "githubmodels" => ProviderId::GithubModels,
                 other => ProviderId::Custom(other.to_string()),
             };
             let config = ProviderConfig {

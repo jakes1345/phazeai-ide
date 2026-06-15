@@ -2577,6 +2577,16 @@ fn handle_command_result(
                 s if s.contains("lm studio") || s.contains("lmstudio") => {
                     phazeai_core::ProviderId::LmStudio
                 }
+                s if s.contains("mistral") => phazeai_core::ProviderId::Mistral,
+                s if s.contains("deepseek") => phazeai_core::ProviderId::DeepSeek,
+                s if s.contains("xai") || s.contains("grok") => phazeai_core::ProviderId::Xai,
+                s if s.contains("cohere") => phazeai_core::ProviderId::Cohere,
+                s if s.contains("perplexity") => phazeai_core::ProviderId::Perplexity,
+                s if s.contains("azure") => phazeai_core::ProviderId::Azure,
+                s if s.contains("cerebras") => phazeai_core::ProviderId::Cerebras,
+                s if s.contains("fireworks") => phazeai_core::ProviderId::Fireworks,
+                s if s.contains("sambanova") => phazeai_core::ProviderId::SambaNova,
+                s if s.contains("github") => phazeai_core::ProviderId::GithubModels,
                 _ => phazeai_core::ProviderId::Claude,
             };
 
