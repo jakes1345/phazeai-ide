@@ -37,11 +37,11 @@ use crate::{
     components::icon::{icons, phaze_icon},
     domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
-        chat::chat_panel, containers::containers_panel,
-        editor::editor_panel, explorer::explorer_panel, extensions::extensions_panel,
-        git::git_panel, github_actions::github_actions_panel, makefile::makefile_panel,
-        remote::remote_panel, run_debug::run_debug_panel, search, settings::settings_panel,
-        terminal::terminal_panel, tests::tests_panel,
+        chat::chat_panel, containers::containers_panel, editor::editor_panel,
+        explorer::explorer_panel, extensions::extensions_panel, git::git_panel,
+        github_actions::github_actions_panel, makefile::makefile_panel, remote::remote_panel,
+        run_debug::run_debug_panel, search, settings::settings_panel, terminal::terminal_panel,
+        tests::tests_panel,
     },
     theme::{PhazeTheme, ThemeVariant},
     util::safe_get,
@@ -1948,7 +1948,6 @@ where
 }
 
 fn status_bar(state: IdeState) -> impl IntoView {
-
     // Branch clickable button — click to open branch picker overlay
     let branch_btn = {
         let s = state.clone();

@@ -55,6 +55,3 @@ streaming-iterator = "0.1.9"
 tempfile = "3.10"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
-[[example]]
-name = "stress_test"
-path = "examples/stress_test.rs"

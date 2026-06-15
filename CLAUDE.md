@@ -27,17 +27,19 @@ cargo fmt --all
 
 ## Workspace Structure
 
-6-crate Cargo workspace:
+Cargo workspace:
 
 - **`phazeai-ui`** — PRIMARY desktop IDE, GPU-accelerated via Floem (Vello/wgpu renderer)
-- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, config
+- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, DAP, config
 - **`phazeai-cli`** — terminal UI (`ratatui`)
-- **`phazeai-cloud`** — paid cloud client: auth, hosted models, team features (skeleton)
 - **`phazeai-sidecar`** — Python semantic search subprocess
+- **`phazeai-plugin-api`** / **`phazeai-plugin-canary`** — native plugin ABI + test plugin
 - **`ollama-rs`** — local fork with custom streaming/chat-history features
 
 > **NOTE**: `phazeai-ide` (the old egui/eframe GUI) has been **permanently deleted**.
 > All GUI work is in `phazeai-ui` (Floem). Never reference egui or eframe.
+> `phazeai-cloud` and the Account panel were removed (no backend exists);
+> the multi-agent orchestrator was removed (no callers) — both live in git history.
 
 Config is stored at `~/.config/phazeai/settings.toml` (auto-created on first run).
 Session (open files, panel sizes) at `~/.config/phazeai/session.toml`.
@@ -128,9 +130,14 @@ pub type ApprovalFn = Box<dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = b
 
 Injected into the agent at construction.
 
-### Multi-Agent (`phazeai-core/src/agent/multi_agent.rs`)
+### DAP Debugger (`phazeai-core/src/dap/` + `phazeai-ui/src/debug_session.rs`)
 
-Planner → Coder → Reviewer pipeline, each backed by independently configured `LlmClient` instances.
+`DapClient` spawns a debug adapter (lldb-dap / lldb-vscode / `gdb -i dap`) and
+speaks Content-Length-framed DAP over stdio. `debug_session::run_session` runs
+on its own thread, takes `DebugCmd`s from the UI and streams `SessionUpdate`s
+back through a sync_channel → `create_signal_from_channel`. Editor: F9 toggles
+breakpoints (red gutter dots), stopped line gets a full-width highlight.
+F5/F10/F11/⇧F11 = continue/step-over/step-into/step-out.
 
 ## Key Dependencies
 
