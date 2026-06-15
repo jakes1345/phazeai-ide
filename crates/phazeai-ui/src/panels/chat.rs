@@ -701,6 +701,12 @@ pub fn chat_panel(
         });
     }
 
+    // ── Active model display (click to edit, persists to settings) ───────────
+    let active_model: RwSignal<String> =
+        create_rw_signal(Settings::load().llm.model.clone());
+    let model_editing: RwSignal<bool> = create_rw_signal(false);
+    let model_edit_buf: RwSignal<String> = create_rw_signal(String::new());
+
     // ── Conversation history UI state (ROADMAP 2.2) ───────────────────────────
     let show_history: RwSignal<bool> = create_rw_signal(false);
     let history_items: RwSignal<Vec<ConversationMetadata>> = create_rw_signal(Vec::new());
@@ -1171,6 +1177,118 @@ pub fn chat_panel(
         },
     );
 
+    // Model chip — shows active model; click to switch inline.
+    let model_chip = dyn_container(
+        move || model_editing.get(),
+        move |editing| {
+            if editing {
+                // Edit mode: text input + confirm button
+                let hov_ok = create_rw_signal(false);
+                stack((
+                    text_input(model_edit_buf)
+                        .style(move |s| {
+                            let p = theme.get().palette;
+                            s.width(140.0)
+                                .font_size(10.0)
+                                .color(p.text_primary)
+                                .background(p.bg_elevated)
+                                .border(1.0)
+                                .border_color(p.accent)
+                                .border_radius(3.0)
+                                .padding_horiz(4.0)
+                                .padding_vert(2.0)
+                        })
+                        .on_event_stop(EventListener::KeyDown, move |e| {
+                            if let floem::event::Event::KeyDown(ke) = e {
+                                match ke.key.logical_key {
+                                    floem::keyboard::Key::Named(
+                                        floem::keyboard::NamedKey::Enter,
+                                    ) => {
+                                        let m = model_edit_buf.get_untracked();
+                                        if !m.trim().is_empty() {
+                                            let mut s = Settings::load();
+                                            s.llm.model = m.trim().to_string();
+                                            let _ = s.save();
+                                            active_model.set(m.trim().to_string());
+                                        }
+                                        model_editing.set(false);
+                                    }
+                                    floem::keyboard::Key::Named(
+                                        floem::keyboard::NamedKey::Escape,
+                                    ) => {
+                                        model_editing.set(false);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }),
+                    container(label(|| "✓").style(move |s| {
+                        s.font_size(10.0).color(theme.get().palette.accent)
+                    }))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.padding_horiz(5.0)
+                            .padding_vert(2.0)
+                            .margin_left(4.0)
+                            .border(1.0)
+                            .border_color(p.accent)
+                            .border_radius(3.0)
+                            .cursor(floem::style::CursorStyle::Pointer)
+                            .background(if hov_ok.get() {
+                                p.accent_dim
+                            } else {
+                                floem::peniko::Color::TRANSPARENT
+                            })
+                    })
+                    .on_event_stop(EventListener::PointerEnter, move |_| hov_ok.set(true))
+                    .on_event_stop(EventListener::PointerLeave, move |_| hov_ok.set(false))
+                    .on_click_stop(move |_| {
+                        let m = model_edit_buf.get_untracked();
+                        if !m.trim().is_empty() {
+                            let mut s = Settings::load();
+                            s.llm.model = m.trim().to_string();
+                            let _ = s.save();
+                            active_model.set(m.trim().to_string());
+                        }
+                        model_editing.set(false);
+                    }),
+                ))
+                .style(|s| s.items_center())
+                .into_any()
+            } else {
+                // Display mode: clickable model name chip
+                let hov = create_rw_signal(false);
+                container(
+                    label(move || active_model.get()).style(move |s| {
+                        s.font_size(10.0).color(theme.get().palette.text_muted)
+                    }),
+                )
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.padding_horiz(6.0)
+                        .padding_vert(2.0)
+                        .border(1.0)
+                        .border_color(p.glass_border)
+                        .border_radius(10.0)
+                        .margin_right(6.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .background(if hov.get() {
+                            p.bg_elevated
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                })
+                .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+                .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+                .on_click_stop(move |_| {
+                    model_edit_buf.set(active_model.get_untracked());
+                    model_editing.set(true);
+                })
+                .into_any()
+            }
+        },
+    );
+
     let header_content = container(
         stack((
             container(
@@ -1186,6 +1304,7 @@ pub fn chat_panel(
             )
             .style(|s| s.flex_grow(1.0)),
             skill_badge,
+            model_chip,
             new_btn,
             history_btn,
         ))
