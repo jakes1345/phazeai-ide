@@ -137,58 +137,67 @@ impl TermLine {
     }
 }
 
-// ── Scrollback limit ──────────────────────────────────────────────────────────
+// ── Terminal Block ────────────────────────────────────────────────────────────
 
-/// Maximum number of scrollback lines kept in TermState.
-/// Oldest lines are trimmed when exceeded.
-/// Note: configurable via settings in the future
-const MAX_SCROLLBACK: usize = 10_000;
+/// One completed shell command unit: the prompt display + all output.
+/// Populated from OSC 133 markers (A = prompt start, D = command done).
+#[derive(Clone, Debug)]
+struct TermBlock {
+    id: u64,
+    lines: Vec<TermLine>,
+    exit_code: i32,
+}
 
 // ── Terminal State ────────────────────────────────────────────────────────────
 
+/// Maximum completed blocks retained in memory (each may have many lines).
+const MAX_BLOCKS: usize = 200;
+/// Maximum lines in the current (in-progress) block before trimming old ones.
+const MAX_CURRENT_LINES: usize = 5_000;
+
 struct TermState {
-    lines: Vec<TermLine>,
+    /// Finalized blocks (OSC 133;D received, committed on next OSC 133;A).
+    blocks: Vec<TermBlock>,
+    /// Lines accumulating for the current in-progress block.
+    current_block_lines: Vec<TermLine>,
+    /// Stable id for the block currently being built.
+    current_block_id: u64,
+    /// Monotonically increasing id counter.
+    next_id: u64,
+    /// Exit code received from OSC 133;D, held until A fires and commits.
+    pending_exit_code: Option<i32>,
+
     current_line: TermLine,
     cur_fg: TermColor,
     cur_bg: TermColor,
     cur_bold: bool,
     cursor_col: usize,
     pub cwd: String,
-    /// Line indices (into `lines`) where OSC 133;A (prompt start) was seen.
-    pub prompt_line_positions: Vec<usize>,
 }
 
 impl TermState {
     fn new() -> Self {
         Self {
-            lines: Vec::new(),
+            blocks: Vec::new(),
+            current_block_lines: Vec::new(),
+            current_block_id: 0,
+            next_id: 1,
+            pending_exit_code: None,
             current_line: TermLine::new(),
             cur_fg: TermColor::Default,
             cur_bg: TermColor::Default,
             cur_bold: false,
             cursor_col: 0,
             cwd: String::new(),
-            prompt_line_positions: Vec::new(),
         }
     }
 
     fn commit_line(&mut self) {
         let line = std::mem::replace(&mut self.current_line, TermLine::new());
-        self.lines.push(line);
-        // Enforce scrollback cap — trim oldest lines when exceeded.
-        // MAX_SCROLLBACK is the configurable limit (see const above).
-        if self.lines.len() > MAX_SCROLLBACK {
-            let drain_count = self.lines.len() - MAX_SCROLLBACK;
-            self.lines.drain(0..drain_count);
-            // Shift all prompt positions down; discard any that fell out.
-            self.prompt_line_positions.retain_mut(|pos| {
-                if *pos < drain_count {
-                    false
-                } else {
-                    *pos -= drain_count;
-                    true
-                }
-            });
+        self.current_block_lines.push(line);
+        if self.current_block_lines.len() > MAX_CURRENT_LINES {
+            let drain = self.current_block_lines.len() - MAX_CURRENT_LINES;
+            self.current_block_lines.drain(0..drain);
         }
         self.cursor_col = 0;
     }
@@ -205,6 +214,35 @@ impl TermState {
         self.cur_fg = TermColor::Default;
         self.cur_bg = TermColor::Default;
         self.cur_bold = false;
+    }
+
+    /// OSC 133;D;code — store exit code for the block being built.
+    fn on_exit_code(&mut self, code: i32) {
+        self.pending_exit_code = Some(code);
+    }
+
+    /// OSC 133;A — commit the current block and start a new one.
+    fn on_prompt_start(&mut self) {
+        if !self.current_line.is_empty() {
+            let line = std::mem::replace(&mut self.current_line, TermLine::new());
+            self.current_block_lines.push(line);
+            self.cursor_col = 0;
+        }
+        if !self.current_block_lines.is_empty() {
+            let exit_code = self.pending_exit_code.unwrap_or(0);
+            self.blocks.push(TermBlock {
+                id: self.current_block_id,
+                lines: std::mem::take(&mut self.current_block_lines),
+                exit_code,
+            });
+            if self.blocks.len() > MAX_BLOCKS {
+                let drain = self.blocks.len() - MAX_BLOCKS;
+                self.blocks.drain(0..drain);
+            }
+            self.current_block_id = self.next_id;
+            self.next_id += 1;
+        }
+        self.pending_exit_code = None;
     }
 
     fn handle_sgr(&mut self, params: &Params) {
@@ -319,7 +357,7 @@ impl Perform for VtePerformer {
                         .unwrap_or(0);
                     if (p == 2 || p == 3) && !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.lines.push(line);
+                        state.current_block_lines.push(line);
                     }
                 }
                 'K' => {
@@ -341,10 +379,10 @@ impl Perform for VtePerformer {
                         .max(1) as usize;
                     if !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.lines.push(line);
+                        state.current_block_lines.push(line);
                     }
-                    let len = state.lines.len();
-                    state.lines.truncate(len.saturating_sub(n));
+                    let len = state.current_block_lines.len();
+                    state.current_block_lines.truncate(len.saturating_sub(n));
                 }
                 'H' | 'f' => {
                     let row = params
@@ -354,7 +392,7 @@ impl Perform for VtePerformer {
                         .unwrap_or(1);
                     if row == 1 && !state.current_line.is_empty() {
                         let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.lines.push(line);
+                        state.current_block_lines.push(line);
                     }
                 }
                 _ => {}
@@ -385,36 +423,22 @@ impl Perform for VtePerformer {
             }
         }
 
-        // OSC 133: shell integration markers (FinalTerm / VSCode shell integration protocol)
-        // \e]133;A\a = prompt start  — record current line position
-        // \e]133;B\a = prompt end
-        // \e]133;C\a = command start (after Enter)
-        // \e]133;D\a = command end / exit code
+        // OSC 133: shell integration (FinalTerm / VSCode protocol)
+        // A = prompt start, B = prompt end, C = command executing, D;code = done
         if params[0] == b"133" && params.len() > 1 {
             let marker = String::from_utf8_lossy(params[1]);
-            // Only track prompt-start (A) for jump navigation
             if marker.starts_with('A') {
                 if let Ok(mut s) = self.state.lock() {
-                    // Commit current line so the position is accurate
-                    if !s.current_line.is_empty() {
-                        let line = std::mem::replace(&mut s.current_line, TermLine::new());
-                        s.lines.push(line);
-                        if s.lines.len() > MAX_SCROLLBACK {
-                            let drain_count = s.lines.len() - MAX_SCROLLBACK;
-                            s.lines.drain(0..drain_count);
-                            s.prompt_line_positions.retain_mut(|pos| {
-                                if *pos < drain_count {
-                                    false
-                                } else {
-                                    *pos -= drain_count;
-                                    true
-                                }
-                            });
-                        }
-                        s.cursor_col = 0;
-                    }
-                    let pos = s.lines.len();
-                    s.prompt_line_positions.push(pos);
+                    s.on_prompt_start();
+                }
+            } else if marker.starts_with("D") {
+                // D;exit_code — parse exit code after the semicolon
+                let code = marker
+                    .strip_prefix("D;")
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
+                if let Ok(mut s) = self.state.lock() {
+                    s.on_exit_code(code);
                 }
             }
         }
@@ -563,9 +587,6 @@ fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
 const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
 /// Maximum lines rendered at once — keeps the dyn_stack fast.
 const MAX_RENDER_LINES: usize = 500;
-/// Maximum lines kept in the reactive UI buffer. Full history remains in
-/// `TermState`; this only reduces cloning/churn on PTY updates.
-const MAX_UI_BUFFER_LINES: usize = 2_000;
 
 fn build_line_layout(
     line: &TermLine,
@@ -657,8 +678,12 @@ fn single_terminal(
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let update_signal = create_signal_from_channel(update_rx);
 
-    // ── Reactive line buffer ──────────────────────────────────────────────
-    let lines: RwSignal<Vec<TermLine>> = create_rw_signal(vec![]);
+    // ── Reactive buffers ──────────────────────────────────────────────────
+    // completed_blocks: stable list of finished blocks (exit_code known).
+    // Key is block id — dyn_stack creates each block view exactly once.
+    let completed_blocks: RwSignal<Vec<(u64, Vec<TermLine>, i32)>> = create_rw_signal(vec![]);
+    // live_lines: lines of the current in-progress block. Updates every keystroke.
+    let live_lines: RwSignal<Vec<TermLine>> = create_rw_signal(vec![]);
     // Increment on every update so auto-scroll can detect new output
     let line_version: RwSignal<u64> = create_rw_signal(0);
     // Cursor column position for rendering the cursor block
@@ -687,7 +712,7 @@ fn single_terminal(
                         for ch in format!("PTY open error: {e}").chars() {
                             err.push_char(ch, TermColor::Indexed(1), TermColor::Default, true);
                         }
-                        s.lines.push(err);
+                        s.current_block_lines.push(err);
                     }
                     let _ = update_tx.try_send(());
                     return;
@@ -706,7 +731,7 @@ fn single_terminal(
                         for ch in format!("Shell spawn error: {e}").chars() {
                             err.push_char(ch, TermColor::Indexed(1), TermColor::Default, true);
                         }
-                        s.lines.push(err);
+                        s.current_block_lines.push(err);
                     }
                     let _ = update_tx.try_send(());
                     return;
@@ -729,8 +754,9 @@ fn single_terminal(
                     thread::sleep(std::time::Duration::from_millis(300));
                     if let Ok(mut guard) = pty_w2.lock() {
                         if let Some(ref mut w) = *guard {
-                            // OSC 7 reports cwd; OSC 133;A marks prompt start for jump navigation
-                            let cmd = "export PROMPT_COMMAND='printf \"\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
+                            // OSC 133;D;$? = exit code of last cmd, then A = prompt start,
+                            // then OSC 7 = cwd. D fires before A so each block gets its code.
+                            let cmd = "export PROMPT_COMMAND='printf \"\\033]133;D;$?\\007\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
                             let _ = w.write_all(cmd.as_bytes());
                             let _ = w.flush();
                         }
@@ -775,7 +801,7 @@ fn single_terminal(
             if let Ok(mut s) = term_state_t.lock() {
                 if !s.current_line.is_empty() {
                     let line = std::mem::replace(&mut s.current_line, TermLine::new());
-                    s.lines.push(line);
+                    s.current_block_lines.push(line);
                 }
             }
             let _ = update_tx.try_send(());
@@ -794,19 +820,23 @@ fn single_terminal(
                 }
             }
             last_ui_sync_at.set(Some(now));
-            if let Ok(state) = term_state_e.lock() {
-                let base_len = state.lines.len();
-                let tail_start = base_len.saturating_sub(MAX_UI_BUFFER_LINES);
-                let mut all_lines = state.lines[tail_start..].to_vec();
-                if !state.current_line.is_empty() {
-                    all_lines.push(state.current_line.clone());
+            if let Ok(ts) = term_state_e.lock() {
+                completed_blocks.set(
+                    ts.blocks
+                        .iter()
+                        .map(|b| (b.id, b.lines.clone(), b.exit_code))
+                        .collect(),
+                );
+                let mut live = ts.current_block_lines.clone();
+                if !ts.current_line.is_empty() {
+                    live.push(ts.current_line.clone());
                 }
-                lines.set(all_lines);
+                live_lines.set(live);
                 line_version.update(|v| *v += 1);
-                cursor_col_sig.set(state.cursor_col);
-                // Feature 2: propagate prompt positions to caller if requested
+                cursor_col_sig.set(ts.cursor_col);
+                // Propagate block count as prompt positions for prev/next nav buttons.
                 if let Some(pp_sig) = prompt_positions_out {
-                    pp_sig.set(state.prompt_line_positions.clone());
+                    pp_sig.set((0..ts.blocks.len()).collect());
                 }
             }
         });
@@ -863,65 +893,239 @@ fn single_terminal(
     // ── Focus state ───────────────────────────────────────────────────────
     let is_focused = create_rw_signal(false);
 
-    // ── Output list ───────────────────────────────────────────────────────
-    let output_list = dyn_stack(
-        move || {
-            let all = safe_get(lines, Vec::new());
-            let total = all.len();
-            let start = total.saturating_sub(MAX_RENDER_LINES);
-            all.into_iter().enumerate().skip(start).collect::<Vec<_>>()
-        },
-        |(i, _)| *i,
-        move |(_, line)| {
-            let segments = line.segments.clone();
-
-            let initial_layout = {
-                let t = theme.get_untracked();
-                let p = &t.palette;
-                let fs = term_font_size.get_untracked() as f32;
-                if segments.is_empty() {
-                    let mut layout = TextLayout::new();
-                    let attrs = Attrs::new()
-                        .font_size(fs)
-                        .color(p.text_primary)
-                        .family(&[FamilyOwned::Monospace]);
-                    layout.set_text(" ", AttrsList::new(attrs), None);
-                    layout
-                } else {
-                    build_line_layout(&line, p.text_primary, p.bg_base, fs)
-                }
+    // ── Helper: render a single TermLine as a rich_text row ──────────────
+    let line_row = move |tl: TermLine| {
+        let segments = tl.segments.clone();
+        let init = {
+            let t = theme.get_untracked();
+            let p = &t.palette;
+            let fs = term_font_size.get_untracked() as f32;
+            if segments.is_empty() {
+                let mut lay = TextLayout::new();
+                lay.set_text(
+                    " ",
+                    AttrsList::new(
+                        Attrs::new()
+                            .font_size(fs)
+                            .color(p.text_primary)
+                            .family(&[FamilyOwned::Monospace]),
+                    ),
+                    None,
+                );
+                lay
+            } else {
+                build_line_layout(&tl, p.text_primary, p.bg_base, fs)
+            }
+        };
+        let layout_sig: RwSignal<TextLayout> = create_rw_signal(init);
+        create_effect(move |_| {
+            let t = theme.get();
+            let p = &t.palette;
+            let fs = term_font_size.get() as f32;
+            let new_lay = if segments.is_empty() {
+                let mut lay = TextLayout::new();
+                lay.set_text(
+                    " ",
+                    AttrsList::new(
+                        Attrs::new()
+                            .font_size(fs)
+                            .color(p.text_primary)
+                            .family(&[FamilyOwned::Monospace]),
+                    ),
+                    None,
+                );
+                lay
+            } else {
+                build_line_layout(&TermLine { segments: segments.clone() }, p.text_primary, p.bg_base, fs)
             };
-
-            let layout_signal: RwSignal<TextLayout> = create_rw_signal(initial_layout);
-
-            create_effect(move |_| {
-                let t = theme.get();
-                let p = &t.palette;
-                let fs = term_font_size.get() as f32;
-                let new_layout = if segments.is_empty() {
-                    let mut layout = TextLayout::new();
-                    let attrs = Attrs::new()
-                        .font_size(fs)
-                        .color(p.text_primary)
-                        .family(&[FamilyOwned::Monospace]);
-                    layout.set_text(" ", AttrsList::new(attrs), None);
-                    layout
-                } else {
-                    let reconstructed = TermLine {
-                        segments: segments.clone(),
-                    };
-                    build_line_layout(&reconstructed, p.text_primary, p.bg_base, fs)
-                };
-                layout_signal.set(new_layout);
-            });
-
-            container(
-                floem::views::rich_text(move || layout_signal.get()).style(|s| s.width_full()),
-            )
+            layout_sig.set(new_lay);
+        });
+        container(floem::views::rich_text(move || layout_sig.get()).style(|s| s.width_full()))
             .style(|s| s.padding_horiz(8.0).padding_vert(1.0).width_full())
+    };
+
+    // ── Completed blocks (one collapsible card per shell command) ─────────
+    let blocks_view = {
+        let state_b = state.clone();
+        dyn_stack(
+            move || completed_blocks.get(),
+            |(id, _, _): &(u64, Vec<TermLine>, i32)| *id,
+            move |(id, lines, exit_code): (u64, Vec<TermLine>, i32)| {
+                let _ = id; // used as key only
+                let collapsed = create_rw_signal(lines.len() > 60);
+                let hovered = create_rw_signal(false);
+
+                // Split: first line = prompt/command header; rest = output
+                let header_line = lines.first().cloned().unwrap_or_else(TermLine::new);
+                let output_lines: Vec<TermLine> = lines.into_iter().skip(1).collect();
+                let has_output = !output_lines.is_empty();
+
+                // ── Exit badge ──────────────────────────────────────────
+                let badge = container(
+                    label(move || {
+                        if exit_code == 0 { " ✓ ".to_string() }
+                        else { format!(" ✗ {} ", exit_code) }
+                    })
+                    .style(move |s| {
+                        s.font_size(10.0)
+                            .color(if exit_code == 0 {
+                                Color::from_rgb8(80, 200, 80)
+                            } else {
+                                theme.get().palette.error
+                            })
+                            .font_weight(Weight::BOLD)
+                    }),
+                )
+                .style(move |s| {
+                    let bg = if exit_code == 0 {
+                        Color::from_rgba8(80, 200, 80, 35)
+                    } else {
+                        theme.get().palette.error.with_alpha(0.15)
+                    };
+                    s.padding_horiz(4.0)
+                        .padding_vert(1.0)
+                        .border_radius(3.0)
+                        .margin_right(6.0)
+                        .background(bg)
+                });
+
+                // ── Header text (prompt + command) ──────────────────────
+                let header_init = {
+                    let t = theme.get_untracked();
+                    build_line_layout(&header_line, t.palette.text_secondary, t.palette.bg_base, term_font_size.get_untracked() as f32)
+                };
+                let header_sig: RwSignal<TextLayout> = create_rw_signal(header_init);
+                let hl2 = header_line.clone();
+                create_effect(move |_| {
+                    let t = theme.get();
+                    let fs = term_font_size.get() as f32;
+                    header_sig.set(build_line_layout(&hl2, t.palette.text_secondary, t.palette.bg_base, fs));
+                });
+                let header_text =
+                    floem::views::rich_text(move || header_sig.get())
+                        .style(|s| s.flex_grow(1.0).min_width(0.0));
+
+                // ── Collapse toggle ─────────────────────────────────────
+                let toggle = container(label(move || if collapsed.get() { " ⌄ " } else { " ⌃ " }))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.font_size(10.0)
+                            .color(if has_output { p.text_muted } else { p.text_disabled })
+                            .padding_horiz(4.0)
+                            .border_radius(3.0)
+                            .cursor(if has_output {
+                                CursorStyle::Pointer
+                            } else {
+                                CursorStyle::Default
+                            })
+                            .hover(|s| s.color(p.accent))
+                    })
+                    .on_click_stop(move |_| {
+                        if has_output {
+                            collapsed.update(|v| *v = !*v);
+                        }
+                    });
+
+                // ── AI explain button ───────────────────────────────────
+                let state_ai = state_b.clone();
+                let lines_ai: String = {
+                    let mut s = header_line.plain_text();
+                    s.push('\n');
+                    for l in &output_lines {
+                        s.push_str(&l.plain_text());
+                        s.push('\n');
+                    }
+                    s.truncate(4000);
+                    s
+                };
+                let ai_btn = container(label(|| " ✦ "))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.font_size(10.0)
+                            .color(p.text_muted)
+                            .padding_horiz(4.0)
+                            .border_radius(3.0)
+                            .cursor(CursorStyle::Pointer)
+                            .hover(|s| s.color(p.accent))
+                    })
+                    .on_click_stop(move |_| {
+                        let prompt = format!(
+                            "Explain this terminal output:\n\n```\n{}\n```",
+                            lines_ai
+                        );
+                        state_ai.ai.pending_chat_inject.set(Some(prompt));
+                        state_ai.workbench.show_right_panel.set(true);
+                    });
+
+                // ── Header row ──────────────────────────────────────────
+                let header_row = container(
+                    stack((badge, header_text, toggle, ai_btn))
+                        .style(|s| s.flex_row().items_center().width_full()),
+                )
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.width_full()
+                        .min_height(28.0)
+                        .padding_horiz(4.0)
+                        .padding_vert(2.0)
+                        .background(if hovered.get() {
+                            p.bg_elevated
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                })
+                .on_event_stop(EventListener::PointerEnter, move |_| hovered.set(true))
+                .on_event_stop(EventListener::PointerLeave, move |_| hovered.set(false));
+
+                // ── Output lines (collapsible) ──────────────────────────
+                let ol_segs: Vec<Vec<TermSegment>> =
+                    output_lines.iter().map(|l| l.segments.clone()).collect();
+                let output_rows = dyn_stack(
+                    move || ol_segs.clone().into_iter().enumerate().collect::<Vec<_>>(),
+                    |(i, _): &(usize, Vec<TermSegment>)| *i,
+                    move |(_, segs): (usize, Vec<TermSegment>)| {
+                        line_row(TermLine { segments: segs })
+                    },
+                )
+                .style(move |s| {
+                    s.flex_col()
+                        .width_full()
+                        .apply_if(collapsed.get(), |s| s.display(Display::None))
+                });
+
+                // ── Block card ──────────────────────────────────────────
+                container(
+                    stack((header_row, output_rows))
+                        .style(|s| s.flex_col().width_full()),
+                )
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.width_full()
+                        .border_bottom(1.0)
+                        .border_color(p.border.with_alpha(0.25))
+                        .margin_bottom(1.0)
+                })
+            },
+        )
+        .style(|s| s.flex_col().width_full())
+    };
+
+    // ── Live / current-block lines (no exit code yet) ─────────────────────
+    let live_view = dyn_stack(
+        move || {
+            let all = live_lines.get();
+            let n = all.len();
+            all.into_iter()
+                .enumerate()
+                .skip(n.saturating_sub(MAX_RENDER_LINES))
+                .collect::<Vec<_>>()
         },
+        |(i, _): &(usize, TermLine)| *i,
+        move |(_, tl): (usize, TermLine)| line_row(tl),
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0));
+
+    let output_list = stack((blocks_view, live_view)).style(|s| s.flex_col().width_full());
 
     // ── Scroll area — also the keyboard target ────────────────────────────
     let output_scroll = scroll(output_list).style(move |s| {
@@ -1033,26 +1237,15 @@ fn single_terminal(
 
                         // Ctrl+Shift+C — copy all visible terminal text to clipboard
                         if ch.as_str() == "c" || ch.as_str() == "C" {
-                            if let Ok(state) = term_state_c.lock() {
-                                let mut parts: Vec<String> = state
-                                    .lines
+                            if let Ok(ts) = term_state_c.lock() {
+                                let mut parts: Vec<String> = ts.blocks
                                     .iter()
-                                    .map(|line| {
-                                        line.segments
-                                            .iter()
-                                            .map(|seg| seg.text.as_str())
-                                            .collect::<String>()
-                                    })
+                                    .flat_map(|b| b.lines.iter())
+                                    .chain(ts.current_block_lines.iter())
+                                    .map(|line| line.plain_text())
                                     .collect();
-                                if !state.current_line.is_empty() {
-                                    parts.push(
-                                        state
-                                            .current_line
-                                            .segments
-                                            .iter()
-                                            .map(|seg| seg.text.as_str())
-                                            .collect::<String>(),
-                                    );
+                                if !ts.current_line.is_empty() {
+                                    parts.push(ts.current_line.plain_text());
                                 }
                                 let text = parts.join("\n");
                                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
@@ -1142,11 +1335,19 @@ fn single_terminal(
             return 0usize;
         }
         let query_lower = query.to_lowercase();
-        lines
+        let mut count = 0usize;
+        for (_, block_lines, _) in completed_blocks.get() {
+            count += block_lines
+                .iter()
+                .filter(|l| l.plain_text().to_lowercase().contains(&query_lower))
+                .count();
+        }
+        count += live_lines
             .get()
             .iter()
             .filter(|l| l.plain_text().to_lowercase().contains(&query_lower))
-            .count()
+            .count();
+        count
     });
 
     let find_bar = container(
