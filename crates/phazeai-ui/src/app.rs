@@ -578,7 +578,7 @@ impl IdeState {
         let hover_text = lsp.hover_text;
         let references = lsp.references;
         let code_actions = lsp.code_actions;
-        let _sig_help = lsp.sig_help;
+        let sig_help_lsp = lsp.sig_help;
         let doc_symbols = lsp.doc_symbols;
         let _workspace_symbols = lsp.workspace_symbols;
         let lsp_progress = lsp.lsp_progress;
@@ -1234,7 +1234,7 @@ impl IdeState {
             rename_open: create_rw_signal(false),
             rename_query: create_rw_signal(String::new()),
             rename_target: create_rw_signal(String::new()),
-            sig_help: create_rw_signal(None),
+            sig_help: sig_help_lsp,
             ws_syms_open: create_rw_signal(false),
             ws_syms_query: create_rw_signal(String::new()),
             workspace_symbols: create_rw_signal(Vec::new()),
@@ -2208,6 +2208,30 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     s.display(floem::style::Display::None)
                 })
         }),
+        // Lightbulb hint — appears when cursor is on a line with a diagnostic.
+        {
+            let lb_state = state.clone();
+            label(move || {
+                let cursor = lb_state.editor.active_cursor.get();
+                let diags = lb_state.editor.diagnostics.get();
+                let on_diag_line = cursor.map(|(ref path, line, _)| {
+                    diags.iter().any(|d| &d.path == path && d.line == line)
+                }).unwrap_or(false);
+                if on_diag_line { "💡 Ctrl+.  ".to_string() } else { String::new() }
+            })
+            .style(move |s| {
+                let on_diag = {
+                    let cursor = state.editor.active_cursor.get();
+                    let diags = state.editor.diagnostics.get();
+                    cursor.map(|(ref path, line, _)| {
+                        diags.iter().any(|d| &d.path == path && d.line == line)
+                    }).unwrap_or(false)
+                };
+                s.color(state.workbench.theme.get().palette.warning)
+                    .font_size(11.0)
+                    .apply_if(!on_diag, |s| s.display(floem::style::Display::None))
+            })
+        },
         label(|| "AI Ready  ").style(move |s| {
             s.color(state.workbench.theme.get().palette.success)
                 .font_size(11.0)
@@ -3354,6 +3378,40 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
 }
 
 fn ide_root(state: IdeState) -> impl IntoView {
+    // ── FIM inline completion worker ─────────────────────────────────────────
+    // Editors send (prefix, suffix, lang) after a 600ms debounce; this thread
+    // calls the LLM and writes completions back through a signal channel.
+    let (fim_req_tx, fim_req_rx) =
+        std::sync::mpsc::sync_channel::<(String, String, String)>(4);
+    {
+        let ghost_text = state.ai.ghost_text;
+        let (fim_result_tx, fim_result_rx) =
+            std::sync::mpsc::sync_channel::<String>(4);
+        let fim_result_sig =
+            floem::ext_event::create_signal_from_channel(fim_result_rx);
+        create_effect(move |_| {
+            if let Some(suggestion) = fim_result_sig.get() {
+                if !suggestion.is_empty() {
+                    ghost_text.set(Some(suggestion));
+                }
+            }
+        });
+        std::thread::spawn(move || {
+            while let Ok((prefix, suffix, lang)) = fim_req_rx.recv() {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("fim tokio rt");
+                let result =
+                    rt.block_on(phazeai_core::fim::fim_complete(&prefix, &suffix, &lang))
+                        .unwrap_or_default();
+                if !result.is_empty() {
+                    let _ = fim_result_tx.try_send(result);
+                }
+            }
+        });
+    }
+
     let raw_editor = editor_panel(
         state.editor.open_file,
         state.workbench.theme,
@@ -3411,6 +3469,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.close_active_tab_nonce,
         state.project.breakpoints,
         state.project.debug_stopped_at,
+        fim_req_tx.clone(),
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3471,6 +3530,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
+        fim_req_tx.clone(),
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3791,6 +3851,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
+        fim_req_tx.clone(),
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4411,7 +4472,7 @@ pub fn launch_phaze_ide() {
                                                             c.is_alphanumeric() || *c == '_'
                                                         })
                                                         .last()
-                                                        .map(|(i, _)| i + col)
+                                                        .map(|(i, c)| i + col + c.len_utf8())
                                                         .unwrap_or(target_line.len());
                                                     Some(target_line[start..end].to_string())
                                                 })

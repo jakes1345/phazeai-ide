@@ -1,5 +1,7 @@
 pub mod agent;
 pub mod agent_event;
+pub mod fim;
+pub mod skills;
 pub mod analysis;
 pub mod companion;
 pub mod config;
@@ -34,4 +36,5 @@ pub use llm::{
     StreamEvent, UsageTracker,
 };
 pub use lsp::{LspClient, LspEvent, LspManager};
+pub use skills::{discover_skills, find_skill, skills_menu_block, Skill, SkillSource};
 pub use tools::{Tool, ToolDefinition, ToolRegistry, ToolResult};

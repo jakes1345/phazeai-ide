@@ -6,12 +6,13 @@ use floem::{
     ext_event::create_signal_from_channel,
     keyboard::{Key, Modifiers},
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
-    views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
+    views::{container, dyn_container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
 use phazeai_core::{
-    Agent, AgentEvent, ApprovalFn, ConversationHistory, ConversationMetadata, ConversationStore,
-    DiffHookFn, SavedConversation, SavedMessage, Settings,
+    discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn,
+    ConversationHistory, ConversationMetadata, ConversationStore, DiffHookFn, SavedConversation,
+    SavedMessage, Settings, Skill,
 };
 use phazeai_sidecar::SidecarClient;
 
@@ -250,6 +251,10 @@ struct SendToAiJob {
     settings: Settings,
     workspace_root: std::path::PathBuf,
     mode_hint: &'static str,
+    /// Full content of an explicitly-activated skill, or None.
+    active_skill: Option<String>,
+    /// Brief skill menu for auto-select; injected when no skill is explicitly active.
+    skills_menu: String,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
     sidecar_client: Option<Arc<SidecarClient>>,
@@ -262,6 +267,8 @@ fn send_to_ai(job: SendToAiJob) {
         settings,
         workspace_root,
         mode_hint,
+        active_skill,
+        skills_menu,
         update_tx,
         cancel_token,
         sidecar_client,
@@ -301,10 +308,26 @@ fn send_to_ai(job: SendToAiJob) {
                     return;
                 }
             };
-            let base_conversation = if mode_hint.is_empty() {
+            // Build system prompt: skill (if active) + mode hint + skill menu.
+            let system_prompt = {
+                let mut parts: Vec<&str> = Vec::new();
+                let skill_body;
+                if let Some(ref s) = active_skill {
+                    skill_body = s.clone();
+                    parts.push(&skill_body);
+                }
+                if !mode_hint.is_empty() {
+                    parts.push(mode_hint);
+                }
+                if active_skill.is_none() && !skills_menu.is_empty() {
+                    parts.push(&skills_menu);
+                }
+                parts.join("\n\n")
+            };
+            let base_conversation = if system_prompt.is_empty() {
                 ConversationHistory::new()
             } else {
-                ConversationHistory::new().with_system_prompt(mode_hint)
+                ConversationHistory::new().with_system_prompt(system_prompt)
             };
             let shared_conversation =
                 std::sync::Arc::new(tokio::sync::Mutex::new(base_conversation));
@@ -661,6 +684,23 @@ pub fn chat_panel(
     let approval_params: RwSignal<String> = create_rw_signal(String::new());
     let approval_slot: RwSignal<Option<DiffApproveSlot>> = create_rw_signal(None);
 
+    // ── Skills state ──────────────────────────────────────────────────────────
+    let available_skills: RwSignal<Vec<Skill>> = create_rw_signal({
+        let root = workspace_root.get_untracked();
+        discover_skills(Some(&root))
+    });
+    // Active skill name (shown in header badge); None = no explicit activation.
+    let active_skill_name: RwSignal<Option<String>> = create_rw_signal(None);
+
+    // Refresh skills when workspace changes.
+    {
+        let ws = workspace_root;
+        create_effect(move |_| {
+            let root = ws.get();
+            available_skills.set(discover_skills(Some(&root)));
+        });
+    }
+
     // ── Conversation history UI state (ROADMAP 2.2) ───────────────────────────
     let show_history: RwSignal<bool> = create_rw_signal(false);
     let history_items: RwSignal<Vec<ConversationMetadata>> = create_rw_signal(Vec::new());
@@ -687,6 +727,7 @@ pub fn chat_panel(
         messages.set(vec![welcome_msg()]);
         conversation_id.set(ConversationStore::generate_id());
         show_history.set(false);
+        active_skill_name.set(None);
     });
 
     let load_conv: Rc<dyn Fn(String)> = Rc::new(move |id: String| {
@@ -911,14 +952,47 @@ pub fn chat_panel(
             }
             let prior_messages = messages.get_untracked();
 
+            // ── Slash skill detection ─────────────────────────────────────────
+            // If the message starts with /skill-name, activate that skill.
+            // The slash token is stripped from the visible message.
+            let (resolved_prompt_raw, resolved_skill) = {
+                let skills = available_skills.get_untracked();
+                if trimmed.starts_with('/') {
+                    let word_end = trimmed
+                        .find(|c: char| c.is_whitespace())
+                        .unwrap_or(trimmed.len());
+                    let slash_word = &trimmed[1..word_end]; // strip leading /
+                    if let Some(skill) = find_skill(&skills, slash_word) {
+                        active_skill_name.set(Some(skill.name.clone()));
+                        let rest = trimmed[word_end..].trim().to_string();
+                        let msg = if rest.is_empty() {
+                            format!("(Using skill: {})", skill.name)
+                        } else {
+                            rest
+                        };
+                        (msg, Some(skill.as_system_prompt()))
+                    } else {
+                        // Unknown slash word — pass through as-is
+                        (trimmed.clone(), None)
+                    }
+                } else {
+                    (trimmed.clone(), None)
+                }
+            };
+            let skills_menu_str = if resolved_skill.is_none() {
+                skills_menu_block(&available_skills.get_untracked())
+            } else {
+                String::new()
+            };
+
             // Expand @file mentions into context blocks before sending to AI
             let root = workspace_root.get_untracked();
-            let prompt = expand_file_mentions(&trimmed, &root);
+            let prompt = expand_file_mentions(&resolved_prompt_raw, &root);
 
             messages.update(|list| {
                 list.push(ChatMessage {
                     role: ChatRole::User,
-                    content: trimmed.clone(),
+                    content: resolved_prompt_raw.clone(),
                     loading: false,
                     is_error: false,
                 });
@@ -962,6 +1036,8 @@ pub fn chat_panel(
                 settings: live_settings,
                 workspace_root: root,
                 mode_hint: hint,
+                active_skill: resolved_skill,
+                skills_menu: skills_menu_str,
                 update_tx: (*update_tx).clone(),
                 cancel_token: token,
                 sidecar_client: sc_snapshot,
@@ -1058,6 +1134,43 @@ pub fn chat_panel(
         })
     };
 
+    // Skill badge — shows the active skill name and clears it on click.
+    let skill_badge = dyn_container(
+        move || active_skill_name.get(),
+        move |name_opt| {
+            if let Some(name) = name_opt {
+                let hov = create_rw_signal(false);
+                let badge_label = format!("⚡ {} ✕", name);
+                container(
+                    label(move || badge_label.clone()).style(move |s| {
+                        s.font_size(10.0).color(theme.get().palette.accent)
+                    }),
+                )
+                .style(move |s| {
+                    let p = &theme.get().palette;
+                    s.padding_horiz(6.0)
+                        .padding_vert(2.0)
+                        .border(1.0)
+                        .border_color(p.accent)
+                        .border_radius(10.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                        .margin_right(6.0)
+                        .background(if hov.get() {
+                            p.accent_dim
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                })
+                .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+                .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+                .on_click_stop(move |_| active_skill_name.set(None))
+                .into_any()
+            } else {
+                container(label(|| "")).style(|s| s.display(floem::style::Display::None)).into_any()
+            }
+        },
+    );
+
     let header_content = container(
         stack((
             container(
@@ -1072,6 +1185,7 @@ pub fn chat_panel(
                 .style(|s| s.items_center()),
             )
             .style(|s| s.flex_grow(1.0)),
+            skill_badge,
             new_btn,
             history_btn,
         ))
@@ -1224,12 +1338,15 @@ pub fn chat_panel(
                     }),
                 );
                 // #endregion
+                let retry_skills_menu = skills_menu_block(&available_skills.get_untracked());
                 send_to_ai(SendToAiJob {
                     user_message: prompt,
                     prior_messages,
                     settings: live_settings,
                     workspace_root: root,
                     mode_hint: hint,
+                    active_skill: None,
+                    skills_menu: retry_skills_menu,
                     update_tx: (*update_tx).clone(),
                     cancel_token: token,
                     sidecar_client: sc_snapshot,

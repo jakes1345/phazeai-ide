@@ -1116,6 +1116,8 @@ pub fn editor_panel(
     close_active_tab_nonce: RwSignal<u64>,
     breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
+    // Channel for FIM (inline AI completion) requests: (prefix, suffix, language).
+    fim_req_tx: std::sync::mpsc::SyncSender<(String, String, String)>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1632,6 +1634,12 @@ pub fn editor_panel(
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
             let lsp_path = tab.path.clone();
             let lsp_tx = lsp_cmd.clone();
+
+            // ── FIM debounce (per-tab) ─────────────────────────────────────────
+            // Fires 600ms after the last edit when in an active editing position.
+            let fim_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+            let fim_tx_tab = fim_req_tx.clone();
+            let fim_path = tab.path.clone();
 
             // ── Crash-recovery shadow write (per-tab) ─────────────────────────
             // Each tab has its own debounce counter + channel. The recovery write
@@ -4222,9 +4230,67 @@ pub fn editor_panel(
                         lsp_ver.update(|v| *v += 1);
                         let _ = lsp_tx.send(crate::lsp_bridge::LspCommand::ChangeFile {
                             path: lsp_path.clone(),
-                            text,
+                            text: text.clone(),
                             version: ver,
                         });
+                        // Auto-trigger: completions on `.` / `::` / `(`; sig help on `(` / `,`.
+                        {
+                            let offset = cursor_sig.get_untracked().offset();
+                            if offset > 0 {
+                                let trigger = text[..offset].chars().last();
+                                if let Some(ch) = trigger {
+                                    let is_completion_trigger =
+                                        ch == '.' || ch == '(' || ch == ','
+                                        || (ch == ':' && text[..offset].ends_with("::"));
+                                    if is_completion_trigger {
+                                        let rope = doc_for_lsp.rope_text();
+                                        let ln = rope.line_of_offset(offset);
+                                        let ls = rope.offset_of_line(ln);
+                                        let (line, col) =
+                                            (ln as u32 + 1, (offset - ls) as u32 + 1);
+                                        let _ = lsp_tx.send(
+                                            crate::lsp_bridge::LspCommand::RequestCompletions {
+                                                path: lsp_path.clone(),
+                                                line,
+                                                col,
+                                            },
+                                        );
+                                        if ch == '(' || ch == ',' {
+                                            let _ = lsp_tx.send(
+                                                crate::lsp_bridge::LspCommand::RequestSignatureHelp {
+                                                    path: lsp_path.clone(),
+                                                    line,
+                                                    col,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // FIM inline completion: debounce 600ms — send prefix/suffix to worker.
+                        {
+                            let gen = fim_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                            let gen_ref = Arc::clone(&fim_gen);
+                            let tx = fim_tx_tab.clone();
+                            let text2 = text.clone();
+                            let path2 = fim_path.clone();
+                            let offset = cursor_sig.get_untracked().offset();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(600));
+                                if gen_ref.load(Ordering::Relaxed) != gen {
+                                    return;
+                                }
+                                let prefix = text2[..offset.min(text2.len())].to_string();
+                                let suffix = text2[offset.min(text2.len())..].to_string();
+                                let lang = path2
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("text")
+                                    .to_string();
+                                let _ = tx.try_send((prefix, suffix, lang));
+                            });
+                        }
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.
                         if auto_save.get_untracked() {
                             let gen = as_gen.fetch_add(1, Ordering::Relaxed) + 1;
