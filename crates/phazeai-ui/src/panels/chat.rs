@@ -10,7 +10,7 @@ use floem::{
     IntoView,
 };
 use phazeai_core::{
-    Agent, AgentEvent, ConversationHistory, ConversationMetadata, ConversationStore,
+    Agent, AgentEvent, ApprovalFn, ConversationHistory, ConversationMetadata, ConversationStore,
     DiffHookFn, SavedConversation, SavedMessage, Settings,
 };
 use phazeai_sidecar::SidecarClient;
@@ -105,6 +105,12 @@ enum ChatUpdate {
         path: String,
         before: String,
         after: String,
+        slot: DiffApproveSlot,
+    },
+    /// A non-file tool wants user approval before running.
+    ToolApprovalNeeded {
+        name: String,
+        params_display: String,
         slot: DiffApproveSlot,
     },
 }
@@ -371,10 +377,33 @@ fn send_to_ai(job: SendToAiJob) {
                 })
             });
 
+            // Tool approval hook — shown for every tool except write/edit (those
+            // go through the diff hook above which already gates the write).
+            let approval_update_tx = update_tx.clone();
+            let approval_fn: ApprovalFn = Box::new(move |name, params| {
+                if matches!(name.as_str(), "write_file" | "edit_file") {
+                    return Box::pin(async { true });
+                }
+                let tx = approval_update_tx.clone();
+                let params_display = serde_json::to_string_pretty(&params)
+                    .unwrap_or_else(|_| params.to_string());
+                Box::pin(async move {
+                    let (os_tx, os_rx) = tokio::sync::oneshot::channel::<bool>();
+                    let slot = Arc::new(std::sync::Mutex::new(Some(os_tx)));
+                    let _ = tx.send(ChatUpdate::ToolApprovalNeeded {
+                        name,
+                        params_display,
+                        slot,
+                    });
+                    os_rx.await.unwrap_or(false)
+                })
+            });
+
             let mut agent = Agent::new(client)
                 .with_cancel_token(cancel_token)
                 .with_shared_conversation(shared_conversation)
-                .with_diff_hook(diff_hook);
+                .with_diff_hook(diff_hook)
+                .with_approval(approval_fn);
 
             // Register semantic search tools if sidecar is running.
             if let Some(sc) = sidecar_client {
@@ -614,6 +643,11 @@ pub fn chat_panel(
     let diff_after: RwSignal<String> = create_rw_signal(String::new());
     let diff_slot: RwSignal<Option<DiffApproveSlot>> = create_rw_signal(None);
 
+    // ── Tool approval state ───────────────────────────────────────────────────
+    let approval_tool: RwSignal<String> = create_rw_signal(String::new());
+    let approval_params: RwSignal<String> = create_rw_signal(String::new());
+    let approval_slot: RwSignal<Option<DiffApproveSlot>> = create_rw_signal(None);
+
     // ── Conversation history UI state (ROADMAP 2.2) ───────────────────────────
     let show_history: RwSignal<bool> = create_rw_signal(false);
     let history_items: RwSignal<Vec<ConversationMetadata>> = create_rw_signal(Vec::new());
@@ -792,6 +826,15 @@ pub fn chat_panel(
                     diff_before.set(before);
                     diff_after.set(after);
                     diff_slot.set(Some(slot));
+                }
+                ChatUpdate::ToolApprovalNeeded {
+                    name,
+                    params_display,
+                    slot,
+                } => {
+                    approval_tool.set(name);
+                    approval_params.set(params_display);
+                    approval_slot.set(Some(slot));
                 }
                 ChatUpdate::Cancelled(partial) => {
                     messages.update(|list| {
@@ -1784,10 +1827,157 @@ pub fn chat_panel(
         })
     };
 
+    // ── Tool approval overlay ─────────────────────────────────────────────────
+    // Shows for any non-file tool call when the agent wants approval.
+
+    let tool_approval_overlay = {
+        let resolve = move |approved: bool| {
+            if let Some(slot) = approval_slot.get_untracked() {
+                if let Ok(mut g) = slot.lock() {
+                    if let Some(tx) = g.take() {
+                        let _ = tx.send(approved);
+                    }
+                }
+            }
+            approval_tool.set(String::new());
+            approval_params.set(String::new());
+            approval_slot.set(None);
+        };
+        let resolve_allow = {
+            let r = resolve;
+            move || r(true)
+        };
+        let resolve_deny = {
+            let r = resolve;
+            move || r(false)
+        };
+
+        let allow_btn = {
+            let hov = create_rw_signal(false);
+            let resolve_allow = resolve_allow.clone();
+            container(label(|| "✓ Allow").style(move |s| {
+                s.font_size(12.0)
+                    .color(floem::peniko::Color::from_rgb8(40, 180, 40))
+                    .font_weight(floem::text::Weight::MEDIUM)
+            }))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.padding_horiz(14.0)
+                    .padding_vert(6.0)
+                    .border(1.0)
+                    .border_color(floem::peniko::Color::from_rgba8(40, 180, 40, 100))
+                    .border_radius(6.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        floem::peniko::Color::from_rgba8(0, 80, 0, 80)
+                    } else {
+                        p.bg_deep.with_alpha(0.6)
+                    })
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            .on_click_stop(move |_| (resolve_allow)())
+        };
+
+        let deny_btn = {
+            let hov = create_rw_signal(false);
+            container(label(|| "✗ Deny").style(move |s| {
+                s.font_size(12.0)
+                    .color(floem::peniko::Color::from_rgb8(200, 80, 80))
+                    .font_weight(floem::text::Weight::MEDIUM)
+            }))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.padding_horiz(14.0)
+                    .padding_vert(6.0)
+                    .border(1.0)
+                    .border_color(floem::peniko::Color::from_rgba8(200, 80, 80, 100))
+                    .border_radius(6.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        floem::peniko::Color::from_rgba8(80, 0, 0, 80)
+                    } else {
+                        p.bg_deep.with_alpha(0.6)
+                    })
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            .on_click_stop(move |_| (resolve_deny)())
+        };
+
+        container(
+            stack((
+                // Header
+                container(
+                    stack((
+                        label(|| "Allow tool:").style(move |s| {
+                            s.font_size(11.0).color(theme.get().palette.text_muted)
+                        }),
+                        label(move || approval_tool.get()).style(move |s| {
+                            s.font_size(12.0)
+                                .font_weight(floem::text::Weight::BOLD)
+                                .color(theme.get().palette.accent)
+                        }),
+                    ))
+                    .style(|s| s.items_center().gap(6.0)),
+                )
+                .style(move |s| {
+                    let p = &theme.get().palette;
+                    s.padding_horiz(12.0)
+                        .padding_vert(8.0)
+                        .border_bottom(1.0)
+                        .border_color(p.glass_border)
+                        .width_full()
+                }),
+                // Params display (scrollable, monospace)
+                scroll(
+                    label(move || approval_params.get()).style(move |s| {
+                        s.font_size(11.0)
+                            .font_family("monospace".to_string())
+                            .color(theme.get().palette.text_secondary)
+                            .padding(8.0)
+                            .width_full()
+                    }),
+                )
+                .style(|s| s.width_full().max_height(120.0)),
+                // Buttons
+                container(
+                    stack((allow_btn, deny_btn)).style(|s| s.gap(8.0).items_center()),
+                )
+                .style(move |s| {
+                    let p = &theme.get().palette;
+                    s.padding(10.0)
+                        .border_top(1.0)
+                        .border_color(p.glass_border)
+                        .width_full()
+                        .justify_end()
+                }),
+            ))
+            .style(|s| s.flex_col().width_full()),
+        )
+        .style(move |s| {
+            let p = &theme.get().palette;
+            let visible = !approval_tool.get().is_empty();
+            s.width_full()
+                .border_top(1.0)
+                .border_color(p.glass_border)
+                .background(p.bg_deep)
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, history_panel, mode_tabs, messages_scroll, diff_overlay, input_bar))
-        .style(move |s| s.flex_col().width_full().height_full())
+    stack((
+        header,
+        history_panel,
+        mode_tabs,
+        messages_scroll,
+        diff_overlay,
+        tool_approval_overlay,
+        input_bar,
+    ))
+    .style(move |s| s.flex_col().width_full().height_full())
 }
 
 #[cfg(test)]
