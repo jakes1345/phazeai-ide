@@ -4926,6 +4926,87 @@ pub fn editor_panel(
             .apply_if(!shown, |s| s.display(floem::style::Display::None))
     });
 
+    // ── Inline diagnostic message strip ──────────────────────────────────────
+    // Shows the first error/warning on the current cursor line in a thin bar
+    // between the editor body and the ghost-text row.
+    let diag_strip = {
+        let diags = diagnostics;
+        let cursor = active_cursor;
+        container(
+            stack((
+                label(move || {
+                    let Some((path, line, _col)) = cursor.get() else { return String::new(); };
+                    let line1 = line + 1; // active_cursor is 0-based, DiagEntry.line is 1-based
+                    let all = diags.get();
+                    // Prefer errors, then warnings, then info/hints.
+                    let best = all.iter()
+                        .filter(|d| d.path == path && d.line == line1)
+                        .min_by_key(|d| match d.severity {
+                            DiagSeverity::Error => 0,
+                            DiagSeverity::Warning => 1,
+                            DiagSeverity::Info => 2,
+                            DiagSeverity::Hint => 3,
+                        });
+                    if let Some(d) = best {
+                        // Keep it to one line and max 120 chars.
+                        let msg = d.message.lines().next().unwrap_or(&d.message);
+                        let truncated = if msg.len() > 120 { &msg[..120] } else { msg };
+                        let prefix = match d.severity {
+                            DiagSeverity::Error => "✗ ",
+                            DiagSeverity::Warning => "⚠ ",
+                            DiagSeverity::Info | DiagSeverity::Hint => "ℹ ",
+                        };
+                        format!("{prefix}{truncated}")
+                    } else {
+                        String::new()
+                    }
+                })
+                .style(move |s| {
+                    let Some((path, line, _)) = active_cursor.get() else {
+                        return s.color(floem::peniko::Color::TRANSPARENT);
+                    };
+                    let line1 = line + 1;
+                    let all = diagnostics.get();
+                    let sev = all.iter()
+                        .filter(|d| d.path == path && d.line == line1)
+                        .min_by_key(|d| match d.severity {
+                            DiagSeverity::Error => 0,
+                            DiagSeverity::Warning => 1,
+                            _ => 2,
+                        })
+                        .map(|d| d.severity.clone());
+                    let p = theme.get().palette;
+                    let color = match sev {
+                        Some(DiagSeverity::Error) => floem::peniko::Color::from_rgba8(255, 100, 100, 220),
+                        Some(DiagSeverity::Warning) => floem::peniko::Color::from_rgba8(255, 200, 60, 200),
+                        _ => p.text_muted,
+                    };
+                    s.font_size(11.5)
+                        .color(color)
+                        .font_family("JetBrains Mono, Fira Code, Cascadia Code, monospace".to_string())
+                        .flex_grow(1.0)
+                }),
+            ))
+            .style(|s| s.flex_row().items_center().width_full()),
+        )
+        .style(move |s| {
+            let Some((path, line, _)) = active_cursor.get() else {
+                return s.display(floem::style::Display::None);
+            };
+            let line1 = line + 1;
+            let has_diag = diagnostics.get().iter().any(|d| d.path == path && d.line == line1);
+            let p = theme.get().palette;
+            s.width_full()
+                .height(22.0)
+                .padding_horiz(12.0)
+                .padding_vert(2.0)
+                .background(p.bg_panel)
+                .border_top(1.0)
+                .border_color(p.border)
+                .apply_if(!has_diag, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     // ── Sticky scroll bar ────────────────────────────────────────────────────
     // Shows the enclosing scope headers (fn/struct/impl) pinned just above the
     // editor body when the cursor is scrolled into a nested block.
@@ -5207,6 +5288,7 @@ pub fn editor_panel(
         find_bar,
         editor_row,
         ghost_strip,
+        diag_strip,
         goto_overlay,
         body_ctx_menu,
     ))
