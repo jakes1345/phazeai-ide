@@ -1309,6 +1309,51 @@ impl IdeState {
             project,
         };
 
+        // Auto-open completion popup when the LSP returns results from an
+        // auto-trigger (typing `.` / `(` / `,` / `::`). Ctrl+Space sets the
+        // filter text before opening; auto-trigger does it here reactively.
+        {
+            let completions = state.editor.completions;
+            let completion_open = state.editor.completion_open;
+            let completion_filter = state.editor.completion_filter_text;
+            let completion_sel = state.editor.completion_selected;
+            let active_cursor = state.editor.active_cursor;
+            let open_file = state.editor.open_file;
+            floem::reactive::create_effect(move |_| {
+                let items = completions.get();
+                if items.is_empty() || completion_open.get_untracked() {
+                    return;
+                }
+                // Compute filter prefix from current cursor position.
+                let prefix = active_cursor
+                    .get_untracked()
+                    .and_then(|(path, line, col)| {
+                        // Only open for the active file.
+                        if open_file.get_untracked() != Some(path.clone()) {
+                            return None;
+                        }
+                        std::fs::read_to_string(&path).ok().and_then(|content| {
+                            let line_str = content.lines().nth(line.saturating_sub(1) as usize)?;
+                            let col = (col.saturating_sub(1) as usize).min(line_str.len());
+                            Some(
+                                line_str[..col]
+                                    .chars()
+                                    .rev()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect::<String>()
+                                    .chars()
+                                    .rev()
+                                    .collect::<String>(),
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                completion_filter.set(prefix);
+                completion_sel.set(0);
+                completion_open.set(true);
+            });
+        }
+
         // Drain plugin-originated EditorCommands on the UI thread.
         {
             use crate::editor_command::EditorCommand;
@@ -4480,6 +4525,61 @@ pub fn launch_phaze_ide() {
                                             state.editor.rename_target.set(word.clone());
                                             state.editor.rename_query.set(word);
                                             state.editor.rename_open.set(true);
+                                        }
+                                        return;
+                                    }
+                                    // Up/Down — navigate completion popup when open
+                                    floem::keyboard::NamedKey::ArrowDown
+                                        if !alt && state.editor.completion_open.get() =>
+                                    {
+                                        let items = state.editor.completions.get();
+                                        let f = state
+                                            .editor
+                                            .completion_filter_text
+                                            .get()
+                                            .to_lowercase();
+                                        let filtered: Vec<usize> = items
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, e)| {
+                                                f.is_empty()
+                                                    || e.label.to_lowercase().contains(&f)
+                                            })
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        if !filtered.is_empty() {
+                                            let sel = state.editor.completion_selected.get();
+                                            let cur =
+                                                filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                                            let next = (cur + 1).min(filtered.len() - 1);
+                                            state.editor.completion_selected.set(filtered[next]);
+                                        }
+                                        return;
+                                    }
+                                    floem::keyboard::NamedKey::ArrowUp
+                                        if !alt && state.editor.completion_open.get() =>
+                                    {
+                                        let items = state.editor.completions.get();
+                                        let f = state
+                                            .editor
+                                            .completion_filter_text
+                                            .get()
+                                            .to_lowercase();
+                                        let filtered: Vec<usize> = items
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, e)| {
+                                                f.is_empty()
+                                                    || e.label.to_lowercase().contains(&f)
+                                            })
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        if !filtered.is_empty() {
+                                            let sel = state.editor.completion_selected.get();
+                                            let cur =
+                                                filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                                            let prev = cur.saturating_sub(1);
+                                            state.editor.completion_selected.set(filtered[prev]);
                                         }
                                         return;
                                     }

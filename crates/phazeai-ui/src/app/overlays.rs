@@ -398,7 +398,7 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
             .get()
             .into_iter()
             .enumerate()
-            .filter(|(_, e)| f.is_empty() || e.label.to_lowercase().starts_with(&f))
+            .filter(|(_, e)| f.is_empty() || e.label.to_lowercase().contains(&f))
             .collect()
     };
 
@@ -436,7 +436,16 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
                 .on_click_stop({
                     let state = state.clone();
                     move |_| {
-                        selected.set(idx);
+                        let items = state.editor.completions.get_untracked();
+                        let prefix_len = state.editor.completion_filter_text.get_untracked().len();
+                        if let Some(entry) = items.get(idx) {
+                            let text = if entry.insert_text.is_empty() {
+                                entry.label.clone()
+                            } else {
+                                entry.insert_text.clone()
+                            };
+                            state.editor.pending_completion.set(Some((text, prefix_len)));
+                        }
                         state.editor.completion_open.set(false);
                     }
                 })
@@ -484,7 +493,7 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
         let count = items
             .get()
             .into_iter()
-            .filter(|e| f.is_empty() || e.label.to_lowercase().starts_with(&f))
+            .filter(|e| f.is_empty() || e.label.to_lowercase().contains(&f))
             .count();
         if count == 0 {
             format!(
@@ -504,7 +513,7 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
         let count = items
             .get()
             .into_iter()
-            .filter(|e| f.is_empty() || e.label.to_lowercase().starts_with(&f))
+            .filter(|e| f.is_empty() || e.label.to_lowercase().contains(&f))
             .count();
         s.font_size(12.0)
             .color(state.workbench.theme.get().palette.text_muted)
@@ -539,7 +548,7 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
                         let max = items
                             .get()
                             .into_iter()
-                            .filter(|e| f.is_empty() || e.label.to_lowercase().starts_with(&f))
+                            .filter(|e| f.is_empty() || e.label.to_lowercase().contains(&f))
                             .count()
                             .saturating_sub(1);
                         selected.update(|v| *v = (*v + 1).min(max));

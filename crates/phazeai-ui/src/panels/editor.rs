@@ -1176,9 +1176,6 @@ pub fn editor_panel(
             ghost_text.set(if text.is_empty() { None } else { Some(text) });
         }
     });
-    // Generation counter: incremented on every cursor move to cancel stale requests.
-    let fim_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-
     // Vim yank register — shared across all tabs (yy copies here, p/P paste from here).
     let vim_register: RwSignal<String> = create_rw_signal(String::new());
 
@@ -1337,8 +1334,22 @@ pub fn editor_panel(
         // Skip the initial run (no actual close requested yet).
         if prev.is_some() && Some(n) != prev {
             if let Some(idx) = active_idx.get_untracked() {
-                let len_before = tabs.get_untracked().len();
-                if idx < len_before {
+                let tab_list = tabs.get_untracked();
+                if idx < tab_list.len() {
+                    let tab = &tab_list[idx];
+                    if tab.dirty.get_untracked() {
+                        let confirmed = rfd::MessageDialog::new()
+                            .set_title("Unsaved Changes")
+                            .set_description(format!(
+                                "\"{}\" has unsaved changes. Close without saving?",
+                                tab.name
+                            ))
+                            .set_buttons(rfd::MessageButtons::YesNo)
+                            .show();
+                        if confirmed != rfd::MessageDialogResult::Yes {
+                            return n;
+                        }
+                    }
                     tabs.update(|list| {
                         list.remove(idx);
                     });
