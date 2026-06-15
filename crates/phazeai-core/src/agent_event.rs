@@ -33,6 +33,13 @@ pub enum AgentEvent {
     McpReconnected {
         servers: Vec<String>,
     },
+    /// Emitted just before a write_file / edit_file tool is executed.
+    /// The UI can display a diff and call the diff hook to approve or reject.
+    FilePatch {
+        path: String,
+        before: String,
+        after: String,
+    },
     // Browser Integration
     BrowserFetchStart {
         url: String,

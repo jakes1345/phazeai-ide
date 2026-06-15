@@ -27,6 +27,12 @@ pub type ApprovalFn = Box<
     dyn Fn(String, serde_json::Value) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
 >;
 
+/// Called before a write_file/edit_file executes.
+/// Arguments: (path, before_content, after_content). Returns true to proceed.
+pub type DiffHookFn = Box<
+    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
+>;
+
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
     pub tool_name: String,
@@ -42,6 +48,7 @@ pub struct Agent {
     max_iterations: usize,
     max_context_tokens: usize,
     approval_fn: Option<ApprovalFn>,
+    diff_hook: Option<DiffHookFn>,
     /// Optional cancellation token — set to `true` to abort the running loop.
     cancel_token: Option<Arc<AtomicBool>>,
     /// Filled for the duration of `run_with_events`; MCP bridges emit here.
@@ -67,8 +74,9 @@ impl Agent {
             tools: ToolRegistry::default(),
             conversation: Arc::new(Mutex::new(ConversationHistory::new())),
             max_iterations: 15,
-            max_context_tokens: 32768, // Default budget
+            max_context_tokens: 32768,
             approval_fn: None,
+            diff_hook: None,
             cancel_token: None,
             mcp_event_sink: Arc::new(StdMutex::new(None)),
             system_prompt: None,
@@ -112,6 +120,11 @@ impl Agent {
 
     pub fn with_approval(mut self, f: ApprovalFn) -> Self {
         self.approval_fn = Some(f);
+        self
+    }
+
+    pub fn with_diff_hook(mut self, f: DiffHookFn) -> Self {
+        self.diff_hook = Some(f);
         self
     }
 
@@ -325,6 +338,43 @@ impl Agent {
                         }
                     }
 
+                    // For file-writing tools, compute before/after and emit FilePatch.
+                    // If a diff_hook is registered it blocks until the user approves.
+                    if let Some(ref hook) = self.diff_hook {
+                        let params_val = tool_call.parse_arguments().unwrap_or(Value::Null);
+                        if let Some((fp, before, after)) =
+                            compute_file_patch(tool_name, &params_val).await
+                        {
+                            let _ = event_tx.send(AgentEvent::FilePatch {
+                                path: fp.clone(),
+                                before: before.clone(),
+                                after: after.clone(),
+                            });
+                            let approved = (hook)(fp, before, after).await;
+                            if !approved {
+                                let _ = event_tx.send(AgentEvent::ToolResult {
+                                    name: tool_name.clone(),
+                                    success: false,
+                                    summary: "File change rejected by user".to_string(),
+                                });
+                                {
+                                    let mut conversation = self.conversation.lock().await;
+                                    conversation.add_tool_result(
+                                        &tool_call.id,
+                                        "Error: File change rejected by user",
+                                    );
+                                }
+                                tool_executions.push(ToolExecution {
+                                    tool_name: tool_name.clone(),
+                                    params: params_val,
+                                    success: false,
+                                    result_summary: "File change rejected by user".to_string(),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+
                     let _ = event_tx.send(AgentEvent::ToolStart {
                         name: tool_name.clone(),
                     });
@@ -437,6 +487,37 @@ impl Agent {
                 _ => {}
             }
         }
+    }
+}
+
+/// Compute (path, before, after) for write_file and edit_file tools so the UI
+/// can show a diff before the write happens. Returns None for all other tools.
+async fn compute_file_patch(
+    tool_name: &str,
+    params: &Value,
+) -> Option<(String, String, String)> {
+    match tool_name {
+        "write_file" => {
+            let path = params.get("path")?.as_str()?;
+            let after = params.get("content")?.as_str()?;
+            let before = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            if before == after {
+                return None; // no change — don't bother the user
+            }
+            Some((path.to_string(), before, after.to_string()))
+        }
+        "edit_file" => {
+            let path = params.get("path")?.as_str()?;
+            let old_text = params.get("old_text")?.as_str()?;
+            let new_text = params.get("new_text")?.as_str()?;
+            let before = tokio::fs::read_to_string(path).await.ok()?;
+            let after = before.replacen(old_text, new_text, 1);
+            if before == after {
+                return None;
+            }
+            Some((path.to_string(), before, after))
+        }
+        _ => None,
     }
 }
 

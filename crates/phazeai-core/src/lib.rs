@@ -21,7 +21,7 @@ pub mod updater;
 pub mod debug_ndjson;
 
 // Re-export key types
-pub use agent::{Agent, AgentResponse, ApprovalFn};
+pub use agent::{Agent, AgentResponse, ApprovalFn, DiffHookFn};
 pub use agent_event::AgentEvent;
 pub use config::Settings;
 pub use context::{

@@ -11,7 +11,7 @@ use floem::{
 };
 use phazeai_core::{
     Agent, AgentEvent, ConversationHistory, ConversationMetadata, ConversationStore,
-    SavedConversation, SavedMessage, Settings,
+    DiffHookFn, SavedConversation, SavedMessage, Settings,
 };
 use phazeai_sidecar::SidecarClient;
 
@@ -78,6 +78,10 @@ pub struct ChatMessage {
     pub is_error: bool,
 }
 
+/// Shared slot for diff approval: carries the oneshot sender for Approve/Reject.
+type DiffApproveSlot =
+    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>;
+
 /// What the background AI thread sends to the Floem UI thread.
 #[derive(Clone, Debug)]
 enum ChatUpdate {
@@ -95,6 +99,14 @@ enum ChatUpdate {
     Cancelled(String),
     /// MCP server process(es) were restarted (stdio recovery).
     McpStatus(String),
+    /// A file-write tool wants user approval. Contains before/after content
+    /// and a slot to resolve the blocking diff hook in the agent thread.
+    DiffApprovalNeeded {
+        path: String,
+        before: String,
+        after: String,
+        slot: DiffApproveSlot,
+    },
 }
 
 fn format_chat_error(raw: &str) -> String {
@@ -341,9 +353,28 @@ fn send_to_ai(job: SendToAiJob) {
                 // #endregion
             }
 
+            // Diff review hook — blocks the agent before any file write until
+            // the user approves or rejects the change in the chat panel.
+            let diff_update_tx = update_tx.clone();
+            let diff_hook: DiffHookFn = Box::new(move |path, before, after| {
+                let tx = diff_update_tx.clone();
+                Box::pin(async move {
+                    let (os_tx, os_rx) = tokio::sync::oneshot::channel::<bool>();
+                    let slot = Arc::new(std::sync::Mutex::new(Some(os_tx)));
+                    let _ = tx.send(ChatUpdate::DiffApprovalNeeded {
+                        path,
+                        before,
+                        after,
+                        slot,
+                    });
+                    os_rx.await.unwrap_or(false)
+                })
+            });
+
             let mut agent = Agent::new(client)
                 .with_cancel_token(cancel_token)
-                .with_shared_conversation(shared_conversation);
+                .with_shared_conversation(shared_conversation)
+                .with_diff_hook(diff_hook);
 
             // Register semantic search tools if sidecar is running.
             if let Some(sc) = sidecar_client {
@@ -577,6 +608,12 @@ pub fn chat_panel(
     let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> =
         create_rw_signal(None);
 
+    // ── Diff review state ─────────────────────────────────────────────────────
+    let diff_path: RwSignal<String> = create_rw_signal(String::new());
+    let diff_before: RwSignal<String> = create_rw_signal(String::new());
+    let diff_after: RwSignal<String> = create_rw_signal(String::new());
+    let diff_slot: RwSignal<Option<DiffApproveSlot>> = create_rw_signal(None);
+
     // ── Conversation history UI state (ROADMAP 2.2) ───────────────────────────
     let show_history: RwSignal<bool> = create_rw_signal(false);
     let history_items: RwSignal<Vec<ConversationMetadata>> = create_rw_signal(Vec::new());
@@ -744,6 +781,17 @@ pub fn chat_panel(
                 }
                 ChatUpdate::McpStatus(msg) => {
                     status_toast.set(Some(msg));
+                }
+                ChatUpdate::DiffApprovalNeeded {
+                    path,
+                    before,
+                    after,
+                    slot,
+                } => {
+                    diff_path.set(path);
+                    diff_before.set(before);
+                    diff_after.set(after);
+                    diff_slot.set(Some(slot));
                 }
                 ChatUpdate::Cancelled(partial) => {
                     messages.update(|list| {
@@ -1541,9 +1589,204 @@ pub fn chat_panel(
         })
     };
 
+    // ── Diff review overlay ───────────────────────────────────────────────────
+    // Appears between the message list and input bar while a file change is
+    // pending approval. The agent is blocked on a oneshot until the user
+    // clicks Approve or Reject.
+
+    let diff_overlay = {
+        // Helper: resolve the pending approval with the given bool, then clear.
+        let resolve = move |approved: bool| {
+            if let Some(slot) = diff_slot.get_untracked() {
+                if let Ok(mut g) = slot.lock() {
+                    if let Some(tx) = g.take() {
+                        let _ = tx.send(approved);
+                    }
+                }
+            }
+            diff_path.set(String::new());
+            diff_before.set(String::new());
+            diff_after.set(String::new());
+            diff_slot.set(None);
+        };
+        let resolve_approve = {
+            let r = resolve;
+            move || r(true)
+        };
+        let resolve_reject = {
+            let r = resolve;
+            move || r(false)
+        };
+
+        // Build diff lines from before/after text using the `similar` crate.
+        let diff_lines_view = dyn_stack(
+            move || {
+                let before = diff_before.get();
+                let after = diff_after.get();
+                if before.is_empty() && after.is_empty() {
+                    return vec![];
+                }
+                let diff = similar::TextDiff::from_lines(&before, &after);
+                let mut out: Vec<(char, String)> = Vec::new();
+                for change in diff.iter_all_changes() {
+                    let tag = match change.tag() {
+                        similar::ChangeTag::Delete => '-',
+                        similar::ChangeTag::Insert => '+',
+                        similar::ChangeTag::Equal => ' ',
+                    };
+                    let text = change.value().to_string();
+                    out.push((tag, text));
+                }
+                out
+            },
+            |(tag, text): &(char, String)| format!("{tag}{text}"),
+            move |(tag, text): (char, String)| {
+                let is_add = tag == '+';
+                let is_del = tag == '-';
+                label(move || format!("{} {}", tag, text.trim_end_matches('\n')))
+                    .style(move |s| {
+                        let p = &theme.get().palette;
+                        s.font_family("monospace".to_string())
+                            .font_size(11.0)
+                            .padding_horiz(8.0)
+                            .padding_vert(1.0)
+                            .width_full()
+                            .color(if is_add {
+                                floem::peniko::Color::from_rgb8(130, 220, 130)
+                            } else if is_del {
+                                floem::peniko::Color::from_rgb8(220, 120, 120)
+                            } else {
+                                p.text_muted
+                            })
+                            .background(if is_add {
+                                floem::peniko::Color::from_rgba8(0, 80, 0, 80)
+                            } else if is_del {
+                                floem::peniko::Color::from_rgba8(80, 0, 0, 80)
+                            } else {
+                                floem::peniko::Color::TRANSPARENT
+                            })
+                    })
+            },
+        )
+        .style(|s| s.flex_col().width_full());
+
+        // Approve button
+        let approve_btn = {
+            let hov = create_rw_signal(false);
+            let resolve_approve = resolve_approve.clone();
+            container(label(|| "✓ Approve").style(move |s| {
+                s.font_size(12.0)
+                    .color(floem::peniko::Color::from_rgb8(40, 180, 40))
+                    .font_weight(floem::text::Weight::MEDIUM)
+            }))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.padding_horiz(14.0)
+                    .padding_vert(6.0)
+                    .border(1.0)
+                    .border_color(floem::peniko::Color::from_rgba8(40, 180, 40, 100))
+                    .border_radius(6.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        floem::peniko::Color::from_rgba8(0, 80, 0, 80)
+                    } else {
+                        p.bg_deep.with_alpha(0.6)
+                    })
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            .on_click_stop(move |_| (resolve_approve)())
+        };
+
+        // Reject button
+        let reject_btn = {
+            let hov = create_rw_signal(false);
+            container(label(|| "✗ Reject").style(move |s| {
+                s.font_size(12.0)
+                    .color(floem::peniko::Color::from_rgb8(200, 80, 80))
+                    .font_weight(floem::text::Weight::MEDIUM)
+            }))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.padding_horiz(14.0)
+                    .padding_vert(6.0)
+                    .border(1.0)
+                    .border_color(floem::peniko::Color::from_rgba8(200, 80, 80, 100))
+                    .border_radius(6.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        floem::peniko::Color::from_rgba8(80, 0, 0, 80)
+                    } else {
+                        p.bg_deep.with_alpha(0.6)
+                    })
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            .on_click_stop(move |_| (resolve_reject)())
+        };
+
+        let btn_row = stack((approve_btn, reject_btn)).style(|s| s.gap(8.0).items_center());
+
+        container(
+            stack((
+                // Header bar: path + label
+                container(
+                    stack((
+                        label(|| "Review change —").style(move |s| {
+                            s.font_size(11.0).color(theme.get().palette.text_muted)
+                        }),
+                        label(move || {
+                            let p = diff_path.get();
+                            std::path::Path::new(&p)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(&p)
+                                .to_string()
+                        })
+                        .style(move |s| {
+                            s.font_size(11.0)
+                                .font_family("monospace".to_string())
+                                .color(theme.get().palette.accent)
+                        }),
+                    ))
+                    .style(|s| s.items_center().gap(6.0)),
+                )
+                .style(move |s| {
+                    let p = &theme.get().palette;
+                    s.padding_horiz(12.0)
+                        .padding_vert(6.0)
+                        .border_bottom(1.0)
+                        .border_color(p.glass_border)
+                        .width_full()
+                }),
+                // Scrollable diff body
+                scroll(diff_lines_view).style(|s| s.width_full().max_height(240.0)),
+                // Action buttons
+                container(btn_row).style(move |s| {
+                    let p = &theme.get().palette;
+                    s.padding(10.0)
+                        .border_top(1.0)
+                        .border_color(p.glass_border)
+                        .width_full()
+                        .justify_end()
+                }),
+            ))
+            .style(|s| s.flex_col().width_full()),
+        )
+        .style(move |s| {
+            let p = &theme.get().palette;
+            let visible = !diff_path.get().is_empty();
+            s.width_full()
+                .border_top(1.0)
+                .border_color(p.glass_border)
+                .background(p.bg_deep)
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        })
+    };
+
     // ── Full panel ────────────────────────────────────────────────────────────
 
-    stack((header, history_panel, mode_tabs, messages_scroll, input_bar))
+    stack((header, history_panel, mode_tabs, messages_scroll, diff_overlay, input_bar))
         .style(move |s| s.flex_col().width_full().height_full())
 }
 

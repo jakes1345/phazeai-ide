@@ -1746,6 +1746,9 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.status_text = "Error".into();
             state.companion.on_error();
         }
+        AgentEvent::FilePatch { path, .. } => {
+            state.status_text = format!("Change pending review: {path}");
+        }
         AgentEvent::BrowserFetchStart { .. }
         | AgentEvent::BrowserFetchComplete { .. }
         | AgentEvent::BrowserFetchError { .. } => {}
