@@ -1170,6 +1170,7 @@ impl IdeState {
             ext_loading: create_rw_signal(false),
             ext_manager: ext_manager.clone(),
             editor_snapshot: editor_snapshot.clone(),
+            new_terminal_nonce: create_rw_signal(0u64),
         };
 
         let editor = EditorState {
@@ -1604,6 +1605,58 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Toggle Code Lens",
             action: |s| s.editor.code_lens_visible.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Copy Absolute Path",
+            action: |s| {
+                if let Some(path) = s.editor.open_file.get() {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(path.to_string_lossy().to_string());
+                    }
+                }
+            },
+        },
+        PaletteCommand {
+            label: "Copy Relative Path",
+            action: |s| {
+                if let Some(path) = s.editor.open_file.get() {
+                    let root = s.project.workspace_root.get();
+                    let rel = path.strip_prefix(&root).unwrap_or(&path);
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(rel.to_string_lossy().to_string());
+                    }
+                }
+            },
+        },
+        PaletteCommand {
+            label: "Copy File Name",
+            action: |s| {
+                if let Some(path) = s.editor.open_file.get() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(name);
+                    }
+                }
+            },
+        },
+        PaletteCommand {
+            label: "Toggle Inlay Hints",
+            action: |s| s.editor.inlay_hints_toggle.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Toggle Minimap",
+            action: |s| s.editor.minimap_visible.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Toggle Word Wrap",
+            action: |s| s.editor.word_wrap.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "New Terminal Tab",
+            action: |s| s.workbench.new_terminal_nonce.update(|v| *v += 1),
         },
     ]
 }
@@ -5196,6 +5249,19 @@ pub fn launch_phaze_ide() {
                                         _ => {}
                                     }
                                 }
+                            }
+                        }
+                    }
+                })
+                .on_event_stop(EventListener::DroppedFile, {
+                    let state = state.clone();
+                    move |e| {
+                        if let Event::DroppedFile(dfe) = e {
+                            let path = dfe.path.clone();
+                            if path.is_file() {
+                                let canon = std::fs::canonicalize(&path).unwrap_or(path);
+                                state.editor.open_file.set(Some(canon));
+                                state.workbench.show_bottom_panel.set(false);
                             }
                         }
                     }

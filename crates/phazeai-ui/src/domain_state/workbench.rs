@@ -48,4 +48,6 @@ pub struct WorkbenchState {
     /// on the UI thread via `create_signal_from_channel` so all signal writes
     /// stay on-thread.
     pub editor_cmd_tx: std::sync::mpsc::SyncSender<crate::editor_command::EditorCommand>,
+    /// Bumped by the command palette "New Terminal Tab" command.
+    pub new_terminal_nonce: RwSignal<u64>,
 }

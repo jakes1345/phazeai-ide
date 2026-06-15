@@ -1301,6 +1301,32 @@ pub fn terminal_panel(
     let active_tab: RwSignal<usize> = create_rw_signal(1);
     let next_id: RwSignal<usize> = create_rw_signal(2);
 
+    // Command palette "New Terminal Tab" — bump new_terminal_nonce to open a fresh tab.
+    {
+        let nonce = state.workbench.new_terminal_nonce;
+        create_effect(move |prev: Option<u64>| {
+            let cur = nonce.get();
+            if prev.is_some() && prev != Some(cur) {
+                let id = next_id.get_untracked();
+                next_id.set(id + 1);
+                let shell_name = SHELLS[shell_idx.get_untracked() % SHELLS.len()].to_string();
+                tab_data.update(|data| {
+                    data.push((
+                        id,
+                        create_rw_signal(shell_name.clone()),
+                        create_rw_signal(0u64),
+                        shell_name,
+                        create_rw_signal(String::new()),
+                        create_rw_signal(None::<SharedPtyWriter>),
+                        create_rw_signal(Vec::<usize>::new()),
+                    ))
+                });
+                active_tab.set(id);
+            }
+            cur
+        });
+    }
+
     // Keep active_pty_writer and prompt_positions in sync with the active tab's signals.
     {
         create_effect(move |_| {

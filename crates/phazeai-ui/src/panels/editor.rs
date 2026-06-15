@@ -1540,6 +1540,11 @@ pub fn editor_panel(
     // changes.  Font-size updates call editor.update_styling() reactively.
     // Goto-line uses the same nonce-effect pattern as find-cursor-jump.
     // This preserves the undo/redo stack across zoom and navigation.
+    // Clones for the body right-click context menu (must be taken before
+    // lsp_cmd is moved into the dyn_stack closure below).
+    let lsp_cmd_bctx_goto = lsp_cmd.clone();
+    let lsp_cmd_bctx_refs = lsp_cmd.clone();
+
     let editor_body = dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(_i, tab)| format!("{}", tab.path.to_string_lossy()),
@@ -5045,6 +5050,154 @@ pub fn editor_panel(
         })
     };
 
+    // ── Editor body right-click context menu ─────────────────────────────────
+    let body_ctx_open: RwSignal<bool> = create_rw_signal(false);
+    let body_ctx_x: RwSignal<f64> = create_rw_signal(0.0);
+    let body_ctx_y: RwSignal<f64> = create_rw_signal(0.0);
+
+    let body_ctx_item = |label_text: &'static str,
+                         hovered_sig: RwSignal<bool>,
+                         action: Box<dyn Fn() + 'static>| {
+        let hov = hovered_sig;
+        container(
+            label(move || label_text).style(move |s| {
+                let p = &theme.get().palette;
+                s.font_size(12.0)
+                    .color(if hov.get() { p.accent } else { p.text_primary })
+                    .width_full()
+            }),
+        )
+        .style(move |s| {
+            let p = &theme.get().palette;
+            s.padding_horiz(12.0)
+                .padding_vert(5.0)
+                .width_full()
+                .cursor(floem::style::CursorStyle::Pointer)
+                .background(if hov.get() {
+                    p.bg_elevated
+                } else {
+                    floem::peniko::Color::TRANSPARENT
+                })
+        })
+        .on_click_stop(move |_| {
+            body_ctx_open.set(false);
+            (action)();
+        })
+        .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+        .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+    };
+
+    let bctx_copy = {
+        let sel = selected_text;
+        body_ctx_item(
+            "Copy",
+            create_rw_signal(false),
+            Box::new(move || {
+                let text = sel.get_untracked();
+                if !text.is_empty() {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(text);
+                    }
+                }
+            }),
+        )
+    };
+    let bctx_sep1 = container(label(|| ""))
+        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_goto = {
+        let lsp = lsp_cmd_bctx_goto;
+        let ac = active_cursor;
+        body_ctx_item(
+            "Go to Definition",
+            create_rw_signal(false),
+            Box::new(move || {
+                if let Some((path, line, col)) = ac.get_untracked() {
+                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestDefinition { path, line, col });
+                }
+            }),
+        )
+    };
+    let bctx_refs = {
+        let lsp = lsp_cmd_bctx_refs;
+        let ac = active_cursor;
+        body_ctx_item(
+            "Find All References",
+            create_rw_signal(false),
+            Box::new(move || {
+                if let Some((path, line, col)) = ac.get_untracked() {
+                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestReferences { path, line, col });
+                }
+            }),
+        )
+    };
+    let bctx_sep2 = container(label(|| ""))
+        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_comment = {
+        let nonce = comment_toggle_nonce;
+        body_ctx_item(
+            "Toggle Comment",
+            create_rw_signal(false),
+            Box::new(move || { nonce.update(|v| *v += 1); }),
+        )
+    };
+    let bctx_fmt = {
+        let nonce = format_selection_nonce;
+        body_ctx_item(
+            "Format Selection",
+            create_rw_signal(false),
+            Box::new(move || { nonce.update(|v| *v += 1); }),
+        )
+    };
+    let bctx_sep3 = container(label(|| ""))
+        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_copy_path = {
+        let of = open_file;
+        body_ctx_item(
+            "Copy File Path",
+            create_rw_signal(false),
+            Box::new(move || {
+                if let Some(p) = of.get_untracked() {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(p.display().to_string());
+                    }
+                }
+            }),
+        )
+    };
+
+    let body_ctx_menu = container(
+        stack((
+            bctx_copy,
+            bctx_sep1,
+            bctx_goto,
+            bctx_refs,
+            bctx_sep2,
+            bctx_comment,
+            bctx_fmt,
+            bctx_sep3,
+            bctx_copy_path,
+        ))
+        .style(|s| s.flex_col().width(200.0)),
+    )
+    .style(move |s| {
+        let p = &theme.get().palette;
+        s.position(floem::style::Position::Absolute)
+            .inset_top(body_ctx_y.get())
+            .inset_left(body_ctx_x.get())
+            .z_index(200)
+            .background(p.bg_panel)
+            .border(1.0)
+            .border_color(p.glass_border)
+            .border_radius(6.0)
+            .box_shadow_blur(12.0)
+            .box_shadow_color(p.glow)
+            .padding_vert(4.0)
+            .apply_if(!body_ctx_open.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    })
+    .on_event_stop(EventListener::PointerLeave, move |_| body_ctx_open.set(false));
+
     stack((
         tab_bar,
         breadcrumbs,
@@ -5055,6 +5208,7 @@ pub fn editor_panel(
         editor_row,
         ghost_strip,
         goto_overlay,
+        body_ctx_menu,
     ))
     .style(move |s| {
         let t = theme.get();
@@ -5065,6 +5219,20 @@ pub fn editor_panel(
             .min_width(0.0)
             .height_full()
             .background(bg)
+            .position(floem::style::Position::Relative)
+    })
+    .on_event_cont(EventListener::PointerDown, move |e| {
+        if let Event::PointerDown(pe) = e {
+            if pe.button.is_secondary() {
+                // Close if already open to let the coordinates update before re-showing.
+                body_ctx_open.set(false);
+                body_ctx_x.set(pe.pos.x);
+                body_ctx_y.set(pe.pos.y);
+                body_ctx_open.set(true);
+            } else {
+                body_ctx_open.set(false);
+            }
+        }
     })
     .on_event_cont(EventListener::KeyDown, move |event| {
         // Editor-specific shortcuts only. Global shortcuts (Ctrl+B/J/P/\/Shift+P,
