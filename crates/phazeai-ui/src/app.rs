@@ -2148,6 +2148,24 @@ fn status_bar(state: IdeState) -> impl IntoView {
     };
 
     let right = stack((
+        // Selection info — shown when text is selected.
+        label(move || {
+            let sel = state.editor.selected_text.get();
+            if sel.is_empty() {
+                return String::new();
+            }
+            let chars = sel.chars().count();
+            let lines = sel.lines().count().max(1);
+            if lines > 1 {
+                format!("{lines} lines  {chars} chars  ")
+            } else {
+                format!("{chars} chars  ")
+            }
+        })
+        .style(move |s| {
+            s.color(state.workbench.theme.get().palette.accent)
+                .font_size(11.0)
+        }),
         // Line / column indicator — reads from active_cursor (set by editor on every move).
         label(move || {
             if let Some((_, line, col)) = state.editor.active_cursor.get() {
@@ -3777,6 +3795,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.workbench.status_toast,
         state.ai.token_usage_input,
         state.ai.token_usage_output,
+        state.ai.model,
     );
 
     let chat_wrap = container(chat).style(move |s| {

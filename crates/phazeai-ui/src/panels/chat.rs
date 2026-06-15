@@ -614,6 +614,7 @@ pub fn chat_panel(
     status_toast: RwSignal<Option<String>>,
     token_usage_input: RwSignal<u64>,
     token_usage_output: RwSignal<u64>,
+    global_model_sig: RwSignal<String>,
 ) -> impl IntoView {
     let mut initial_messages = vec![ChatMessage {
         role: ChatRole::Assistant,
@@ -702,8 +703,8 @@ pub fn chat_panel(
     }
 
     // ── Active model display (click to edit, persists to settings) ───────────
-    let active_model: RwSignal<String> =
-        create_rw_signal(Settings::load().llm.model.clone());
+    // Backed by global_model_sig so the status bar stays in sync.
+    let active_model = global_model_sig;
     let model_editing: RwSignal<bool> = create_rw_signal(false);
     let model_edit_buf: RwSignal<String> = create_rw_signal(String::new());
 
