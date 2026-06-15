@@ -4359,12 +4359,18 @@ pub fn editor_panel(
     // Renders each line of the active document as a 1 px tall bar whose width
     // indicates line length.  Diagnostic lines get colored markers; the current
     // cursor line gets a bright accent indicator.
+    // Store canvas height so the click handler can compute line fractions.
+    let minimap_canvas_height: RwSignal<f64> = create_rw_signal(700.0_f64);
     let minimap_docs = docs_for_find.clone();
     let heatmap = canvas(move |cx, size| {
         let t = theme.get();
         let p = &t.palette;
         let h = size.height;
         let w = size.width;
+        // Persist height so the click handler can compute line fractions.
+        if (minimap_canvas_height.get_untracked() - h).abs() > 1.0 {
+            minimap_canvas_height.set(h);
+        }
         cx.fill(&floem::kurbo::Rect::ZERO.with_size(size), p.glass_bg, 0.0);
 
         // Left-edge separator
@@ -4463,11 +4469,30 @@ pub fn editor_panel(
         s.width(60.0).height_full().min_width(60.0).background(bg)
     });
 
-    let minimap_strip = container(heatmap).style(move |s| {
-        s.apply_if(!minimap_visible.get(), |s| {
-            s.display(floem::style::Display::None)
+    let minimap_docs_click = docs_for_find.clone();
+    let minimap_strip = container(heatmap)
+        .style(move |s| {
+            s.apply_if(!minimap_visible.get(), |s| {
+                s.display(floem::style::Display::None)
+            })
+            .cursor(floem::style::CursorStyle::Pointer)
         })
-    });
+        .on_event_stop(EventListener::PointerDown, move |e| {
+            if let Event::PointerDown(pe) = e {
+                // Map click Y coordinate to document line and jump there.
+                let tab_list = tabs.get_untracked();
+                let Some(idx) = active_idx.get_untracked() else { return; };
+                let Some(tab) = tab_list.get(idx) else { return; };
+                let key = tab.path.to_string_lossy().to_string();
+                let reg = minimap_docs_click.borrow();
+                let Some(doc) = reg.get(&key) else { return; };
+                let line_count = doc.text().to_string().lines().count().max(1) as f64;
+                let canvas_h = minimap_canvas_height.get_untracked().max(1.0);
+                let frac = (pe.pos.y / canvas_h).clamp(0.0, 1.0);
+                let target_line = ((frac * line_count) as u32).saturating_add(1);
+                ext_goto_line.set(target_line);
+            }
+        });
 
     // ── Welcome screen ─────────────────────────────────────────────────────
     let welcome = container(
