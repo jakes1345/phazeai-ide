@@ -643,6 +643,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                         let instruction = query.get();
                         if instruction.is_empty() { return; }
                         ai_thinking.set(true);
+                        let selection = state.editor.selected_text.get_untracked();
                         let file_ctx = state.editor.open_file.get()
                             .and_then(|p| std::fs::read_to_string(&p).ok())
                             .unwrap_or_default();
@@ -651,11 +652,20 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                         } else {
                             file_ctx
                         };
-                        let prompt = format!(
-                            "Apply the following edit to the code. \
-                             Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
-                             Instruction: {instruction}\n\nCode context:\n{file_ctx}"
-                        );
+                        let prompt = if !selection.is_empty() {
+                            // Selection-scoped: only rewrite the selected region.
+                            format!(
+                                "Rewrite ONLY the following code snippet according to the instruction. \
+                                 Respond with ONLY the rewritten snippet, no explanation, no markdown fences.\n\n\
+                                 Instruction: {instruction}\n\nCode to rewrite:\n{selection}"
+                            )
+                        } else {
+                            format!(
+                                "Apply the following edit to the code. \
+                                 Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
+                                 Instruction: {instruction}\n\nCode context:\n{file_ctx}"
+                            )
+                        };
                         let settings = Settings::load();
                         let tx = update_tx.clone();
                         std::thread::spawn(move || {

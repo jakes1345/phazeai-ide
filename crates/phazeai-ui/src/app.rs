@@ -1260,6 +1260,7 @@ impl IdeState {
             split_down_cursor: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             close_active_tab_nonce: create_rw_signal(0u64),
+            selected_text: create_rw_signal(String::new()),
         };
 
         let ai = AiState {
@@ -3515,6 +3516,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        state.editor.selected_text,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3576,6 +3578,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        create_rw_signal(String::new()), // split: dedicated selected_text (unused)
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3897,6 +3900,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        create_rw_signal(String::new()), // split-down: dedicated selected_text (unused)
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

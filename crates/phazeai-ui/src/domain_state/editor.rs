@@ -107,4 +107,7 @@ pub struct EditorState {
 
     // Bumped to request closing the currently active tab (Ctrl+W).
     pub close_active_tab_nonce: RwSignal<u64>,
+
+    // Text currently selected in the active editor ("" when no selection).
+    pub selected_text: RwSignal<String>,
 }

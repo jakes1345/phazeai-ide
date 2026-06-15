@@ -1118,6 +1118,7 @@ pub fn editor_panel(
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
     // Channel for FIM (inline AI completion) requests: (prefix, suffix, language).
     fim_req_tx: std::sync::mpsc::SyncSender<(String, String, String)>,
+    selected_text: RwSignal<String>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1766,6 +1767,19 @@ pub fn editor_panel(
                     active_cursor.set(Some((track_path.clone(), line, col)));
                     // Keep current_line_sig in sync so the current-line highlight reacts.
                     current_line_sig.set(line as usize);
+                    // Track selected text so overlays (e.g. Ctrl+K inline edit) can use it.
+                    if let CursorMode::Insert(sel) = &cursor.mode {
+                        let text: String = sel
+                            .regions()
+                            .iter()
+                            .filter(|r| r.min() != r.max())
+                            .map(|r| rope.slice_to_cow(r.min()..r.max()).to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        selected_text.set(text);
+                    } else {
+                        selected_text.set(String::new());
+                    }
                 });
             }
             {
