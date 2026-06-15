@@ -1658,6 +1658,38 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             label: "New Terminal Tab",
             action: |s| s.workbench.new_terminal_nonce.update(|v| *v += 1),
         },
+        PaletteCommand {
+            label: "Go to Next Problem (F8)",
+            action: |s| {
+                let mut sorted = s.editor.diagnostics.get();
+                sorted.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+                let cur_line = s.editor.active_cursor.get().map(|(_, l, _)| l + 1).unwrap_or(0);
+                let cur_path = s.editor.active_cursor.get().map(|(p, _, _)| p);
+                if let Some(d) = sorted.iter().find(|d| {
+                    Some(&d.path) > cur_path.as_ref()
+                        || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
+                }).or_else(|| sorted.first()) {
+                    s.editor.open_file.set(Some(d.path.clone()));
+                    s.editor.goto_line.set(d.line);
+                }
+            },
+        },
+        PaletteCommand {
+            label: "Go to Previous Problem (Shift+F8)",
+            action: |s| {
+                let mut sorted = s.editor.diagnostics.get();
+                sorted.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+                let cur_line = s.editor.active_cursor.get().map(|(_, l, _)| l + 1).unwrap_or(0);
+                let cur_path = s.editor.active_cursor.get().map(|(p, _, _)| p);
+                if let Some(d) = sorted.iter().rev().find(|d| {
+                    Some(&d.path) < cur_path.as_ref()
+                        || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
+                }).or_else(|| sorted.last()) {
+                    s.editor.open_file.set(Some(d.path.clone()));
+                    s.editor.goto_line.set(d.line);
+                }
+            },
+        },
     ]
 }
 
@@ -4451,6 +4483,49 @@ pub fn launch_phaze_ide() {
                                             state.editor.completion_filter_text.set(String::new());
                                             return;
                                         }
+                                    }
+                                    // F8 / Shift+F8 — navigate to next / previous diagnostic
+                                    floem::keyboard::NamedKey::F8 => {
+                                        let all_diags = state.editor.diagnostics.get();
+                                        if all_diags.is_empty() {
+                                            return;
+                                        }
+                                        // Sort by (path, line) for stable navigation order.
+                                        let mut sorted = all_diags.clone();
+                                        sorted.sort_by(|a, b| {
+                                            a.path.cmp(&b.path).then(a.line.cmp(&b.line))
+                                        });
+                                        // Find current position: the first diag strictly
+                                        // after (or before for Shift+F8) the active cursor.
+                                        let cur_line = state.editor.active_cursor
+                                            .get()
+                                            .map(|(_, l, _)| l + 1) // DiagEntry.line is 1-based
+                                            .unwrap_or(0);
+                                        let cur_path = state.editor.active_cursor
+                                            .get()
+                                            .map(|(p, _, _)| p);
+
+                                        let target = if shift {
+                                            // Shift+F8: previous
+                                            sorted.iter().rev().find(|d| {
+                                                Some(&d.path) < cur_path.as_ref()
+                                                    || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
+                                            }).or_else(|| sorted.last())
+                                        } else {
+                                            // F8: next
+                                            sorted.iter().find(|d| {
+                                                Some(&d.path) > cur_path.as_ref()
+                                                    || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
+                                            }).or_else(|| sorted.first())
+                                        };
+
+                                        if let Some(d) = target {
+                                            let path = d.path.clone();
+                                            let line = d.line; // 1-based
+                                            state.editor.open_file.set(Some(path));
+                                            state.editor.goto_line.set(line);
+                                        }
+                                        return;
                                     }
                                     // F9 — toggle breakpoint on the cursor line
                                     floem::keyboard::NamedKey::F9 => {
