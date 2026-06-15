@@ -5,6 +5,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 pub mod app;
 pub mod commands;
 pub mod components;
+pub mod crash_recovery;
 pub mod debug_session;
 pub mod domain_state;
 pub mod editor_command;

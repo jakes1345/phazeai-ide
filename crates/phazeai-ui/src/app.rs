@@ -3845,6 +3845,29 @@ pub fn launch_phaze_ide() {
             move |_| {
                 let state = IdeState::new(&settings);
 
+                // Crash recovery: surface any unsaved content from a prior crash.
+                {
+                    let pending = crate::crash_recovery::list_pending();
+                    if !pending.is_empty() {
+                        let msg = if pending.len() == 1 {
+                            let name = pending[0]
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| pending[0].to_string_lossy().to_string());
+                            format!(
+                                "Recovery: unsaved \"{}\" → ~/.config/phazeai/crash-recovery/",
+                                name
+                            )
+                        } else {
+                            format!(
+                                "Recovery: {} unsaved files → ~/.config/phazeai/crash-recovery/",
+                                pending.len()
+                            )
+                        };
+                        show_toast(state.workbench.status_toast, msg);
+                    }
+                }
+
                 // Overlay layers — rendered after IDE content so they paint on top.
                 let palette = command_palette(state.clone());
                 let picker = file_picker(state.clone());

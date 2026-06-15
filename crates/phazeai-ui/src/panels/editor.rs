@@ -1366,6 +1366,7 @@ pub fn editor_panel(
         let content = doc.text().to_string();
         if std::fs::write(&tab.path, content).is_ok() {
             tab.dirty.set(false);
+            crate::crash_recovery::clear_recovery(&tab.path);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
             // doesn't need it, but gopls, pylsp, etc. do) get the save notification.
             let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::SaveFile {
@@ -1631,6 +1632,30 @@ pub fn editor_panel(
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
             let lsp_path = tab.path.clone();
             let lsp_tx = lsp_cmd.clone();
+
+            // ── Crash-recovery shadow write (per-tab) ─────────────────────────
+            // Each tab has its own debounce counter + channel. The recovery write
+            // fires 2 s after the last edit regardless of auto_save setting.
+            let recovery_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+            let (recovery_tx, recovery_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            let recovery_sig = create_signal_from_channel(recovery_rx);
+            {
+                let doc_for_rec = doc.clone();
+                let rec_path = tab.path.clone();
+                create_effect(move |_| {
+                    if recovery_sig.get().is_none() {
+                        return;
+                    }
+                    if !dirty.get_untracked() {
+                        return;
+                    }
+                    let content = doc_for_rec.text().to_string();
+                    let p = rec_path.clone();
+                    std::thread::spawn(move || {
+                        crate::crash_recovery::write_recovery(&p, &content);
+                    });
+                });
+            }
 
             // ── Goto-line cursor jump (reactive effect, no editor recreation) ─
             {
@@ -4187,6 +4212,8 @@ pub fn editor_panel(
                 .update({
                     let as_gen = Arc::clone(&auto_save_gen);
                     let as_tx = auto_save_tx.clone();
+                    let rec_gen = Arc::clone(&recovery_gen);
+                    let rec_tx = recovery_tx.clone();
                     move |_| {
                         dirty.set(true);
                         // Notify LSP server of content change (textDocument/didChange).
@@ -4205,6 +4232,18 @@ pub fn editor_panel(
                             let tx = as_tx.clone();
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(1500));
+                                if gen_ref.load(Ordering::Relaxed) == gen {
+                                    let _ = tx.try_send(());
+                                }
+                            });
+                        }
+                        // Recovery shadow write: debounce 2s, always fires.
+                        {
+                            let gen = rec_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                            let gen_ref = Arc::clone(&rec_gen);
+                            let tx = rec_tx.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(2000));
                                 if gen_ref.load(Ordering::Relaxed) == gen {
                                     let _ = tx.try_send(());
                                 }
