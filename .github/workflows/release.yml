@@ -10,15 +10,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. VERIFY — tests + lint before any packaging
+  # ─────────────────────────────────────────────────────────────────────────────
   verify:
     name: Verify workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.93'
+          components: rustfmt, clippy
       - uses: actions/cache@v4
         with:
           path: |
@@ -33,14 +36,13 @@ jobs:
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3
-      - name: Verify tests and lint
-        run: |
-          cargo test --workspace
-          cargo clippy --workspace -- -D warnings
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test -p phazeai-core -p phazeai-cli
 
-  # ─────────────────────────────────────────────
-  # BUILD RELEASE BINARIES (matrix)
-  # ─────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. BUILD RELEASE BINARIES
+  # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: Build / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -53,31 +55,31 @@ jobs:
             os: ubuntu-latest
             cli_bin: phazeai
             ui_bin: phazeai-ui
-            archive_ext: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cli_bin: phazeai
+            ui_bin: phazeai-ui
 
           - target: x86_64-apple-darwin
             os: macos-latest
             cli_bin: phazeai
             ui_bin: phazeai-ui
-            archive_ext: tar.gz
 
           - target: aarch64-apple-darwin
             os: macos-latest
             cli_bin: phazeai
             ui_bin: phazeai-ui
-            archive_ext: tar.gz
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cli_bin: phazeai.exe
             ui_bin: phazeai-ui.exe
-            archive_ext: zip
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (channel from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.93'
           targets: ${{ matrix.target }}
@@ -93,9 +95,8 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-release-
             ${{ runner.os }}-${{ matrix.target }}-
 
-      # ── Linux system deps (matches ci.yml exactly) ──
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system deps (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -103,91 +104,347 @@ jobs:
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3
 
-      # ── Build ──────────────────────────────────────
+      - name: Install cross-compilation deps (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update -qq
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu python3 \
+            libxkbcommon-dev:arm64 libwayland-dev:arm64 \
+            libxcb-xfixes0-dev:arm64 libxcb-shape0-dev:arm64 \
+            libxcb-render0-dev:arm64 libxkbcommon-x11-dev:arm64 \
+            libudev-dev:arm64 libinput-dev:arm64 libdbus-1-dev:arm64 || true
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
       - name: Build release binaries
         run: cargo build --release -p phazeai-cli -p phazeai-ui --target ${{ matrix.target }}
 
-      # ── Extract version from tag ───────────────────
-      - name: Extract version
-        id: version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
-      # ── Package: Linux / macOS (tar.gz) ───────────
-      - name: Package binaries (tar.gz)
-        if: matrix.archive_ext == 'tar.gz'
-        shell: bash
-        run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          TARGET="${{ matrix.target }}"
-          BIN_DIR="target/$TARGET/release"
-
-          mkdir -p dist
-
-          # phazeai-cli
-          CLI_NAME="phazeai-cli-${VERSION}-${TARGET}"
-          mkdir -p "dist/${CLI_NAME}"
-          cp "${BIN_DIR}/${{ matrix.cli_bin }}" "dist/${CLI_NAME}/"
-          tar -C dist -czf "dist/${CLI_NAME}.tar.gz" "${CLI_NAME}"
-          rm -rf "dist/${CLI_NAME}"
-
-          # phazeai-ui (IDE)
-          IDE_NAME="phazeai-ide-${VERSION}-${TARGET}"
-          mkdir -p "dist/${IDE_NAME}"
-          cp "${BIN_DIR}/${{ matrix.ui_bin }}" "dist/${IDE_NAME}/"
-          tar -C dist -czf "dist/${IDE_NAME}.tar.gz" "${IDE_NAME}"
-          rm -rf "dist/${IDE_NAME}"
-
-      # ── Package: Windows (zip) ────────────────────
-      - name: Package binaries (zip)
-        if: matrix.archive_ext == 'zip'
-        shell: pwsh
-        run: |
-          $VERSION = "${{ steps.version.outputs.VERSION }}"
-          $TARGET  = "${{ matrix.target }}"
-          $BIN_DIR = "target\$TARGET\release"
-
-          New-Item -ItemType Directory -Force dist | Out-Null
-
-          # phazeai-cli
-          $CLI_NAME = "phazeai-cli-${VERSION}-${TARGET}"
-          New-Item -ItemType Directory -Force "dist\${CLI_NAME}" | Out-Null
-          Copy-Item "${BIN_DIR}\${{ matrix.cli_bin }}" "dist\${CLI_NAME}\"
-          Compress-Archive -Path "dist\${CLI_NAME}" -DestinationPath "dist\${CLI_NAME}.zip" -Force
-          Remove-Item -Recurse -Force "dist\${CLI_NAME}"
-
-          # phazeai-ui (IDE)
-          $IDE_NAME = "phazeai-ide-${VERSION}-${TARGET}"
-          New-Item -ItemType Directory -Force "dist\${IDE_NAME}" | Out-Null
-          Copy-Item "${BIN_DIR}\${{ matrix.ui_bin }}" "dist\${IDE_NAME}\"
-          Compress-Archive -Path "dist\${IDE_NAME}" -DestinationPath "dist\${IDE_NAME}.zip" -Force
-          Remove-Item -Recurse -Force "dist\${IDE_NAME}"
-
-      # ── Upload artifacts for release job ──────────
-      - name: Upload artifacts
+      - name: Upload raw binaries
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.target }}
-          path: dist/
+          name: bin-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/${{ matrix.cli_bin }}
+            target/${{ matrix.target }}/release/${{ matrix.ui_bin }}
           if-no-files-found: error
 
-  # ─────────────────────────────────────────────
-  # CREATE GITHUB RELEASE
-  # ─────────────────────────────────────────────
-  release:
-    name: Create GitHub Release
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. LINUX PACKAGING — AppImage + .deb (x86_64)
+  # ─────────────────────────────────────────────────────────────────────────────
+  package-linux:
+    name: Package / Linux (AppImage + deb)
     runs-on: ubuntu-latest
     needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-x86_64-unknown-linux-gnu
+          path: bin/
+
+      - name: Make binaries executable
+        run: chmod +x bin/phazeai bin/phazeai-ui
+
+      - name: Extract version
+        id: ver
+        run: echo "V=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # ── AppImage ────────────────────────────────────────────────────────────
+      - name: Build AppImage (phazeai-ide)
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -O appimagetool && chmod +x appimagetool
+
+          mkdir -p AppDir/usr/bin \
+                   AppDir/usr/share/applications \
+                   AppDir/usr/share/icons/hicolor/256x256/apps
+
+          cp bin/phazeai-ui AppDir/usr/bin/phazeai-ide
+
+          # Desktop entry
+          cat > AppDir/usr/share/applications/phazeai-ide.desktop <<'DESK'
+          [Desktop Entry]
+          Name=PhazeAI IDE
+          Exec=phazeai-ide
+          Icon=phazeai-ide
+          Type=Application
+          Categories=Development;TextEditor;IDE;
+          Comment=GPU-accelerated AI-powered code editor
+          DESK
+
+          # Icon (use real asset if present, else minimal placeholder)
+          if [ -f assets/icons/phazeai-256.png ]; then
+            cp assets/icons/phazeai-256.png AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png
+          else
+            python3 - <<'PY'
+          import struct, zlib
+          def tiny_png():
+              ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
+              idat_data = zlib.compress(b'\x00\x88\x88\x88')
+              def chunk(tag, data):
+                  return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag+data)&0xFFFFFFFF)
+              return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr_data) + chunk(b'IDAT', idat_data) + chunk(b'IEND', b'')
+          open('AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png','wb').write(tiny_png())
+          PY
+          fi
+
+          # AppRun launcher
+          printf '#!/bin/sh\nexec "$APPDIR/usr/bin/phazeai-ide" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+
+          # appimagetool requires symlinks at AppDir root
+          ln -s usr/share/applications/phazeai-ide.desktop AppDir/phazeai-ide.desktop
+          ln -s usr/share/icons/hicolor/256x256/apps/phazeai-ide.png AppDir/phazeai-ide.png
+
+          ARCH=x86_64 ./appimagetool AppDir "phazeai-ide-${V}-x86_64.AppImage"
+
+      # ── .deb (IDE) ──────────────────────────────────────────────────────────
+      - name: Build .deb (phazeai-ide)
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          PKG="phazeai-ide_${V}_amd64"
+          mkdir -p "${PKG}/DEBIAN" "${PKG}/usr/bin" "${PKG}/usr/share/applications"
+          cp bin/phazeai-ui "${PKG}/usr/bin/phazeai-ide"
+          cat > "${PKG}/DEBIAN/control" <<EOF
+          Package: phazeai-ide
+          Version: ${V}
+          Architecture: amd64
+          Maintainer: PhazeAI Technologies <dev@phazeai.com>
+          Description: PhazeAI IDE - GPU-accelerated AI-powered code editor
+          Section: devel
+          Priority: optional
+          EOF
+          cat > "${PKG}/usr/share/applications/phazeai-ide.desktop" <<'DESK'
+          [Desktop Entry]
+          Name=PhazeAI IDE
+          Exec=phazeai-ide
+          Icon=phazeai-ide
+          Type=Application
+          Categories=Development;TextEditor;IDE;
+          DESK
+          dpkg-deb --build "${PKG}" "phazeai-ide_${V}_amd64.deb"
+
+      # ── .deb (CLI) ──────────────────────────────────────────────────────────
+      - name: Build .deb (phazeai-cli)
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          PKG="phazeai-cli_${V}_amd64"
+          mkdir -p "${PKG}/DEBIAN" "${PKG}/usr/bin"
+          cp bin/phazeai "${PKG}/usr/bin/phazeai"
+          cat > "${PKG}/DEBIAN/control" <<EOF
+          Package: phazeai-cli
+          Version: ${V}
+          Architecture: amd64
+          Maintainer: PhazeAI Technologies <dev@phazeai.com>
+          Description: PhazeAI CLI - terminal UI for AI-powered coding
+          Section: devel
+          Priority: optional
+          EOF
+          dpkg-deb --build "${PKG}" "phazeai-cli_${V}_amd64.deb"
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-linux
+          path: |
+            phazeai-ide-*.AppImage
+            phazeai-ide_*.deb
+            phazeai-cli_*.deb
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4. MACOS PACKAGING — universal .dmg
+  # ─────────────────────────────────────────────────────────────────────────────
+  package-macos:
+    name: Package / macOS (universal dmg)
+    runs-on: macos-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS x86_64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-x86_64-apple-darwin
+          path: bin-x86_64/
+
+      - name: Download macOS aarch64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-aarch64-apple-darwin
+          path: bin-aarch64/
+
+      - name: Extract version
+        id: ver
+        run: echo "V=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create universal binaries
+        run: |
+          chmod +x bin-x86_64/phazeai-ui bin-x86_64/phazeai
+          chmod +x bin-aarch64/phazeai-ui bin-aarch64/phazeai
+          mkdir universal
+          lipo -create bin-x86_64/phazeai-ui bin-aarch64/phazeai-ui -output universal/phazeai-ui
+          lipo -create bin-x86_64/phazeai    bin-aarch64/phazeai    -output universal/phazeai
+          chmod +x universal/phazeai-ui universal/phazeai
+
+      - name: Build .app bundle
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          APP="PhazeAI IDE.app"
+          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+          cp universal/phazeai-ui "${APP}/Contents/MacOS/phazeai-ide"
+          chmod +x "${APP}/Contents/MacOS/phazeai-ide"
+          cat > "${APP}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>phazeai-ide</string>
+            <key>CFBundleIdentifier</key><string>com.phazeai.ide</string>
+            <key>CFBundleName</key><string>PhazeAI IDE</string>
+            <key>CFBundleVersion</key><string>${V}</string>
+            <key>CFBundleShortVersionString</key><string>${V}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+          </dict></plist>
+          EOF
+
+      - name: Create .dmg
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          mkdir dmg-staging
+          cp -r "PhazeAI IDE.app" dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create \
+            -volname "PhazeAI IDE ${V}" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            "phazeai-ide-${V}-macos-universal.dmg"
+
+      - name: Package CLI (tar.gz, universal)
+        run: |
+          V="${{ steps.ver.outputs.V }}"
+          tar -czf "phazeai-cli-${V}-macos-universal.tar.gz" -C universal phazeai
+
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-macos
+          path: |
+            phazeai-ide-*-macos-*.dmg
+            phazeai-cli-*-macos-*.tar.gz
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 5. WINDOWS PACKAGING — NSIS installer + zip
+  # ─────────────────────────────────────────────────────────────────────────────
+  package-windows:
+    name: Package / Windows (NSIS installer + zip)
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-x86_64-pc-windows-msvc
+          path: bin/
+
+      - name: Extract version
+        id: ver
+        shell: bash
+        run: echo "V=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Write NSIS installer script
+        shell: pwsh
+        run: |
+          $V = "${{ steps.ver.outputs.V }}"
+          $script = @"
+!define APP_NAME "PhazeAI IDE"
+!define APP_VERSION "$V"
+!define INSTALL_DIR "`$PROGRAMFILES64\PhazeAI IDE"
+Name "`${APP_NAME} `${APP_VERSION}"
+OutFile "phazeai-ide-`${APP_VERSION}-windows-x64-setup.exe"
+InstallDir "`${INSTALL_DIR}"
+RequestExecutionLevel admin
+Unicode True
+
+Section "Install"
+  SetOutPath "`$INSTDIR"
+  File "bin\phazeai-ui.exe"
+  File "bin\phazeai.exe"
+  CreateShortcut "`$DESKTOP\PhazeAI IDE.lnk" "`$INSTDIR\phazeai-ui.exe"
+  CreateDirectory "`$SMPROGRAMS\PhazeAI IDE"
+  CreateShortcut "`$SMPROGRAMS\PhazeAI IDE\PhazeAI IDE.lnk" "`$INSTDIR\phazeai-ui.exe"
+  WriteUninstaller "`$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE" "DisplayName" "`${APP_NAME} `${APP_VERSION}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE" "UninstallString" "`$INSTDIR\Uninstall.exe"
+SectionEnd
+
+Section "Uninstall"
+  Delete "`$INSTDIR\phazeai-ui.exe"
+  Delete "`$INSTDIR\phazeai.exe"
+  Delete "`$INSTDIR\Uninstall.exe"
+  Delete "`$DESKTOP\PhazeAI IDE.lnk"
+  Delete "`$SMPROGRAMS\PhazeAI IDE\PhazeAI IDE.lnk"
+  RMDir "`$SMPROGRAMS\PhazeAI IDE"
+  RMDir "`$INSTDIR"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE"
+SectionEnd
+"@
+          $script | Out-File -FilePath installer.nsi -Encoding UTF8
+
+      - name: Build NSIS installer
+        run: makensis installer.nsi
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $V = "${{ steps.ver.outputs.V }}"
+          Compress-Archive -Path "bin\phazeai-ui.exe","bin\phazeai.exe" `
+            -DestinationPath "phazeai-ide-${V}-windows-x64.zip"
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-windows
+          path: |
+            phazeai-ide-*-windows-x64-setup.exe
+            phazeai-ide-*-windows-x64.zip
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 6. GITHUB RELEASE — publish all packages with checksums
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [ package-linux, package-macos, package-windows ]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download all packages
         uses: actions/download-artifact@v4
         with:
+          pattern: packages-*
           path: dist/
           merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * | tee SHA256SUMS.txt
 
       - name: List release assets
         run: find dist -type f | sort

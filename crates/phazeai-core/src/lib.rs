@@ -16,6 +16,7 @@ pub mod project;
 pub mod syntax;
 pub mod telemetry;
 pub mod tools;
+pub mod updater;
 
 pub mod debug_ndjson;
 

@@ -1037,6 +1037,28 @@ impl IdeState {
         let ai_model_sig = create_rw_signal(settings.llm.model.clone());
 
         let status_toast_sig = create_rw_signal(None);
+        let update_available_sig = create_rw_signal(None::<String>);
+
+        // Background update check — fires once on startup, result written via
+        // create_ext_action so the signal write stays on the UI thread.
+        {
+            let send = floem::ext_event::create_ext_action(
+                floem::reactive::Scope::current(),
+                move |info: Option<phazeai_core::updater::ReleaseInfo>| {
+                    if let Some(info) = info {
+                        update_available_sig.set(Some(info.version));
+                    }
+                },
+            );
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("updater runtime");
+                let result = rt.block_on(phazeai_core::updater::check_for_update());
+                send(result);
+            });
+        }
 
         // Extension Manager — native plugin system
         let ext_manager = Arc::new(std::sync::Mutex::new(
@@ -1134,6 +1156,7 @@ impl IdeState {
             command_palette_open: create_rw_signal(false),
             command_palette_query: create_rw_signal(String::new()),
             status_toast: status_toast_sig,
+            update_available: update_available_sig,
             file_picker_open: create_rw_signal(false),
             file_picker_query: create_rw_signal(String::new()),
             file_picker_files: create_rw_signal(Vec::new()),
@@ -3794,7 +3817,49 @@ fn ide_root(state: IdeState) -> impl IntoView {
     let status_wrap = container(status_raw)
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
 
-    stack((content_row, bottom, status_wrap)).style(move |s| {
+    // Update-available banner — shown between editor and status bar when a new
+    // version is detected on startup. Click "Download" opens the releases page.
+    let update_banner = {
+        let upd = state.workbench.update_available;
+        container(
+            stack((
+                label(move || {
+                    upd.get()
+                        .map(|v| format!(" Update available: {} — ", v))
+                        .unwrap_or_default()
+                })
+                .style(move |s| {
+                    s.font_size(11.0)
+                        .color(floem::peniko::Color::from_rgb8(20, 10, 0))
+                }),
+                label(|| " Download ↗ ").style(move |s| {
+                    s.font_size(11.0)
+                        .color(floem::peniko::Color::from_rgb8(20, 10, 0))
+                        .font_bold()
+                        .cursor(floem::style::CursorStyle::Pointer)
+                }),
+            ))
+            .on_click_stop(|_| {
+                let url = format!(
+                    "https://github.com/{}/releases/latest",
+                    "jakes1345/phazeai-ide"
+                );
+                let _ = open::that(url);
+            })
+            .style(|s| s.items_center()),
+        )
+        .style(move |s| {
+            let visible = upd.get().is_some();
+            s.background(floem::peniko::Color::from_rgb8(255, 213, 79))
+                .width_full()
+                .height(22.0)
+                .items_center()
+                .justify_center()
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        })
+    };
+
+    stack((content_row, bottom, update_banner, status_wrap)).style(move |s| {
         let t = state.workbench.theme.get();
         let p = &t.palette;
         s.flex_col()

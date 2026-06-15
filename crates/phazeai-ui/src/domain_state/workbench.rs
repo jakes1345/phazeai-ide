@@ -25,6 +25,8 @@ pub struct WorkbenchState {
     pub command_palette_open: RwSignal<bool>,
     pub command_palette_query: RwSignal<String>,
     pub status_toast: RwSignal<Option<String>>,
+    /// Set to "v0.X.Y" when a newer release is available. Drives the update banner.
+    pub update_available: RwSignal<Option<String>>,
     pub file_picker_open: RwSignal<bool>,
     pub file_picker_query: RwSignal<String>,
     pub file_picker_files: RwSignal<Vec<std::path::PathBuf>>,
