@@ -1659,6 +1659,31 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             action: |s| s.workbench.new_terminal_nonce.update(|v| *v += 1),
         },
         PaletteCommand {
+            label: "Find in Files (Ctrl+Shift+F)",
+            action: |s| {
+                s.workbench.show_left_panel.set(true);
+                s.workbench.left_panel_tab.set(Tab::Search);
+            },
+        },
+        PaletteCommand {
+            label: "Explain Selection with AI (Ctrl+Shift+E)",
+            action: |s| {
+                if let Some((ref path, line, _)) = s.editor.active_cursor.get() {
+                    let sel = s.editor.selected_text.get();
+                    let fname = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    let prompt = if !sel.is_empty() {
+                        format!("Explain this code:\n\n```\n{sel}\n```")
+                    } else {
+                        format!("Explain the code around line {} in {}", line + 1, fname)
+                    };
+                    s.ai.pending_chat_inject.set(Some(prompt));
+                    s.workbench.show_right_panel.set(true);
+                }
+            },
+        },
+        PaletteCommand {
             label: "Go to Next Problem (F8)",
             action: |s| {
                 let mut sorted = s.editor.diagnostics.get();
@@ -5028,6 +5053,31 @@ pub fn launch_phaze_ide() {
                                         }
                                         return;
                                     }
+                                }
+
+                                // Ctrl+Shift+F → open global search (Find in Files)
+                                if ctrl && shift && !alt && ch.as_str() == "f" {
+                                    state.workbench.show_left_panel.set(true);
+                                    state.workbench.left_panel_tab.set(Tab::Search);
+                                    return;
+                                }
+
+                                // Ctrl+Shift+E → Explain Selection with AI
+                                if ctrl && shift && !alt && ch.as_str() == "e" {
+                                    if let Some((ref path, line, _)) = state.editor.active_cursor.get() {
+                                        let sel = state.editor.selected_text.get();
+                                        let fname = path.file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| "file".to_string());
+                                        let prompt = if !sel.is_empty() {
+                                            format!("Explain this code:\n\n```\n{sel}\n```")
+                                        } else {
+                                            format!("Explain the code around line {} in {}", line + 1, fname)
+                                        };
+                                        state.ai.pending_chat_inject.set(Some(prompt));
+                                        state.workbench.show_right_panel.set(true);
+                                    }
+                                    return;
                                 }
 
                                 // Ctrl+Alt+Shift+D → split editor down toggle
