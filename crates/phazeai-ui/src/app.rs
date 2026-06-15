@@ -2304,6 +2304,30 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.color(state.workbench.theme.get().palette.text_muted)
                 .font_size(11.0)
         }),
+        // Token usage — shown after first AI response
+        label(move || {
+            let inp = state.ai.token_usage_input.get();
+            let out = state.ai.token_usage_output.get();
+            if inp == 0 && out == 0 {
+                return String::new();
+            }
+            let fmt = |n: u64| {
+                if n >= 1_000 {
+                    format!("{:.1}k", n as f64 / 1_000.0)
+                } else {
+                    n.to_string()
+                }
+            };
+            format!("⬤ {}↑ {}↓  ", fmt(inp), fmt(out))
+        })
+        .style(move |s| {
+            let p = state.workbench.theme.get().palette;
+            let visible = state.ai.token_usage_input.get() > 0
+                || state.ai.token_usage_output.get() > 0;
+            s.font_size(10.0)
+                .color(p.text_muted)
+                .apply_if(!visible, |s| s.display(floem::style::Display::None))
+        }),
         // Read-only indicator
         {
             let ro_theme = state.workbench.theme;
@@ -3643,6 +3667,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.workspace_root,
         state.project.sidecar_client.clone(),
         state.workbench.status_toast,
+        state.ai.token_usage_input,
+        state.ai.token_usage_output,
     );
 
     let chat_wrap = container(chat).style(move |s| {

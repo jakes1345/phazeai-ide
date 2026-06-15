@@ -113,6 +113,8 @@ enum ChatUpdate {
         params_display: String,
         slot: DiffApproveSlot,
     },
+    /// Cumulative token counts for the completed run.
+    TokenUsage { input: u64, output: u64 },
 }
 
 fn format_chat_error(raw: &str) -> String {
@@ -454,6 +456,15 @@ fn send_to_ai(job: SendToAiJob) {
                             };
                             let _ = update_tx.send(ChatUpdate::McpStatus(msg));
                         }
+                        AgentEvent::TokenUsage {
+                            input_tokens,
+                            output_tokens,
+                        } => {
+                            let _ = update_tx.send(ChatUpdate::TokenUsage {
+                                input: input_tokens,
+                                output: output_tokens,
+                            });
+                        }
                         AgentEvent::Complete { .. } => {
                             let _ = update_tx.send(ChatUpdate::Done(accumulated.clone()));
                             // #region agent log
@@ -578,6 +589,8 @@ pub fn chat_panel(
     workspace_root: RwSignal<std::path::PathBuf>,
     sidecar_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
     status_toast: RwSignal<Option<String>>,
+    token_usage_input: RwSignal<u64>,
+    token_usage_output: RwSignal<u64>,
 ) -> impl IntoView {
     let mut initial_messages = vec![ChatMessage {
         role: ChatRole::Assistant,
@@ -835,6 +848,10 @@ pub fn chat_panel(
                     approval_tool.set(name);
                     approval_params.set(params_display);
                     approval_slot.set(Some(slot));
+                }
+                ChatUpdate::TokenUsage { input, output } => {
+                    token_usage_input.update(|v| *v += input);
+                    token_usage_output.update(|v| *v += output);
                 }
                 ChatUpdate::Cancelled(partial) => {
                     messages.update(|list| {
