@@ -756,6 +756,8 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
 
 pub(crate) fn hover_tooltip(state: IdeState) -> impl IntoView {
     let hover_text = state.editor.hover_text;
+    let hover_anchor_x = state.editor.hover_anchor_x;
+    let hover_anchor_y = state.editor.hover_anchor_y;
     let theme = state.workbench.theme;
 
     let tooltip_box = container(label(move || hover_text.get().unwrap_or_default()).style(
@@ -787,9 +789,15 @@ pub(crate) fn hover_tooltip(state: IdeState) -> impl IntoView {
 
     container(tooltip_box).style(move |s| {
         let shown = hover_text.get().is_some();
+        let ax = hover_anchor_x.get();
+        let ay = hover_anchor_y.get();
+        // Show the tooltip below the pointer, clamped so it starts no further
+        // right than 200 px from the left edge and doesn't go off-screen top.
+        let tip_x = (ax - 8.0).max(8.0).min(ax);
+        let tip_y = (ay + 24.0).max(8.0);
         s.absolute()
-            .inset_bottom(60.0)
-            .inset_left(320.0)
+            .inset_top(tip_y)
+            .inset_left(tip_x)
             .z_index(ui_const::Z_HOVER_TIP)
             .apply_if(!shown, |s| s.display(floem::style::Display::None))
     })

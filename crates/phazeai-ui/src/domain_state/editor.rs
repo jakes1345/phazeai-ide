@@ -110,4 +110,9 @@ pub struct EditorState {
 
     // Text currently selected in the active editor ("" when no selection).
     pub selected_text: RwSignal<String>,
+
+    // Last known pointer position (window-relative). Written by PointerMove on the
+    // root stack; read by the hover tooltip overlay to position itself near the cursor.
+    pub hover_anchor_x: RwSignal<f64>,
+    pub hover_anchor_y: RwSignal<f64>,
 }

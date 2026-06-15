@@ -1262,6 +1262,8 @@ impl IdeState {
             split_down_tabs: create_rw_signal(Vec::new()),
             close_active_tab_nonce: create_rw_signal(0u64),
             selected_text: create_rw_signal(String::new()),
+            hover_anchor_x: create_rw_signal(0.0_f64),
+            hover_anchor_y: create_rw_signal(0.0_f64),
         };
 
         let ai = AiState {
@@ -1353,6 +1355,34 @@ impl IdeState {
                 completion_filter.set(prefix);
                 completion_sel.set(0);
                 completion_open.set(true);
+            });
+        }
+
+        // Auto-hover: fire an LSP hover request 500ms after the cursor stops moving.
+        // Each cursor change cancels the in-flight timer via a generation counter.
+        // Clears stale hover_text immediately when cursor moves.
+        {
+            let hover_gen =
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let active_cursor = state.editor.active_cursor;
+            let hover_text = state.editor.hover_text;
+            let lsp_cmd = state.project.lsp_cmd.clone();
+            floem::reactive::create_effect(move |_| {
+                let cursor = active_cursor.get();
+                hover_text.set(None);
+                let gen =
+                    hover_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let hover_gen2 = hover_gen.clone();
+                let lsp_cmd2 = lsp_cmd.clone();
+                if let Some((path, line, col)) = cursor {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if hover_gen2.load(std::sync::atomic::Ordering::SeqCst) == gen {
+                            let _ = lsp_cmd2
+                                .send(LspCommand::RequestHover { path, line, col });
+                        }
+                    });
+                }
             });
         }
 
@@ -5388,6 +5418,16 @@ pub fn launch_phaze_ide() {
                                 state.editor.open_file.set(Some(canon));
                                 state.workbench.show_bottom_panel.set(false);
                             }
+                        }
+                    }
+                })
+                .on_event_cont(EventListener::PointerMove, {
+                    let hover_anchor_x = state.editor.hover_anchor_x;
+                    let hover_anchor_y = state.editor.hover_anchor_y;
+                    move |e| {
+                        if let Event::PointerMove(pe) = e {
+                            hover_anchor_x.set(pe.pos.x);
+                            hover_anchor_y.set(pe.pos.y);
                         }
                     }
                 })
