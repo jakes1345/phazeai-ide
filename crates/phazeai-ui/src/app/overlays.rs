@@ -444,7 +444,10 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
                             } else {
                                 entry.insert_text.clone()
                             };
-                            state.editor.pending_completion.set(Some((text, prefix_len)));
+                            state
+                                .editor
+                                .pending_completion
+                                .set(Some((text, prefix_len)));
                         }
                         state.editor.completion_open.set(false);
                     }

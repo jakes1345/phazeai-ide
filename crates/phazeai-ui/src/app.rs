@@ -1362,24 +1362,21 @@ impl IdeState {
         // Each cursor change cancels the in-flight timer via a generation counter.
         // Clears stale hover_text immediately when cursor moves.
         {
-            let hover_gen =
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let hover_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let active_cursor = state.editor.active_cursor;
             let hover_text = state.editor.hover_text;
             let lsp_cmd = state.project.lsp_cmd.clone();
             floem::reactive::create_effect(move |_| {
                 let cursor = active_cursor.get();
                 hover_text.set(None);
-                let gen =
-                    hover_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let gen = hover_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let hover_gen2 = hover_gen.clone();
                 let lsp_cmd2 = lsp_cmd.clone();
                 if let Some((path, line, col)) = cursor {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if hover_gen2.load(std::sync::atomic::Ordering::SeqCst) == gen {
-                            let _ = lsp_cmd2
-                                .send(LspCommand::RequestHover { path, line, col });
+                            let _ = lsp_cmd2.send(LspCommand::RequestHover { path, line, col });
                         }
                     });
                 }
@@ -1700,7 +1697,8 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             action: |s| {
                 if let Some((ref path, line, _)) = s.editor.active_cursor.get() {
                     let sel = s.editor.selected_text.get();
-                    let fname = path.file_name()
+                    let fname = path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "file".to_string());
                     let prompt = if !sel.is_empty() {
@@ -1718,12 +1716,21 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             action: |s| {
                 let mut sorted = s.editor.diagnostics.get();
                 sorted.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
-                let cur_line = s.editor.active_cursor.get().map(|(_, l, _)| l + 1).unwrap_or(0);
+                let cur_line = s
+                    .editor
+                    .active_cursor
+                    .get()
+                    .map(|(_, l, _)| l + 1)
+                    .unwrap_or(0);
                 let cur_path = s.editor.active_cursor.get().map(|(p, _, _)| p);
-                if let Some(d) = sorted.iter().find(|d| {
-                    Some(&d.path) > cur_path.as_ref()
-                        || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
-                }).or_else(|| sorted.first()) {
+                if let Some(d) = sorted
+                    .iter()
+                    .find(|d| {
+                        Some(&d.path) > cur_path.as_ref()
+                            || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
+                    })
+                    .or_else(|| sorted.first())
+                {
                     s.editor.open_file.set(Some(d.path.clone()));
                     s.editor.goto_line.set(d.line);
                 }
@@ -1734,12 +1741,22 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             action: |s| {
                 let mut sorted = s.editor.diagnostics.get();
                 sorted.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
-                let cur_line = s.editor.active_cursor.get().map(|(_, l, _)| l + 1).unwrap_or(0);
+                let cur_line = s
+                    .editor
+                    .active_cursor
+                    .get()
+                    .map(|(_, l, _)| l + 1)
+                    .unwrap_or(0);
                 let cur_path = s.editor.active_cursor.get().map(|(p, _, _)| p);
-                if let Some(d) = sorted.iter().rev().find(|d| {
-                    Some(&d.path) < cur_path.as_ref()
-                        || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
-                }).or_else(|| sorted.last()) {
+                if let Some(d) = sorted
+                    .iter()
+                    .rev()
+                    .find(|d| {
+                        Some(&d.path) < cur_path.as_ref()
+                            || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
+                    })
+                    .or_else(|| sorted.last())
+                {
                     s.editor.open_file.set(Some(d.path.clone()));
                     s.editor.goto_line.set(d.line);
                 }
@@ -2418,18 +2435,26 @@ fn status_bar(state: IdeState) -> impl IntoView {
             label(move || {
                 let cursor = lb_state.editor.active_cursor.get();
                 let diags = lb_state.editor.diagnostics.get();
-                let on_diag_line = cursor.map(|(ref path, line, _)| {
-                    diags.iter().any(|d| &d.path == path && d.line == line)
-                }).unwrap_or(false);
-                if on_diag_line { "💡 Ctrl+.  ".to_string() } else { String::new() }
+                let on_diag_line = cursor
+                    .map(|(ref path, line, _)| {
+                        diags.iter().any(|d| &d.path == path && d.line == line)
+                    })
+                    .unwrap_or(false);
+                if on_diag_line {
+                    "💡 Ctrl+.  ".to_string()
+                } else {
+                    String::new()
+                }
             })
             .style(move |s| {
                 let on_diag = {
                     let cursor = state.editor.active_cursor.get();
                     let diags = state.editor.diagnostics.get();
-                    cursor.map(|(ref path, line, _)| {
-                        diags.iter().any(|d| &d.path == path && d.line == line)
-                    }).unwrap_or(false)
+                    cursor
+                        .map(|(ref path, line, _)| {
+                            diags.iter().any(|d| &d.path == path && d.line == line)
+                        })
+                        .unwrap_or(false)
                 };
                 s.color(state.workbench.theme.get().palette.warning)
                     .font_size(11.0)
@@ -2550,8 +2575,8 @@ fn status_bar(state: IdeState) -> impl IntoView {
         })
         .style(move |s| {
             let p = state.workbench.theme.get().palette;
-            let visible = state.ai.token_usage_input.get() > 0
-                || state.ai.token_usage_output.get() > 0;
+            let visible =
+                state.ai.token_usage_input.get() > 0 || state.ai.token_usage_output.get() > 0;
             s.font_size(10.0)
                 .color(p.text_muted)
                 .apply_if(!visible, |s| s.display(floem::style::Display::None))
@@ -3585,14 +3610,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
     // ── FIM inline completion worker ─────────────────────────────────────────
     // Editors send (prefix, suffix, lang) after a 600ms debounce; this thread
     // calls the LLM and writes completions back through a signal channel.
-    let (fim_req_tx, fim_req_rx) =
-        std::sync::mpsc::sync_channel::<(String, String, String)>(4);
+    let (fim_req_tx, fim_req_rx) = std::sync::mpsc::sync_channel::<(String, String, String)>(4);
     {
         let ghost_text = state.ai.ghost_text;
-        let (fim_result_tx, fim_result_rx) =
-            std::sync::mpsc::sync_channel::<String>(4);
-        let fim_result_sig =
-            floem::ext_event::create_signal_from_channel(fim_result_rx);
+        let (fim_result_tx, fim_result_rx) = std::sync::mpsc::sync_channel::<String>(4);
+        let fim_result_sig = floem::ext_event::create_signal_from_channel(fim_result_rx);
         create_effect(move |_| {
             if let Some(suggestion) = fim_result_sig.get() {
                 if !suggestion.is_empty() {
@@ -3606,9 +3628,9 @@ fn ide_root(state: IdeState) -> impl IntoView {
                     .enable_all()
                     .build()
                     .expect("fim tokio rt");
-                let result =
-                    rt.block_on(phazeai_core::fim::fim_complete(&prefix, &suffix, &lang))
-                        .unwrap_or_default();
+                let result = rt
+                    .block_on(phazeai_core::fim::fim_complete(&prefix, &suffix, &lang))
+                    .unwrap_or_default();
                 if !result.is_empty() {
                     let _ = fim_result_tx.try_send(result);
                 }
@@ -4552,26 +4574,36 @@ pub fn launch_phaze_ide() {
                                         });
                                         // Find current position: the first diag strictly
                                         // after (or before for Shift+F8) the active cursor.
-                                        let cur_line = state.editor.active_cursor
+                                        let cur_line = state
+                                            .editor
+                                            .active_cursor
                                             .get()
                                             .map(|(_, l, _)| l + 1) // DiagEntry.line is 1-based
                                             .unwrap_or(0);
-                                        let cur_path = state.editor.active_cursor
-                                            .get()
-                                            .map(|(p, _, _)| p);
+                                        let cur_path =
+                                            state.editor.active_cursor.get().map(|(p, _, _)| p);
 
                                         let target = if shift {
                                             // Shift+F8: previous
-                                            sorted.iter().rev().find(|d| {
-                                                Some(&d.path) < cur_path.as_ref()
-                                                    || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
-                                            }).or_else(|| sorted.last())
+                                            sorted
+                                                .iter()
+                                                .rev()
+                                                .find(|d| {
+                                                    Some(&d.path) < cur_path.as_ref()
+                                                        || (Some(&d.path) == cur_path.as_ref()
+                                                            && d.line < cur_line)
+                                                })
+                                                .or_else(|| sorted.last())
                                         } else {
                                             // F8: next
-                                            sorted.iter().find(|d| {
-                                                Some(&d.path) > cur_path.as_ref()
-                                                    || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
-                                            }).or_else(|| sorted.first())
+                                            sorted
+                                                .iter()
+                                                .find(|d| {
+                                                    Some(&d.path) > cur_path.as_ref()
+                                                        || (Some(&d.path) == cur_path.as_ref()
+                                                            && d.line > cur_line)
+                                                })
+                                                .or_else(|| sorted.first())
                                         };
 
                                         if let Some(d) = target {
@@ -4748,15 +4780,16 @@ pub fn launch_phaze_ide() {
                                             .iter()
                                             .enumerate()
                                             .filter(|(_, e)| {
-                                                f.is_empty()
-                                                    || e.label.to_lowercase().contains(&f)
+                                                f.is_empty() || e.label.to_lowercase().contains(&f)
                                             })
                                             .map(|(i, _)| i)
                                             .collect();
                                         if !filtered.is_empty() {
                                             let sel = state.editor.completion_selected.get();
-                                            let cur =
-                                                filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                                            let cur = filtered
+                                                .iter()
+                                                .position(|&i| i == sel)
+                                                .unwrap_or(0);
                                             let next = (cur + 1).min(filtered.len() - 1);
                                             state.editor.completion_selected.set(filtered[next]);
                                         }
@@ -4775,15 +4808,16 @@ pub fn launch_phaze_ide() {
                                             .iter()
                                             .enumerate()
                                             .filter(|(_, e)| {
-                                                f.is_empty()
-                                                    || e.label.to_lowercase().contains(&f)
+                                                f.is_empty() || e.label.to_lowercase().contains(&f)
                                             })
                                             .map(|(i, _)| i)
                                             .collect();
                                         if !filtered.is_empty() {
                                             let sel = state.editor.completion_selected.get();
-                                            let cur =
-                                                filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                                            let cur = filtered
+                                                .iter()
+                                                .position(|&i| i == sel)
+                                                .unwrap_or(0);
                                             let prev = cur.saturating_sub(1);
                                             state.editor.completion_selected.set(filtered[prev]);
                                         }
@@ -5094,15 +5128,22 @@ pub fn launch_phaze_ide() {
 
                                 // Ctrl+Shift+E → Explain Selection with AI
                                 if ctrl && shift && !alt && ch.as_str() == "e" {
-                                    if let Some((ref path, line, _)) = state.editor.active_cursor.get() {
+                                    if let Some((ref path, line, _)) =
+                                        state.editor.active_cursor.get()
+                                    {
                                         let sel = state.editor.selected_text.get();
-                                        let fname = path.file_name()
+                                        let fname = path
+                                            .file_name()
                                             .map(|n| n.to_string_lossy().to_string())
                                             .unwrap_or_else(|| "file".to_string());
                                         let prompt = if !sel.is_empty() {
                                             format!("Explain this code:\n\n```\n{sel}\n```")
                                         } else {
-                                            format!("Explain the code around line {} in {}", line + 1, fname)
+                                            format!(
+                                                "Explain the code around line {} in {}",
+                                                line + 1,
+                                                fname
+                                            )
                                         };
                                         state.ai.pending_chat_inject.set(Some(prompt));
                                         state.workbench.show_right_panel.set(true);

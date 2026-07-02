@@ -938,7 +938,14 @@ fn single_terminal(
                 );
                 lay
             } else {
-                build_line_layout(&TermLine { segments: segments.clone() }, p.text_primary, p.bg_base, fs)
+                build_line_layout(
+                    &TermLine {
+                        segments: segments.clone(),
+                    },
+                    p.text_primary,
+                    p.bg_base,
+                    fs,
+                )
             };
             layout_sig.set(new_lay);
         });
@@ -965,8 +972,11 @@ fn single_terminal(
                 // ── Exit badge ──────────────────────────────────────────
                 let badge = container(
                     label(move || {
-                        if exit_code == 0 { " ✓ ".to_string() }
-                        else { format!(" ✗ {} ", exit_code) }
+                        if exit_code == 0 {
+                            " ✓ ".to_string()
+                        } else {
+                            format!(" ✗ {} ", exit_code)
+                        }
                     })
                     .style(move |s| {
                         s.font_size(10.0)
@@ -994,25 +1004,38 @@ fn single_terminal(
                 // ── Header text (prompt + command) ──────────────────────
                 let header_init = {
                     let t = theme.get_untracked();
-                    build_line_layout(&header_line, t.palette.text_secondary, t.palette.bg_base, term_font_size.get_untracked() as f32)
+                    build_line_layout(
+                        &header_line,
+                        t.palette.text_secondary,
+                        t.palette.bg_base,
+                        term_font_size.get_untracked() as f32,
+                    )
                 };
                 let header_sig: RwSignal<TextLayout> = create_rw_signal(header_init);
                 let hl2 = header_line.clone();
                 create_effect(move |_| {
                     let t = theme.get();
                     let fs = term_font_size.get() as f32;
-                    header_sig.set(build_line_layout(&hl2, t.palette.text_secondary, t.palette.bg_base, fs));
+                    header_sig.set(build_line_layout(
+                        &hl2,
+                        t.palette.text_secondary,
+                        t.palette.bg_base,
+                        fs,
+                    ));
                 });
-                let header_text =
-                    floem::views::rich_text(move || header_sig.get())
-                        .style(|s| s.flex_grow(1.0).min_width(0.0));
+                let header_text = floem::views::rich_text(move || header_sig.get())
+                    .style(|s| s.flex_grow(1.0).min_width(0.0));
 
                 // ── Collapse toggle ─────────────────────────────────────
                 let toggle = container(label(move || if collapsed.get() { " ⌄ " } else { " ⌃ " }))
                     .style(move |s| {
                         let p = theme.get().palette;
                         s.font_size(10.0)
-                            .color(if has_output { p.text_muted } else { p.text_disabled })
+                            .color(if has_output {
+                                p.text_muted
+                            } else {
+                                p.text_disabled
+                            })
                             .padding_horiz(4.0)
                             .border_radius(3.0)
                             .cursor(if has_output {
@@ -1051,10 +1074,8 @@ fn single_terminal(
                             .hover(|s| s.color(p.accent))
                     })
                     .on_click_stop(move |_| {
-                        let prompt = format!(
-                            "Explain this terminal output:\n\n```\n{}\n```",
-                            lines_ai
-                        );
+                        let prompt =
+                            format!("Explain this terminal output:\n\n```\n{}\n```", lines_ai);
                         state_ai.ai.pending_chat_inject.set(Some(prompt));
                         state_ai.workbench.show_right_panel.set(true);
                     });
@@ -1096,17 +1117,14 @@ fn single_terminal(
                 });
 
                 // ── Block card ──────────────────────────────────────────
-                container(
-                    stack((header_row, output_rows))
-                        .style(|s| s.flex_col().width_full()),
-                )
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.width_full()
-                        .border_bottom(1.0)
-                        .border_color(p.border.with_alpha(0.25))
-                        .margin_bottom(1.0)
-                })
+                container(stack((header_row, output_rows)).style(|s| s.flex_col().width_full()))
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.width_full()
+                            .border_bottom(1.0)
+                            .border_color(p.border.with_alpha(0.25))
+                            .margin_bottom(1.0)
+                    })
             },
         )
         .style(|s| s.flex_col().width_full())
@@ -1244,7 +1262,8 @@ fn single_terminal(
                         // Ctrl+Shift+C — copy all visible terminal text to clipboard
                         if ch.as_str() == "c" || ch.as_str() == "C" {
                             if let Ok(ts) = term_state_c.lock() {
-                                let mut parts: Vec<String> = ts.blocks
+                                let mut parts: Vec<String> = ts
+                                    .blocks
                                     .iter()
                                     .flat_map(|b| b.lines.iter())
                                     .chain(ts.current_block_lines.iter())
@@ -1494,7 +1513,9 @@ pub fn terminal_panel(
     {
         let writer = active_pty_writer;
         create_effect(move |_| {
-            let Some(res) = ai_cmd_result.get() else { return };
+            let Some(res) = ai_cmd_result.get() else {
+                return;
+            };
             ai_cmd_thinking.set(false);
             match res {
                 Ok(cmd) => {
@@ -1849,23 +1870,25 @@ pub fn terminal_panel(
                 term_font_size.update(|v| *v = (*v + 1).min(32));
             }),
         // "✦" AI command button — opens natural-language → shell command bar (Ctrl+K)
-        container(label(move || if ai_cmd_thinking.get() { "⏳" } else { "✦" }))
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                let active = ai_cmd_open.get();
-                s.padding_horiz(8.0)
-                    .padding_vert(5.0)
-                    .font_size(13.0)
-                    .color(if active { p.accent } else { p.text_muted })
-                    .cursor(CursorStyle::Pointer)
-                    .border(1.0)
-                    .border_color(if active { p.accent } else { p.border })
-                    .border_radius(3.0)
-                    .margin_right(4.0)
-                    .hover(|s| s.color(p.accent))
-            })
-            .on_click_stop(move |_| ai_cmd_open.update(|v| *v = !*v)),
+        container(label(
+            move || if ai_cmd_thinking.get() { "⏳" } else { "✦" },
+        ))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let active = ai_cmd_open.get();
+            s.padding_horiz(8.0)
+                .padding_vert(5.0)
+                .font_size(13.0)
+                .color(if active { p.accent } else { p.text_muted })
+                .cursor(CursorStyle::Pointer)
+                .border(1.0)
+                .border_color(if active { p.accent } else { p.border })
+                .border_radius(3.0)
+                .margin_right(4.0)
+                .hover(|s| s.color(p.accent))
+        })
+        .on_click_stop(move |_| ai_cmd_open.update(|v| *v = !*v)),
         // "⊟" split button — toggle side-by-side split
         container(label(|| "⊟"))
             .style(move |s| {
@@ -2118,9 +2141,13 @@ pub fn terminal_panel(
             });
 
         let hint = label(move || {
-            if ai_cmd_thinking.get() { "Generating…".to_string() }
-            else { "Enter to generate · Esc to close".to_string() }
-        }).style(move |s| {
+            if ai_cmd_thinking.get() {
+                "Generating…".to_string()
+            } else {
+                "Enter to generate · Esc to close".to_string()
+            }
+        })
+        .style(move |s| {
             let p = theme.get().palette;
             s.font_size(11.0).color(p.text_muted).padding_horiz(10.0)
         });
@@ -2128,8 +2155,11 @@ pub fn terminal_panel(
         let close_btn = container(label(|| "✕"))
             .style(move |s| {
                 let p = theme.get().palette;
-                s.font_size(12.0).color(p.text_muted).padding_horiz(8.0)
-                    .padding_vert(4.0).cursor(CursorStyle::Pointer)
+                s.font_size(12.0)
+                    .color(p.text_muted)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .cursor(CursorStyle::Pointer)
                     .hover(|s| s.color(p.text_primary))
             })
             .on_click_stop(move |_| {
@@ -2141,8 +2171,10 @@ pub fn terminal_panel(
             stack((
                 label(|| "✦ AI Command").style(move |s| {
                     let p = theme.get().palette;
-                    s.font_size(11.0).font_weight(floem::text::Weight::BOLD)
-                     .color(p.accent).margin_right(8.0)
+                    s.font_size(11.0)
+                        .font_weight(floem::text::Weight::BOLD)
+                        .color(p.accent)
+                        .margin_right(8.0)
                 }),
                 input,
                 hint,

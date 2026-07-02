@@ -80,8 +80,7 @@ pub struct ChatMessage {
 }
 
 /// Shared slot for diff approval: carries the oneshot sender for Approve/Reject.
-type DiffApproveSlot =
-    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>;
+type DiffApproveSlot = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>;
 
 /// What the background AI thread sends to the Floem UI thread.
 #[derive(Clone, Debug)]
@@ -410,8 +409,8 @@ fn send_to_ai(job: SendToAiJob) {
                     return Box::pin(async { true });
                 }
                 let tx = approval_update_tx.clone();
-                let params_display = serde_json::to_string_pretty(&params)
-                    .unwrap_or_else(|_| params.to_string());
+                let params_display =
+                    serde_json::to_string_pretty(&params).unwrap_or_else(|_| params.to_string());
                 Box::pin(async move {
                     let (os_tx, os_rx) = tokio::sync::oneshot::channel::<bool>();
                     let slot = Arc::new(std::sync::Mutex::new(Some(os_tx)));
@@ -1149,9 +1148,8 @@ pub fn chat_panel(
                 let hov = create_rw_signal(false);
                 let badge_label = format!("⚡ {} ✕", name);
                 container(
-                    label(move || badge_label.clone()).style(move |s| {
-                        s.font_size(10.0).color(theme.get().palette.accent)
-                    }),
+                    label(move || badge_label.clone())
+                        .style(move |s| s.font_size(10.0).color(theme.get().palette.accent)),
                 )
                 .style(move |s| {
                     let p = &theme.get().palette;
@@ -1173,7 +1171,9 @@ pub fn chat_panel(
                 .on_click_stop(move |_| active_skill_name.set(None))
                 .into_any()
             } else {
-                container(label(|| "")).style(|s| s.display(floem::style::Display::None)).into_any()
+                container(label(|| ""))
+                    .style(|s| s.display(floem::style::Display::None))
+                    .into_any()
             }
         },
     );
@@ -1223,9 +1223,10 @@ pub fn chat_panel(
                                 }
                             }
                         }),
-                    container(label(|| "✓").style(move |s| {
-                        s.font_size(10.0).color(theme.get().palette.accent)
-                    }))
+                    container(
+                        label(|| "✓")
+                            .style(move |s| s.font_size(10.0).color(theme.get().palette.accent)),
+                    )
                     .style(move |s| {
                         let p = theme.get().palette;
                         s.padding_horiz(5.0)
@@ -1260,9 +1261,8 @@ pub fn chat_panel(
                 // Display mode: clickable model name chip
                 let hov = create_rw_signal(false);
                 container(
-                    label(move || active_model.get()).style(move |s| {
-                        s.font_size(10.0).color(theme.get().palette.text_muted)
-                    }),
+                    label(move || active_model.get())
+                        .style(move |s| s.font_size(10.0).color(theme.get().palette.text_muted)),
                 )
                 .style(move |s| {
                     let p = theme.get().palette;
@@ -1940,29 +1940,28 @@ pub fn chat_panel(
             move |(tag, text): (char, String)| {
                 let is_add = tag == '+';
                 let is_del = tag == '-';
-                label(move || format!("{} {}", tag, text.trim_end_matches('\n')))
-                    .style(move |s| {
-                        let p = &theme.get().palette;
-                        s.font_family("monospace".to_string())
-                            .font_size(11.0)
-                            .padding_horiz(8.0)
-                            .padding_vert(1.0)
-                            .width_full()
-                            .color(if is_add {
-                                floem::peniko::Color::from_rgb8(130, 220, 130)
-                            } else if is_del {
-                                floem::peniko::Color::from_rgb8(220, 120, 120)
-                            } else {
-                                p.text_muted
-                            })
-                            .background(if is_add {
-                                floem::peniko::Color::from_rgba8(0, 80, 0, 80)
-                            } else if is_del {
-                                floem::peniko::Color::from_rgba8(80, 0, 0, 80)
-                            } else {
-                                floem::peniko::Color::TRANSPARENT
-                            })
-                    })
+                label(move || format!("{} {}", tag, text.trim_end_matches('\n'))).style(move |s| {
+                    let p = &theme.get().palette;
+                    s.font_family("monospace".to_string())
+                        .font_size(11.0)
+                        .padding_horiz(8.0)
+                        .padding_vert(1.0)
+                        .width_full()
+                        .color(if is_add {
+                            floem::peniko::Color::from_rgb8(130, 220, 130)
+                        } else if is_del {
+                            floem::peniko::Color::from_rgb8(220, 120, 120)
+                        } else {
+                            p.text_muted
+                        })
+                        .background(if is_add {
+                            floem::peniko::Color::from_rgba8(0, 80, 0, 80)
+                        } else if is_del {
+                            floem::peniko::Color::from_rgba8(80, 0, 0, 80)
+                        } else {
+                            floem::peniko::Color::TRANSPARENT
+                        })
+                })
             },
         )
         .style(|s| s.flex_col().width_full());
@@ -2184,28 +2183,25 @@ pub fn chat_panel(
                         .width_full()
                 }),
                 // Params display (scrollable, monospace)
-                scroll(
-                    label(move || approval_params.get()).style(move |s| {
-                        s.font_size(11.0)
-                            .font_family("monospace".to_string())
-                            .color(theme.get().palette.text_secondary)
-                            .padding(8.0)
-                            .width_full()
-                    }),
-                )
+                scroll(label(move || approval_params.get()).style(move |s| {
+                    s.font_size(11.0)
+                        .font_family("monospace".to_string())
+                        .color(theme.get().palette.text_secondary)
+                        .padding(8.0)
+                        .width_full()
+                }))
                 .style(|s| s.width_full().max_height(120.0)),
                 // Buttons
-                container(
-                    stack((allow_btn, deny_btn)).style(|s| s.gap(8.0).items_center()),
-                )
-                .style(move |s| {
-                    let p = &theme.get().palette;
-                    s.padding(10.0)
-                        .border_top(1.0)
-                        .border_color(p.glass_border)
-                        .width_full()
-                        .justify_end()
-                }),
+                container(stack((allow_btn, deny_btn)).style(|s| s.gap(8.0).items_center())).style(
+                    move |s| {
+                        let p = &theme.get().palette;
+                        s.padding(10.0)
+                            .border_top(1.0)
+                            .border_color(p.glass_border)
+                            .width_full()
+                            .justify_end()
+                    },
+                ),
             ))
             .style(|s| s.flex_col().width_full()),
         )
