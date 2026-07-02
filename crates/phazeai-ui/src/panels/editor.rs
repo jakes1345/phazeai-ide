@@ -1204,13 +1204,21 @@ pub fn editor_panel(
     // Incremented to trigger "replace all matches" in the active editor.
     let replace_all_nonce: RwSignal<u64> = create_rw_signal(0u64);
     let find_whole_word: RwSignal<bool> = create_rw_signal(false);
+    // Find-in-selection: restrict matches to the byte range captured when the
+    // find bar opened (or when the toggle was clicked).
+    let find_in_selection: RwSignal<bool> = create_rw_signal(false);
+    let find_sel_range: RwSignal<Option<(usize, usize)>> = create_rw_signal(None);
+    // Live selection span of the active tab (min..max across regions).
+    let active_sel_range: RwSignal<Option<(usize, usize)>> = create_rw_signal(None);
 
-    // Compute match offsets reactively (for display + navigation)
+    // Compute match ranges (start, end) reactively — for display + navigation.
+    // Ranges (not just starts) so regex matches whose length differs from the
+    // pattern length replace/highlight correctly, and multi-line matches work.
     let find_match_offsets = create_memo({
         let docs_for_find = docs_for_find.clone();
-        move |_| -> Vec<usize> {
-            let q = find_query.get();
-            if q.is_empty() {
+        move |_| -> Vec<(usize, usize)> {
+            let raw_q = find_query.get();
+            if raw_q.is_empty() {
                 return vec![];
             }
             let case = find_case.get();
@@ -1229,37 +1237,50 @@ pub fn editor_panel(
                 return vec![];
             };
             let text = doc.text().to_string();
-            let mut offs = vec![];
+            let mut ranges: Vec<(usize, usize)> = vec![];
             if use_regex {
                 // Regex mode using the regex crate (if available) or simple literal fallback.
                 // Build pattern with optional case-insensitive flag.
-                let pattern = if case { q.clone() } else { format!("(?i){q}") };
+                let pattern = if case {
+                    raw_q.clone()
+                } else {
+                    format!("(?i){raw_q}")
+                };
                 if let Ok(re) = regex::Regex::new(&pattern) {
                     for m in re.find_iter(&text) {
-                        offs.push(m.start());
+                        if m.start() < m.end() {
+                            ranges.push((m.start(), m.end()));
+                        }
                     }
                 }
-            } else if case {
-                // Case-sensitive literal search
-                let mut start = 0usize;
-                while let Some(pos) = text[start..].find(q.as_str()) {
-                    offs.push(start + pos);
-                    start += pos + q.len().max(1);
-                }
             } else {
-                // Case-insensitive literal search
-                let q_lo = q.to_lowercase();
-                let t_lo = text.to_lowercase();
-                let mut start = 0usize;
-                while let Some(pos) = t_lo[start..].find(&q_lo) {
-                    offs.push(start + pos);
-                    start += pos + q_lo.len().max(1);
+                // Literal mode. Unescape \n and \t so multi-line patterns can be
+                // typed into the single-line input (same escapes as the replace field).
+                let q = raw_q.replace("\\n", "\n").replace("\\t", "\t");
+                if q.is_empty() {
+                    return vec![];
+                }
+                if case {
+                    // Case-sensitive literal search
+                    let mut start = 0usize;
+                    while let Some(pos) = text[start..].find(q.as_str()) {
+                        ranges.push((start + pos, start + pos + q.len()));
+                        start += pos + q.len();
+                    }
+                } else {
+                    // Case-insensitive literal search
+                    let q_lo = q.to_lowercase();
+                    let t_lo = text.to_lowercase();
+                    let mut start = 0usize;
+                    while let Some(pos) = t_lo[start..].find(&q_lo) {
+                        ranges.push((start + pos, start + pos + q_lo.len()));
+                        start += pos + q_lo.len();
+                    }
                 }
             }
             // Apply whole-word filter: each match position must have word boundaries.
             if whole_word && !use_regex {
-                offs.retain(|&start| {
-                    let end = start + q.len();
+                ranges.retain(|&(start, end)| {
                     let before_ok = start == 0 || {
                         let c = text[..start].chars().last().unwrap_or(' ');
                         !c.is_alphanumeric() && c != '_'
@@ -1271,7 +1292,13 @@ pub fn editor_panel(
                     before_ok && after_ok
                 });
             }
-            offs
+            // Restrict to the captured selection when the toggle is on.
+            if find_in_selection.get() {
+                if let Some((sel_s, sel_e)) = find_sel_range.get() {
+                    ranges.retain(|&(ms, me)| ms >= sel_s && me <= sel_e);
+                }
+            }
+            ranges
         }
     });
 
@@ -1782,8 +1809,19 @@ pub fn editor_panel(
                             .collect::<Vec<_>>()
                             .join("\n");
                         selected_text.set(text);
+                        // Byte span across all non-empty regions (for find-in-selection).
+                        let span = sel
+                            .regions()
+                            .iter()
+                            .filter(|r| r.min() != r.max())
+                            .fold(None, |acc: Option<(usize, usize)>, r| match acc {
+                                Some((s, e)) => Some((s.min(r.min()), e.max(r.max()))),
+                                None => Some((r.min(), r.max())),
+                            });
+                        active_sel_range.set(span);
                     } else {
                         selected_text.set(String::new());
+                        active_sel_range.set(None);
                     }
                 });
             }
@@ -2427,17 +2465,23 @@ pub fn editor_panel(
                     last_repl_nonce.set(nonce);
                     let offsets = find_match_offsets.get();
                     let cur = find_cur_match.get();
-                    let Some(&start) = offsets.get(cur) else {
+                    let Some(&(start, end)) = offsets.get(cur) else {
                         return;
                     };
-                    let q = find_query.get();
-                    let end = start + q.len();
                     let sel = Selection::region(start, end);
                     let replacement = replace_query
                         .get()
                         .replace("\\n", "\n")
                         .replace("\\t", "\t");
                     doc_for_repl.edit_single(sel, &replacement, EditType::InsertChars);
+                    // Keep the captured selection span valid after the edit.
+                    if find_in_selection.get_untracked() {
+                        if let Some((s, e)) = find_sel_range.get_untracked() {
+                            let delta = replacement.len() as isize - (end - start) as isize;
+                            let new_e = (e as isize + delta).max(s as isize) as usize;
+                            find_sel_range.set(Some((s, new_e)));
+                        }
+                    }
                 });
             }
 
@@ -2458,16 +2502,23 @@ pub fn editor_panel(
                     if offsets.is_empty() {
                         return;
                     }
-                    let q = find_query.get();
                     let replacement = replace_query
                         .get()
                         .replace("\\n", "\n")
                         .replace("\\t", "\t");
                     // Replace from last to first to preserve earlier offsets.
-                    for &start in offsets.iter().rev() {
-                        let end = start + q.len();
+                    let mut total_delta = 0isize;
+                    for &(start, end) in offsets.iter().rev() {
                         let sel = Selection::region(start, end);
                         doc_for_repl_all.edit_single(sel, &replacement, EditType::InsertChars);
+                        total_delta += replacement.len() as isize - (end - start) as isize;
+                    }
+                    // Keep the captured selection span valid after the edits.
+                    if find_in_selection.get_untracked() {
+                        if let Some((s, e)) = find_sel_range.get_untracked() {
+                            let new_e = (e as isize + total_delta).max(s as isize) as usize;
+                            find_sel_range.set(Some((s, new_e)));
+                        }
                     }
                 });
             }
@@ -4147,8 +4198,7 @@ pub fn editor_panel(
                     let (fold_ranges, folded) = fold_state.get();
                     let bp_pairs = bracket_pairs_sig.get();
                     let match_brkt = matching_bracket_sig.get();
-                    let find_offs = find_match_offsets.get();
-                    let find_q = find_query.get();
+                    let find_ranges = find_match_offsets.get();
                     let blame_entries = blame_data.get();
                     let all_bps = breakpoints.get();
                     let stopped_at = debug_stopped_at.get();
@@ -4221,12 +4271,7 @@ pub fn editor_panel(
                     } else {
                         active_blame.set(String::new());
                     }
-                    // Convert start offsets \u2192 (start, end) ranges using query length.
-                    new_style.find_match_ranges = if find_q.is_empty() {
-                        vec![]
-                    } else {
-                        find_offs.iter().map(|&s| (s, s + find_q.len())).collect()
-                    };
+                    new_style.find_match_ranges = find_ranges;
                     editor_for_style.update_styling(Rc::new(new_style));
                 });
             }
@@ -4481,11 +4526,17 @@ pub fn editor_panel(
             if let Event::PointerDown(pe) = e {
                 // Map click Y coordinate to document line and jump there.
                 let tab_list = tabs.get_untracked();
-                let Some(idx) = active_idx.get_untracked() else { return; };
-                let Some(tab) = tab_list.get(idx) else { return; };
+                let Some(idx) = active_idx.get_untracked() else {
+                    return;
+                };
+                let Some(tab) = tab_list.get(idx) else {
+                    return;
+                };
                 let key = tab.path.to_string_lossy().to_string();
                 let reg = minimap_docs_click.borrow();
-                let Some(doc) = reg.get(&key) else { return; };
+                let Some(doc) = reg.get(&key) else {
+                    return;
+                };
                 let line_count = doc.text().to_string().lines().count().max(1) as f64;
                 let canvas_h = minimap_canvas_height.get_untracked().max(1.0);
                 let frac = (pe.pos.y / canvas_h).clamp(0.0, 1.0);
@@ -4569,7 +4620,7 @@ pub fn editor_panel(
                 let cur = find_cur_match.get();
                 let prev = if cur == 0 { offs.len() - 1 } else { cur - 1 };
                 find_cur_match.set(prev);
-                find_jump_offset.set(offs[prev]);
+                find_jump_offset.set(offs[prev].0);
                 find_jump_nonce.update(|n| *n += 1);
             });
 
@@ -4591,7 +4642,7 @@ pub fn editor_panel(
                 let cur = find_cur_match.get();
                 let next = (cur + 1) % offs.len();
                 find_cur_match.set(next);
-                find_jump_offset.set(offs[next]);
+                find_jump_offset.set(offs[next].0);
                 find_jump_nonce.update(|n| *n += 1);
             });
 
@@ -4608,6 +4659,7 @@ pub fn editor_panel(
             .on_click_stop(move |_| {
                 find_open.set(false);
                 find_query.set(String::new());
+                find_in_selection.set(false);
             });
 
         // Case-sensitive toggle button (Aa)
@@ -4687,6 +4739,40 @@ pub fn editor_panel(
             })
             .on_click_stop(move |_| {
                 find_regex_mode.update(|v| *v = !*v);
+            });
+
+        // Find-in-selection toggle button (Sel)
+        let sel_btn = container(label(|| "Sel"))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(3.0)
+                    .font_size(11.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .color(if find_in_selection.get() {
+                        p.bg_base
+                    } else {
+                        p.text_muted
+                    })
+                    .background(if find_in_selection.get() {
+                        p.accent
+                    } else {
+                        p.bg_elevated
+                    })
+                    .border(1.0)
+                    .border_color(p.border)
+            })
+            .on_click_stop(move |_| {
+                let turning_on = !find_in_selection.get();
+                if turning_on {
+                    // Re-capture the live selection so toggling reflects what
+                    // the user has highlighted right now.
+                    if let Some(range) = active_sel_range.get_untracked() {
+                        find_sel_range.set(Some(range));
+                    }
+                }
+                find_in_selection.set(turning_on);
             });
 
         let find_input = text_input(find_query).style(move |s| {
@@ -4786,6 +4872,7 @@ pub fn editor_panel(
                 case_btn,
                 word_btn,
                 regex_btn,
+                sel_btn,
                 match_label,
                 prev_btn,
                 next_btn,
@@ -4817,6 +4904,7 @@ pub fn editor_panel(
                         find_open.set(false);
                         find_query.set(String::new());
                         replace_open.set(false);
+                        find_in_selection.set(false);
                     }
                     Key::Named(floem::keyboard::NamedKey::Enter) => {
                         let offs = find_match_offsets.get();
@@ -4826,7 +4914,7 @@ pub fn editor_panel(
                         let cur = find_cur_match.get();
                         let next = (cur + 1) % offs.len();
                         find_cur_match.set(next);
-                        find_jump_offset.set(offs[next]);
+                        find_jump_offset.set(offs[next].0);
                         find_jump_nonce.update(|n| *n += 1);
                     }
                     _ => {}
@@ -4958,60 +5046,66 @@ pub fn editor_panel(
         let diags = diagnostics;
         let cursor = active_cursor;
         container(
-            stack((
-                label(move || {
-                    let Some((path, line, _col)) = cursor.get() else { return String::new(); };
-                    let line1 = line + 1; // active_cursor is 0-based, DiagEntry.line is 1-based
-                    let all = diags.get();
-                    // Prefer errors, then warnings, then info/hints.
-                    let best = all.iter()
-                        .filter(|d| d.path == path && d.line == line1)
-                        .min_by_key(|d| match d.severity {
-                            DiagSeverity::Error => 0,
-                            DiagSeverity::Warning => 1,
-                            DiagSeverity::Info => 2,
-                            DiagSeverity::Hint => 3,
-                        });
-                    if let Some(d) = best {
-                        // Keep it to one line and max 120 chars.
-                        let msg = d.message.lines().next().unwrap_or(&d.message);
-                        let truncated = if msg.len() > 120 { &msg[..120] } else { msg };
-                        let prefix = match d.severity {
-                            DiagSeverity::Error => "✗ ",
-                            DiagSeverity::Warning => "⚠ ",
-                            DiagSeverity::Info | DiagSeverity::Hint => "ℹ ",
-                        };
-                        format!("{prefix}{truncated}")
-                    } else {
-                        String::new()
+            stack((label(move || {
+                let Some((path, line, _col)) = cursor.get() else {
+                    return String::new();
+                };
+                let line1 = line + 1; // active_cursor is 0-based, DiagEntry.line is 1-based
+                let all = diags.get();
+                // Prefer errors, then warnings, then info/hints.
+                let best = all
+                    .iter()
+                    .filter(|d| d.path == path && d.line == line1)
+                    .min_by_key(|d| match d.severity {
+                        DiagSeverity::Error => 0,
+                        DiagSeverity::Warning => 1,
+                        DiagSeverity::Info => 2,
+                        DiagSeverity::Hint => 3,
+                    });
+                if let Some(d) = best {
+                    // Keep it to one line and max 120 chars.
+                    let msg = d.message.lines().next().unwrap_or(&d.message);
+                    let truncated = if msg.len() > 120 { &msg[..120] } else { msg };
+                    let prefix = match d.severity {
+                        DiagSeverity::Error => "✗ ",
+                        DiagSeverity::Warning => "⚠ ",
+                        DiagSeverity::Info | DiagSeverity::Hint => "ℹ ",
+                    };
+                    format!("{prefix}{truncated}")
+                } else {
+                    String::new()
+                }
+            })
+            .style(move |s| {
+                let Some((path, line, _)) = active_cursor.get() else {
+                    return s.color(floem::peniko::Color::TRANSPARENT);
+                };
+                let line1 = line + 1;
+                let all = diagnostics.get();
+                let sev = all
+                    .iter()
+                    .filter(|d| d.path == path && d.line == line1)
+                    .min_by_key(|d| match d.severity {
+                        DiagSeverity::Error => 0,
+                        DiagSeverity::Warning => 1,
+                        _ => 2,
+                    })
+                    .map(|d| d.severity);
+                let p = theme.get().palette;
+                let color = match sev {
+                    Some(DiagSeverity::Error) => {
+                        floem::peniko::Color::from_rgba8(255, 100, 100, 220)
                     }
-                })
-                .style(move |s| {
-                    let Some((path, line, _)) = active_cursor.get() else {
-                        return s.color(floem::peniko::Color::TRANSPARENT);
-                    };
-                    let line1 = line + 1;
-                    let all = diagnostics.get();
-                    let sev = all.iter()
-                        .filter(|d| d.path == path && d.line == line1)
-                        .min_by_key(|d| match d.severity {
-                            DiagSeverity::Error => 0,
-                            DiagSeverity::Warning => 1,
-                            _ => 2,
-                        })
-                        .map(|d| d.severity.clone());
-                    let p = theme.get().palette;
-                    let color = match sev {
-                        Some(DiagSeverity::Error) => floem::peniko::Color::from_rgba8(255, 100, 100, 220),
-                        Some(DiagSeverity::Warning) => floem::peniko::Color::from_rgba8(255, 200, 60, 200),
-                        _ => p.text_muted,
-                    };
-                    s.font_size(11.5)
-                        .color(color)
-                        .font_family("JetBrains Mono, Fira Code, Cascadia Code, monospace".to_string())
-                        .flex_grow(1.0)
-                }),
-            ))
+                    Some(DiagSeverity::Warning) => {
+                        floem::peniko::Color::from_rgba8(255, 200, 60, 200)
+                    }
+                    _ => p.text_muted,
+                };
+                s.font_size(11.5)
+                    .color(color)
+                    .font_family("JetBrains Mono, Fira Code, Cascadia Code, monospace".to_string())
+                    .flex_grow(1.0)
+            }),))
             .style(|s| s.flex_row().items_center().width_full()),
         )
         .style(move |s| {
@@ -5019,7 +5113,10 @@ pub fn editor_panel(
                 return s.display(floem::style::Display::None);
             };
             let line1 = line + 1;
-            let has_diag = diagnostics.get().iter().any(|d| d.path == path && d.line == line1);
+            let has_diag = diagnostics
+                .get()
+                .iter()
+                .any(|d| d.path == path && d.line == line1);
             let p = theme.get().palette;
             s.width_full()
                 .height(22.0)
@@ -5161,37 +5258,34 @@ pub fn editor_panel(
     let body_ctx_x: RwSignal<f64> = create_rw_signal(0.0);
     let body_ctx_y: RwSignal<f64> = create_rw_signal(0.0);
 
-    let body_ctx_item = |label_text: &'static str,
-                         hovered_sig: RwSignal<bool>,
-                         action: Box<dyn Fn() + 'static>| {
-        let hov = hovered_sig;
-        container(
-            label(move || label_text).style(move |s| {
+    let body_ctx_item =
+        |label_text: &'static str, hovered_sig: RwSignal<bool>, action: Box<dyn Fn() + 'static>| {
+            let hov = hovered_sig;
+            container(label(move || label_text).style(move |s| {
                 let p = &theme.get().palette;
                 s.font_size(12.0)
                     .color(if hov.get() { p.accent } else { p.text_primary })
                     .width_full()
-            }),
-        )
-        .style(move |s| {
-            let p = &theme.get().palette;
-            s.padding_horiz(12.0)
-                .padding_vert(5.0)
-                .width_full()
-                .cursor(floem::style::CursorStyle::Pointer)
-                .background(if hov.get() {
-                    p.bg_elevated
-                } else {
-                    floem::peniko::Color::TRANSPARENT
-                })
-        })
-        .on_click_stop(move |_| {
-            body_ctx_open.set(false);
-            (action)();
-        })
-        .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
-        .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
-    };
+            }))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.padding_horiz(12.0)
+                    .padding_vert(5.0)
+                    .width_full()
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        p.bg_elevated
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    })
+            })
+            .on_click_stop(move |_| {
+                body_ctx_open.set(false);
+                (action)();
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+        };
 
     let bctx_copy = {
         let sel = selected_text;
@@ -5208,8 +5302,12 @@ pub fn editor_panel(
             }),
         )
     };
-    let bctx_sep1 = container(label(|| ""))
-        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_sep1 = container(label(|| "")).style(move |s| {
+        s.height(1.0)
+            .width_full()
+            .background(theme.get().palette.border)
+            .margin_vert(3.0)
+    });
     let bctx_goto = {
         let lsp = lsp_cmd_bctx_goto;
         let ac = active_cursor;
@@ -5218,7 +5316,11 @@ pub fn editor_panel(
             create_rw_signal(false),
             Box::new(move || {
                 if let Some((path, line, col)) = ac.get_untracked() {
-                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestDefinition { path, line, col });
+                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestDefinition {
+                        path,
+                        line,
+                        col,
+                    });
                 }
             }),
         )
@@ -5231,19 +5333,29 @@ pub fn editor_panel(
             create_rw_signal(false),
             Box::new(move || {
                 if let Some((path, line, col)) = ac.get_untracked() {
-                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestReferences { path, line, col });
+                    let _ = lsp.send(crate::lsp_bridge::LspCommand::RequestReferences {
+                        path,
+                        line,
+                        col,
+                    });
                 }
             }),
         )
     };
-    let bctx_sep2 = container(label(|| ""))
-        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_sep2 = container(label(|| "")).style(move |s| {
+        s.height(1.0)
+            .width_full()
+            .background(theme.get().palette.border)
+            .margin_vert(3.0)
+    });
     let bctx_comment = {
         let nonce = comment_toggle_nonce;
         body_ctx_item(
             "Toggle Comment",
             create_rw_signal(false),
-            Box::new(move || { nonce.update(|v| *v += 1); }),
+            Box::new(move || {
+                nonce.update(|v| *v += 1);
+            }),
         )
     };
     let bctx_fmt = {
@@ -5251,11 +5363,17 @@ pub fn editor_panel(
         body_ctx_item(
             "Format Selection",
             create_rw_signal(false),
-            Box::new(move || { nonce.update(|v| *v += 1); }),
+            Box::new(move || {
+                nonce.update(|v| *v += 1);
+            }),
         )
     };
-    let bctx_sep3 = container(label(|| ""))
-        .style(move |s| s.height(1.0).width_full().background(theme.get().palette.border).margin_vert(3.0));
+    let bctx_sep3 = container(label(|| "")).style(move |s| {
+        s.height(1.0)
+            .width_full()
+            .background(theme.get().palette.border)
+            .margin_vert(3.0)
+    });
     let bctx_copy_path = {
         let of = open_file;
         body_ctx_item(
@@ -5302,7 +5420,9 @@ pub fn editor_panel(
                 s.display(floem::style::Display::None)
             })
     })
-    .on_event_stop(EventListener::PointerLeave, move |_| body_ctx_open.set(false));
+    .on_event_stop(EventListener::PointerLeave, move |_| {
+        body_ctx_open.set(false)
+    });
 
     stack((
         tab_bar,
@@ -5356,11 +5476,14 @@ pub fn editor_panel(
                             find_open.set(true);
                             replace_open.set(false);
                             find_cur_match.set(0);
+                            // Snapshot the selection so the Sel toggle applies to it.
+                            find_sel_range.set(active_sel_range.get_untracked());
                         }
                         "h" => {
                             find_open.set(true);
                             replace_open.set(true);
                             find_cur_match.set(0);
+                            find_sel_range.set(active_sel_range.get_untracked());
                         }
                         _ => {}
                     }
