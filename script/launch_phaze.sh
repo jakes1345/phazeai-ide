@@ -1,7 +1,7 @@
 #!/bin/bash
 # PhazeAI IDE Launcher — launches immediately, rebuilds in background for next time
 
-PROJECT_DIR="/home/jack/phazeai_ide"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BINARY_PATH="$PROJECT_DIR/target/release/phazeai-ui"
 cd "$PROJECT_DIR"
 

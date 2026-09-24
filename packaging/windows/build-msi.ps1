@@ -16,12 +16,12 @@ Write-Host "==> Building PhazeAI IDE v$Version MSI installer" -ForegroundColor C
 if (-not $NoBuild) {
     Write-Host "==> Compiling release binary..."
     Push-Location $ProjectRoot
-    cargo build --release -p phazeai-ide
+    cargo build --release -p phazeai-ui
     if ($LASTEXITCODE -ne 0) { Write-Error "cargo build failed"; exit 1 }
     Pop-Location
 }
 
-$Binary = Join-Path $ProjectRoot "target\release\phazeai-ide.exe"
+$Binary = Join-Path $ProjectRoot "target\release\phazeai-ui.exe"
 if (-not (Test-Path $Binary)) {
     Write-Error "Binary not found at: $Binary"
     exit 1
@@ -35,7 +35,7 @@ Push-Location $ProjectRoot
 try {
     # cargo-wix will use the .wxs file in the packaging/windows directory
     cargo wix --no-build --nocapture `
-        --package phazeai-ide `
+        --package phazeai-ui `
         --output "dist\PhazeAI-IDE-$Version-x64.msi"
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "cargo-wix failed. Trying wix directly..."

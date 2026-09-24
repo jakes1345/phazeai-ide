@@ -1,60 +1,62 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# PhazeAI — build from source and install for the current user (Linux).
+#
+# Installs the IDE (phazeai-ui) and CLI (phazeai) into ~/.local/bin and adds
+# a desktop entry. Run from anywhere inside a clone of the repository.
 
-# PhazeAI Installation Script
-# This script builds PhazeAI in release mode and installs it to ~/.local/bin
+set -euo pipefail
 
-set -e
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="${PHAZEAI_BIN_DIR:-$HOME/.local/bin}"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
 
-echo "🚀 Starting PhazeAI Installation..."
-
-# 1. Build in release mode
-echo "📦 Building PhazeAI (Release Mode)..."
-cargo build --release --workspace
-
-# 2. Create local bin directory if it doesn't exist
-mkdir -p ~/.local/bin
-
-# 3. Copy binaries
-echo "🚚 Installing binaries to ~/.local/bin/..."
-cp target/release/phazeai ~/.local/bin/phazeai
-cp target/release/phazeai-ide ~/.local/bin/phazeai-ide
-
-# 4. Set up desktop entry
-echo "🖥️ Setting up desktop integration..."
-APP_DIR="/home/jack/phazeai_ide"
-ICON_PATH="$APP_DIR/phazeai.png"
-DESKTOP_FILE="$HOME/.local/share/applications/phazeai.desktop"
-
-# Copy icon if it exists (assuming it's in the root)
-if [ -f "$ICON_PATH" ]; then
-    mkdir -p ~/.local/share/icons
-    cp "$ICON_PATH" ~/.local/share/icons/phazeai.png
-    ICON_REF="phazeai"
-else
-    ICON_REF="utilities-terminal"
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo not found. Install Rust from https://rustup.rs and re-run." >&2
+    exit 1
 fi
 
-cat > "$DESKTOP_FILE" <<EOF
+echo "Building PhazeAI (release)..."
+cargo build --release --locked --manifest-path "$REPO_DIR/Cargo.toml" -p phazeai-ui -p phazeai-cli
+
+echo "Installing binaries to $BIN_DIR..."
+mkdir -p "$BIN_DIR"
+install -m 755 "$REPO_DIR/target/release/phazeai-ui" "$BIN_DIR/phazeai-ui"
+install -m 755 "$REPO_DIR/target/release/phazeai" "$BIN_DIR/phazeai"
+
+echo "Adding desktop entry..."
+ICON_SRC="$REPO_DIR/assets/branding/icon_256.png"
+ICON_REF="utilities-terminal"
+if [ -f "$ICON_SRC" ]; then
+    mkdir -p "$DATA_DIR/icons/hicolor/256x256/apps"
+    install -m 644 "$ICON_SRC" "$DATA_DIR/icons/hicolor/256x256/apps/phazeai.png"
+    ICON_REF="phazeai"
+fi
+
+mkdir -p "$DATA_DIR/applications"
+cat > "$DATA_DIR/applications/phazeai.desktop" <<EOF
 [Desktop Entry]
-Name=PhazeAI
-Comment=AI-powered coding assistant
-Exec=$HOME/.local/bin/phazeai-ide
+Name=PhazeAI IDE
+Comment=AI-powered code editor
+Exec=$BIN_DIR/phazeai-ui %F
 Icon=$ICON_REF
 Terminal=false
 Type=Application
 Categories=Development;IDE;
-Keywords=AI;Coding;Rust;
+Keywords=AI;Coding;Editor;
+StartupWMClass=phazeai-ui
 EOF
 
-chmod +x "$DESKTOP_FILE"
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$DATA_DIR/applications" >/dev/null 2>&1 || true
+fi
 
-# 5. Final message
-echo "✅ Installation Complete!"
-echo ""
-echo "You can now run:"
-echo "  - 'phazeai' from your terminal to start the CLI."
-echo "  - 'PhazeAI' from your application menu to start the IDE."
-echo ""
-echo "Note: If 'phazeai' is not found, make sure ~/.local/bin is in your PATH."
-echo "Add this to your .bashrc or .zshrc if needed:"
-echo "  export PATH=\$PATH:\$HOME/.local/bin"
+echo
+echo "Installed:"
+echo "  phazeai-ui  - desktop IDE (also in your application menu as 'PhazeAI IDE')"
+echo "  phazeai     - terminal UI"
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) echo
+       echo "Note: $BIN_DIR is not on your PATH. Add this to your shell profile:"
+       echo "  export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac

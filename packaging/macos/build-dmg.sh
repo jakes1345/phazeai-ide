@@ -15,9 +15,9 @@ echo "==> Building $APP_NAME v$VERSION for macOS"
 
 # 1. Build release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
-BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
+BINARY="$PROJECT_ROOT/target/release/phazeai-ui"
 
 # 2. Create .app bundle
 echo "==> Creating .app bundle..."

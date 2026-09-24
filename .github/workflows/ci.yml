@@ -298,6 +298,31 @@ jobs:
         run: cargo test -p phazeai-plugin-api
 
   # ─────────────────────────────────────────────
+  # macOS / Windows compile check — catches platform-specific breakage on
+  # every push instead of at release time.
+  # ─────────────────────────────────────────────
+  check-other-platforms:
+    name: Check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, windows-latest ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-check-
+      - name: cargo check (IDE + CLI)
+        run: cargo check --locked -p phazeai-ui -p phazeai-cli
+
+  # ─────────────────────────────────────────────
   build-gate:
     name: Build Gate (all crates)
     runs-on: ubuntu-latest

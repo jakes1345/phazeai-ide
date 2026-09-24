@@ -56,8 +56,10 @@ jobs:
             cli_bin: phazeai
             ui_bin: phazeai-ui
 
+          # Native ARM runner: cross-compiling the GUI's system libraries
+          # (wayland/xkbcommon/dbus) from x86 is fragile.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             cli_bin: phazeai
             ui_bin: phazeai-ui
 
@@ -95,28 +97,14 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-release-
             ${{ runner.os }}-${{ matrix.target }}-
 
-      - name: Install system deps (Linux x86_64)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3
-
-      - name: Install cross-compilation deps (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update -qq
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu python3 \
-            libxkbcommon-dev:arm64 libwayland-dev:arm64 \
-            libxcb-xfixes0-dev:arm64 libxcb-shape0-dev:arm64 \
-            libxcb-render0-dev:arm64 libxkbcommon-x11-dev:arm64 \
-            libudev-dev:arm64 libinput-dev:arm64 libdbus-1-dev:arm64 || true
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Build release binaries
         run: cargo build --release -p phazeai-cli -p phazeai-ui --target ${{ matrix.target }}
@@ -178,8 +166,8 @@ jobs:
           DESK
 
           # Icon (use real asset if present, else minimal placeholder)
-          if [ -f assets/icons/phazeai-256.png ]; then
-            cp assets/icons/phazeai-256.png AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png
+          if [ -f assets/branding/icon_256.png ]; then
+            cp assets/branding/icon_256.png AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png
           else
             python3 - <<'PY'
           import struct, zlib
@@ -364,47 +352,11 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
 
-      - name: Write NSIS installer script
+      - name: Build NSIS installer
         shell: pwsh
         run: |
           $V = "${{ steps.ver.outputs.V }}"
-          $script = @"
-!define APP_NAME "PhazeAI IDE"
-!define APP_VERSION "$V"
-!define INSTALL_DIR "`$PROGRAMFILES64\PhazeAI IDE"
-Name "`${APP_NAME} `${APP_VERSION}"
-OutFile "phazeai-ide-`${APP_VERSION}-windows-x64-setup.exe"
-InstallDir "`${INSTALL_DIR}"
-RequestExecutionLevel admin
-Unicode True
-
-Section "Install"
-  SetOutPath "`$INSTDIR"
-  File "bin\phazeai-ui.exe"
-  File "bin\phazeai.exe"
-  CreateShortcut "`$DESKTOP\PhazeAI IDE.lnk" "`$INSTDIR\phazeai-ui.exe"
-  CreateDirectory "`$SMPROGRAMS\PhazeAI IDE"
-  CreateShortcut "`$SMPROGRAMS\PhazeAI IDE\PhazeAI IDE.lnk" "`$INSTDIR\phazeai-ui.exe"
-  WriteUninstaller "`$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE" "DisplayName" "`${APP_NAME} `${APP_VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE" "UninstallString" "`$INSTDIR\Uninstall.exe"
-SectionEnd
-
-Section "Uninstall"
-  Delete "`$INSTDIR\phazeai-ui.exe"
-  Delete "`$INSTDIR\phazeai.exe"
-  Delete "`$INSTDIR\Uninstall.exe"
-  Delete "`$DESKTOP\PhazeAI IDE.lnk"
-  Delete "`$SMPROGRAMS\PhazeAI IDE\PhazeAI IDE.lnk"
-  RMDir "`$SMPROGRAMS\PhazeAI IDE"
-  RMDir "`$INSTDIR"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PhazeAI IDE"
-SectionEnd
-"@
-          $script | Out-File -FilePath installer.nsi -Encoding UTF8
-
-      - name: Build NSIS installer
-        run: makensis installer.nsi
+          makensis "/DAPP_VERSION=$V" "/DBIN_DIR=$PWD\bin" "/DOUT_DIR=$PWD" packaging\windows\installer.nsi
 
       - name: Package zip
         shell: pwsh
