@@ -5,6 +5,26 @@ All notable changes to PhazeAI IDE will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Multi-agent pipeline in Composer (Pipeline toggle): Planner → Coder (real file edits) → project check with automatic fix rounds → Reviewer on the run's diff, with per-stage models via `[model_routes]`.
+- MCP workspace trust: project `.phazeai/mcp.json` servers only start after the user trusts them (IDE palette "MCP: Trust Workspace Servers", CLI `/mcp-trust`); user-level `~/.config/phazeai/mcp.json` servers always start.
+- Open tabs reload when their file changes on disk; saving over a newer file asks first.
+- Unsaved-changes prompt on File → Exit, vim `:q`/`:wq`, and window close; vim `:w` / `:wa` now save.
+- CLI crash log and terminal restore on panic; CLI logs to `~/.config/phazeai/logs/`.
+- CI compile check on macOS and Windows.
+
+### Fixed
+- Security: chained shell commands (`cat … | curl …`) no longer skip tool approval; grep/glob/list/find tools are confined to the workspace; credential stores (`~/.ssh`, `~/.aws`, `.env`, …) are off-limits to all tools; bash could run in a protected directory.
+- Data loss: files that can't be loaded faithfully (binary, non-UTF-8, >20 MiB) open read-only instead of as an empty buffer that auto-save wrote back; a corrupt `settings.toml` is backed up instead of replaced with defaults; editor and settings saves are atomic.
+- MCP now uses the spec's newline-delimited JSON stdio framing (standard servers previously timed out).
+- CLI no longer panics on non-ASCII input.
+- Release workflow is valid YAML again; installers and packaging scripts build `phazeai-ui`; `install.sh` no longer hardcodes a home directory.
+
+### Removed
+- Multi-agent orchestrator (replaced by the pipeline above), `phazeai-cloud` client skeleton and Account panel (no backend yet).
+
 ## [0.1.0] - 2026-04-01
 
 ### Added

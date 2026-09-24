@@ -316,4 +316,31 @@ mod tests {
         assert_eq!(s.editor.font_size, 18.0);
         assert!(s.sidecar.enabled);
     }
+
+    #[test]
+    fn readme_model_routes_example_parses() {
+        let s: Settings = toml::from_str(
+            r#"
+[model_routes.reasoning]
+provider = "claude"
+model = "claude-opus-4-7"
+
+[model_routes.code_generation]
+provider = "ollama"
+model = "qwen2.5-coder:14b"
+
+[model_routes.code_review]
+provider = "openai"
+model = "gpt-4.1"
+"#,
+        )
+        .unwrap();
+        assert_eq!(s.model_routes.len(), 3);
+        assert_eq!(
+            s.model_routes[&TaskType::CodeGeneration].model,
+            "qwen2.5-coder:14b"
+        );
+        // A local route builds without any API key.
+        assert!(s.build_llm_client_for(TaskType::CodeGeneration).is_ok());
+    }
 }
