@@ -8,10 +8,12 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, text_input, v_stack, Decorators},
     IntoView,
 };
+use phazeai_core::agent::{Pipeline, PipelineConfig, PipelineEvent, ReviewVerdict, Stage};
+use phazeai_core::llm::TaskType;
 use phazeai_core::tools::{
     BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry,
 };
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::{Agent, AgentEvent, ApprovalFn, Settings};
 use serde_json::Value;
 
 use crate::components::button::{phaze_button, ButtonVariant};
@@ -100,6 +102,10 @@ enum ComposerUpdate {
     DiffOutput(Vec<DiffCard>),
     /// MCP stdio server(s) restarted.
     McpStatus(String),
+    /// Pipeline mode: a stage started / finished, or a check ran.
+    PipelineStep { text: String, kind: EventKind },
+    /// Pipeline mode: the whole run finished.
+    PipelineDone(String),
 }
 
 #[derive(Clone, Debug)]
@@ -116,7 +122,7 @@ struct EventLogEntry {
     path: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 enum EventKind {
     Thinking,
@@ -162,6 +168,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     // Approval mode — default to ApproveDestructive for safer beta experience.
     let approval_mode: RwSignal<ComposerApprovalMode> =
         create_rw_signal(ComposerApprovalMode::ApproveDestructive);
+
+    // Single agent vs. Planner → Coder → Verify → Reviewer pipeline.
+    let pipeline_mode: RwSignal<bool> = create_rw_signal(false);
 
     // Pending approval — Some when the agent is waiting for the user.
     let pending_approval: RwSignal<Option<PendingApproval>> = create_rw_signal(None);
@@ -297,6 +306,31 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 ComposerUpdate::DiffOutput(cards) => {
                     diff_cards.set(cards);
                 }
+                ComposerUpdate::PipelineStep { text, kind } => {
+                    event_log.update(|log| {
+                        log.push(EventLogEntry {
+                            kind,
+                            text,
+                            path: None,
+                        });
+                        if log.len() > 500 {
+                            log.drain(0..log.len() - 500);
+                        }
+                    });
+                }
+                ComposerUpdate::PipelineDone(summary) => {
+                    pending_approval.set(None);
+                    event_log.update(|log| {
+                        log.push(EventLogEntry {
+                            kind: EventKind::Done,
+                            text: summary,
+                            path: None,
+                        });
+                    });
+                    is_running.set(false);
+                    state.ai.thinking.set(false);
+                    cancel_token.set(None);
+                }
             }
         }
     });
@@ -323,7 +357,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             // Clear previous run
             event_log.set(vec![EventLogEntry {
                 kind: EventKind::Thinking,
-                text: "Starting agent...".to_string(),
+                text: if pipeline_mode.get_untracked() {
+                    "Starting pipeline: Planner → Coder → Check → Reviewer".to_string()
+                } else {
+                    "Starting agent...".to_string()
+                },
                 path: None,
             }]);
             diff_cards.set(Vec::new());
@@ -338,6 +376,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             let tx = (*update_tx).clone();
             let ws = workspace.get_untracked();
             let mode = approval_mode.get_untracked();
+            let use_pipeline = pipeline_mode.get_untracked();
             // Snapshot the shared sidecar client (if ready) for semantic search tools.
             let sidecar_client_snapshot = state
                 .project
@@ -371,6 +410,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 rt.block_on(async move {
                     // Build LLM client from settings
                     let settings = Settings::load();
+                    if use_pipeline {
+                        run_pipeline(&settings, &trimmed, ws, mode, token, tx, approval_rx_arc)
+                            .await;
+                        return;
+                    }
                     let client = match settings.build_llm_client() {
                         Ok(c) => c,
                         Err(e) => {
@@ -404,39 +448,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
                     // Wire approval function when mode is not AutoAll.
                     if mode != ComposerApprovalMode::AutoAll {
-                        let tx_appr = tx.clone();
-                        let rx_arc = approval_rx_arc.clone();
-                        agent = agent.with_approval(Box::new(
-                            move |tool_name: String, params: Value| {
-                                let tx_inner = tx_appr.clone();
-                                let rx_inner = rx_arc.clone();
-                                Box::pin(async move {
-                                    if !mode.needs_approval(&tool_name, &params) {
-                                        // Read-only or safe — auto-approve silently.
-                                        return true;
-                                    }
-                                    // Send approval request to UI.
-                                    let _ = tx_inner.send(ComposerUpdate::ToolApprovalRequest {
-                                        name: tool_name.clone(),
-                                        params: params.clone(),
-                                    });
-                                    // Block this async task on the sync response channel.
-                                    // Use spawn_blocking so we don't starve the runtime.
-                                    let result: ApprovalResponse =
-                                        tokio::task::spawn_blocking(move || {
-                                            let Ok(lock) = rx_inner.lock() else {
-                                                return ApprovalResponse::Denied;
-                                            };
-                                            // Wait up to 5 minutes for user response.
-                                            lock.recv_timeout(std::time::Duration::from_secs(300))
-                                                .unwrap_or(ApprovalResponse::Denied)
-                                        })
-                                        .await
-                                        .unwrap_or(ApprovalResponse::Denied);
-
-                                    matches!(result, ApprovalResponse::Approved)
-                                })
-                            },
+                        agent = agent.with_approval(make_approval_fn(
+                            mode,
+                            tx.clone(),
+                            approval_rx_arc.clone(),
                         ));
                     }
 
@@ -544,6 +559,35 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     .font_weight(floem::text::Weight::BOLD)
                     .color(p.text_muted)
                     .flex_grow(1.0)
+            }),
+            // Single agent / multi-agent pipeline toggle.
+            container(label(move || {
+                if pipeline_mode.get() {
+                    "Pipeline".to_string()
+                } else {
+                    "Single agent".to_string()
+                }
+            }))
+            .style(move |s| {
+                let p = theme.get().palette;
+                let fg = if pipeline_mode.get() {
+                    p.accent
+                } else {
+                    p.text_secondary
+                };
+                s.padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .font_size(10.0)
+                    .color(fg)
+                    .border(1.0)
+                    .border_color(fg.with_alpha(0.4))
+                    .border_radius(3.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+            })
+            .on_click_stop(move |_| {
+                if !is_running.get_untracked() {
+                    pipeline_mode.update(|m| *m = !*m);
+                }
             }),
             // Approval mode toggle button — cycles through the three modes.
             container(label(move || {
@@ -828,7 +872,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     text: String::new(),
                     path: None,
                 });
-                let kind = entry.kind.clone();
+                let kind = entry.kind;
                 let text = entry.text.clone();
                 let path_opt = entry.path.clone();
 
@@ -1031,6 +1075,193 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+// ── Approval + pipeline helpers ──────────────────────────────────────────────
+
+/// Build the agent approval callback for `mode`: safe tools pass silently,
+/// everything else is sent to the UI and waits (up to 5 min) for a decision.
+fn make_approval_fn(
+    mode: ComposerApprovalMode,
+    tx: std::sync::mpsc::SyncSender<ComposerUpdate>,
+    rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ApprovalResponse>>>,
+) -> ApprovalFn {
+    Box::new(move |tool_name: String, params: Value| {
+        let tx_inner = tx.clone();
+        let rx_inner = rx_arc.clone();
+        Box::pin(async move {
+            if !mode.needs_approval(&tool_name, &params) {
+                return true;
+            }
+            let _ = tx_inner.send(ComposerUpdate::ToolApprovalRequest {
+                name: tool_name.clone(),
+                params: params.clone(),
+            });
+            // Block on the sync response channel off the async runtime.
+            let result: ApprovalResponse = tokio::task::spawn_blocking(move || {
+                let Ok(lock) = rx_inner.lock() else {
+                    return ApprovalResponse::Denied;
+                };
+                lock.recv_timeout(std::time::Duration::from_secs(300))
+                    .unwrap_or(ApprovalResponse::Denied)
+            })
+            .await
+            .unwrap_or(ApprovalResponse::Denied);
+            matches!(result, ApprovalResponse::Approved)
+        })
+    })
+}
+
+/// Run the Planner → Coder → Verify → Reviewer pipeline, translating its
+/// events into composer updates.
+async fn run_pipeline(
+    settings: &Settings,
+    task: &str,
+    ws: std::path::PathBuf,
+    mode: ComposerApprovalMode,
+    token: Arc<AtomicBool>,
+    tx: std::sync::mpsc::SyncSender<ComposerUpdate>,
+    approval_rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ApprovalResponse>>>,
+) {
+    let build = |task_type| settings.build_llm_client_for(task_type);
+    let clients = (|| {
+        Ok::<_, phazeai_core::PhazeError>((
+            build(TaskType::Reasoning)?,
+            build(TaskType::CodeGeneration)?,
+            build(TaskType::CodeReview)?,
+        ))
+    })();
+    let (planner, coder, reviewer) = match clients {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(ComposerUpdate::Err(format!("LLM init error: {e}")));
+            return;
+        }
+    };
+
+    let mut coder_tools = ToolRegistry::default();
+    coder_tools.register(Box::new(BashTool::new(ws.clone())));
+    let mut pipeline = Pipeline::new(planner, coder, reviewer, PipelineConfig::new(&ws))
+        .with_coder_tools(coder_tools)
+        .with_cancel_token(token);
+    if mode != ComposerApprovalMode::AutoAll {
+        pipeline = pipeline.with_approval(make_approval_fn(mode, tx.clone(), approval_rx_arc));
+    }
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<PipelineEvent>();
+    let tx2 = tx.clone();
+    let drain = async move {
+        let mut stage_text = String::new();
+        let mut current: Option<Stage> = None;
+        while let Some(ev) = ev_rx.recv().await {
+            let step = |text: String, kind: EventKind| ComposerUpdate::PipelineStep { text, kind };
+            let _ = match ev {
+                PipelineEvent::StageStarted(stage) => {
+                    if current == Some(stage) {
+                        continue;
+                    }
+                    current = Some(stage);
+                    stage_text.clear();
+                    tx2.send(step(format!("▶ {}", stage.label()), EventKind::Thinking))
+                }
+                PipelineEvent::StageFinished { stage, summary } => tx2.send(step(
+                    format!("✓ {}: {summary}", stage.label()),
+                    EventKind::ToolResult,
+                )),
+                PipelineEvent::CheckResult {
+                    command,
+                    passed,
+                    output,
+                    ..
+                } => {
+                    let first_err = output
+                        .lines()
+                        .find(|l| l.contains("error"))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let (text, kind) = if passed {
+                        (format!("`{command}` passed"), EventKind::Done)
+                    } else {
+                        (
+                            format!("`{command}` failed {first_err}"),
+                            EventKind::Warning,
+                        )
+                    };
+                    tx2.send(step(text, kind))
+                }
+                PipelineEvent::Agent { stage, event } => match event {
+                    AgentEvent::TextDelta(t) => {
+                        stage_text.push_str(&t);
+                        tx2.send(ComposerUpdate::TextDelta(format!(
+                            "[{}]\n{stage_text}",
+                            stage.label()
+                        )))
+                    }
+                    AgentEvent::ToolStart { name } => tx2.send(ComposerUpdate::ToolStart {
+                        name,
+                        params: Value::Null,
+                    }),
+                    AgentEvent::ToolResult {
+                        name,
+                        success,
+                        summary,
+                    } => tx2.send(ComposerUpdate::ToolResult {
+                        name,
+                        success,
+                        summary,
+                    }),
+                    AgentEvent::Error(e) => {
+                        tx2.send(step(format!("{}: {e}", stage.label()), EventKind::Error))
+                    }
+                    _ => continue,
+                },
+                PipelineEvent::Complete(_) => continue,
+            };
+        }
+    };
+
+    let (result, ()) = tokio::join!(pipeline.run(task, ev_tx), drain);
+    match result {
+        Ok(outcome) => {
+            let verdict = match outcome.verdict {
+                ReviewVerdict::Approved => "Reviewer approved",
+                ReviewVerdict::ChangesRequested => "Reviewer still requests changes",
+                ReviewVerdict::Unclear => "Reviewer gave no clear verdict",
+            };
+            let check = match outcome.check_passed {
+                Some(true) => "check passes",
+                Some(false) => "check FAILS",
+                None => "no check for this project",
+            };
+            let _ = tx.send(ComposerUpdate::TextDelta(format!(
+                "## Review\n{}\n\n## Plan\n{}",
+                outcome.review, outcome.plan
+            )));
+            let _ = tx.send(ComposerUpdate::PipelineDone(format!(
+                "Pipeline done — {verdict}, {check}, {} fix round(s), {} file(s) changed",
+                outcome.fix_rounds,
+                outcome.changed_files.len()
+            )));
+        }
+        Err(e) => {
+            let _ = tx.send(ComposerUpdate::Err(e.to_string()));
+            return;
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["diff", "HEAD"])
+        .current_dir(&ws)
+        .output()
+    {
+        if output.status.success() {
+            let cards = parse_diff_cards(&String::from_utf8_lossy(&output.stdout));
+            if !cards.is_empty() {
+                let _ = tx.send(ComposerUpdate::DiffOutput(cards));
+            }
+        }
+    }
+}
 
 /// Extract a file path from tool parameters for prominent display.
 fn extract_path_from_params(tool_name: &str, params: &Value) -> Option<String> {

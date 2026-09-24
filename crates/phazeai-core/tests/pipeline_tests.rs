@@ -133,7 +133,9 @@ async fn pipeline_edits_files_fixes_failed_check_and_reviews_diff() {
     // The Coder was shown the plan, then the failing check.
     let coder_prompts = coder_prompts.lock().unwrap();
     assert!(coder_prompts[0].contains("Create status.txt"));
-    assert!(coder_prompts.iter().any(|p| p.contains("fails after your changes")));
+    assert!(coder_prompts
+        .iter()
+        .any(|p| p.contains("fails after your changes")));
 
     // The Reviewer was told the check passes and which file changed.
     let review_prompt = &reviewer_prompts.lock().unwrap()[0];
