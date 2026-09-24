@@ -1050,6 +1050,50 @@ struct TabState {
     dirty: RwSignal<bool>,
 }
 
+// ── Open-editor registry (quit / save-all) ───────────────────────────────────
+//
+// Each editor panel registers its tab list and a save-all closure so app-level
+// actions (quit, `:wa`, window close) can find unsaved work in every pane
+// without threading more signals through `editor_panel`. UI-thread only.
+
+struct EditorHandle {
+    tabs: RwSignal<Vec<TabState>>,
+    unsaveable: Rc<RefCell<std::collections::HashSet<PathBuf>>>,
+    save_all: Rc<dyn Fn() -> Vec<String>>,
+}
+
+thread_local! {
+    static OPEN_EDITORS: RefCell<Vec<EditorHandle>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Display names of tabs with unsaved edits, across all editor panes.
+/// Tabs whose file could not be loaded are excluded — their buffer is a
+/// read-only notice and there is nothing to save.
+pub fn dirty_tab_names() -> Vec<String> {
+    OPEN_EDITORS.with(|eds| {
+        let mut names = Vec::new();
+        for ed in eds.borrow().iter() {
+            let Some(list) = ed.tabs.try_get_untracked() else {
+                continue;
+            };
+            let blocked = ed.unsaveable.borrow();
+            for tab in list {
+                if tab.dirty.try_get_untracked().unwrap_or(false) && !blocked.contains(&tab.path) {
+                    names.push(tab.name.clone());
+                }
+            }
+        }
+        names
+    })
+}
+
+/// Save every dirty tab in every pane. Returns a description of each failure.
+pub fn save_all_dirty() -> Vec<String> {
+    let savers: Vec<_> =
+        OPEN_EDITORS.with(|eds| eds.borrow().iter().map(|e| e.save_all.clone()).collect());
+    savers.iter().flat_map(|save| save()).collect()
+}
+
 // ── Editor panel ──────────────────────────────────────────────────────────────
 
 /// Full multi-tab code editor with syntect syntax highlighting.
@@ -1190,6 +1234,42 @@ pub fn editor_panel(
     let unsaveable: Rc<RefCell<std::collections::HashSet<PathBuf>>> = Rc::default();
     let unsaveable_for_save = unsaveable.clone();
     let unsaveable_for_stack = unsaveable.clone();
+    {
+        let docs = docs.clone();
+        let blocked = unsaveable.clone();
+        let save_all: Rc<dyn Fn() -> Vec<String>> = Rc::new(move || {
+            let mut failures = Vec::new();
+            let Some(list) = tabs.try_get_untracked() else {
+                return failures;
+            };
+            for tab in list {
+                if !tab.dirty.try_get_untracked().unwrap_or(false)
+                    || blocked.borrow().contains(&tab.path)
+                {
+                    continue;
+                }
+                let key = tab.path.to_string_lossy().to_string();
+                let Some(doc) = docs.borrow().get(&key).cloned() else {
+                    continue;
+                };
+                match crate::util::write_file_atomic(&tab.path, doc.text().to_string().as_bytes()) {
+                    Ok(()) => {
+                        tab.dirty.set(false);
+                        crate::crash_recovery::clear_recovery(&tab.path);
+                    }
+                    Err(e) => failures.push(format!("{}: {e}", tab.path.display())),
+                }
+            }
+            failures
+        });
+        OPEN_EDITORS.with(|eds| {
+            eds.borrow_mut().push(EditorHandle {
+                tabs,
+                unsaveable: unsaveable.clone(),
+                save_all,
+            })
+        });
+    }
     let docs_for_find = docs.clone();
 
     // ── Find in file (Ctrl+F) ────────────────────────────────────────────────

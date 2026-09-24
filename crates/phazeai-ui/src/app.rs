@@ -347,6 +347,65 @@ pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::Edito
     let _ = settings.save();
 }
 
+/// Stop background processes and persist the session. Safe to call more than
+/// once; used by every exit path (window close, File → Exit, `:q`).
+pub(crate) fn shutdown_cleanly(state: &IdeState) {
+    if let Ok(guard) = state.project.sidecar_client.lock() {
+        if let Some(client) = guard.as_ref() {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let client = client.clone();
+                let _ = rt.block_on(client.shutdown());
+            }
+        }
+    }
+    // Synchronous save — bypasses the debounce so the final state is kept.
+    SessionState::from_ide_state_untracked(&state.clone()).save();
+}
+
+/// Quit the IDE from a menu or command. Unless `force`, asks what to do with
+/// unsaved tabs first and lets the user cancel.
+pub(crate) fn request_quit(state: &IdeState, force: bool) {
+    if !force {
+        let dirty = crate::panels::editor::dirty_tab_names();
+        if !dirty.is_empty() {
+            let answer = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title("Unsaved Changes")
+                .set_description(format!(
+                    "{} file(s) have unsaved changes:\n\n{}\n\nSave them before quitting?",
+                    dirty.len(),
+                    dirty.join("\n")
+                ))
+                .set_buttons(rfd::MessageButtons::YesNoCancel)
+                .show();
+            match answer {
+                rfd::MessageDialogResult::Yes => {
+                    let failures = crate::panels::editor::save_all_dirty();
+                    if !failures.is_empty() {
+                        rfd::MessageDialog::new()
+                            .set_level(rfd::MessageLevel::Error)
+                            .set_title("Save Failed")
+                            .set_description(format!(
+                                "Could not save:\n\n{}\n\nThe IDE will stay open.",
+                                failures.join("\n")
+                            ))
+                            .set_buttons(rfd::MessageButtons::Ok)
+                            .show();
+                        return;
+                    }
+                }
+                rfd::MessageDialogResult::No => {}
+                _ => return,
+            }
+        }
+    }
+    shutdown_cleanly(state);
+    std::process::exit(0);
+}
+
 /// Show a toast notification that auto-dismisses after 3 seconds.
 /// Safe to call from any code that has access to `IdeState`.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
@@ -5492,22 +5551,27 @@ pub fn launch_phaze_ide() {
                 .on_event_stop(EventListener::WindowClosed, {
                     let state = state.clone();
                     move |_| {
-                        // Kill sidecar process cleanly on IDE exit.
-                        if let Ok(guard) = state.project.sidecar_client.lock() {
-                            if let Some(client) = guard.as_ref() {
-                                // Build a small runtime just for the shutdown call.
-                                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                {
-                                    let client = client.clone();
-                                    let _ = rt.block_on(client.shutdown());
+                        // The window is already closing (floem can't veto it),
+                        // so the best we can do is offer to save.
+                        let dirty = crate::panels::editor::dirty_tab_names();
+                        if !dirty.is_empty() {
+                            let answer = rfd::MessageDialog::new()
+                                .set_level(rfd::MessageLevel::Warning)
+                                .set_title("Unsaved Changes")
+                                .set_description(format!(
+                                    "Save changes to {} file(s) before closing?\n\n{}",
+                                    dirty.len(),
+                                    dirty.join("\n")
+                                ))
+                                .set_buttons(rfd::MessageButtons::YesNo)
+                                .show();
+                            if answer == rfd::MessageDialogResult::Yes {
+                                for failure in crate::panels::editor::save_all_dirty() {
+                                    tracing::error!("save on close failed: {failure}");
                                 }
                             }
                         }
-                        // Synchronous save on close — bypasses the debounce so the
-                        // final state is never lost.
-                        SessionState::from_ide_state_untracked(&state).save();
+                        shutdown_cleanly(&state);
                     }
                 })
             },

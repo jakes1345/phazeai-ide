@@ -1469,6 +1469,8 @@ pub(crate) fn vim_ex_overlay(state: IdeState) -> impl IntoView {
     let open_file = state.editor.open_file;
     let toast = state.workbench.status_toast;
     let workspace = state.project.workspace_root;
+    let save_active = state.editor.save_no_format_nonce;
+    let quit_state = state.clone();
 
     let input_view = text_input(input_sig)
         .style(move |s| {
@@ -1494,17 +1496,35 @@ pub(crate) fn vim_ex_overlay(state: IdeState) -> impl IntoView {
                         input_sig.set(String::new());
                         match cmd.as_str() {
                             "w" | "write" => {
-                                show_toast(toast, "Saved".to_string());
+                                save_active.update(|v| *v += 1);
                             }
-                            "q" | "quit" => {
-                                std::process::exit(0);
+                            "wa" | "wall" => {
+                                let failures = crate::panels::editor::save_all_dirty();
+                                if failures.is_empty() {
+                                    show_toast(toast, "Saved all".to_string());
+                                } else {
+                                    show_toast(
+                                        toast,
+                                        format!("Save failed: {}", failures.join("; ")),
+                                    );
+                                }
                             }
-                            "wq" | "x" => {
-                                show_toast(toast, "Saved".to_string());
-                                std::process::exit(0);
+                            "q" | "quit" | "qa" | "qall" => {
+                                super::request_quit(&quit_state, false);
                             }
-                            "wqa" | "qa" => {
-                                std::process::exit(0);
+                            "q!" | "quit!" | "qa!" | "qall!" => {
+                                super::request_quit(&quit_state, true);
+                            }
+                            "wq" | "x" | "wqa" | "xa" | "wqall" | "xall" => {
+                                let failures = crate::panels::editor::save_all_dirty();
+                                if failures.is_empty() {
+                                    super::request_quit(&quit_state, false);
+                                } else {
+                                    show_toast(
+                                        toast,
+                                        format!("Save failed: {}", failures.join("; ")),
+                                    );
+                                }
                             }
                             _ if cmd.starts_with("e ") => {
                                 let path = cmd[2..].trim();

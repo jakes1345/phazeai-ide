@@ -65,8 +65,7 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 }))
                 .separator()
                 .entry(MenuItem::new("Exit").action(move || {
-                    let _ = s4.clone();
-                    std::process::exit(0);
+                    super::request_quit(&s4, false);
                 }));
             show_context_menu(menu, None);
         })
