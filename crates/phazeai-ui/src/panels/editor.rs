@@ -1050,6 +1050,79 @@ struct TabState {
     dirty: RwSignal<bool>,
 }
 
+// ── External-change detection ─────────────────────────────────────────────────
+//
+// The agent, git, Replace All and other programs write files that may be open
+// in a tab. Each pane remembers the on-disk mtime it last loaded or saved; a
+// clean tab silently reloads when the file changes, and saving a dirty tab
+// over a newer file asks first instead of reverting someone else's edit.
+
+type KnownMtimes = Rc<RefCell<HashMap<PathBuf, Option<std::time::SystemTime>>>>;
+
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// True if the file on disk changed since this pane last loaded or saved it.
+fn changed_on_disk(path: &std::path::Path, known: &KnownMtimes) -> bool {
+    match known.borrow().get(path) {
+        Some(Some(seen)) => file_mtime(path).is_some_and(|now| now != *seen),
+        _ => false,
+    }
+}
+
+/// Ask before overwriting a file that changed on disk. Returns true to proceed.
+fn confirm_overwrite_if_changed(path: &std::path::Path, name: &str, known: &KnownMtimes) -> bool {
+    if !changed_on_disk(path, known) {
+        return true;
+    }
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("File Changed on Disk")
+        .set_description(format!(
+            "\"{name}\" was changed on disk (by the AI agent, git, or another program) \
+             after you started editing it.\n\nOverwrite it with the version in the editor?"
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes
+}
+
+/// Poll one open tab's file and reload the buffer when it changes on disk and
+/// the tab has no unsaved edits. Stops once the tab is closed.
+fn watch_tab_file(
+    path: PathBuf,
+    tabs: RwSignal<Vec<TabState>>,
+    dirty: RwSignal<bool>,
+    doc: Rc<dyn Document>,
+    known: KnownMtimes,
+    reloading: Rc<std::cell::Cell<bool>>,
+) {
+    floem::action::exec_after(std::time::Duration::from_millis(1500), move |_| {
+        let still_open =
+            floem::reactive::SignalWith::try_with_untracked(&tabs, |l: Option<&Vec<TabState>>| {
+                l.is_some_and(|l| l.iter().any(|t| t.path == path))
+            });
+        if !still_open {
+            return;
+        }
+        if !dirty.try_get_untracked().unwrap_or(true) && changed_on_disk(&path, &known) {
+            let now = file_mtime(&path);
+            if let Ok(text) = crate::util::load_text_file(&path) {
+                let current = doc.text().to_string();
+                if text != current {
+                    reloading.set(true);
+                    doc.edit_single(Selection::region(0, current.len()), &text, EditType::Other);
+                    reloading.set(false);
+                    dirty.set(false);
+                }
+                known.borrow_mut().insert(path.clone(), now);
+            }
+        }
+        watch_tab_file(path, tabs, dirty, doc, known, reloading);
+    });
+}
+
 // ── Open-editor registry (quit / save-all) ───────────────────────────────────
 //
 // Each editor panel registers its tab list and a save-all closure so app-level
@@ -1234,9 +1307,13 @@ pub fn editor_panel(
     let unsaveable: Rc<RefCell<std::collections::HashSet<PathBuf>>> = Rc::default();
     let unsaveable_for_save = unsaveable.clone();
     let unsaveable_for_stack = unsaveable.clone();
+    let known_mtimes: KnownMtimes = Rc::default();
+    let known_for_save = known_mtimes.clone();
+    let known_for_stack = known_mtimes.clone();
     {
         let docs = docs.clone();
         let blocked = unsaveable.clone();
+        let known = known_mtimes.clone();
         let save_all: Rc<dyn Fn() -> Vec<String>> = Rc::new(move || {
             let mut failures = Vec::new();
             let Some(list) = tabs.try_get_untracked() else {
@@ -1252,8 +1329,18 @@ pub fn editor_panel(
                 let Some(doc) = docs.borrow().get(&key).cloned() else {
                     continue;
                 };
+                if changed_on_disk(&tab.path, &known) {
+                    failures.push(format!(
+                        "{}: changed on disk since it was opened; not overwritten",
+                        tab.path.display()
+                    ));
+                    continue;
+                }
                 match crate::util::write_file_atomic(&tab.path, doc.text().to_string().as_bytes()) {
                     Ok(()) => {
+                        known
+                            .borrow_mut()
+                            .insert(tab.path.clone(), file_mtime(&tab.path));
                         tab.dirty.set(false);
                         crate::crash_recovery::clear_recovery(&tab.path);
                     }
@@ -1494,10 +1581,16 @@ pub fn editor_panel(
             tracing::warn!(path = %tab.path.display(), "refusing to save a file that failed to load");
             return;
         }
+        if !confirm_overwrite_if_changed(&tab.path, &tab.name, &known_for_save) {
+            return;
+        }
         let content = doc.text().to_string();
         if let Err(e) = crate::util::write_file_atomic(&tab.path, content.as_bytes()) {
             tracing::error!(path = %tab.path.display(), error = %e, "save failed");
         } else {
+            known_for_save
+                .borrow_mut()
+                .insert(tab.path.clone(), file_mtime(&tab.path));
             tab.dirty.set(false);
             crate::crash_recovery::clear_recovery(&tab.path);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
@@ -1683,6 +1776,9 @@ pub fn editor_panel(
                     None => match crate::util::load_text_file(&tab.path) {
                         Ok(text) => {
                             unsaveable_for_stack.borrow_mut().remove(&tab.path);
+                            known_for_stack
+                                .borrow_mut()
+                                .insert(tab.path.clone(), file_mtime(&tab.path));
                             text
                         }
                         Err(reason) => {
@@ -1780,6 +1876,18 @@ pub fn editor_panel(
             let cursor_sig = raw_editor.editor().cursor; // RwSignal<Cursor>
             let editor_ref = raw_editor.editor().clone(); // Clone for reactive updates
             let doc = raw_editor.doc().clone();
+            // Set while an external-change reload rewrites the buffer, so the
+            // update hook doesn't mark the tab dirty or schedule an auto-save.
+            let reloading = Rc::new(std::cell::Cell::new(false));
+            let reloading_upd = reloading.clone();
+            watch_tab_file(
+                tab.path.clone(),
+                tabs,
+                dirty,
+                doc.clone(),
+                known_for_stack.clone(),
+                reloading,
+            );
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
@@ -4021,6 +4129,7 @@ pub fn editor_panel(
                 let tab_dirty_snf = tab.dirty;
                 let lsp_cmd_snf = lsp_cmd.clone();
                 let unsaveable_snf = unsaveable_for_stack.clone();
+                let known_snf = known_for_stack.clone();
                 let last_snf = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = save_no_format_nonce.get();
@@ -4034,8 +4143,18 @@ pub fn editor_panel(
                     if unsaveable_snf.borrow().contains(&tab_path_snf) {
                         return;
                     }
+                    let name = tab_path_snf
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !confirm_overwrite_if_changed(&tab_path_snf, &name, &known_snf) {
+                        return;
+                    }
                     let content = doc_snf.text().to_string();
                     if crate::util::write_file_atomic(&tab_path_snf, content.as_bytes()).is_ok() {
+                        known_snf
+                            .borrow_mut()
+                            .insert(tab_path_snf.clone(), file_mtime(&tab_path_snf));
                         tab_dirty_snf.set(false);
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
                             path: tab_path_snf.clone(),
@@ -4409,7 +4528,10 @@ pub fn editor_panel(
                     let rec_gen = Arc::clone(&recovery_gen);
                     let rec_tx = recovery_tx.clone();
                     move |_| {
-                        dirty.set(true);
+                        let is_reload = reloading_upd.get();
+                        if !is_reload {
+                            dirty.set(true);
+                        }
                         // Notify LSP server of content change (textDocument/didChange).
                         let text = doc_for_lsp.text().to_string();
                         let ver = lsp_ver.get();
@@ -4419,6 +4541,9 @@ pub fn editor_panel(
                             text: text.clone(),
                             version: ver,
                         });
+                        if is_reload {
+                            return;
+                        }
                         // Auto-trigger: completions on `.` / `::` / `(`; sig help on `(` / `,`.
                         {
                             let offset = cursor_sig.get_untracked().offset();
