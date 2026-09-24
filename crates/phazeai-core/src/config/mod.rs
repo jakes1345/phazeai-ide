@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub llm: LlmSettings,
@@ -130,18 +130,6 @@ impl Default for SidecarSettings {
 /// Set when the settings file exists but could not be read or parsed, so the
 /// UI can tell the user instead of silently running on defaults.
 static LOAD_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            llm: LlmSettings::default(),
-            editor: EditorSettings::default(),
-            sidecar: SidecarSettings::default(),
-            providers: Vec::new(),
-            model_routes: HashMap::new(),
-        }
-    }
-}
 
 impl Settings {
     pub fn config_path() -> PathBuf {
