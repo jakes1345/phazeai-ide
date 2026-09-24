@@ -1184,6 +1184,12 @@ pub fn editor_panel(
         Rc::new(RefCell::new(HashMap::new()));
     let docs_for_stack = docs.clone();
     let docs_for_save = docs.clone();
+    // Tabs whose file could not be loaded faithfully (binary, non-UTF-8,
+    // unreadable, huge). Their buffers hold an explanation, not the file, so
+    // saving them — manually or via auto-save — must never touch disk.
+    let unsaveable: Rc<RefCell<std::collections::HashSet<PathBuf>>> = Rc::default();
+    let unsaveable_for_save = unsaveable.clone();
+    let unsaveable_for_stack = unsaveable.clone();
     let docs_for_find = docs.clone();
 
     // ── Find in file (Ctrl+F) ────────────────────────────────────────────────
@@ -1404,8 +1410,14 @@ pub fn editor_panel(
         let Some(doc) = registry.get(&key) else {
             return;
         };
+        if unsaveable_for_save.borrow().contains(&tab.path) {
+            tracing::warn!(path = %tab.path.display(), "refusing to save a file that failed to load");
+            return;
+        }
         let content = doc.text().to_string();
-        if std::fs::write(&tab.path, content).is_ok() {
+        if let Err(e) = crate::util::write_file_atomic(&tab.path, content.as_bytes()) {
+            tracing::error!(path = %tab.path.display(), error = %e, "save failed");
+        } else {
             tab.dirty.set(false);
             crate::crash_recovery::clear_recovery(&tab.path);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
@@ -1586,9 +1598,24 @@ pub fn editor_panel(
             // Preserve unsaved edits across tab switches by reading doc registry first.
             let content = {
                 let reg = docs_for_stack.borrow();
-                reg.get(&key)
-                    .map(|d| d.text().to_string())
-                    .unwrap_or_else(|| std::fs::read_to_string(&tab.path).unwrap_or_default())
+                match reg.get(&key) {
+                    Some(d) => d.text().to_string(),
+                    None => match crate::util::load_text_file(&tab.path) {
+                        Ok(text) => {
+                            unsaveable_for_stack.borrow_mut().remove(&tab.path);
+                            text
+                        }
+                        Err(reason) => {
+                            tracing::warn!(path = %tab.path.display(), %reason, "not opening file for editing");
+                            unsaveable_for_stack.borrow_mut().insert(tab.path.clone());
+                            format!(
+                                "PhazeAI can't edit this file: {reason}.\n\n\
+                                 It is shown read-only; nothing typed here will be saved,\n\
+                                 and the file on disk has not been touched.\n"
+                            )
+                        }
+                    },
+                }
             };
 
             // ── .editorconfig: read and apply for this tab ────────────────
@@ -3913,6 +3940,7 @@ pub fn editor_panel(
                 let tab_path_snf = tab.path.clone();
                 let tab_dirty_snf = tab.dirty;
                 let lsp_cmd_snf = lsp_cmd.clone();
+                let unsaveable_snf = unsaveable_for_stack.clone();
                 let last_snf = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = save_no_format_nonce.get();
@@ -3923,8 +3951,11 @@ pub fn editor_panel(
                         return;
                     }
                     last_snf.set(n);
+                    if unsaveable_snf.borrow().contains(&tab_path_snf) {
+                        return;
+                    }
                     let content = doc_snf.text().to_string();
-                    if std::fs::write(&tab_path_snf, content).is_ok() {
+                    if crate::util::write_file_atomic(&tab_path_snf, content.as_bytes()).is_ok() {
                         tab_dirty_snf.set(false);
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
                             path: tab_path_snf.clone(),

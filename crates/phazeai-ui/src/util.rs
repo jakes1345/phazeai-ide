@@ -133,3 +133,92 @@ pub fn shell_join_args(parts: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// Files larger than this are refused by the editor rather than loaded into
+/// a text buffer (and later auto-saved over).
+pub const MAX_EDITOR_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Load a file for editing. A missing file yields an empty buffer (new file).
+/// Anything we cannot faithfully round-trip — unreadable, binary, non-UTF-8,
+/// or huge — is an error, so the caller never saves a lossy buffer back over
+/// the user's data.
+pub fn load_text_file(path: &std::path::Path) -> Result<String, String> {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("cannot read file: {e}")),
+    };
+    if meta.is_dir() {
+        return Err("path is a directory".into());
+    }
+    if meta.len() > MAX_EDITOR_FILE_BYTES {
+        return Err(format!(
+            "file is too large to edit ({} MiB, limit {} MiB)",
+            meta.len() / (1024 * 1024),
+            MAX_EDITOR_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read file: {e}"))?;
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return Err("file looks binary".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8 text".into())
+}
+
+/// Write `content` to `path` atomically: write a sibling temp file, fsync it,
+/// then rename over the target. A crash or full disk mid-save leaves the
+/// original file intact. Symlinks are followed so the link itself survives,
+/// and the original file's permissions are preserved.
+pub fn write_file_atomic(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(content)?;
+    tmp.as_file().sync_all()?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(tmp.path(), meta.permissions());
+    }
+    tmp.persist(&target).map_err(|e| e.error)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod file_io_tests {
+    use super::*;
+
+    #[test]
+    fn load_rejects_binary_and_invalid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("a.bin");
+        std::fs::write(&bin, [0x7f, b'E', b'L', b'F', 0, 0, 1]).unwrap();
+        assert!(load_text_file(&bin).is_err());
+        let latin1 = dir.path().join("b.txt");
+        std::fs::write(&latin1, [b'c', b'a', b'f', 0xe9]).unwrap();
+        assert!(load_text_file(&latin1).is_err());
+        assert_eq!(load_text_file(&dir.path().join("new.rs")).unwrap(), "");
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_keeps_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, "old").unwrap();
+        write_file_atomic(&real, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            write_file_atomic(&link, b"via link").unwrap();
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read_to_string(&real).unwrap(), "via link");
+        }
+    }
+}

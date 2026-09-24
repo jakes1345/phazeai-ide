@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub llm: LlmSettings,
     pub editor: EditorSettings,
@@ -17,6 +18,7 @@ pub struct Settings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LlmSettings {
     pub provider: LlmProvider,
     pub model: String,
@@ -96,28 +98,45 @@ impl Default for EditorSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SidecarSettings {
     pub enabled: bool,
     pub python_path: String,
     pub auto_start: bool,
 }
 
+impl Default for LlmSettings {
+    fn default() -> Self {
+        Self {
+            provider: LlmProvider::Ollama,
+            model: defaults::DEFAULT_MODEL.to_string(),
+            api_key_env: "".to_string(),
+            base_url: None,
+            max_tokens: defaults::MAX_TOKENS,
+        }
+    }
+}
+
+impl Default for SidecarSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            python_path: defaults::PYTHON_PATH.to_string(),
+            auto_start: true,
+        }
+    }
+}
+
+/// Set when the settings file exists but could not be read or parsed, so the
+/// UI can tell the user instead of silently running on defaults.
+static LOAD_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            llm: LlmSettings {
-                provider: LlmProvider::Ollama,
-                model: defaults::DEFAULT_MODEL.to_string(),
-                api_key_env: "".to_string(),
-                base_url: None,
-                max_tokens: defaults::MAX_TOKENS,
-            },
+            llm: LlmSettings::default(),
             editor: EditorSettings::default(),
-            sidecar: SidecarSettings {
-                enabled: true,
-                python_path: defaults::PYTHON_PATH.to_string(),
-                auto_start: true,
-            },
+            sidecar: SidecarSettings::default(),
             providers: Vec::new(),
             model_routes: HashMap::new(),
         }
@@ -139,30 +158,67 @@ impl Settings {
             .join(paths::CONFIG_FILE)
     }
 
+    /// Load settings, falling back to defaults if the file is missing or
+    /// broken. A broken file is left untouched on disk (see [`Self::save`])
+    /// and the problem is reported through [`Self::load_error`].
     pub fn load() -> Self {
         let config_path = Self::config_path();
-        if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
+        let result = match std::fs::read_to_string(&config_path) {
+            Ok(content) => toml::from_str::<Self>(&content)
+                .map_err(|e| format!("{} is not valid: {e}", config_path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("could not read {}: {e}", config_path.display())),
+        };
+        let mut slot = LOAD_ERROR.lock().unwrap_or_else(|p| p.into_inner());
+        match result {
+            Ok(settings) => {
+                *slot = None;
+                settings
+            }
+            Err(msg) => {
+                if slot.as_deref() != Some(msg.as_str()) {
+                    tracing::error!("{msg}; using default settings");
                 }
-                eprintln!(
-                    "Warning: failed to parse settings at '{}'; using defaults",
-                    config_path.display()
-                );
+                *slot = Some(msg);
+                Self::default()
             }
         }
-        Self::default()
     }
 
+    /// The error from the most recent [`Self::load`], if the settings file
+    /// exists but could not be used.
+    pub fn load_error() -> Option<String> {
+        LOAD_ERROR.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Save settings atomically. If the file currently on disk can't be
+    /// parsed, it is first copied to `settings.toml.corrupt-<timestamp>` so a
+    /// typo in a hand-edited config never silently destroys the user's
+    /// providers and routes.
     pub fn save(&self) -> Result<(), crate::error::PhazeError> {
         let config_path = Self::config_path();
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if let Ok(existing) = std::fs::read_to_string(&config_path) {
+            if toml::from_str::<Self>(&existing).is_err() {
+                let backup = config_path.with_extension(format!(
+                    "toml.corrupt-{}",
+                    chrono::Local::now().format("%Y%m%d-%H%M%S")
+                ));
+                std::fs::copy(&config_path, &backup)?;
+                tracing::warn!(
+                    backup = %backup.display(),
+                    "backed up unparseable settings file before overwriting"
+                );
+            }
+        }
         let content = toml::to_string_pretty(self)
             .map_err(|e| crate::error::PhazeError::Config(e.to_string()))?;
-        std::fs::write(&config_path, content)?;
+        let tmp = config_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &config_path)?;
+        *LOAD_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = None;
         Ok(())
     }
 
@@ -228,5 +284,25 @@ impl Settings {
             let router = ModelRouter::new(&self.model_routes, &registry, default_client);
             Ok(Box::new(router))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_settings_file_keeps_user_values() {
+        // An older/hand-written config missing whole sections must still parse
+        // instead of being treated as corrupt and replaced with defaults.
+        let s: Settings = toml::from_str(
+            "[llm]\nprovider = \"claude\"\nmodel = \"my-model\"\n\n[editor]\nfont_size = 18.0\n",
+        )
+        .unwrap();
+        assert_eq!(s.llm.provider, LlmProvider::Claude);
+        assert_eq!(s.llm.model, "my-model");
+        assert_eq!(s.llm.max_tokens, defaults::MAX_TOKENS);
+        assert_eq!(s.editor.font_size, 18.0);
+        assert!(s.sidecar.enabled);
     }
 }

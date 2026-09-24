@@ -25,6 +25,7 @@ anyhow = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+tempfile = "3.10"
 dirs = "5.0"
 portable-pty = { workspace = true }
 vte = { workspace = true }
@@ -43,5 +44,4 @@ similar = "2"
 
 [dev-dependencies]
 image = "0.25"
-tempfile = "3.10"
 serde = { workspace = true }

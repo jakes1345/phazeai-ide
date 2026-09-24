@@ -339,7 +339,9 @@ pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
 /// This preserves all other settings (LLM, sidecar, providers, etc.).
 pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::EditorSettings)) {
-    let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut settings = Settings::load();
     mutate(&mut settings.editor);
     let _ = settings.save();
@@ -1082,11 +1084,19 @@ impl IdeState {
         }
 
         // Persist provider + model changes to settings.toml whenever they change.
-        create_effect(move |_| {
+        // The first run only subscribes: re-saving the values we just loaded
+        // would rewrite (and, if it was unparseable, replace) the user's file
+        // on every launch.
+        create_effect(move |first_run_done: Option<()>| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
+            if first_run_done.is_none() {
+                return;
+            }
             std::thread::spawn(move || {
-                let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
+                let _guard = SETTINGS_WRITE_LOCK
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 let mut s = Settings::load();
                 let Some(provider) = provider_name_to_llm_provider(&provider_name) else {
                     return;
@@ -4226,6 +4236,13 @@ pub fn launch_phaze_ide() {
         .window(
             move |_| {
                 let state = IdeState::new(&settings);
+
+                if let Some(err) = Settings::load_error() {
+                    show_toast(
+                        state.workbench.status_toast,
+                        format!("Settings file has an error, using defaults: {err}"),
+                    );
+                }
 
                 // Crash recovery: surface any unsaved content from a prior crash.
                 {
