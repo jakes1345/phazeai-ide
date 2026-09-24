@@ -164,6 +164,31 @@ pub fn handle_command(input: &str) -> CommandResult {
                 }
             }
         }
+        "/mcp-trust" => {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let servers = phazeai_core::mcp::McpManager::untrusted_project_servers(&root);
+            if servers.is_empty() {
+                CommandResult::Message("No untrusted MCP servers in this workspace.".into())
+            } else if arg.trim() == "yes" {
+                match phazeai_core::mcp::McpManager::trust_project_servers(&root) {
+                    Ok(()) => CommandResult::Message(format!(
+                        "Trusted {} MCP server(s). They start with the next conversation.",
+                        servers.len()
+                    )),
+                    Err(e) => CommandResult::Message(format!("Could not save MCP trust: {e}")),
+                }
+            } else {
+                let listing = servers
+                    .iter()
+                    .map(|s| format!("  {}: {} {}", s.name, s.command, s.args.join(" ")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                CommandResult::Message(format!(
+                    "This workspace's .phazeai/mcp.json would run:\n{listing}\n\n\
+                     Only trust these if you trust the project. Run `/mcp-trust yes` to allow."
+                ))
+            }
+        }
         "/version" => CommandResult::Message(format!("PhazeAI CLI v{}", env!("CARGO_PKG_VERSION"))),
         "/models" => CommandResult::ListModels,
         "/discover" => CommandResult::DiscoverModels,
@@ -301,6 +326,7 @@ fn show_help() -> CommandResult {
 
   QUICK TOGGLES
     /yolo                     Auto-approve all tools (no more confirmations)
+    /mcp-trust [yes]          Review / allow this project's MCP servers
 
   KEYBOARD SHORTCUTS
     Ctrl+E                    Open external editor ($EDITOR) for prompt

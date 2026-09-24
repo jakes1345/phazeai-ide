@@ -406,6 +406,49 @@ pub(crate) fn request_quit(state: &IdeState, force: bool) {
     std::process::exit(0);
 }
 
+/// Show the commands a workspace's `.phazeai/mcp.json` would launch and, if
+/// the user agrees, trust them so chat/composer start those servers.
+pub(crate) fn trust_workspace_mcp_servers(state: &IdeState) {
+    use phazeai_core::mcp::McpManager;
+    let root = state.project.workspace_root.get_untracked();
+    let servers = McpManager::untrusted_project_servers(&root);
+    if servers.is_empty() {
+        show_toast(
+            state.workbench.status_toast,
+            "No untrusted MCP servers in this workspace",
+        );
+        return;
+    }
+    let listing = servers
+        .iter()
+        .map(|s| format!("• {}: {} {}", s.name, s.command, s.args.join(" ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Trust MCP Servers?")
+        .set_description(format!(
+            "This workspace wants to run these programs on your computer as MCP \
+             tool servers:\n\n{listing}\n\nOnly trust them if you trust this \
+             project's authors. Allow them to run?"
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show();
+    if answer != rfd::MessageDialogResult::Yes {
+        return;
+    }
+    match McpManager::trust_project_servers(&root) {
+        Ok(()) => show_toast(
+            state.workbench.status_toast,
+            format!("Trusted {} MCP server(s) for this workspace", servers.len()),
+        ),
+        Err(e) => show_toast(
+            state.workbench.status_toast,
+            format!("Could not save MCP trust: {e}"),
+        ),
+    }
+}
+
 /// Show a toast notification that auto-dismisses after 3 seconds.
 /// Safe to call from any code that has access to `IdeState`.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
@@ -1689,6 +1732,10 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Save Without Formatting",
             action: |s| s.editor.save_no_format_nonce.update(|v| *v += 1),
+        },
+        PaletteCommand {
+            label: "MCP: Trust Workspace Servers",
+            action: |s| trust_workspace_mcp_servers(&s),
         },
         PaletteCommand {
             label: "Fold All",
@@ -4295,6 +4342,20 @@ pub fn launch_phaze_ide() {
         .window(
             move |_| {
                 let state = IdeState::new(&settings);
+
+                {
+                    let root = state.project.workspace_root.get_untracked();
+                    let n = phazeai_core::mcp::McpManager::untrusted_project_servers(&root).len();
+                    if n > 0 {
+                        show_toast(
+                            state.workbench.status_toast,
+                            format!(
+                                "This workspace defines {n} MCP server(s) that won't run until you \
+                                 trust them (command palette: \"MCP: Trust Workspace Servers\")"
+                            ),
+                        );
+                    }
+                }
 
                 if let Some(err) = Settings::load_error() {
                     show_toast(
