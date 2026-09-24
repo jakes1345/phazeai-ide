@@ -1,7 +1,6 @@
 use crate::error::PhazeError;
 use crate::tools::traits::{Tool, ToolResult};
 use globset::{Glob as GlobPattern, GlobSetBuilder};
-use ignore::WalkBuilder;
 use serde_json::Value;
 
 pub struct GlobTool;
@@ -40,6 +39,7 @@ impl Tool for GlobTool {
             .ok_or_else(|| PhazeError::tool("glob", "Missing required parameter: pattern"))?;
 
         let base_path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let base_path = crate::tools::sandbox::resolve_within_workspace("glob", base_path)?;
 
         let glob = GlobPattern::new(pattern)
             .map_err(|e| PhazeError::tool("glob", format!("Invalid glob pattern: {e}")))?;
@@ -52,11 +52,7 @@ impl Tool for GlobTool {
 
         let mut matches = Vec::new();
 
-        let walker = WalkBuilder::new(base_path)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .build();
+        let walker = crate::tools::sandbox::search_walker(&base_path).build();
 
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -64,7 +60,7 @@ impl Tool for GlobTool {
             }
 
             let entry_path = entry.path();
-            let relative = entry_path.strip_prefix(base_path).unwrap_or(entry_path);
+            let relative = entry_path.strip_prefix(&base_path).unwrap_or(entry_path);
 
             if glob_set.is_match(relative) {
                 matches.push(entry_path.to_string_lossy().to_string());

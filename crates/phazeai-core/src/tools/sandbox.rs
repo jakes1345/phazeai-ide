@@ -45,6 +45,55 @@ pub const PROTECTED_SYSTEM_PATHS: &[&str] = &[
     "/root",
 ];
 
+/// OS directories whose *contents* are off-limits too (unlike the list above,
+/// which only refuses the exact path so e.g. `/home/me/project` stays usable).
+const PROTECTED_SYSTEM_PREFIXES: &[&str] = &[
+    "/etc",
+    "/boot",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib64",
+    "/var/lib",
+];
+
+/// Credential stores under the user's home directory. No tool may read, list,
+/// search or write these: whatever a tool returns is sent to the model provider.
+const SENSITIVE_HOME_PATHS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+    ".git-credentials",
+    ".config/gcloud",
+    ".config/gh",
+    ".password-store",
+    ".local/share/keyrings",
+];
+
+/// File names that hold secrets wherever they appear.
+const SENSITIVE_FILE_NAMES: &[&str] = &[
+    ".env",
+    "id_rsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_dsa",
+    ".git-credentials",
+];
+
 static WORKSPACE_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 /// Set the workspace root used by all sandboxed tool calls. Call once at app
@@ -62,11 +111,40 @@ pub fn workspace_root() -> Option<PathBuf> {
     WORKSPACE_ROOT.read().ok().and_then(|g| g.clone())
 }
 
-/// Returns true if `canonical` matches any path in [`PROTECTED_SYSTEM_PATHS`]
-/// or is the user's home directory itself.
+/// True for credential stores and secret files (`~/.ssh`, `~/.aws`, `.env`,
+/// private keys, ...). Tools must neither read nor write these.
+pub fn is_sensitive_path(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if SENSITIVE_FILE_NAMES.contains(&name) || name.starts_with(".env.") {
+            return true;
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        if SENSITIVE_HOME_PATHS
+            .iter()
+            .any(|sub| path.starts_with(home.join(sub)))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if `canonical` matches any path in [`PROTECTED_SYSTEM_PATHS`],
+/// lies under a [`PROTECTED_SYSTEM_PREFIXES`] directory, is a credential
+/// store ([`is_sensitive_path`]), or is the user's home directory itself.
 pub fn is_protected_system_path(canonical: &Path) -> bool {
     let s = canonical.to_string_lossy();
     if PROTECTED_SYSTEM_PATHS.iter().any(|p| s.as_ref() == *p) {
+        return true;
+    }
+    if PROTECTED_SYSTEM_PREFIXES
+        .iter()
+        .any(|p| canonical.starts_with(p))
+    {
+        return true;
+    }
+    if is_sensitive_path(canonical) {
         return true;
     }
     if let Some(home) = dirs::home_dir() {
@@ -96,7 +174,16 @@ pub fn resolve_within_workspace(tool_name: &str, input: &str) -> Result<PathBuf,
         return Err(PhazeError::tool(tool_name, "path is empty"));
     }
 
-    let raw = Path::new(input);
+    // Relative paths are relative to the workspace, not to wherever the
+    // process happened to be launched from (e.g. $HOME from a desktop icon).
+    let joined;
+    let raw = match workspace_root() {
+        Some(root) if Path::new(input).is_relative() => {
+            joined = root.join(input);
+            joined.as_path()
+        }
+        _ => Path::new(input),
+    };
 
     // Defense in depth: refuse the textual form before canonicalisation, so a
     // symlink like /bin -> /usr/bin doesn't bypass the protected list when /bin
@@ -139,6 +226,20 @@ pub fn resolve_within_workspace(tool_name: &str, input: &str) -> Result<PathBuf,
     }
 
     Ok(canonical)
+}
+
+/// Directory walker for search/list tools: honours .gitignore, includes other
+/// dotfiles, never follows symlinks out of the tree, and never descends into
+/// `.git` or credential stores (see [`is_sensitive_path`]).
+pub fn search_walker(root: &Path) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .follow_links(false)
+        .filter_entry(|e| e.file_name() != ".git" && !is_sensitive_path(e.path()));
+    builder
 }
 
 /// Same as [`resolve_within_workspace`] but for tools that accept directories
@@ -281,5 +382,55 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn refuses_contents_of_system_dirs_and_credentials() {
+        with_workspace(None, || {
+            let err = resolve_within_workspace("test", "/etc/passwd").unwrap_err();
+            assert!(format!("{err}").contains("protected"));
+            if let Some(home) = dirs::home_dir() {
+                for sub in [".ssh/id_rsa", ".aws/credentials", ".gnupg"] {
+                    let p = home.join(sub);
+                    assert!(
+                        resolve_within_workspace("test", p.to_str().unwrap()).is_err(),
+                        "{} must be refused",
+                        p.display()
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn secret_files_are_refused_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "KEY=secret").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        with_workspace(Some(dir.path().to_path_buf()), || {
+            assert!(resolve_within_workspace("test", ".env").is_err());
+            assert!(resolve_within_workspace("test", "main.rs").is_ok());
+        });
+        let names: Vec<_> = search_walker(dir.path())
+            .build()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
+        assert!(names.contains(&"main.rs".to_string()));
+        assert!(!names.contains(&".env".to_string()));
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_workspace_not_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        with_workspace(Some(canonical.clone()), || {
+            assert_eq!(resolve_within_workspace("test", ".").unwrap(), canonical);
+            assert_eq!(
+                resolve_within_workspace("test", "src").unwrap(),
+                canonical.join("src")
+            );
+        });
     }
 }

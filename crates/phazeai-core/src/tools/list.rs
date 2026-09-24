@@ -1,5 +1,4 @@
 use crate::tools::traits::{Tool, ToolResult};
-use ignore::WalkBuilder;
 use serde_json::Value;
 
 pub struct ListFilesTool;
@@ -33,6 +32,7 @@ impl Tool for ListFilesTool {
 
     async fn execute(&self, params: Value) -> ToolResult {
         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let resolved = crate::tools::sandbox::resolve_within_workspace("list_files", path)?;
 
         let recursive = params
             .get("recursive")
@@ -43,8 +43,7 @@ impl Tool for ListFilesTool {
 
         let max_depth = if recursive { None } else { Some(1) };
 
-        let mut builder = WalkBuilder::new(path);
-        builder.hidden(false).git_ignore(true).git_global(true);
+        let mut builder = crate::tools::sandbox::search_walker(&resolved);
 
         if let Some(depth) = max_depth {
             builder.max_depth(Some(depth));

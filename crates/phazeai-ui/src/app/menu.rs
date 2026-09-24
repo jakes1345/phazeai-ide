@@ -57,6 +57,8 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 }))
                 .entry(MenuItem::new("Open Folder…").action(move || {
                     if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        // Move the agent's file sandbox along with the workspace.
+                        phazeai_core::tools::sandbox::set_workspace_root(Some(folder.clone()));
                         s3.project.workspace_root.set(folder);
                         s3.workbench.file_picker_files.set(Vec::new());
                         s3.workbench.show_left_panel.set(true);

@@ -1,9 +1,15 @@
 use crate::error::PhazeError;
+use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
-use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::Value;
-use std::path::Path;
+
+/// Files larger than this are skipped rather than read into memory.
+const MAX_GREP_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+fn small_enough(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() <= MAX_GREP_FILE_BYTES)
+}
 
 pub struct GrepTool;
 
@@ -51,10 +57,17 @@ impl Tool for GrepTool {
         let regex = Regex::new(pattern)
             .map_err(|e| PhazeError::tool("grep", format!("Invalid regex: {e}")))?;
 
-        let path = Path::new(search_path);
+        let resolved = sandbox::resolve_within_workspace("grep", search_path)?;
+        let path = resolved.as_path();
         let mut matches = Vec::new();
 
         if path.is_file() {
+            if !small_enough(path) {
+                return Err(PhazeError::tool(
+                    "grep",
+                    format!("'{search_path}' is larger than 10 MiB; refusing to search it"),
+                ));
+            }
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 for (line_num, line) in content.lines().enumerate() {
                     if regex.is_match(line) {
@@ -67,8 +80,7 @@ impl Tool for GrepTool {
                 }
             }
         } else {
-            let mut builder = WalkBuilder::new(path);
-            builder.hidden(false).git_ignore(true).git_global(true);
+            let mut builder = sandbox::search_walker(path);
 
             if let Some(glob) = include_pattern {
                 let mut types = ignore::types::TypesBuilder::new();
@@ -86,6 +98,9 @@ impl Tool for GrepTool {
                 }
 
                 let file_path = entry.path();
+                if !small_enough(file_path) {
+                    continue;
+                }
                 if let Ok(content) = tokio::fs::read_to_string(file_path).await {
                     let file_str = file_path.to_string_lossy();
                     for (line_num, line) in content.lines().enumerate() {

@@ -22,7 +22,13 @@ impl BashTool {
 
 impl Default for BashTool {
     fn default() -> Self {
-        Self::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        // Start in the workspace when one is set, so commands aren't refused
+        // just because the app was launched from another directory.
+        Self::new(
+            sandbox::workspace_root()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        )
     }
 }
 
@@ -73,7 +79,7 @@ impl Tool for BashTool {
         if let Some(root) = sandbox::workspace_root() {
             let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
             if !canonical_cwd.starts_with(&root)
-                && !sandbox::is_protected_system_path(&canonical_cwd)
+                || sandbox::is_protected_system_path(&canonical_cwd)
             {
                 return Err(PhazeError::tool(
                     "bash",
@@ -90,7 +96,11 @@ impl Tool for BashTool {
         let wrapped_command = format!("{command} && echo \"PWD:$(pwd)\"");
 
         let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg("-c").arg(&wrapped_command).current_dir(&cwd);
+        cmd.arg("-c")
+            .arg(&wrapped_command)
+            .current_dir(&cwd)
+            // Dropping the future on timeout must kill the child, not leak it.
+            .kill_on_drop(true);
 
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
@@ -130,13 +140,12 @@ impl Tool for BashTool {
         }
 
         // Truncate if too long
-        if stdout.len() > MAX_OUTPUT_CHARS {
-            stdout.truncate(MAX_OUTPUT_CHARS);
-            stdout.push_str("\n... [output truncated]");
-        }
-        if stderr.len() > MAX_OUTPUT_CHARS {
-            stderr.truncate(MAX_OUTPUT_CHARS);
-            stderr.push_str("\n... [output truncated]");
+        // Cut on a char boundary: `truncate` panics mid-codepoint.
+        for out in [&mut stdout, &mut stderr] {
+            if out.len() > MAX_OUTPUT_CHARS {
+                out.truncate(out.floor_char_boundary(MAX_OUTPUT_CHARS));
+                out.push_str("\n... [output truncated]");
+            }
         }
 
         Ok(serde_json::json!({
