@@ -259,6 +259,29 @@ impl Settings {
         registry
     }
 
+    /// Build a client for one kind of task: the `[model_routes]` entry for
+    /// `task` if one is configured and buildable, otherwise the active
+    /// provider/model. Used by the multi-agent pipeline to give each role
+    /// its own model.
+    pub fn build_llm_client_for(
+        &self,
+        task: TaskType,
+    ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
+        let registry = self.build_provider_registry();
+        if let Some(route) = self.model_routes.get(&task) {
+            let id = ModelRouter::parse_provider_id(&route.provider);
+            if let Some(config) = registry.get_config(&id) {
+                match registry.build_client_for(config, &route.model) {
+                    Ok(client) => return Ok(client),
+                    Err(e) => tracing::warn!(
+                        "model route for {task:?} unusable ({e}); using the active model"
+                    ),
+                }
+            }
+        }
+        registry.build_active_client()
+    }
+
     /// Build an LLM client from the current settings.
     pub fn build_llm_client(
         &self,

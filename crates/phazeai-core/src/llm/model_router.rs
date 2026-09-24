@@ -188,7 +188,7 @@ impl ModelRouter {
         self.routes.len()
     }
 
-    fn parse_provider_id(name: &str) -> ProviderId {
+    pub(crate) fn parse_provider_id(name: &str) -> ProviderId {
         match name.to_lowercase().as_str() {
             "claude" | "anthropic" => ProviderId::Claude,
             "openai" => ProviderId::OpenAI,
