@@ -434,6 +434,23 @@ impl AppState {
     }
 }
 
+/// Leave raw mode and the alternate screen. Safe to call more than once and
+/// from a panic hook.
+pub fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+}
+
+/// Restores the terminal when dropped, so early `?` returns and panics that
+/// unwind out of the TUI loop don't leave the user's shell in raw mode.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
 pub async fn run_tui(
     settings: Settings,
     theme_name: &str,
@@ -442,6 +459,7 @@ pub async fn run_tui(
     extra_instructions: Option<&str>,
 ) -> Result<()> {
     enable_raw_mode()?;
+    let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -1315,7 +1333,7 @@ fn render_tool_card_lines(
         // Show tool arguments (truncated)
         if !args.is_empty() {
             let display_args = if args.len() > 100 {
-                format!("{}…", &args[..99])
+                format!("{}…", &args[..args.floor_char_boundary(99)])
             } else {
                 args.to_string()
             };
@@ -1515,7 +1533,12 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, state: &AppState, theme: &Them
 
     // Set cursor position in input area
     if !state.is_processing && state.pending_approval.is_none() {
-        let cursor_x = area.x + state.cursor_pos as u16 + 1;
+        // cursor_pos is a byte offset; the terminal column is a char count.
+        let col = state.input[..state.cursor_pos].chars().count();
+        let cursor_x = area
+            .x
+            .saturating_add(u16::try_from(col).unwrap_or(u16::MAX))
+            + 1;
         let max_x = area.x + area.width.saturating_sub(2);
         f.set_cursor_position((cursor_x.min(max_x), area.y + 1));
     }
@@ -1920,8 +1943,9 @@ fn handle_key(
         // Input editing
         (_, KeyCode::Backspace) => {
             if state.cursor_pos > 0 && !state.is_processing {
-                state.input.remove(state.cursor_pos - 1);
-                state.cursor_pos -= 1;
+                let prev = prev_char_boundary(&state.input, state.cursor_pos);
+                state.input.replace_range(prev..state.cursor_pos, "");
+                state.cursor_pos = prev;
             }
         }
         (_, KeyCode::Delete) => {
@@ -1934,7 +1958,7 @@ fn handle_key(
                 // Word jump left
                 state.cursor_pos = word_boundary_left(&state.input, state.cursor_pos);
             } else {
-                state.cursor_pos = state.cursor_pos.saturating_sub(1);
+                state.cursor_pos = prev_char_boundary(&state.input, state.cursor_pos);
             }
         }
         (_, KeyCode::Right) => {
@@ -1942,7 +1966,7 @@ fn handle_key(
                 // Word jump right
                 state.cursor_pos = word_boundary_right(&state.input, state.cursor_pos);
             } else if state.cursor_pos < state.input.len() {
-                state.cursor_pos += 1;
+                state.cursor_pos = next_char_boundary(&state.input, state.cursor_pos);
             }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
@@ -2062,7 +2086,7 @@ fn handle_key(
         (_, KeyCode::Char(c)) => {
             if !state.is_processing {
                 state.input.insert(state.cursor_pos, c);
-                state.cursor_pos += 1;
+                state.cursor_pos += c.len_utf8();
             }
         }
 
@@ -3010,6 +3034,19 @@ jobs:
 }
 
 // ── Helper functions ────────────────────────────────────────────────────
+
+/// Byte offset of the char boundary before `pos` (0 at the start).
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    s[..pos].char_indices().next_back().map_or(0, |(i, _)| i)
+}
+
+/// Byte offset of the char boundary after `pos` (`s.len()` at the end).
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    s[pos..]
+        .chars()
+        .next()
+        .map_or(s.len(), |c| pos + c.len_utf8())
+}
 
 fn word_boundary_left(s: &str, pos: usize) -> usize {
     if pos == 0 {

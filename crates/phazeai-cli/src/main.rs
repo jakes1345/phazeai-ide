@@ -42,13 +42,26 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Log to a daily file, never to stderr: the TUI owns the terminal, and
+    // any stray stderr line would be drawn over the interface.
+    let log_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("phazeai")
+        .join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let (log_writer, _log_guard) = tracing_appender::non_blocking(
+        tracing_appender::rolling::daily(&log_dir, "phazeai-cli.log"),
+    );
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
+        .with_writer(log_writer)
+        .with_ansi(false)
         .with_target(false)
         .init();
+    install_panic_hook(log_dir);
 
     // Anonymous telemetry — single fire-and-forget ping, no personal data
     phazeai_core::telemetry::report_launch(phazeai_core::telemetry::AppKind::Cli);
@@ -150,4 +163,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// On panic: put the terminal back into a usable state *before* anything is
+/// printed (otherwise the message lands on the alternate screen in raw mode
+/// and the user's shell is left broken), log it, then run the default hook.
+fn install_panic_hook(log_dir: std::path::PathBuf) {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        app::restore_terminal();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic: {info}\n{backtrace}");
+        default_hook(info);
+        eprintln!(
+            "\nPhazeAI crashed. Details were written to {}. Please include that log \
+             when reporting the bug.",
+            log_dir.display()
+        );
+    }));
 }
