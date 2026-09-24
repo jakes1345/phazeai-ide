@@ -29,17 +29,13 @@ pub struct Skill {
 impl Skill {
     /// Returns the full system-prompt block to inject when this skill is active.
     pub fn as_system_prompt(&self) -> String {
-        format!(
-            "# Active Expert Skill: {}\n\n{}\n",
-            self.name, self.body
-        )
+        format!("# Active Expert Skill: {}\n\n{}\n", self.name, self.body)
     }
 
     /// Returns true if this skill's name or description loosely matches `query`.
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
-        self.name.to_lowercase().contains(&q)
-            || self.description.to_lowercase().contains(&q)
+        self.name.to_lowercase().contains(&q) || self.description.to_lowercase().contains(&q)
     }
 }
 
@@ -48,8 +44,7 @@ impl Skill {
 /// Project skills take precedence: if a project skill has the same name as a
 /// global skill, the global one is excluded.
 pub fn discover_skills(workspace: Option<&Path>) -> Vec<Skill> {
-    let global_dir = dirs::config_dir()
-        .map(|d| d.join("phazeai").join("skills"));
+    let global_dir = dirs::config_dir().map(|d| d.join("phazeai").join("skills"));
 
     let project_dir = workspace.map(|w| w.join(".phazeai").join("skills"));
 
@@ -194,8 +189,8 @@ fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
 fn first_sentence(text: &str) -> String {
     let s = text.trim();
     let end = s
-        .find(|c| c == '.' || c == '!' || c == '?')
+        .find(['.', '!', '?'])
         .map(|i| i + 1)
-        .unwrap_or(s.len().min(120));
+        .unwrap_or_else(|| s.floor_char_boundary(120));
     s[..end].trim().to_string()
 }
