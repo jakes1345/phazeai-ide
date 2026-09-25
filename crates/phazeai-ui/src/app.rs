@@ -331,7 +331,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
     }
 }
 
-/// Serializes all settings.toml load-mutate-save cycles. Both the editor
+/// Serializes all config.toml load-mutate-save cycles. Both the editor
 /// settings effect and the provider/model effect write from background
 /// threads; without this lock concurrent writers clobber each other's fields.
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1185,7 +1185,7 @@ impl IdeState {
             });
         }
 
-        // Persist provider + model changes to settings.toml whenever they change.
+        // Persist provider + model changes to config.toml whenever they change.
         // The first run only subscribes: re-saving the values we just loaded
         // would rewrite (and, if it was unparseable, replace) the user's file
         // on every launch.
@@ -4326,7 +4326,7 @@ pub fn launch_phaze_ide() {
             (
                 "Python available",
                 check_python_ready(&settings),
-                "Install Python 3 or set sidecar.python_path in settings.toml",
+                "Install Python 3 or set sidecar.python_path in config.toml",
             ),
             (
                 "rust-analyzer found",

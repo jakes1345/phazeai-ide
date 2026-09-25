@@ -582,3 +582,17 @@ fn test_provider_command_case_preservation() {
         _ => panic!("Expected ProviderChanged, got {:?}", result),
     }
 }
+
+#[test]
+fn test_pipeline_command() {
+    match handle_command("/pipeline add a --verbose flag") {
+        CommandResult::Pipeline(task) => assert_eq!(task, "add a --verbose flag"),
+        other => panic!("expected Pipeline, got {other:?}"),
+    }
+    match handle_command("/pipe fix it") {
+        CommandResult::Pipeline(task) => assert_eq!(task, "fix it"),
+        other => panic!("expected Pipeline, got {other:?}"),
+    }
+    // No task: still routed to the handler, which prints usage.
+    assert!(matches!(handle_command("/pipeline"), CommandResult::Pipeline(t) if t.is_empty()));
+}

@@ -47,7 +47,7 @@ This is the honest version. Every item is grounded in the current codebase. Noth
 ### 1.6 First-run readiness checks
 **Why it matters:** right now the IDE launches silently even when no provider is configured, rust-analyzer isn't installed, or the sidecar Python env is broken.
 
-**Fix:** on first launch (no `settings.toml`), show a setup checklist: provider configured?, LSP binary found for workspace language?, sidecar enabled + Python found?. Non-blocking — user can skip — but actionable.
+**Fix:** on first launch (no `config.toml`), show a setup checklist: provider configured?, LSP binary found for workspace language?, sidecar enabled + Python found?. Non-blocking — user can skip — but actionable.
 
 **Files:** `app.rs`, `panels/settings.rs`
 

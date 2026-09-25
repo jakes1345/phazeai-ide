@@ -137,8 +137,21 @@ struct PendingApproval {
 
 enum WorkerCommand {
     UserMessage(String),
+    /// Run the multi-agent pipeline on a task.
+    Pipeline(String),
     ClearHistory,
-    SwapModel { settings: Box<Settings> },
+    SwapModel {
+        settings: Box<Settings>,
+    },
+}
+
+/// What the worker task sends back to the UI loop.
+enum WorkerEvent {
+    Agent(AgentEvent),
+    /// A pipeline progress line, shown as a system message.
+    Note(String),
+    /// The pipeline finished (successfully or not); text is the summary.
+    PipelineDone(String),
 }
 
 struct AppState {
@@ -559,7 +572,7 @@ pub async fn run_tui(
         }
     };
 
-    let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
     let (user_input_tx, mut user_input_rx) = mpsc::unbounded_channel::<WorkerCommand>();
 
     // Agent worker task
@@ -570,39 +583,13 @@ pub async fn run_tui(
         // Share the approval_tx with the agent callback so it can block on user input.
         let approval_tx_shared = state.approval_tx.clone();
 
-        // Create approval callback
-        let approval_manager_clone = state.approval_manager.clone();
-        let approval_mgr = approval_manager_clone.clone();
-        let approval_fn: phazeai_core::agent::ApprovalFn = Box::new(move |tool_name, params| {
-            let mgr = approval_mgr.clone();
-            let tx_slot = approval_tx_shared.clone();
-            Box::pin(async move {
-                let needs = {
-                    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
-                    mgr.needs_approval(&tool_name, &params)
-                };
-                if !needs {
-                    return true; // Auto-approved by manager policy
-                }
-
-                // Block until the UI responds via the oneshot channel.
-                let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-                {
-                    let mut slot = tx_slot.lock().unwrap_or_else(|e| e.into_inner());
-                    *slot = Some(tx);
-                }
-
-                // Await user response; default to deny on channel error.
-                let approved = rx.await.unwrap_or(false);
-
-                if approved {
-                    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
-                    mgr.record_approval(&tool_name, &params);
-                }
-
-                approved
-            })
-        });
+        // Approval callbacks (single agent + pipeline Coder) share the
+        // manager's policy and the UI's approval slot.
+        let approval_mgr = state.approval_manager.clone();
+        let make_approval_fn =
+            move || cli_approval_fn(approval_mgr.clone(), approval_tx_shared.clone());
+        let approval_fn = make_approval_fn();
+        let mut worker_settings = settings.clone();
 
         let cancel_token = state.cancel_token.clone();
         let handle = tokio::spawn(async move {
@@ -646,6 +633,19 @@ pub async fn run_tui(
                         if let Ok(new_llm) = new_settings.build_llm_client() {
                             agent.swap_llm(new_llm);
                         }
+                        worker_settings = *new_settings;
+                        continue;
+                    }
+                    WorkerCommand::Pipeline(task) => {
+                        cancel_token.store(false, Ordering::Relaxed);
+                        run_cli_pipeline(
+                            &worker_settings,
+                            &task,
+                            make_approval_fn(),
+                            cancel_token.clone(),
+                            &event_tx,
+                        )
+                        .await;
                         continue;
                     }
                     WorkerCommand::UserMessage(msg) => msg,
@@ -659,7 +659,7 @@ pub async fn run_tui(
 
                 let forward = tokio::spawn(async move {
                     while let Some(ev) = inner_rx.recv().await {
-                        if local_tx.send(ev).is_err() {
+                        if local_tx.send(WorkerEvent::Agent(ev)).is_err() {
                             break;
                         }
                     }
@@ -668,7 +668,7 @@ pub async fn run_tui(
                 if let Err(e) = agent_fut.await {
                     let err_str = e.to_string();
                     if err_str != "Cancelled" {
-                        let _ = event_tx.send(AgentEvent::Error(err_str));
+                        let _ = event_tx.send(WorkerEvent::Agent(AgentEvent::Error(err_str)));
                     }
                 }
 
@@ -685,8 +685,21 @@ pub async fn run_tui(
         terminal.draw(|f| draw_ui(f, &mut state))?;
 
         // Process agent events (non-blocking)
-        while let Ok(agent_event) = agent_event_rx.try_recv() {
-            handle_agent_event(&mut state, agent_event);
+        while let Ok(worker_event) = agent_event_rx.try_recv() {
+            match worker_event {
+                WorkerEvent::Agent(ev) => handle_agent_event(&mut state, ev),
+                WorkerEvent::Note(text) => {
+                    state.status_text = text.clone();
+                    state.add_message(MessageRole::System, text);
+                }
+                WorkerEvent::PipelineDone(summary) => {
+                    state.is_processing = false;
+                    state.pending_approval = None;
+                    state.status_text = "Pipeline done".into();
+                    state.add_message(MessageRole::System, summary);
+                    state.save_conversation();
+                }
+            }
         }
 
         // Handle keyboard input with timeout
@@ -2827,6 +2840,36 @@ fn handle_command_result(
                 let _ = user_input_tx.send(WorkerCommand::UserMessage(agent_input));
             }
         }
+        CommandResult::Pipeline(task) => {
+            if task.trim().is_empty() {
+                state.add_message(
+                    MessageRole::System,
+                    "Usage: /pipeline <task>\n\
+                     Runs Planner -> Coder -> project check (with fix rounds) -> Reviewer.\n\
+                     The Coder edits files under your current /approve mode."
+                        .into(),
+                );
+            } else if state.is_processing {
+                state.add_message(
+                    MessageRole::System,
+                    "Agent is still running. Wait for it to finish or /cancel.".into(),
+                );
+            } else if state.agent_task.is_none() {
+                state.add_message(
+                    MessageRole::System,
+                    "No model is configured, so the pipeline can't run. Set an API key or use --provider ollama.".into(),
+                );
+            } else {
+                state.add_message(MessageRole::User, format!("[pipeline] {task}"));
+                state.last_user_input = task.clone();
+                state.is_processing = true;
+                state.status_text = "Pipeline starting...".into();
+                if user_input_tx.send(WorkerCommand::Pipeline(task)).is_err() {
+                    state.is_processing = false;
+                    state.add_message(MessageRole::System, "The agent worker has stopped.".into());
+                }
+            }
+        }
         CommandResult::Cancel => {
             state.cancel_token.store(true, Ordering::Relaxed);
             let sender = state
@@ -3082,6 +3125,149 @@ fn word_boundary_right(s: &str, pos: usize) -> usize {
         i += 1;
     }
     chars[..i].iter().collect::<String>().len()
+}
+
+/// Tool-approval callback: the manager's policy decides; anything that needs
+/// a decision parks a oneshot sender in `slot` for the approval prompt.
+fn cli_approval_fn(
+    mgr: Arc<std::sync::Mutex<ToolApprovalManager>>,
+    slot: Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+) -> phazeai_core::agent::ApprovalFn {
+    Box::new(move |tool_name, params| {
+        let mgr = mgr.clone();
+        let tx_slot = slot.clone();
+        Box::pin(async move {
+            let needs = {
+                let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                mgr.needs_approval(&tool_name, &params)
+            };
+            if !needs {
+                return true; // Auto-approved by manager policy
+            }
+            // Block until the UI responds via the oneshot channel.
+            let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+            {
+                let mut slot = tx_slot.lock().unwrap_or_else(|e| e.into_inner());
+                *slot = Some(tx);
+            }
+            let approved = rx.await.unwrap_or(false);
+            if approved {
+                let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                mgr.record_approval(&tool_name, &params);
+            }
+            approved
+        })
+    })
+}
+
+/// Run the multi-agent pipeline for `/pipeline`, streaming stage notes and
+/// the agents' own events to the UI.
+async fn run_cli_pipeline(
+    settings: &Settings,
+    task: &str,
+    approval: phazeai_core::agent::ApprovalFn,
+    cancel: Arc<AtomicBool>,
+    ui: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    use phazeai_core::agent::{Pipeline, PipelineConfig, PipelineEvent, ReviewVerdict};
+    use phazeai_core::llm::TaskType;
+
+    let clients = (|| {
+        Ok::<_, phazeai_core::PhazeError>((
+            settings.build_llm_client_for(TaskType::Reasoning)?,
+            settings.build_llm_client_for(TaskType::CodeGeneration)?,
+            settings.build_llm_client_for(TaskType::CodeReview)?,
+        ))
+    })();
+    let (planner, coder, reviewer) = match clients {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = ui.send(WorkerEvent::PipelineDone(format!(
+                "Pipeline could not start: {e}"
+            )));
+            return;
+        }
+    };
+    let root = phazeai_core::tools::sandbox::workspace_root()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let pipeline = Pipeline::new(planner, coder, reviewer, PipelineConfig::new(root))
+        .with_approval(approval)
+        .with_cancel_token(cancel);
+
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<PipelineEvent>();
+    let ui_fwd = ui.clone();
+    let forward = async move {
+        let mut current = None;
+        while let Some(ev) = ev_rx.recv().await {
+            let out = match ev {
+                PipelineEvent::StageStarted(stage) => {
+                    if current == Some(stage) {
+                        continue;
+                    }
+                    current = Some(stage);
+                    WorkerEvent::Note(format!("> {}", stage.label()))
+                }
+                PipelineEvent::CheckResult {
+                    command,
+                    passed,
+                    output,
+                    ..
+                } => {
+                    // Force the next stage banner even if it repeats (Code).
+                    current = None;
+                    if passed {
+                        WorkerEvent::Note(format!("`{command}` passed"))
+                    } else {
+                        let tail: Vec<&str> = output.lines().rev().take(12).collect();
+                        let tail: Vec<&str> = tail.into_iter().rev().collect();
+                        WorkerEvent::Note(format!("`{command}` failed:\n{}", tail.join("\n")))
+                    }
+                }
+                // Each stage's own Complete/Error must not end the whole run.
+                PipelineEvent::Agent {
+                    event: AgentEvent::Complete { .. },
+                    ..
+                } => continue,
+                PipelineEvent::Agent {
+                    stage,
+                    event: AgentEvent::Error(e),
+                } => WorkerEvent::Note(format!("{}: {e}", stage.label())),
+                PipelineEvent::Agent { event, .. } => WorkerEvent::Agent(event),
+                PipelineEvent::StageFinished { .. } | PipelineEvent::Complete(_) => continue,
+            };
+            if ui_fwd.send(out).is_err() {
+                break;
+            }
+        }
+    };
+
+    let (result, ()) = tokio::join!(pipeline.run(task, ev_tx), forward);
+    let summary = match result {
+        Ok(o) => {
+            let verdict = match o.verdict {
+                ReviewVerdict::Approved => "Reviewer approved",
+                ReviewVerdict::ChangesRequested => "Reviewer still requests changes",
+                ReviewVerdict::Unclear => "Reviewer gave no clear verdict",
+            };
+            let check = match o.check_passed {
+                Some(true) => "check passes",
+                Some(false) => "check FAILS",
+                None => "no check for this project",
+            };
+            let files = if o.changed_files.is_empty() {
+                String::new()
+            } else {
+                format!("\nChanged: {}", o.changed_files.join(", "))
+            };
+            format!(
+                "Pipeline done - {verdict}, {check}, {} fix round(s).{files}\nReview with /diff.",
+                o.fix_rounds
+            )
+        }
+        Err(e) => format!("Pipeline stopped: {e}"),
+    };
+    let _ = ui.send(WorkerEvent::PipelineDone(summary));
 }
 
 fn estimate_cost(provider: &str, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {

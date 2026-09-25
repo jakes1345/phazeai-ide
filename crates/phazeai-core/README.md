@@ -11,7 +11,7 @@ The brain of PhazeAI IDE — a shared Rust engine providing agentic AI capabilit
 - **MCP Bridge**: Model Context Protocol support for extended tool capabilities
 - **Multi-Agent Orchestrator**: Planner → Coder → Reviewer pipeline with role-based model routing
 - **Project Analysis**: Repo map generation, git context collection, project type detection, conversation persistence
-- **Configuration**: TOML-based settings at `~/.config/phazeai/settings.toml` with provider keys, model defaults, and feature flags
+- **Configuration**: TOML-based settings at `~/.config/phazeai/config.toml` with provider keys, model defaults, and feature flags
 
 ## Usage
 

@@ -21,7 +21,7 @@ cargo run -p phazeai-ui          # desktop IDE (primary)
 cargo run -p phazeai-cli         # terminal UI (ratatui)
 ```
 
-First launch creates `~/.config/phazeai/settings.toml`. Open the Settings panel (Ctrl+,) to point at your LLM provider.
+First launch creates `~/.config/phazeai/config.toml`. Open the Settings panel (Ctrl+,) to point at your LLM provider.
 
 To install both apps for your user on Linux (`~/.local/bin` plus an app-menu entry), run `./install.sh` from the clone.
 
@@ -40,7 +40,7 @@ To install both apps for your user on Linux (`~/.local/bin` plus an app-menu ent
 - Streaming chat panel against any configured LLM
 - Inline AI edit (Ctrl+K) — describe a change, AI rewrites the selection in place
 - Composer — multi-file agent loop with three approval modes (auto / approve-destructive / approve-all), tool diffs, cancel, MCP server integration
-- Multi-agent pipeline (Composer → **Pipeline** toggle): a Planner explores the repo and writes a plan, a Coder implements it with real file edits (same approval rules), the project's check (`cargo check`, `tsc`, `go build`, …) runs with up to 3 automatic fix rounds, and a Reviewer reads the diff of that run and approves or requests changes. Each stage can use a different model — see [Per-stage models](#per-stage-models)
+- Multi-agent pipeline (IDE: Composer → **Pipeline** toggle; CLI: `/pipeline <task>`): a Planner explores the repo and writes a plan, a Coder implements it with real file edits (same approval rules), the project's check (`cargo check`, `tsc`, `go build`, …) runs with up to 3 automatic fix rounds, and a Reviewer reads the diff of that run and approves or requests changes. Each stage can use a different model — see [Per-stage models](#per-stage-models)
 - Saved chat history, cancel / retry, and a picker to switch models from the chat panel
 
 **Tools & Infra**
@@ -80,7 +80,7 @@ To install both apps for your user on Linux (`~/.local/bin` plus an app-menu ent
 
 ## AI Providers
 
-Configure in the Settings panel or `~/.config/phazeai/settings.toml`:
+Configure in the Settings panel or `~/.config/phazeai/config.toml`:
 
 | Provider | Type | Setup |
 |---|---|---|
@@ -93,13 +93,13 @@ Configure in the Settings panel or `~/.config/phazeai/settings.toml`:
 | Ollama | Local | [Download](https://ollama.ai), `ollama pull <model>` |
 | LM Studio | Local | [Download](https://lmstudio.ai) |
 
-API keys you paste through the Settings panel are stored in the OS keyring (Secret Service / Keychain / Credential Manager), not in `settings.toml`.
+API keys you paste through the Settings panel are stored in the OS keyring (Secret Service / Keychain / Credential Manager), not in `config.toml`.
 
 **Recommended for new users:** install [Ollama](https://ollama.ai), `ollama pull llama3.2`, point PhazeAI at `http://localhost:11434`. Free, offline, no key.
 
 ### Per-stage models
 
-Different kinds of work can go to different models. Add routes to `settings.toml`; anything without a route uses the active provider/model:
+Different kinds of work can go to different models. Add routes to `config.toml`; anything without a route uses the active provider/model:
 
 ```toml
 [model_routes.reasoning]        # Pipeline Planner
@@ -170,7 +170,7 @@ crates/
 └── ollama-rs/             local fork with streaming + chat history
 ```
 
-Config lives at `~/.config/phazeai/settings.toml`; session state at `~/.config/phazeai/session.toml`. Logs roll daily into `~/.config/phazeai/logs/`.
+Config lives at `~/.config/phazeai/config.toml` (macOS: `~/Library/Application Support/phazeai/`, Windows: `%APPDATA%\phazeai\`); session state in `session.toml` and daily logs in `logs/` in the same folder.
 
 ---
 

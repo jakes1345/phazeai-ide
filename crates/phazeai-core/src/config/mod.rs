@@ -180,7 +180,7 @@ impl Settings {
     }
 
     /// Save settings atomically. If the file currently on disk can't be
-    /// parsed, it is first copied to `settings.toml.corrupt-<timestamp>` so a
+    /// parsed, it is first copied to `config.toml.corrupt-<timestamp>` so a
     /// typo in a hand-edited config never silently destroys the user's
     /// providers and routes.
     pub fn save(&self) -> Result<(), crate::error::PhazeError> {

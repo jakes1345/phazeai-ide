@@ -41,7 +41,7 @@ Cargo workspace:
 > `phazeai-cloud` and the Account panel were removed (no backend exists);
 > the multi-agent orchestrator was removed (no callers) — both live in git history.
 
-Config is stored at `~/.config/phazeai/settings.toml` (auto-created on first run).
+Config is stored at `~/.config/phazeai/config.toml` (auto-created on first run).
 Session (open files, panel sizes) at `~/.config/phazeai/session.toml`.
 
 ## Core Architecture

@@ -51,6 +51,8 @@ pub enum CommandResult {
     AddFile(String),
     /// Retry the last user message.
     Retry,
+    /// Run the multi-agent pipeline (/pipeline <task>).
+    Pipeline(String),
     /// Cancel the current agent run.
     Cancel,
     /// Grep for a pattern in the project (/grep <pattern>).
@@ -228,6 +230,7 @@ pub fn handle_command(input: &str) -> CommandResult {
             }
         }
         "/retry" => CommandResult::Retry,
+        "/pipeline" | "/pipe" => CommandResult::Pipeline(arg.to_string()),
         "/cancel" | "/stop" => CommandResult::Cancel,
         "/undo" => {
             if matches!(arg, "confirm" | "--confirm") {
@@ -327,6 +330,7 @@ fn show_help() -> CommandResult {
   QUICK TOGGLES
     /yolo                     Auto-approve all tools (no more confirmations)
     /mcp-trust [yes]          Review / allow this project's MCP servers
+    /pipeline <task>          Planner -> Coder -> check/fix -> Reviewer
 
   KEYBOARD SHORTCUTS
     Ctrl+E                    Open external editor ($EDITOR) for prompt

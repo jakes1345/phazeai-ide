@@ -68,7 +68,7 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
-            detail: "This provider is disabled in settings.toml.".into(),
+            detail: "This provider is disabled in config.toml.".into(),
         };
     }
 
