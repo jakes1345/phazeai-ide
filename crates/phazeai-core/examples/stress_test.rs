@@ -64,14 +64,35 @@ async fn main() -> Result<(), PhazeError> {
                 MultiAgentEvent::RefinementStarted { max_iterations } => {
                     println!("\n▶️  Refinement Started (max iter: {})", max_iterations);
                 }
-                MultiAgentEvent::BuildCheck { success, error_count, warning_count, .. } => {
-                    println!("\n▶️  Build Check: success={}, errs={}, warns={}", success, error_count, warning_count);
+                MultiAgentEvent::BuildCheck {
+                    success,
+                    error_count,
+                    warning_count,
+                    ..
+                } => {
+                    println!(
+                        "\n▶️  Build Check: success={}, errs={}, warns={}",
+                        success, error_count, warning_count
+                    );
                 }
-                MultiAgentEvent::RefinementIteration { iteration, errors_remaining, .. } => {
-                    println!("\n▶️  Refinement Iteration: {} ({} errors remaining)", iteration, errors_remaining);
+                MultiAgentEvent::RefinementIteration {
+                    iteration,
+                    errors_remaining,
+                    ..
+                } => {
+                    println!(
+                        "\n▶️  Refinement Iteration: {} ({} errors remaining)",
+                        iteration, errors_remaining
+                    );
                 }
-                MultiAgentEvent::RefinementComplete { clean_build, iterations_used } => {
-                    println!("\n▶️  Refinement Complete (clean: {}, iters: {})", clean_build, iterations_used);
+                MultiAgentEvent::RefinementComplete {
+                    clean_build,
+                    iterations_used,
+                } => {
+                    println!(
+                        "\n▶️  Refinement Complete (clean: {}, iters: {})",
+                        clean_build, iterations_used
+                    );
                 }
                 MultiAgentEvent::PipelineComplete { plan, code, review } => {
                     println!("\n🏁 PIPELINE COMPLETE!");

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub llm: LlmSettings,
     pub editor: EditorSettings,
@@ -17,6 +18,7 @@ pub struct Settings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LlmSettings {
     pub provider: LlmProvider,
     pub model: String,
@@ -64,6 +66,7 @@ pub struct ProviderEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EditorSettings {
     pub theme: String,
     pub font_size: f32,
@@ -73,34 +76,53 @@ pub struct EditorSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SidecarSettings {
     pub enabled: bool,
     pub python_path: String,
     pub auto_start: bool,
 }
 
+impl Default for LlmSettings {
+    fn default() -> Self {
+        Self {
+            provider: LlmProvider::Ollama,
+            model: defaults::DEFAULT_MODEL.to_string(),
+            api_key_env: String::new(),
+            base_url: None,
+            max_tokens: defaults::MAX_TOKENS,
+        }
+    }
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            theme: defaults::THEME.to_string(),
+            font_size: defaults::FONT_SIZE,
+            tab_size: defaults::TAB_SIZE,
+            show_line_numbers: true,
+            auto_save: true,
+        }
+    }
+}
+
+impl Default for SidecarSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            python_path: defaults::PYTHON_PATH.to_string(),
+            auto_start: true,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            llm: LlmSettings {
-                provider: LlmProvider::Ollama,
-                model: defaults::DEFAULT_MODEL.to_string(),
-                api_key_env: "".to_string(),
-                base_url: None,
-                max_tokens: defaults::MAX_TOKENS,
-            },
-            editor: EditorSettings {
-                theme: defaults::THEME.to_string(),
-                font_size: defaults::FONT_SIZE,
-                tab_size: defaults::TAB_SIZE,
-                show_line_numbers: true,
-                auto_save: true,
-            },
-            sidecar: SidecarSettings {
-                enabled: true,
-                python_path: defaults::PYTHON_PATH.to_string(),
-                auto_start: true,
-            },
+            llm: LlmSettings::default(),
+            editor: EditorSettings::default(),
+            sidecar: SidecarSettings::default(),
             providers: Vec::new(),
             model_routes: HashMap::new(),
         }
@@ -108,11 +130,30 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn config_path() -> PathBuf {
+    /// Directory holding `config.toml`, `session.toml` and other PhazeAI state.
+    /// Single source of truth for every crate (was previously re-derived by hand).
+    pub fn config_dir() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(paths::CONFIG_DIR)
-            .join(paths::CONFIG_FILE)
+    }
+
+    pub fn config_path() -> PathBuf {
+        Self::config_dir().join(paths::CONFIG_FILE)
+    }
+
+    /// Update only the editor section on disk, preserving `[llm]`, `[sidecar]`,
+    /// providers and routes. Safe to call from UI code on every preference change.
+    pub fn save_editor(
+        theme: &str,
+        font_size: f32,
+        tab_size: u32,
+    ) -> Result<(), crate::error::PhazeError> {
+        let mut s = Self::load();
+        s.editor.theme = theme.to_string();
+        s.editor.font_size = font_size;
+        s.editor.tab_size = tab_size;
+        s.save()
     }
 
     pub fn load() -> Self {

@@ -144,4 +144,3 @@ impl ToolRegistry {
         self.tools.len()
     }
 }
-

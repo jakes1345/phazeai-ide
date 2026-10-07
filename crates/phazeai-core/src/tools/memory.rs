@@ -76,14 +76,18 @@ impl Tool for MemoryTool {
                 let content = params
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| PhazeError::tool("memory", "Missing 'content' for store action"))?;
+                    .ok_or_else(|| {
+                        PhazeError::tool("memory", "Missing 'content' for store action")
+                    })?;
 
                 store.items.insert(key.to_string(), content.to_string());
 
                 let serialized = serde_json::to_string_pretty(&store).unwrap();
-                tokio::fs::write(&memory_file, serialized).await.map_err(|e| {
-                    PhazeError::tool("memory", format!("Failed to save memory file: {}", e))
-                })?;
+                tokio::fs::write(&memory_file, serialized)
+                    .await
+                    .map_err(|e| {
+                        PhazeError::tool("memory", format!("Failed to save memory file: {}", e))
+                    })?;
 
                 Ok(serde_json::json!({
                     "success": true,
@@ -91,11 +95,8 @@ impl Tool for MemoryTool {
                 }))
             }
             "search" => {
-                let key_query = params
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                
+                let key_query = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
+
                 let mut results = HashMap::new();
                 for (k, v) in &store.items {
                     if k.contains(key_query) || key_query.is_empty() {
@@ -113,7 +114,10 @@ impl Tool for MemoryTool {
                     "memory_keys": keys
                 }))
             }
-            _ => Err(PhazeError::tool("memory", format!("Unknown action: {}", action))),
+            _ => Err(PhazeError::tool(
+                "memory",
+                format!("Unknown action: {}", action),
+            )),
         }
     }
 }

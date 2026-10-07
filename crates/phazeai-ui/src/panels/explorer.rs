@@ -552,8 +552,11 @@ pub fn explorer_panel(
                                     .map(|p| p.to_path_buf())
                                     .unwrap_or_else(|| root_ref.get());
                                 menu.entry(MenuItem::new("Duplicate").action(move || {
-                                    let new_path =
-                                        find_unique_path(&dup_dir, &format!("{}_copy", stem), &ext_str);
+                                    let new_path = find_unique_path(
+                                        &dup_dir,
+                                        &format!("{}_copy", stem),
+                                        &ext_str,
+                                    );
                                     let _ = std::fs::copy(&dup_path, &new_path);
                                     entries_ref.update(|list| {
                                         let root = root_ref.get();
@@ -566,30 +569,26 @@ pub fn explorer_panel(
 
                             // ── Reveal in File Manager ────────────────────────
                             let reveal_path = entry_path3.clone();
-                            let menu =
-                                menu.entry(MenuItem::new("Reveal in File Manager").action(
-                                    move || {
-                                        let dir = if reveal_path.is_dir() {
-                                            reveal_path.clone()
-                                        } else {
-                                            reveal_path
-                                                .parent()
-                                                .map(|p| p.to_path_buf())
-                                                .unwrap_or_else(|| reveal_path.clone())
-                                        };
-                                        #[cfg(target_os = "linux")]
-                                        let _ = std::process::Command::new("xdg-open")
-                                            .arg(&dir)
-                                            .spawn();
-                                        #[cfg(target_os = "macos")]
-                                        let _ =
-                                            std::process::Command::new("open").arg(&dir).spawn();
-                                        #[cfg(target_os = "windows")]
-                                        let _ = std::process::Command::new("explorer")
-                                            .arg(&dir)
-                                            .spawn();
-                                    },
-                                ));
+                            let menu = menu.entry(MenuItem::new("Reveal in File Manager").action(
+                                move || {
+                                    let dir = if reveal_path.is_dir() {
+                                        reveal_path.clone()
+                                    } else {
+                                        reveal_path
+                                            .parent()
+                                            .map(|p| p.to_path_buf())
+                                            .unwrap_or_else(|| reveal_path.clone())
+                                    };
+                                    #[cfg(target_os = "linux")]
+                                    let _ =
+                                        std::process::Command::new("xdg-open").arg(&dir).spawn();
+                                    #[cfg(target_os = "macos")]
+                                    let _ = std::process::Command::new("open").arg(&dir).spawn();
+                                    #[cfg(target_os = "windows")]
+                                    let _ =
+                                        std::process::Command::new("explorer").arg(&dir).spawn();
+                                },
+                            ));
 
                             show_context_menu(menu, None);
                         }
@@ -657,8 +656,8 @@ pub fn explorer_panel(
                 reveal_nonce.update(|v| *v += 1);
             });
 
-        container(stack((title, collapse_btn, locate_btn)).style(|s| s.items_center()))
-            .style(move |s| {
+        container(stack((title, collapse_btn, locate_btn)).style(|s| s.items_center())).style(
+            move |s| {
                 let t = theme.get();
                 let p = &t.palette;
                 s.padding_horiz(8.0)
@@ -666,7 +665,8 @@ pub fn explorer_panel(
                     .border_bottom(1.0)
                     .border_color(p.border)
                     .width_full()
-            })
+            },
+        )
     };
 
     // Scrollable tree wrapped in a container that captures keyboard events.
@@ -786,13 +786,18 @@ pub fn explorer_panel(
         let oe_header = container(
             stack((
                 // Toggle arrow
-                label(move || if open_editors_expanded.get() { "▾" } else { "▸" }).style(
-                    move |s| {
-                        let t = theme.get();
-                        let p = &t.palette;
-                        s.font_size(10.0).color(p.text_muted).margin_right(4.0)
-                    },
-                ),
+                label(move || {
+                    if open_editors_expanded.get() {
+                        "▾"
+                    } else {
+                        "▸"
+                    }
+                })
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    s.font_size(10.0).color(p.text_muted).margin_right(4.0)
+                }),
                 // Title with count
                 label(move || {
                     let n = open_tabs.get().len();
@@ -887,9 +892,12 @@ pub fn explorer_panel(
                 .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
                     is_row_hovered.set(true);
                 })
-                .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-                    is_row_hovered.set(false);
-                })
+                .on_event_stop(
+                    floem::event::EventListener::PointerLeave,
+                    move |_| {
+                        is_row_hovered.set(false);
+                    },
+                )
             },
         )
         .style(move |s| {
@@ -902,15 +910,10 @@ pub fn explorer_panel(
         });
 
         // Border separator below the section
-        container(
-            stack((oe_header, oe_rows)).style(|s| s.flex_col()),
-        )
-        .style(move |s| {
+        container(stack((oe_header, oe_rows)).style(|s| s.flex_col())).style(move |s| {
             let t = theme.get();
             let p = &t.palette;
-            s.width_full()
-                .border_bottom(1.0)
-                .border_color(p.border)
+            s.width_full().border_bottom(1.0).border_color(p.border)
         })
     };
 

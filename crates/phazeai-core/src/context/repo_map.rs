@@ -255,7 +255,18 @@ fn extract_rust_symbols(content: &str) -> Vec<Symbol> {
 
         // pub fn / fn
         if let Some((fn_name, sig)) = extract_rust_fn(trimmed) {
-            let kind = if trimmed.contains("fn ") && content[..content.lines().take(line_num).map(|l| l.len() + 1).sum::<usize>().saturating_sub(1)].lines().rev().take(5).any(|l| l.trim().starts_with("impl ")) {
+            let kind = if trimmed.contains("fn ")
+                && content[..content
+                    .lines()
+                    .take(line_num)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                    .saturating_sub(1)]
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .any(|l| l.trim().starts_with("impl "))
+            {
                 SymbolKind::Method
             } else {
                 SymbolKind::Function
@@ -325,11 +336,10 @@ fn extract_rust_symbols(content: &str) -> Vec<Symbol> {
             }
         }
         // impl
-        else if trimmed.starts_with("impl ") && !trimmed.starts_with("impl<") || trimmed.starts_with("impl<") {
-            let sig = trimmed
-                .trim_end_matches('{')
-                .trim_end()
-                .to_string();
+        else if trimmed.starts_with("impl ") && !trimmed.starts_with("impl<")
+            || trimmed.starts_with("impl<")
+        {
+            let sig = trimmed.trim_end_matches('{').trim_end().to_string();
             // Extract the type being implemented
             let name = sig
                 .replace("impl ", "")
@@ -591,7 +601,12 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if let Some(func_rest) = trimmed.strip_prefix("func ") {
-            let sig = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            let sig = trimmed
+                .split('{')
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
             let name = if trimmed.contains("(") && func_rest.starts_with('(') {
                 // Method: func (r *Receiver) Name(
                 let after_close = trimmed.find(") ").map(|i| &trimmed[i + 2..]).unwrap_or("");
@@ -602,12 +617,7 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
                     .trim()
                     .to_string()
             } else {
-                func_rest
-                    .split('(')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
+                func_rest.split('(').next().unwrap_or("").trim().to_string()
             };
             if !name.is_empty() {
                 symbols.push(Symbol {
@@ -618,11 +628,7 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
                 });
             }
         } else if trimmed.starts_with("type ") && trimmed.contains("struct") {
-            let name = trimmed
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
+            let name = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
             if !name.is_empty() {
                 symbols.push(Symbol {
                     name: name.clone(),
@@ -632,11 +638,7 @@ fn extract_go_symbols(content: &str) -> Vec<Symbol> {
                 });
             }
         } else if trimmed.starts_with("type ") && trimmed.contains("interface") {
-            let name = trimmed
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
+            let name = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
             if !name.is_empty() {
                 symbols.push(Symbol {
                     name: name.clone(),
@@ -672,9 +674,17 @@ fn extract_c_symbols(content: &str) -> Vec<Symbol> {
             let before_paren = trimmed[..paren_idx].trim();
             let parts: Vec<&str> = before_paren.split_whitespace().collect();
             if parts.len() >= 2 {
-                let name = parts.last().unwrap_or(&"").trim_start_matches('*').to_string();
+                let name = parts
+                    .last()
+                    .unwrap_or(&"")
+                    .trim_start_matches('*')
+                    .to_string();
                 if !name.is_empty()
-                    && name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+                    && name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_alphabetic())
+                        .unwrap_or(false)
                 {
                     symbols.push(Symbol {
                         name,
@@ -766,11 +776,7 @@ fn extract_ruby_symbols(content: &str) -> Vec<Symbol> {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if let Some(def_rest) = trimmed.strip_prefix("def ") {
-            let name = def_rest
-                .split(['(', ' '])
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let name = def_rest.split(['(', ' ']).next().unwrap_or("").to_string();
             if !name.is_empty() {
                 symbols.push(Symbol {
                     name,

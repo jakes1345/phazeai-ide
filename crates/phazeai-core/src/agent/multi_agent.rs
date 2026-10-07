@@ -414,10 +414,7 @@ impl MultiAgentOrchestrator {
     /// Run a build check against the project to detect errors and warnings.
     /// Returns (success, error_count, warning_count, raw_output).
     async fn run_build_check(&self) -> Result<(bool, usize, usize, String), PhazeError> {
-        let project_dir = self
-            .project_root
-            .clone()
-            .unwrap_or_else(|| ".".to_string());
+        let project_dir = self.project_root.clone().unwrap_or_else(|| ".".to_string());
 
         let project_path = std::path::Path::new(&project_dir);
 
@@ -467,7 +464,12 @@ impl MultiAgentOrchestrator {
             .count();
         let warning_count = combined.lines().filter(|l| l.contains("warning")).count();
 
-        Ok((output.status.success(), error_count, warning_count, truncated))
+        Ok((
+            output.status.success(),
+            error_count,
+            warning_count,
+            truncated,
+        ))
     }
 
     fn emit(

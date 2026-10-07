@@ -900,3 +900,39 @@ fn lsp_offset_zero_is_origin() {
     assert_eq!(line, 0);
     assert_eq!(col, 0);
 }
+
+// ========================================================================
+// Settings robustness: partial files + editor-only saves must not lose [llm]
+// ========================================================================
+
+#[test]
+fn test_settings_partial_file_parses_with_defaults() {
+    // The old UI wrote only an [editor] section with 3 keys; that used to fail
+    // to parse and silently reset the whole config to defaults.
+    let text = "[editor]\ntheme = \"Dracula\"\nfont_size = 16\ntab_size = 2\n";
+    let s: Settings = toml::from_str(text).expect("partial config must parse");
+    assert_eq!(s.editor.theme, "Dracula");
+    assert_eq!(s.editor.tab_size, 2);
+    assert!(s.editor.auto_save, "missing keys fall back to defaults");
+    assert_eq!(s.llm.model, Settings::default().llm.model);
+}
+
+#[test]
+fn test_settings_llm_survives_roundtrip_with_editor_change() {
+    let mut s = Settings::default();
+    s.llm.model = "my-custom-model".to_string();
+    s.llm.base_url = Some("http://localhost:9999".to_string());
+    let text = toml::to_string_pretty(&s).unwrap();
+
+    let mut back: Settings = toml::from_str(&text).unwrap();
+    back.editor.theme = "Nord".to_string();
+    let text2 = toml::to_string_pretty(&back).unwrap();
+    let final_s: Settings = toml::from_str(&text2).unwrap();
+
+    assert_eq!(final_s.editor.theme, "Nord");
+    assert_eq!(final_s.llm.model, "my-custom-model");
+    assert_eq!(
+        final_s.llm.base_url.as_deref(),
+        Some("http://localhost:9999")
+    );
+}
