@@ -1,6 +1,7 @@
 pub mod app;
 pub mod components;
 pub mod lsp_bridge;
+pub mod notify;
 pub mod panels;
 pub mod session;
 pub mod theme;

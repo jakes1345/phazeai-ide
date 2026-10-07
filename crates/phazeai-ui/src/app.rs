@@ -2008,11 +2008,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
         branch_btn,
         label(|| "   ").style(|s| s.font_size(11.0)),
         phaze_icon(icons::BRANCH, 12.0, move |p| p.accent, state.theme),
-        label(move || {
-            let s = Settings::load();
-            format!(" {}", s.llm.model)
-        })
-        .style(move |s| {
+        label(move || format!(" {}", state.ai_model.get())).style(move |s| {
             s.color(state.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
@@ -2236,8 +2232,12 @@ fn status_bar(state: IdeState) -> impl IntoView {
                                 }
                                 out
                             };
-                            let _ = std::fs::write(&path, &converted);
-                            show_toast(toast, format!("Converted to {new_le}"));
+                            match std::fs::write(&path, &converted) {
+                                Ok(()) => show_toast(toast, format!("Converted to {new_le}")),
+                                Err(e) => {
+                                    show_toast(toast, format!("Couldn't convert line endings: {e}"))
+                                }
+                            }
                         }
                     }
                 }
@@ -3602,7 +3602,16 @@ fn code_actions_overlay(state: IdeState) -> impl IntoView {
                             } else if let Some(file_edits) = edits2.as_ref() {
                                 // Apply workspace edits (e.g. organize imports)
                                 for (fpath, new_content) in file_edits {
-                                    let _ = std::fs::write(fpath, new_content);
+                                    if let Err(e) = std::fs::write(fpath, new_content) {
+                                        show_toast(
+                                            state5.status_toast,
+                                            format!(
+                                                "Couldn't apply edit to {}: {e}",
+                                                fpath.display()
+                                            ),
+                                        );
+                                        continue;
+                                    }
                                     // Re-open in editor to reflect changes
                                     if state5.open_file.get().as_ref() == Some(fpath) {
                                         state5.open_file.set(Some(fpath.clone()));

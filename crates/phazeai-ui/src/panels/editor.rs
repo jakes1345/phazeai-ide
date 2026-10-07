@@ -1263,7 +1263,15 @@ pub fn editor_panel(
             return;
         };
         let content = doc.text().to_string();
-        if std::fs::write(&tab.path, content).is_ok() {
+        let write_result = std::fs::write(&tab.path, content);
+        if let Err(e) = &write_result {
+            // Don't lose the user's work silently: keep the tab dirty and say why.
+            crate::notify::error_dialog(
+                "Save failed",
+                crate::notify::save_failure_message(&tab.path, e),
+            );
+        }
+        if write_result.is_ok() {
             tab.dirty.set(false);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
             // doesn't need it, but gopls, pylsp, etc. do) get the save notification.
@@ -3875,46 +3883,30 @@ pub fn editor_panel(
                 let blame_path = tab.path.clone();
                 let scope = Scope::new();
                 create_effect(move |_| {
-                    let _dirty = dirty.get();
+                    // Only (re)blame when the buffer is clean — i.e. on open and after a save.
+                    // (Previously this spawned a `git blame` process on every keystroke.)
+                    if dirty.get() {
+                        return;
+                    }
                     let send = create_ext_action(scope, move |data: Vec<(String, String)>| {
                         blame_data.set(data);
                     });
                     let p = blame_path.clone();
                     std::thread::spawn(move || {
                         let dir = p.parent().unwrap_or(&p);
-                        let out = std::process::Command::new("git")
+                        let entries = std::process::Command::new("git")
                             .args(["blame", "--date=short", "--porcelain"])
                             .arg(&p)
                             .current_dir(dir)
-                            .output();
-                        let mut entries: Vec<(String, String)> = vec![];
-                        if let Ok(output) = out {
-                            if output.status.success() {
-                                let text = String::from_utf8_lossy(&output.stdout);
-                                let mut cur_author = String::new();
-                                let mut cur_date = String::new();
-                                for line in text.lines() {
-                                    if let Some(rest) = line.strip_prefix("author ") {
-                                        cur_author = rest.to_string();
-                                    } else if let Some(rest) = line.strip_prefix("author-time ") {
-                                        // porcelain gives unix timestamp; convert to date
-                                        if let Ok(ts) = rest.parse::<i64>() {
-                                            let secs_per_day = 86400;
-                                            let days = ts / secs_per_day;
-                                            let y = 1970 + (days / 365);
-                                            cur_date = format!("{y}");
-                                        }
-                                    } else if let Some(rest) = line.strip_prefix("committer-time ")
-                                    {
-                                        // Use committer date as fallback
-                                        let _ = rest;
-                                    } else if line.starts_with('\t') {
-                                        // Content line = one blame entry complete
-                                        entries.push((cur_author.clone(), cur_date.clone()));
-                                    }
-                                }
-                            }
-                        }
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| {
+                                super::blame::parse_blame_porcelain(&String::from_utf8_lossy(
+                                    &o.stdout,
+                                ))
+                            })
+                            .unwrap_or_default();
                         send(entries);
                     });
                 });

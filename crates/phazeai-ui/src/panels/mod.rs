@@ -1,4 +1,5 @@
 pub mod ai_panel;
+pub mod blame;
 pub mod chat;
 pub mod editor;
 pub mod explorer;
