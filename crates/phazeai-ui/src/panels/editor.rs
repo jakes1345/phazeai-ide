@@ -1405,7 +1405,15 @@ pub fn editor_panel(
             return;
         };
         let content = doc.text().to_string();
-        if std::fs::write(&tab.path, content).is_ok() {
+        let write_result = std::fs::write(&tab.path, content);
+        if let Err(e) = &write_result {
+            // Don't lose work silently: keep the tab modified and say why.
+            crate::notify::error_dialog(
+                "Save failed",
+                crate::notify::save_failure_message(&tab.path, e),
+            );
+        }
+        if write_result.is_ok() {
             tab.dirty.set(false);
             crate::crash_recovery::clear_recovery(&tab.path);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
@@ -3924,7 +3932,14 @@ pub fn editor_panel(
                     }
                     last_snf.set(n);
                     let content = doc_snf.text().to_string();
-                    if std::fs::write(&tab_path_snf, content).is_ok() {
+                    let write_result = std::fs::write(&tab_path_snf, content);
+                    if let Err(e) = &write_result {
+                        crate::notify::error_dialog(
+                            "Save failed",
+                            crate::notify::save_failure_message(&tab_path_snf, e),
+                        );
+                    }
+                    if write_result.is_ok() {
                         tab_dirty_snf.set(false);
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
                             path: tab_path_snf.clone(),
@@ -4134,46 +4149,29 @@ pub fn editor_panel(
                         blame_data.set(data);
                     }
                 });
-                // Trigger effect: re-runs on save, spawns background git blame.
+                // Trigger effect: blame on open and after each save only. (It used to re-run on
+                // every keystroke because `dirty` is set on every edit.)
                 create_effect(move |_| {
-                    let _dirty = safe_get(dirty, false);
+                    if safe_get(dirty, false) {
+                        return;
+                    }
                     let p = blame_path.clone();
                     let tx = blame_tx.clone();
                     std::thread::spawn(move || {
                         let dir = p.parent().unwrap_or(&p);
-                        let out = std::process::Command::new("git")
+                        let entries = std::process::Command::new("git")
                             .args(["blame", "--date=short", "--porcelain"])
                             .arg(&p)
                             .current_dir(dir)
-                            .output();
-                        let mut entries: Vec<(String, String)> = vec![];
-                        if let Ok(output) = out {
-                            if output.status.success() {
-                                let text = String::from_utf8_lossy(&output.stdout);
-                                let mut cur_author = String::new();
-                                let mut cur_date = String::new();
-                                for line in text.lines() {
-                                    if let Some(rest) = line.strip_prefix("author ") {
-                                        cur_author = rest.to_string();
-                                    } else if let Some(rest) = line.strip_prefix("author-time ") {
-                                        // porcelain gives unix timestamp; convert to date
-                                        if let Ok(ts) = rest.parse::<i64>() {
-                                            let secs_per_day = 86400;
-                                            let days = ts / secs_per_day;
-                                            let y = 1970 + (days / 365);
-                                            cur_date = format!("{y}");
-                                        }
-                                    } else if let Some(rest) = line.strip_prefix("committer-time ")
-                                    {
-                                        // Use committer date as fallback
-                                        let _ = rest;
-                                    } else if line.starts_with('\t') {
-                                        // Content line = one blame entry complete
-                                        entries.push((cur_author.clone(), cur_date.clone()));
-                                    }
-                                }
-                            }
-                        }
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| {
+                                super::blame::parse_blame_porcelain(&String::from_utf8_lossy(
+                                    &o.stdout,
+                                ))
+                            })
+                            .unwrap_or_default();
                         let _ = tx.send(entries);
                     });
                 });

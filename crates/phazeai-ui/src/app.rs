@@ -1414,6 +1414,42 @@ impl IdeState {
     }
 }
 
+// ── AI prompts from the editor (right-click menu + command palette) ───────────
+
+/// Pure prompt construction (unit-tested). Uses the *selected text* when there is one;
+/// otherwise points at the line under the cursor (`line0` is 0-based).
+fn build_ai_prompt(
+    selection: &str,
+    path: &std::path::Path,
+    line0: u32,
+    on_selection: &str,
+    on_line: &str,
+) -> String {
+    if !selection.trim().is_empty() {
+        return format!("{on_selection}:\n\n```\n{selection}\n```");
+    }
+    let fname = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    format!("{on_line} around line {} in {fname}", line0 + 1)
+}
+
+/// Prompt for an editor AI action, or `None` when no file is active.
+fn editor_ai_prompt(state: &IdeState, on_selection: &str, on_line: &str) -> Option<String> {
+    let (path, line, _) = state.editor.active_cursor.get()?;
+    let sel = state.editor.selected_text.get();
+    Some(build_ai_prompt(&sel, &path, line, on_selection, on_line))
+}
+
+/// Send an editor AI action to the chat panel and reveal it.
+fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
+    if let Some(prompt) = editor_ai_prompt(state, on_selection, on_line) {
+        state.ai.pending_chat_inject.set(Some(prompt));
+        state.workbench.show_right_panel.set(true);
+    }
+}
+
 // ── Command palette commands ──────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1694,22 +1730,7 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         },
         PaletteCommand {
             label: "Explain Selection with AI (Ctrl+Shift+E)",
-            action: |s| {
-                if let Some((ref path, line, _)) = s.editor.active_cursor.get() {
-                    let sel = s.editor.selected_text.get();
-                    let fname = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "file".to_string());
-                    let prompt = if !sel.is_empty() {
-                        format!("Explain this code:\n\n```\n{sel}\n```")
-                    } else {
-                        format!("Explain the code around line {} in {}", line + 1, fname)
-                    };
-                    s.ai.pending_chat_inject.set(Some(prompt));
-                    s.workbench.show_right_panel.set(true);
-                }
-            },
+            action: |s| send_editor_ai_action(&s, "Explain this code", "Explain the code"),
         },
         PaletteCommand {
             label: "Go to Next Problem (F8)",
@@ -3843,42 +3864,36 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         // AI-powered context menu items
                         let s_explain = s.clone();
                         let s_tests = s.clone();
+                        let s_refactor = s.clone();
+                        let s_docs = s.clone();
                         let s_fix = s.clone();
                         let s_run = s.clone();
                         let s_run_file = s.clone();
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_explain.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_explain.ai.pending_chat_inject.set(Some(format!(
-                                        "Explain the code around line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_explain.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(&s_explain, "Explain this code", "Explain the code");
                             }))
                             .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_tests.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_tests.ai.pending_chat_inject.set(Some(format!(
-                                        "Generate unit tests for the function at line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_tests.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(
+                                    &s_tests,
+                                    "Write unit tests for this code, following the testing conventions already used in this project",
+                                    "Write unit tests for the function",
+                                );
+                            }))
+                            .entry(MenuItem::new("✨ Refactor with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_refactor,
+                                    "Refactor this code for readability and idiomatic style without changing its behaviour",
+                                    "Refactor the code",
+                                );
+                            }))
+                            .entry(MenuItem::new("📝 Add Docs with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_docs,
+                                    "Add concise doc comments to this code, matching the project's existing style",
+                                    "Add concise doc comments to the item",
+                                );
                             }))
                             .entry(MenuItem::new("🔧 Fix with AI").action(move || {
                                 if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get()
@@ -5501,4 +5516,40 @@ pub fn launch_phaze_ide() {
             ),
         )
         .run();
+}
+
+#[cfg(test)]
+mod ai_prompt_tests {
+    use super::build_ai_prompt;
+    use std::path::Path;
+
+    #[test]
+    fn selection_is_quoted_verbatim() {
+        let p = build_ai_prompt(
+            "let x = 1;",
+            Path::new("/a/main.rs"),
+            4,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p, "Explain this code:\n\n```\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn without_selection_points_at_the_cursor_line() {
+        let p = build_ai_prompt(
+            "",
+            Path::new("/a/b/main.rs"),
+            41,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p, "Explain the code around line 42 in main.rs");
+    }
+
+    #[test]
+    fn whitespace_only_selection_counts_as_no_selection() {
+        let p = build_ai_prompt("  \n\t ", Path::new("x.py"), 0, "A", "B");
+        assert_eq!(p, "B around line 1 in x.py");
+    }
 }

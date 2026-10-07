@@ -10,6 +10,7 @@ pub mod debug_session;
 pub mod domain_state;
 pub mod editor_command;
 pub mod lsp_bridge;
+pub mod notify;
 pub mod panels;
 pub mod theme;
 pub mod util;
