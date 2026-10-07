@@ -96,7 +96,7 @@ impl Tool for BrowseTool {
         let content = if truncated {
             format!(
                 "{}...\n\n[Content truncated at {} chars]",
-                &text[..MAX_CONTENT_CHARS],
+                crate::text::truncate_bytes(&text, MAX_CONTENT_CHARS),
                 MAX_CONTENT_CHARS
             )
         } else {

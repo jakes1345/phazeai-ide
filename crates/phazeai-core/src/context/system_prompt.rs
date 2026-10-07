@@ -306,7 +306,7 @@ Before tackling complex tasks, outline your plan. Follow this workflow:
 4. **Finalize**: Run tests/builds and summarize your accomplishments.";
 
 const TOOL_GUIDELINES: &str = "\n\n## The PhazeAI Arsenal
-You have 17 powerful tools at your disposal:
+You have a powerful toolbox at your disposal (the exact list for this session is given above):
 
 ### File System
 - `read_file`: Read contents (supports offset/limit for large files).

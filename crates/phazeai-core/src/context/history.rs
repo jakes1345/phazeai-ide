@@ -52,7 +52,7 @@ impl ConversationHistory {
         if result_str.len() > MAX_TOOL_RESULT_LEN {
             result_str = format!(
                 "{}... [Truncated {} bytes]",
-                &result_str[..MAX_TOOL_RESULT_LEN],
+                crate::text::truncate_bytes(&result_str, MAX_TOOL_RESULT_LEN),
                 result_str.len() - MAX_TOOL_RESULT_LEN
             );
         }
