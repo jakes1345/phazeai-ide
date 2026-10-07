@@ -222,6 +222,10 @@ jobs:
         run: |
           git config --global user.email "ci@phazeai.dev"
           git config --global user.name "PhazeAI CI"
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Run git tests
         run: cargo test -p phazeai-core --test git_tests
 
