@@ -698,7 +698,7 @@ impl IdeState {
             create_rw_signal(settings.llm.provider.to_provider_id().name().to_string());
         let ai_model_sig = create_rw_signal(settings.llm.model.clone());
 
-        // Persist provider + model changes to settings.toml whenever they change.
+        // Persist provider + model changes to config.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();

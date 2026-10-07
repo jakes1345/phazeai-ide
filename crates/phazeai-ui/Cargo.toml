@@ -10,7 +10,7 @@ description = "PhazeAI GPU-accelerated UI framework built on Floem"
 path = "src/lib.rs"
 
 [[bin]]
-name = "phazeai-ui"
+name = "phazeai-ide"
 path = "src/bin/phazeai-ui.rs"
 
 [dependencies]

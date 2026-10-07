@@ -21,7 +21,7 @@ cp target/release/phazeai-ide ~/.local/bin/phazeai-ide
 
 # 4. Set up desktop entry
 echo "🖥️ Setting up desktop integration..."
-APP_DIR="/home/jack/phazeai_ide"
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICON_PATH="$APP_DIR/phazeai.png"
 DESKTOP_FILE="$HOME/.local/share/applications/phazeai.desktop"
 

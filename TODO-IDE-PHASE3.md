@@ -1,3 +1,5 @@
+> **Status:** detailed IDE backlog. The canonical, up-to-date checklist is [`TODO.md`](TODO.md) — check items off there first.
+
 # PhazeAI IDE — Phase 3 Master Feature List
 > 200+ items. Grounded in Lapce's changelog + gaps we identified.
 > Status: `[ ]` = not started · `[~]` = in progress · `[x]` = done

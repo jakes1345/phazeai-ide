@@ -30,7 +30,7 @@ cli:
 
 # Build only the IDE
 ide:
-	cargo build -p phazeai-ide
+	cargo build -p phazeai-ui
 
 # Install CLI to ~/.cargo/bin
 install:
@@ -38,7 +38,7 @@ install:
 
 # Install IDE to ~/.cargo/bin
 install-ide:
-	cargo install --path crates/phazeai-ide
+	cargo install --path crates/phazeai-ui
 
 # Clean build artifacts
 clean:
@@ -50,7 +50,7 @@ run-cli:
 
 # Run the IDE in debug mode
 run-ide:
-	cargo run -p phazeai-ide
+	cargo run -p phazeai-ui
 
 # Cross-compile for a specific target
 # Usage: make cross TARGET=x86_64-pc-windows-gnu

@@ -32,14 +32,14 @@ fn binary_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // phazeai-ui → crates
     p.pop(); // crates     → workspace root
-    p.push("target/debug/phazeai-ui");
+    p.push("target/debug/phazeai-ide");
     p
 }
 
 /// Kill any stale IDE processes from previous test runs.
 fn cleanup_stale() {
     Command::new("pkill")
-        .args(["-f", "phazeai-ui"])
+        .args(["-f", "phazeai-ide"])
         .status()
         .ok();
     Command::new("pkill").args(["-f", "fluxbox"]).status().ok();
@@ -68,7 +68,7 @@ fn launch_ide() -> (Child, u64) {
     let bin = binary_path();
     assert!(
         bin.exists(),
-        "phazeai-ui binary not found at {bin:?}. Run `cargo build -p phazeai-ui` first."
+        "phazeai-ide binary not found at {bin:?}. Run `cargo build -p phazeai-ui` first."
     );
 
     let dpy = display();
@@ -78,7 +78,7 @@ fn launch_ide() -> (Child, u64) {
         .env("GALLIUM_DRIVER", "softpipe")
         .env("MESA_GL_VERSION_OVERRIDE", "3.3")
         .spawn()
-        .expect("Failed to launch phazeai-ui");
+        .expect("Failed to launch phazeai-ide");
 
     // Poll until window appears (up to 15s)
     let wid = wait_for_window("PhazeAI IDE", 30);

@@ -107,7 +107,7 @@ MidnightBlue, Cyberpunk, Dracula, Tokyo Night, Material, Nord, Catppuccin, Solar
 
 ## AI Providers
 
-PhazeAI works with any LLM provider. Configure in Settings panel or `~/.config/phazeai/settings.toml`:
+PhazeAI works with any LLM provider. Configure in the Settings panel or in `config.toml` (see [Configuration](#configuration)):
 
 | Provider | Type | Cost | Setup |
 |----------|------|------|-------|
@@ -117,10 +117,12 @@ PhazeAI works with any LLM provider. Configure in Settings panel or `~/.config/p
 | **Groq** | Cloud | BYOK | API key |
 | **Together.ai** | Cloud | BYOK | API key |
 | **OpenRouter** | Cloud | BYOK | API key |
-| **Ollama** | Local | Free | [Download](https://ollama.ai) + `ollama pull llama2` |
+| **Ollama** | Local | Free | [Download](https://ollama.com) + `ollama pull qwen2.5-coder:7b` |
 | **LM Studio** | Local | Free | [Download](https://lmstudio.ai) |
 
-**Recommended for new users**: Download [Ollama](https://ollama.ai), run `ollama pull llama2`, then configure PhazeAI to use `http://localhost:11434`. Zero cost, zero setup, runs offline.
+**Recommended for new users**: install [Ollama](https://ollama.com), run `ollama pull qwen2.5-coder:7b`, then choose that model in *Settings → AI*. Free, private, and works offline. (The default model name `phaze-beast` is a PhazeAI-tuned alias of that model; the `phazeai` CLI creates it for you on first run.)
+
+If the model or server isn't available, the chat tells you exactly what to run instead of showing a raw network error.
 
 ---
 
@@ -152,7 +154,7 @@ cd ide
 
 # Desktop GUI (Floem-based, GPU-accelerated)
 cargo build -p phazeai-ui --release
-./target/release/phazeai-ui
+./target/release/phazeai-ide
 
 # Terminal UI (ratatui-based)
 cargo build -p phazeai-cli --release
@@ -173,33 +175,42 @@ cargo clippy --workspace -- -D warnings
 
 ## Configuration
 
-Settings are stored at `~/.config/phazeai/settings.toml` (auto-created on first run):
+PhazeAI keeps its state in one directory (`~/.config/phazeai/` on Linux, `~/Library/Application Support/phazeai/` on macOS, `%APPDATA%\phazeai\` on Windows):
+
+| File | Contents |
+|------|----------|
+| `config.toml` | Provider, model, editor preferences (auto-created on first run) |
+| `session.toml` | Open tabs, active file, panel layout, vim mode |
+| `.phazeai/mcp.json` (in a project) | Optional MCP servers for that workspace |
+
+Every section and key is optional — anything you leave out falls back to its default:
 
 ```toml
-# AI Provider
-[ai]
-provider = "ollama"  # ollama, claude, openai, groq, together, openrouter
-model = "llama2"
-api_key = ""         # leave empty for local providers
-api_url = "http://localhost:11434"  # for ollama
+[llm]
+provider = "ollama"            # claude | openai | ollama | groq | together | openrouter | lmstudio | gemini
+model = "qwen2.5-coder:7b"
+api_key_env = ""               # NAME of the env var holding the key, e.g. "ANTHROPIC_API_KEY"
+base_url = "http://localhost:11434"   # optional override
+max_tokens = 8192
 
-# Editor
 [editor]
-font_family = "Fira Code"
-font_size = 14
-theme = "MidnightBlue"
+theme = "Midnight Blue"
+font_size = 14.0
 tab_size = 4
-
-# IDE
-[ide]
+show_line_numbers = true
 auto_save = true
-show_breadcrumbs = true
-show_minimap = false
+
+[sidecar]                      # optional Python semantic-search helper (CLI)
+enabled = true
+python_path = "python3"
+auto_start = true
 ```
 
+Project rules for the AI: put instructions in `CLAUDE.md`, `AGENTS.md`, `.phazerules` or `.phazeai/instructions.md` in your workspace and they are added to the AI's system prompt automatically.
+
 ### Cloud Provider API Keys
+Keys are read from environment variables (never written to disk). Export them in the shell you launch PhazeAI from:
 ```bash
-# Set environment variables for cloud providers
 export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 export GROQ_API_KEY="gsk_..."

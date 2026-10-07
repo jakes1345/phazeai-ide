@@ -39,8 +39,8 @@ cargo fmt --all
 > **NOTE**: `phazeai-ide` (the old egui/eframe GUI) has been **permanently deleted**.
 > All GUI work is in `phazeai-ui` (Floem). Never reference egui or eframe.
 
-Config is stored at `~/.config/phazeai/settings.toml` (auto-created on first run).
-Session (open files, panel sizes) at `~/.config/phazeai/session.toml`.
+Config lives in `Settings::config_dir()` (single source of truth in `phazeai-core`):
+`config.toml` (provider/model/editor — `#[serde(default)]` everywhere so partial files work; update the editor section with `Settings::save_editor`, never overwrite the file) and `session.toml` (`phazeai-ui/src/session.rs`, serde + atomic writes).
 
 ## Core Architecture
 
@@ -76,7 +76,8 @@ Key files:
 - `app.rs` — `IdeState`, all overlay views (command palette, file picker, completion popup, Ctrl+K inline edit), key handler, `launch_phaze_ide()`
 - `panels/editor.rs` — multi-tab code editor with syntect highlighting, LSP, find/replace, reactive font-size
 - `panels/terminal.rs` — PTY via `portable-pty` + VTE parser, 256-color rendering, clipboard
-- `panels/chat.rs` — AI chat with real streaming via `Agent::run_with_events()`
+- `panels/chat.rs` — AI chat: streams via `Agent::run_with_events()`, attaches editor context (file/cursor/selection/diagnostics), keeps one shared `ConversationHistory`, roots tools in the workspace, asks approval for mutating tools, supports Stop / New chat. Right-click AI actions and palette commands queue prompts via `IdeState::pending_ai_prompt`.
+- `session.rs` — session persistence (tabs, layout)
 - `panels/git.rs` — git status, stage/commit UI
 - `lsp_bridge.rs` — LSP manager, completions, diagnostics signals
 - `theme.rs` — 12 themes, `PhazeTheme` / `PhazePalette`

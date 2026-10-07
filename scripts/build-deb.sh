@@ -13,7 +13,7 @@ echo "==> Building PhazeAI IDE v$VERSION .deb package"
 
 # Compile release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
 BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
 

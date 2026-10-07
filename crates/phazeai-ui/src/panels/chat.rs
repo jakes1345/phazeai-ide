@@ -209,6 +209,16 @@ fn friendly_error(settings: &Settings, raw: &str) -> String {
                  • or pick a different provider in Settings → AI."
             )
         }
+        LlmProvider::Ollama
+            if model == phazeai_core::constants::models::PHAZE_BEAST
+                && (lower.contains("not found") || lower.contains("404")) =>
+        {
+            format!(
+                "Ollama is running, but '{model}' (PhazeAI's tuned alias) hasn't been created yet.\n\n\
+                 Quickest fix: run `ollama pull qwen2.5-coder:7b`, then pick that model in Settings → AI.\n\
+                 (Running the `phazeai` CLI once also creates '{model}' for you.)"
+            )
+        }
         LlmProvider::Ollama if lower.contains("not found") || lower.contains("404") => format!(
             "Ollama is running but the model '{model}' isn't installed.\n\n\
              Run `ollama pull {model}` (or choose another model in Settings → AI)."
@@ -1048,6 +1058,17 @@ mod tests {
         );
         assert!(
             msg.contains("isn't installed") && msg.contains("ollama pull"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn default_phaze_beast_alias_gets_specific_guidance() {
+        let mut s = ollama();
+        s.llm.model = phazeai_core::constants::models::PHAZE_BEAST.to_string();
+        let msg = friendly_error(&s, "model \"phaze-beast\" not found (404)");
+        assert!(
+            msg.contains("qwen2.5-coder:7b") && msg.contains("hasn't been created"),
             "{msg}"
         );
     }

@@ -125,7 +125,6 @@ pub mod limits {
 pub mod paths {
     pub const CONFIG_DIR: &str = "phazeai";
     pub const CONFIG_FILE: &str = "config.toml";
-    pub const IDE_STATE_FILE: &str = "ide_state.json";
     pub const CONVERSATIONS_DIR: &str = "conversations";
     pub const INSTRUCTION_FILES: &[&str] = &[
         "CLAUDE.md",
@@ -149,7 +148,7 @@ pub mod paths {
     ];
 }
 
-// ─── UI Layout (egui — will be replaced by Floem layout in phazeai-ui) ────────
+// ─── UI Layout defaults ────────────────────────────────────────────────────────
 
 pub mod ui {
     pub const ACTIVITY_BAR_WIDTH: f32 = 48.0;

@@ -1,3 +1,5 @@
+> **Status:** detailed Cloud backlog. The canonical, up-to-date checklist is [`TODO.md`](TODO.md) — check items off there first.
+
 # PhazeAI Cloud — Phase 3 Master Feature List
 > 200+ items. Modeled on Gitpod/Codespaces/Codeium + what Lapdev originally was before K8s pivot.
 > phazeai-cloud crate is the backend client; we'll need a real backend service too.
