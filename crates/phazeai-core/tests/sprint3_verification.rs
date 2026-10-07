@@ -122,10 +122,16 @@ fn test_system_prompt_contains_all_tools() {
     assert!(prompt.contains("open"), "Should contain open");
 
     // Verify count and workflow sections
-    assert!(
-        prompt.contains("17 powerful tools"),
-        "Should mention tool count"
-    );
+    // Every tool the agent can actually call must be documented in the prompt
+    // (a hard-coded count went stale as tools were added).
+    let registry = ToolRegistry::default();
+    for tool in registry.list() {
+        assert!(
+            prompt.contains(tool.name()),
+            "System prompt does not mention registered tool `{}`",
+            tool.name()
+        );
+    }
     assert!(
         prompt.contains("Multi-Turn Planning"),
         "Should contain planning section"

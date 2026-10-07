@@ -1709,7 +1709,10 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .unwrap_or_default();
 
             let snippet = if full_diff.len() > 8_000 {
-                format!("{}…(truncated)", &full_diff[..8_000])
+                format!(
+                    "{}…(truncated)",
+                    phazeai_core::text::truncate_bytes(&full_diff, 8_000)
+                )
             } else {
                 full_diff
             };
@@ -1965,7 +1968,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 label(move || {
                     let text = expanded_diff_text.get();
                     if text.len() > 4000 {
-                        format!("{}…", &text[..4000])
+                        format!("{}…", phazeai_core::text::truncate_bytes(&text, 4000))
                     } else {
                         text
                     }

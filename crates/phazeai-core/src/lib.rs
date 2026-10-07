@@ -9,6 +9,7 @@ pub mod llm;
 pub mod lsp;
 pub mod mcp;
 pub mod project;
+pub mod text;
 pub mod tools;
 
 // Re-export key types

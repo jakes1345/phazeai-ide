@@ -90,10 +90,14 @@ impl ToolApprovalManager {
     pub fn classify_tool(&self, tool_name: &str, params: &Value) -> ToolPermission {
         match tool_name {
             // Read-only tools
-            "read_file" | "grep" | "glob" | "list_files" => ToolPermission::ReadOnly,
+            "read_file" | "grep" | "glob" | "list_files" | "find_path" | "now" | "diagnostics"
+            | "memory" => ToolPermission::ReadOnly,
 
             // Write operations
-            "write_file" | "edit_file" => ToolPermission::Write,
+            "write_file" | "edit_file" | "copy_path" | "create_directory" => ToolPermission::Write,
+
+            // Removing / relocating user files
+            "delete_path" | "move_path" => ToolPermission::Destructive,
 
             // Bash commands need deeper inspection
             "bash" => {
@@ -246,7 +250,11 @@ impl ToolApprovalManager {
                     prompt.push_str(&format!("Write to file: {}\n", path));
                     if let Some(content) = params.get("content").and_then(|v| v.as_str()) {
                         let preview = if content.len() > 100 {
-                            format!("{}... ({} bytes)", &content[..100], content.len())
+                            format!(
+                                "{}... ({} bytes)",
+                                crate::text::truncate_bytes(content, 100),
+                                content.len()
+                            )
                         } else {
                             content.to_string()
                         };
@@ -465,5 +473,36 @@ mod tests {
 
         manager.clear_approvals();
         assert!(!manager.is_approved("write_file"));
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn registered_tool_names_are_classified() {
+        let m = ToolApprovalManager::default();
+        let p = json!({});
+        assert_eq!(m.classify_tool("find_path", &p), ToolPermission::ReadOnly);
+        assert_eq!(m.classify_tool("edit_file", &p), ToolPermission::Write);
+        assert_eq!(
+            m.classify_tool("delete_path", &p),
+            ToolPermission::Destructive
+        );
+        assert_eq!(
+            m.classify_tool("mystery_mcp_tool", &p),
+            ToolPermission::Execute
+        );
+    }
+
+    #[test]
+    fn read_only_tools_skip_the_prompt_but_edits_do_not() {
+        let m = ToolApprovalManager::default();
+        let p = json!({});
+        assert!(!m.needs_approval("read_file", &p));
+        assert!(m.needs_approval("edit_file", &p));
+        assert!(m.needs_approval("delete_path", &p));
     }
 }

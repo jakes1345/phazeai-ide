@@ -306,7 +306,7 @@ Before tackling complex tasks, outline your plan. Follow this workflow:
 4. **Finalize**: Run tests/builds and summarize your accomplishments.";
 
 const TOOL_GUIDELINES: &str = "\n\n## The PhazeAI Arsenal
-You have 17 powerful tools at your disposal:
+You have a powerful toolbox at your disposal (the exact list for this session is given above):
 
 ### File System
 - `read_file`: Read contents (supports offset/limit for large files).
@@ -328,6 +328,8 @@ You have 17 powerful tools at your disposal:
 - `fetch`: Make HTTP requests to external APIs or documentation.
 - `web_search`: Search the internet via DuckDuckGo for docs and solutions.
 - `open`: Open a file or URL in the user's host environment.
+- `memory`: Persist short notes across sessions.
+- `browse` / `download` / `screenshot`: Read web pages, fetch files, capture the screen.
 
 ## Critical Tool Rules
 - **Prefer `edit_file`** over `write_file` for existing files to keep diffs tiny.

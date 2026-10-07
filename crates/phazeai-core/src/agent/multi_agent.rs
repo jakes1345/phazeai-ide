@@ -453,7 +453,10 @@ impl MultiAgentOrchestrator {
 
         // Truncate to avoid blowing up context windows
         let truncated = if combined.len() > 4000 {
-            format!("{}\n... [output truncated]", &combined[..4000])
+            format!(
+                "{}\n... [output truncated]",
+                crate::text::truncate_bytes(&combined, 4000)
+            )
         } else {
             combined.clone()
         };

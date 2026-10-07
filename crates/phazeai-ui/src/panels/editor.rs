@@ -1046,6 +1046,7 @@ pub fn editor_panel(
     inlay_hints_toggle: RwSignal<bool>,
     show_whitespace: RwSignal<bool>,
     semantic_tokens: RwSignal<Vec<crate::lsp_bridge::SemanticTokenEntry>>,
+    editor_selection: RwSignal<String>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1620,6 +1621,22 @@ pub fn editor_panel(
                     active_cursor.set(Some((track_path.clone(), line, col)));
                     // Keep current_line_sig in sync so the current-line highlight reacts.
                     current_line_sig.set(line as usize);
+                    // Publish the selected text so the AI chat can see what the user is looking at.
+                    let selected = match &cursor.mode {
+                        CursorMode::Insert(sel) => sel
+                            .regions()
+                            .first()
+                            .filter(|r| r.start != r.end)
+                            .map(|r| {
+                                let (s, e) = (r.start.min(r.end), r.start.max(r.end));
+                                rope.slice_to_cow(s..e.min(rope.len())).to_string()
+                            })
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    if editor_selection.get_untracked() != selected {
+                        editor_selection.set(selected);
+                    }
                 });
             }
             {
@@ -3775,16 +3792,8 @@ pub fn editor_panel(
                             };
 
                             // Trim to reasonable context window sizes.
-                            let pre = if prefix.len() > 1500 {
-                                prefix[prefix.len() - 1500..].to_string()
-                            } else {
-                                prefix
-                            };
-                            let suf = if suffix.len() > 400 {
-                                suffix[..400].to_string()
-                            } else {
-                                suffix
-                            };
+                            let pre = phazeai_core::text::tail_bytes(&prefix, 1500).to_string();
+                            let suf = phazeai_core::text::truncate_bytes(&suffix, 400).to_string();
 
                             let prompt = format!(
                                 "You are a code completion engine. \

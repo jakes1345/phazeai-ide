@@ -367,6 +367,12 @@ pub struct IdeState {
     pub show_whitespace: RwSignal<bool>,
     /// Semantic token entries from LSP for the active file (override syntect colors).
     pub semantic_tokens: RwSignal<Vec<crate::lsp_bridge::SemanticTokenEntry>>,
+    /// Text currently selected in the active editor (empty when nothing is selected).
+    /// Written by the editor on every cursor move; read by the AI chat for context.
+    pub editor_selection: RwSignal<String>,
+    /// Prompt queued for the AI chat panel (set by right-click AI actions, Fix-with-AI, etc.).
+    /// The chat panel consumes it and resets it to `None`.
+    pub pending_ai_prompt: RwSignal<Option<String>>,
 }
 
 use crate::session::{self, SessionData};
@@ -826,8 +832,81 @@ impl IdeState {
             inlay_hints_sig: inlay_hints_lsp,
             show_whitespace: create_rw_signal(false),
             semantic_tokens: semantic_tokens_lsp,
+            editor_selection: create_rw_signal(String::new()),
+            pending_ai_prompt: create_rw_signal(None),
         }
     }
+}
+
+// ── Right-click AI actions ────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+enum AiAction {
+    Explain,
+    Fix,
+    Refactor,
+    Tests,
+    Docs,
+}
+
+/// Queue a prompt for the AI chat. The chat panel attaches the file, cursor, selection and
+/// diagnostics itself; the prompt only says *what to do* and whether it means the selection
+/// or the code under the cursor.
+fn queue_ai_action(state: &IdeState, action: AiAction) {
+    let has_selection = !state.editor_selection.get_untracked().trim().is_empty();
+    let target = if has_selection {
+        "the selected code"
+    } else {
+        "the code at my cursor (the enclosing function or block)"
+    };
+
+    let prompt = match action {
+        AiAction::Explain => {
+            format!("Explain {target}. Be concise and call out anything subtle or risky.")
+        }
+        AiAction::Fix => {
+            let file = state.open_file.get_untracked();
+            let cursor_line = state.active_cursor.get_untracked().map(|(_, l, _)| l + 1);
+            let diags: Vec<_> = state
+                .diagnostics
+                .get_untracked()
+                .into_iter()
+                .filter(|d| Some(&d.path) == file.as_ref())
+                .collect();
+            match (cursor_line.and_then(|l| diags.iter().find(|d| d.line == l)), diags.len()) {
+                (Some(d), _) => format!(
+                    "Fix this error on line {}: {}\nMake the change with the `edit_file` tool and summarise what you changed.",
+                    d.line, d.message
+                ),
+                (None, 0) if has_selection => {
+                    "Find and fix any bugs in the selected code. Make the change with the `edit_file` tool and summarise it."
+                        .to_string()
+                }
+                (None, 0) => {
+                    show_toast(
+                        state.status_toast,
+                        "No diagnostics here — select code to ask the AI to review it",
+                    );
+                    return;
+                }
+                (None, _) => "Fix the diagnostics listed in the IDE context for this file. \
+                    Make the changes with the `edit_file` tool and summarise them."
+                    .to_string(),
+            }
+        }
+        AiAction::Refactor => format!(
+            "Refactor {target} for readability and idiomatic style without changing behaviour. \
+             Apply it with the `edit_file` tool and summarise the change."
+        ),
+        AiAction::Tests => format!(
+            "Write unit tests for {target}, following the testing conventions already used in this project. \
+             Put them where this project keeps its tests."
+        ),
+        AiAction::Docs => {
+            format!("Add concise doc comments to {target}, matching the project's existing style.")
+        }
+    };
+    state.pending_ai_prompt.set(Some(prompt));
 }
 
 // ── Command palette commands ──────────────────────────────────────────────────
@@ -991,6 +1070,22 @@ fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Toggle Relative Line Numbers",
             action: |s| s.relative_line_numbers.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "AI: Explain Selection / Code at Cursor",
+            action: |s| queue_ai_action(&s, AiAction::Explain),
+        },
+        PaletteCommand {
+            label: "AI: Fix Diagnostics",
+            action: |s| queue_ai_action(&s, AiAction::Fix),
+        },
+        PaletteCommand {
+            label: "AI: Refactor Selection",
+            action: |s| queue_ai_action(&s, AiAction::Refactor),
+        },
+        PaletteCommand {
+            label: "AI: Generate Tests",
+            action: |s| queue_ai_action(&s, AiAction::Tests),
         },
         PaletteCommand {
             label: "Toggle Whitespace Rendering",
@@ -3245,7 +3340,7 @@ fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                         let file_ctx = state.open_file.get()
                             .and_then(|p| std::fs::read_to_string(&p).ok())
                             .unwrap_or_default();
-                        let file_ctx = if file_ctx.len() > 4096 { &file_ctx[..4096] } else { &file_ctx };
+                        let file_ctx = phazeai_core::text::truncate_bytes(&file_ctx, 4096);
                         let prompt = format!(
                             "Apply the following edit to the code. \
                              Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
@@ -4385,6 +4480,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.inlay_hints_toggle,
         state.show_whitespace,
         state.semantic_tokens,
+        state.editor_selection,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4443,6 +4539,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // inlay_hints_toggle
         state.show_whitespace,                      // show_whitespace
         create_rw_signal(vec![]),                   // semantic_tokens (split pane)
+        create_rw_signal(String::new()),            // editor_selection (detached pane)
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4528,61 +4625,25 @@ fn ide_root(state: IdeState) -> impl IntoView {
                             .entry(MenuItem::new("Toggle Comment\tCtrl+/").action(move || {
                                 s7.comment_toggle_nonce.update(|v| *v += 1);
                             }));
-                        // AI-powered context menu items
-                        let s_explain = s.clone();
-                        let s_tests = s.clone();
-                        let s_fix = s.clone();
+                        // AI-powered context menu items — each queues a prompt for the chat
+                        // panel, which attaches the live selection/diagnostics itself.
+                        let ai = |action: AiAction| {
+                            let st = s.clone();
+                            move || queue_ai_action(&st, action)
+                        };
                         let s_run = s.clone();
                         let s_run_file = s.clone();
                         let menu = menu
                             .separator()
-                            .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) = s_explain.active_cursor.get() {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_explain.search_query.set(format!(
-                                        "Explain the code around line {} in {}",
-                                        line + 1,
-                                        fname
-                                    ));
-                                    s_explain.show_right_panel.set(true);
-                                }
-                            }))
-                            .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) = s_tests.active_cursor.get() {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_tests.search_query.set(format!(
-                                        "Generate unit tests for the function at line {} in {}",
-                                        line + 1,
-                                        fname
-                                    ));
-                                    s_tests.show_right_panel.set(true);
-                                }
-                            }))
-                            .entry(MenuItem::new("🔧 Fix with AI").action(move || {
-                                if let Some((ref path, line, _)) = s_fix.active_cursor.get() {
-                                    let diags = s_fix.diagnostics.get();
-                                    let cur_diag = diags
-                                        .iter()
-                                        .find(|d| d.path == *path && d.line == (line + 1));
-                                    if let Some(d) = cur_diag {
-                                        s_fix
-                                            .search_query
-                                            .set(format!("Fix this error: {}", d.message));
-                                        s_fix.show_right_panel.set(true);
-                                    } else {
-                                        show_toast(
-                                            s_fix.status_toast,
-                                            "No diagnostic on this line",
-                                        );
-                                    }
-                                }
-                            }));
+                            .entry(
+                                MenuItem::new("🤖 Explain with AI").action(ai(AiAction::Explain)),
+                            )
+                            .entry(MenuItem::new("🔧 Fix with AI").action(ai(AiAction::Fix)))
+                            .entry(
+                                MenuItem::new("✨ Refactor with AI").action(ai(AiAction::Refactor)),
+                            )
+                            .entry(MenuItem::new("🧪 Generate Tests").action(ai(AiAction::Tests)))
+                            .entry(MenuItem::new("📝 Add Docs with AI").action(ai(AiAction::Docs)));
                         // Run in Terminal / Run File entries
                         let menu = menu
                             .separator()
@@ -4629,7 +4690,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
     };
 
-    let chat = chat_panel(state.theme, state.ai_thinking);
+    let chat = chat_panel(state.clone());
 
     let chat_wrap = container(chat).style(move |s| {
         let t = state.theme.get();
@@ -4747,6 +4808,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(false),                    // inlay_hints_toggle
         state.show_whitespace,                      // show_whitespace
         create_rw_signal(vec![]),                   // semantic_tokens (down pane)
+        create_rw_signal(String::new()),            // editor_selection (detached pane)
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub llm: LlmSettings,
@@ -113,18 +113,6 @@ impl Default for SidecarSettings {
             enabled: true,
             python_path: defaults::PYTHON_PATH.to_string(),
             auto_start: true,
-        }
-    }
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            llm: LlmSettings::default(),
-            editor: EditorSettings::default(),
-            sidecar: SidecarSettings::default(),
-            providers: Vec::new(),
-            model_routes: HashMap::new(),
         }
     }
 }
