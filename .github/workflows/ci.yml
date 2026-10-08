@@ -131,6 +131,8 @@ jobs:
   test-ui:
     name: Test / phazeai-ui
     runs-on: ubuntu-latest
+    # The xvfb screenshot tests have hung until GitHub's 6h limit; fail fast instead.
+    timeout-minutes: 30
     needs: fmt
     steps:
       - uses: actions/checkout@v4
