@@ -18,10 +18,10 @@ pub struct KeyHelp {
 const FREE_NOTE: &str =
     "Free tier: usage limits apply and prompts may be used for training. Check the provider's terms.";
 
-/// Sign-up info for the providers worth pointing a new user at.
+/// Sign-up info for the providers we point a new user at. Gemini is deliberately not
+/// suggested (maintainer's call); it still works for anyone who brings their own key.
 pub fn key_help(id: &ProviderId) -> Option<KeyHelp> {
     let (signup_url, free_tier, note) = match id {
-        ProviderId::Gemini => ("https://aistudio.google.com/apikey", true, FREE_NOTE),
         ProviderId::Groq => ("https://console.groq.com/keys", true, FREE_NOTE),
         ProviderId::OpenRouter => (
             "https://openrouter.ai/keys",
