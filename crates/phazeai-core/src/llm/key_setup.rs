@@ -137,7 +137,6 @@ mod tests {
     #[test]
     fn free_providers_have_signup_links_and_paid_ones_say_so() {
         for id in [
-            ProviderId::Gemini,
             ProviderId::Groq,
             ProviderId::OpenRouter,
             ProviderId::Mistral,
@@ -153,6 +152,8 @@ mod tests {
             assert!(!key_help(&id).unwrap().free_tier);
         }
         assert!(key_help(&ProviderId::Ollama).is_none());
+        // Deliberately not suggested to new users (maintainer's call).
+        assert!(key_help(&ProviderId::Gemini).is_none());
     }
 
     #[test]
