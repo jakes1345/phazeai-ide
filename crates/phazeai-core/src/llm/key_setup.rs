@@ -30,7 +30,7 @@ pub fn key_help(id: &ProviderId) -> Option<KeyHelp> {
         ),
         ProviderId::Mistral => ("https://console.mistral.ai/api-keys", true, FREE_NOTE),
         ProviderId::Claude => (
-            "https://console.anthropic.com/settings/keys",
+            "https://platform.claude.com/settings/keys",
             false,
             "Paid per use. New accounts may get a small trial credit.",
         ),
