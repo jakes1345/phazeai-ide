@@ -331,7 +331,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
     }
 }
 
-/// Serializes all settings.toml load-mutate-save cycles. Both the editor
+/// Serializes all config.toml load-mutate-save cycles. Both the editor
 /// settings effect and the provider/model effect write from background
 /// threads; without this lock concurrent writers clobber each other's fields.
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -370,10 +370,11 @@ fn check_provider_ready(settings: &Settings) -> bool {
     match settings.llm.provider {
         LlmProvider::Ollama | LlmProvider::LmStudio => true,
         _ => {
-            !settings.llm.api_key_env.is_empty()
-                && std::env::var(&settings.llm.api_key_env)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
+            // A key saved through Settings lives in the OS keyring, not the environment.
+            let env = &settings.llm.api_key_env;
+            !env.is_empty()
+                && (phazeai_core::llm::provider::keyring_get(env).is_some_and(|k| !k.is_empty())
+                    || std::env::var(env).map(|v| !v.is_empty()).unwrap_or(false))
         }
     }
 }
@@ -1081,7 +1082,7 @@ impl IdeState {
             });
         }
 
-        // Persist provider + model changes to settings.toml whenever they change.
+        // Persist provider + model changes to config.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
@@ -4225,7 +4226,7 @@ pub fn launch_phaze_ide() {
             (
                 "Python available",
                 check_python_ready(&settings),
-                "Install Python 3 or set sidecar.python_path in settings.toml",
+                "Install Python 3 or set sidecar.python_path in config.toml",
             ),
             (
                 "rust-analyzer found",
