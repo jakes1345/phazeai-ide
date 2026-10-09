@@ -4,7 +4,10 @@ use floem::{
     IntoView,
 };
 use phazeai_core::{
-    llm::provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+    llm::{
+        key_setup::{check_api_key, key_help},
+        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+    },
     Settings,
 };
 
@@ -68,7 +71,7 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
-            detail: "This provider is disabled in settings.toml.".into(),
+            detail: "This provider is disabled in config.toml.".into(),
         };
     }
 
@@ -654,6 +657,46 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         }
     };
 
+    let test_fn = {
+        move || {
+            use floem::{ext_event::create_ext_action, reactive::Scope};
+            let Some(id) = provider_name_to_id(&ai_provider.get()) else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            let settings = Settings::load();
+            let registry = settings.build_provider_registry();
+            let Some(cfg) = registry.get_config(&id) else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            // Test what is typed; fall back to the key already saved.
+            let typed = key_input.get().trim().to_string();
+            let key = if typed.is_empty() {
+                cfg.api_key().unwrap_or_default()
+            } else {
+                typed
+            };
+            if key.is_empty() {
+                feedback.set("Paste a key first.".into());
+                return;
+            }
+            feedback.set("Testing…".into());
+            let base_url = cfg.base_url.clone();
+            let send = create_ext_action(Scope::new(), move |msg: String| feedback.set(msg));
+            std::thread::spawn(move || {
+                let msg = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(check_api_key(&id, &base_url, &key)).message(),
+                    Err(e) => format!("Could not start the check: {e}"),
+                };
+                send(msg);
+            });
+        }
+    };
+
     let input = text_input(key_input)
         .placeholder("Paste API key — cleared after Save")
         .style(move |s| {
@@ -692,6 +735,23 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| save_fn());
 
+    let test_btn = container(label(|| "Test"))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.padding_horiz(10.0)
+                .padding_vert(4.0)
+                .font_size(12.0)
+                .color(p.text_primary)
+                .background(p.bg_surface)
+                .border(1.0)
+                .border_color(p.border)
+                .border_radius(4.0)
+                .margin_left(4.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+        })
+        .on_click_stop(move |_| test_fn());
+
     let clear_btn = container(label(|| "Clear"))
         .style(move |s| {
             let t = theme.get();
@@ -709,13 +769,57 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| clear_fn());
 
-    let input_row =
-        stack((input, save_btn, clear_btn)).style(|s| s.flex_row().items_center().width_full());
+    let input_row = stack((input, save_btn, test_btn, clear_btn))
+        .style(|s| s.flex_row().items_center().width_full());
 
     let feedback_line = label(move || feedback.get()).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.font_size(11.0).color(p.text_muted).margin_top(4.0)
+    });
+
+    // Where to get a key, and what the free tier costs you (limits, training).
+    let help_text = move || {
+        provider_name_to_id(&ai_provider.get())
+            .and_then(|id| key_help(&id))
+            .map(|h| {
+                if h.free_tier {
+                    format!("Free tier available. {}", h.note)
+                } else {
+                    h.note.to_string()
+                }
+            })
+            .unwrap_or_default()
+    };
+    let get_key_btn = container(label(|| "Get a key ↗"))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let has_link = provider_name_to_id(&ai_provider.get())
+                .and_then(|id| key_help(&id))
+                .is_some();
+            s.padding_horiz(10.0)
+                .padding_vert(3.0)
+                .font_size(12.0)
+                .color(p.accent)
+                .border(1.0)
+                .border_color(p.accent)
+                .border_radius(4.0)
+                .margin_top(6.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(!has_link, |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| {
+            if let Some(h) = provider_name_to_id(&ai_provider.get()).and_then(|id| key_help(&id)) {
+                if let Err(e) = crate::util::open_external_url(h.signup_url) {
+                    feedback.set(format!("Could not open the browser: {e}"));
+                }
+            }
+        });
+    let help_line = label(help_text).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0).color(p.text_muted).margin_top(6.0)
     });
 
     stack((
@@ -726,6 +830,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         }),
         input_row,
         feedback_line,
+        help_line,
+        get_key_btn,
     ))
     .style(move |s| {
         let needs = provider_name_to_id(&ai_provider.get())

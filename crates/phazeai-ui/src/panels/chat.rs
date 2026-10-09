@@ -604,6 +604,7 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn chat_panel(
     theme: RwSignal<PhazeTheme>,
     ai_thinking: RwSignal<bool>,
@@ -1969,7 +1970,6 @@ pub fn chat_panel(
         // Approve button
         let approve_btn = {
             let hov = create_rw_signal(false);
-            let resolve_approve = resolve_approve.clone();
             container(label(|| "✓ Approve").style(move |s| {
                 s.font_size(12.0)
                     .color(floem::peniko::Color::from_rgb8(40, 180, 40))
@@ -2107,7 +2107,6 @@ pub fn chat_panel(
 
         let allow_btn = {
             let hov = create_rw_signal(false);
-            let resolve_allow = resolve_allow.clone();
             container(label(|| "✓ Allow").style(move |s| {
                 s.font_size(12.0)
                     .color(floem::peniko::Color::from_rgb8(40, 180, 40))

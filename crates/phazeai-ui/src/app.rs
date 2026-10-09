@@ -331,7 +331,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
     }
 }
 
-/// Serializes all settings.toml load-mutate-save cycles. Both the editor
+/// Serializes all config.toml load-mutate-save cycles. Both the editor
 /// settings effect and the provider/model effect write from background
 /// threads; without this lock concurrent writers clobber each other's fields.
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -366,14 +366,62 @@ fn load_editor_settings() -> phazeai_core::config::EditorSettings {
     Settings::load().editor
 }
 
-fn check_provider_ready(settings: &Settings) -> bool {
+/// Why the configured AI provider cannot be used yet, or `None` when it is ready.
+///
+/// A fresh install defaults to Ollama, so "local" must mean *reachable*, not just
+/// "doesn't need a key" - otherwise the first-run checklist ticks AI as configured for
+/// exactly the person who has nothing set up.
+fn provider_problem(settings: &Settings) -> Option<String> {
+    use phazeai_core::llm::{discovery::LocalDiscovery, provider::keyring_get};
+    let id = settings.llm.provider.to_provider_id();
     match settings.llm.provider {
-        LlmProvider::Ollama | LlmProvider::LmStudio => true,
+        LlmProvider::Ollama | LlmProvider::LmStudio => {
+            let base = settings
+                .llm
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| id.default_base_url())
+                .to_string();
+            let local = matches!(settings.llm.provider, LlmProvider::Ollama);
+            let up = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map(|rt| {
+                    rt.block_on(async {
+                        let probe = async {
+                            if local {
+                                LocalDiscovery::ollama_available(&base).await
+                            } else {
+                                LocalDiscovery::lm_studio_available(&base).await
+                            }
+                        };
+                        tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                            .await
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            (!up).then(|| {
+                format!(
+                    "{} isn't running. Start it, or add a cloud key in Settings → AI (some providers have a free tier).",
+                    id.name()
+                )
+            })
+        }
         _ => {
-            !settings.llm.api_key_env.is_empty()
-                && std::env::var(&settings.llm.api_key_env)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
+            // A key saved through Settings lives in the OS keyring, not the environment.
+            let env = &settings.llm.api_key_env;
+            let has_key = !env.is_empty()
+                && (keyring_get(env).is_some_and(|k| !k.is_empty())
+                    || std::env::var(env).map(|v| !v.is_empty()).unwrap_or(false));
+            (!has_key).then(|| {
+                format!(
+                    "No {} key found. Add one in Settings → AI (some providers have a free tier).",
+                    id.name()
+                )
+            })
         }
     }
 }
@@ -1081,7 +1129,7 @@ impl IdeState {
             });
         }
 
-        // Persist provider + model changes to settings.toml whenever they change.
+        // Persist provider + model changes to config.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
@@ -1414,6 +1462,42 @@ impl IdeState {
     }
 }
 
+// ── AI prompts from the editor (right-click menu + command palette) ───────────
+
+/// Pure prompt construction (unit-tested). Uses the *selected text* when there is one;
+/// otherwise points at the line under the cursor (`line0` is 0-based).
+fn build_ai_prompt(
+    selection: &str,
+    path: &std::path::Path,
+    line0: u32,
+    on_selection: &str,
+    on_line: &str,
+) -> String {
+    if !selection.trim().is_empty() {
+        return format!("{on_selection}:\n\n```\n{selection}\n```");
+    }
+    let fname = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    format!("{on_line} around line {} in {fname}", line0 + 1)
+}
+
+/// Prompt for an editor AI action, or `None` when no file is active.
+fn editor_ai_prompt(state: &IdeState, on_selection: &str, on_line: &str) -> Option<String> {
+    let (path, line, _) = state.editor.active_cursor.get()?;
+    let sel = state.editor.selected_text.get();
+    Some(build_ai_prompt(&sel, &path, line, on_selection, on_line))
+}
+
+/// Send an editor AI action to the chat panel and reveal it.
+fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
+    if let Some(prompt) = editor_ai_prompt(state, on_selection, on_line) {
+        state.ai.pending_chat_inject.set(Some(prompt));
+        state.workbench.show_right_panel.set(true);
+    }
+}
+
 // ── Command palette commands ──────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1694,22 +1778,7 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         },
         PaletteCommand {
             label: "Explain Selection with AI (Ctrl+Shift+E)",
-            action: |s| {
-                if let Some((ref path, line, _)) = s.editor.active_cursor.get() {
-                    let sel = s.editor.selected_text.get();
-                    let fname = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "file".to_string());
-                    let prompt = if !sel.is_empty() {
-                        format!("Explain this code:\n\n```\n{sel}\n```")
-                    } else {
-                        format!("Explain the code around line {} in {}", line + 1, fname)
-                    };
-                    s.ai.pending_chat_inject.set(Some(prompt));
-                    s.workbench.show_right_panel.set(true);
-                }
-            },
+            action: |s| send_editor_ai_action(&s, "Explain this code", "Explain the code"),
         },
         PaletteCommand {
             label: "Go to Next Problem (F8)",
@@ -3843,42 +3912,36 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         // AI-powered context menu items
                         let s_explain = s.clone();
                         let s_tests = s.clone();
+                        let s_refactor = s.clone();
+                        let s_docs = s.clone();
                         let s_fix = s.clone();
                         let s_run = s.clone();
                         let s_run_file = s.clone();
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_explain.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_explain.ai.pending_chat_inject.set(Some(format!(
-                                        "Explain the code around line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_explain.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(&s_explain, "Explain this code", "Explain the code");
                             }))
                             .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_tests.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_tests.ai.pending_chat_inject.set(Some(format!(
-                                        "Generate unit tests for the function at line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_tests.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(
+                                    &s_tests,
+                                    "Write unit tests for this code, following the testing conventions already used in this project",
+                                    "Write unit tests for the function",
+                                );
+                            }))
+                            .entry(MenuItem::new("✨ Refactor with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_refactor,
+                                    "Refactor this code for readability and idiomatic style without changing its behaviour",
+                                    "Refactor the code",
+                                );
+                            }))
+                            .entry(MenuItem::new("📝 Add Docs with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_docs,
+                                    "Add concise doc comments to this code, matching the project's existing style",
+                                    "Add concise doc comments to the item",
+                                );
                             }))
                             .entry(MenuItem::new("🔧 Fix with AI").action(move || {
                                 if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get()
@@ -4200,22 +4263,23 @@ pub fn launch_phaze_ide() {
     let settings = Settings::load();
 
     // Compute readiness items before entering the reactive scope (fast, synchronous).
-    let readiness_items: Vec<(&'static str, bool, &'static str)> = if is_first_run {
+    let readiness_items: Vec<(&'static str, bool, String)> = if is_first_run {
+        let ai_problem = provider_problem(&settings);
         vec![
             (
-                "AI provider configured",
-                check_provider_ready(&settings),
-                "Set your API key env var in Settings → AI Provider",
+                "AI provider ready",
+                ai_problem.is_none(),
+                ai_problem.unwrap_or_default(),
             ),
             (
                 "Python available",
                 check_python_ready(&settings),
-                "Install Python 3 or set sidecar.python_path in settings.toml",
+                "Install Python 3 or set sidecar.python_path in config.toml".to_string(),
             ),
             (
                 "rust-analyzer found",
                 check_lsp_ready(),
-                "Install rust-analyzer for LSP features (cargo install rust-analyzer)",
+                "Install rust-analyzer for LSP features (cargo install rust-analyzer)".to_string(),
             ),
         ]
     } else {
@@ -4382,8 +4446,33 @@ pub fn launch_phaze_ide() {
                             .margin_bottom(10.0)
                     });
 
-                    container(stack((header, rows)).style(|s| s.flex_col().width(300.0))).style(
-                        move |s| {
+                    // One click from "AI isn't set up" to the place that fixes it.
+                    let ai_missing = items.first().map(|(_, ok, _)| !ok).unwrap_or(false);
+                    let setup_state = state.clone();
+                    let setup_btn =
+                        container(label(|| "Set up AI →".to_string()).style(move |s| {
+                            let p = title_theme.get().palette;
+                            s.font_size(12.0).color(p.accent)
+                        }))
+                        .on_click_stop(move |_| {
+                            setup_state.workbench.show_left_panel.set(true);
+                            setup_state.workbench.left_panel_tab.set(Tab::Settings);
+                            visible_sig.set(false);
+                        })
+                        .style(move |s| {
+                            let p = theme.get().palette;
+                            s.padding_horiz(10.0)
+                                .padding_vert(5.0)
+                                .margin_top(4.0)
+                                .border(1.0)
+                                .border_color(p.accent)
+                                .border_radius(4.0)
+                                .cursor(floem::style::CursorStyle::Pointer)
+                                .apply_if(!ai_missing, |s| s.display(floem::style::Display::None))
+                        });
+
+                    container(stack((header, rows, setup_btn)).style(|s| s.flex_col().width(300.0)))
+                        .style(move |s| {
                             let p = theme.get().palette;
                             let shown = visible_sig.get();
                             s.absolute()
@@ -4401,8 +4490,7 @@ pub fn launch_phaze_ide() {
                                 .box_shadow_color(p.glow)
                                 .box_shadow_spread(0.0)
                                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
-                        },
-                    )
+                        })
                 };
 
                 stack((
@@ -5501,4 +5589,85 @@ pub fn launch_phaze_ide() {
             ),
         )
         .run();
+}
+
+#[cfg(test)]
+mod ai_prompt_tests {
+    use super::build_ai_prompt;
+    use std::path::Path;
+
+    #[test]
+    fn selection_is_quoted_verbatim() {
+        let p = build_ai_prompt(
+            "let x = 1;",
+            Path::new("/a/main.rs"),
+            4,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p, "Explain this code:\n\n```\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn without_selection_points_at_the_cursor_line() {
+        let p = build_ai_prompt(
+            "",
+            Path::new("/a/b/main.rs"),
+            41,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p, "Explain the code around line 42 in main.rs");
+    }
+
+    #[test]
+    fn whitespace_only_selection_counts_as_no_selection() {
+        let p = build_ai_prompt("  \n\t ", Path::new("x.py"), 0, "A", "B");
+        assert_eq!(p, "B around line 1 in x.py");
+    }
+}
+
+#[cfg(test)]
+mod provider_problem_tests {
+    use super::provider_problem;
+    use phazeai_core::{config::LlmProvider, Settings};
+
+    fn settings(provider: LlmProvider, env: &str, base_url: Option<&str>) -> Settings {
+        let mut s = Settings::default();
+        s.llm.provider = provider;
+        s.llm.api_key_env = env.to_string();
+        s.llm.base_url = base_url.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn missing_key_is_reported_with_the_provider_name() {
+        let s = settings(LlmProvider::Groq, "PHAZEAI_TEST_NO_SUCH_KEY_VAR", None);
+        let msg = provider_problem(&s).expect("no key should be a problem");
+        assert!(msg.contains("Groq") && msg.contains("Settings"), "{msg}");
+    }
+
+    #[test]
+    fn a_key_in_the_environment_counts_as_ready() {
+        // PATH is set (and non-empty) in every environment the tests run in.
+        let s = settings(LlmProvider::Groq, "PATH", None);
+        assert_eq!(provider_problem(&s), None);
+    }
+
+    #[test]
+    fn an_empty_key_variable_name_is_not_ready() {
+        let s = settings(LlmProvider::Claude, "", None);
+        assert!(provider_problem(&s).is_some());
+    }
+
+    #[test]
+    fn local_providers_are_only_ready_when_reachable() {
+        // Port 9 (discard) has nothing listening: a fresh install with Ollama as the
+        // default provider but no Ollama must not be reported as configured.
+        for p in [LlmProvider::Ollama, LlmProvider::LmStudio] {
+            let s = settings(p, "", Some("http://127.0.0.1:9"));
+            let msg = provider_problem(&s).expect("unreachable local server is a problem");
+            assert!(msg.contains("isn't running"), "{msg}");
+        }
+    }
 }

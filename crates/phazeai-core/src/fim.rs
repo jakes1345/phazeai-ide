@@ -1,9 +1,9 @@
-/// Fill-in-Middle (FIM) inline code completion.
-///
-/// Uses the active LLM with a tight chat prompt that emulates FIM behaviour.
-/// The model sees the code before and after the cursor and must output ONLY
-/// the text to insert at the cursor — no explanation, no markdown, no repeating
-/// the surrounding code.
+//! Fill-in-Middle (FIM) inline code completion.
+//!
+//! Uses the active LLM with a tight chat prompt that emulates FIM behaviour.
+//! The model sees the code before and after the cursor and must output ONLY
+//! the text to insert at the cursor — no explanation, no markdown, no repeating
+//! the surrounding code.
 
 use crate::config::Settings;
 use crate::llm::Message;
@@ -17,15 +17,9 @@ use crate::llm::Message;
 ///
 /// This is intentionally synchronous-from-a-thread: callers spawn a thread,
 /// call this, then write the result back to a signal via `create_ext_action`.
-pub async fn fim_complete(
-    prefix: &str,
-    suffix: &str,
-    language: &str,
-) -> Result<String, String> {
+pub async fn fim_complete(prefix: &str, suffix: &str, language: &str) -> Result<String, String> {
     let settings = Settings::load();
-    let client = settings
-        .build_llm_client()
-        .map_err(|e| e.to_string())?;
+    let client = settings.build_llm_client().map_err(|e| e.to_string())?;
 
     // Trim prefix to last ~40 lines and suffix to next ~20 lines so we
     // don't blow the context window on large files.
@@ -45,10 +39,7 @@ pub async fn fim_complete(
          ```{language}\n{prefix_trimmed}<CURSOR>{suffix_trimmed}\n```"
     );
 
-    let messages = vec![
-        Message::system(system),
-        Message::user(user),
-    ];
+    let messages = vec![Message::system(system), Message::user(user)];
 
     let resp = client
         .chat(&messages, &[])
@@ -58,10 +49,7 @@ pub async fn fim_complete(
     let raw = resp.message.content.trim().to_string();
 
     // Strip any accidental markdown fences the model might output.
-    let cleaned = raw
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+    let cleaned = raw.trim_start_matches("```").trim_end_matches("```").trim();
 
     // Drop if the model repeated the prefix (common failure mode).
     if cleaned.is_empty() || prefix_trimmed.contains(cleaned) {

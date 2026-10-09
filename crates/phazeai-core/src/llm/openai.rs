@@ -12,6 +12,32 @@ pub struct OpenAIClient {
     base_url: String,
 }
 
+/// Build `<base_url>/<path>` for an OpenAI-compatible API.
+///
+/// Providers document their base URL differently: some stop at the host
+/// (`https://api.openai.com`) and some already carry the version segment
+/// (`https://api.mistral.ai/v1`, `.../v1beta/openai/`). Appending `/v1`
+/// unconditionally produced `.../v1/v1/chat/completions` for the latter, so only
+/// add it when the base has no version segment of its own.
+pub(crate) fn openai_compat_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    if base.split('/').any(is_version_segment) {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/v1/{path}")
+    }
+}
+
+/// `v1`, `v2`, `v1beta`, `v1alpha`, ... but not hosts like `v1.example.com`.
+fn is_version_segment(seg: &str) -> bool {
+    let Some(rest) = seg.strip_prefix('v') else {
+        return false;
+    };
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && matches!(&rest[digits..], "" | "beta" | "alpha")
+}
+
 impl OpenAIClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
@@ -104,7 +130,7 @@ impl LlmClient for OpenAIClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = openai_compat_url(&self.base_url, "chat/completions");
 
         let oai_messages: Vec<Value> = messages
             .iter()
@@ -217,7 +243,7 @@ impl LlmClient for OpenAIClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = openai_compat_url(&self.base_url, "chat/completions");
 
         let oai_messages: Vec<Value> = messages
             .iter()
@@ -407,5 +433,88 @@ impl LlmClient for OpenAIClient {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::openai_compat_url;
+
+    fn chat(base: &str) -> String {
+        openai_compat_url(base, "chat/completions")
+    }
+
+    #[test]
+    fn host_only_bases_get_v1_added() {
+        assert_eq!(
+            chat("https://api.openai.com"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.together.xyz"),
+            "https://api.together.xyz/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("http://localhost:1234"),
+            "http://localhost:1234/v1/chat/completions"
+        );
+        // Groq and OpenRouter keep a path prefix but no version segment.
+        assert_eq!(
+            chat("https://api.groq.com/openai"),
+            "https://api.groq.com/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://openrouter.ai/api"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn versioned_bases_are_not_double_versioned() {
+        assert_eq!(
+            chat("https://api.mistral.ai/v1"),
+            "https://api.mistral.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.cerebras.ai/v1"),
+            "https://api.cerebras.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.fireworks.ai/inference/v1"),
+            "https://api.fireworks.ai/inference/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.cohere.com/compatibility/v1"),
+            "https://api.cohere.com/compatibility/v1/chat/completions"
+        );
+        // Gemini's OpenAI-compat base: trailing slash, v1beta segment.
+        assert_eq!(
+            chat("https://generativelanguage.googleapis.com/v1beta/openai/"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+    }
+
+    #[test]
+    fn trailing_slashes_and_leading_path_slashes_are_tolerated() {
+        assert_eq!(
+            openai_compat_url("https://api.mistral.ai/v1//", "/models"),
+            "https://api.mistral.ai/v1/models"
+        );
+        assert_eq!(
+            openai_compat_url("https://api.openai.com/", "models"),
+            "https://api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn a_version_like_hostname_is_not_a_version_segment() {
+        assert_eq!(
+            chat("https://v1.example.com"),
+            "https://v1.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://example.com/v2"),
+            "https://example.com/v2/chat/completions"
+        );
     }
 }
