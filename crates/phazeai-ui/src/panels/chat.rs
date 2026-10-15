@@ -1215,11 +1215,26 @@ pub fn chat_panel(
     {
         let do_send = do_send.clone();
         create_effect(move |_| {
-            if let Some(text) = chat_inject.get() {
-                input_text.set(text);
-                chat_inject.set(None);
-                do_send();
+            let Some(text) = chat_inject.get() else {
+                return;
+            };
+            chat_inject.set(None);
+            if text.trim().is_empty() || is_loading.get_untracked() {
+                // Not dispatched. An editor action hands the file it quotes to
+                // the privacy audit together with its prompt (see
+                // `inject_editor_prompt` in app.rs); drop that hand-off with the
+                // prompt so it is not attributed to an unrelated later send.
+                let _ = crate::panels::privacy::take_attachments();
+                if !text.trim().is_empty() {
+                    crate::app::show_toast(
+                        status_toast,
+                        "AI chat is busy — try again when the current response finishes",
+                    );
+                }
+                return;
             }
+            input_text.set(text);
+            do_send();
         });
     }
 

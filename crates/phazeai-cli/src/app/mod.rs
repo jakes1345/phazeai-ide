@@ -208,6 +208,8 @@ pub(crate) struct AppState {
     cancel_requested: bool,
     status_text: String,
     pending_approval: Option<PendingApproval>,
+    /// Input lines, as typed (`/add path`, `/skill name`, or a message),
+    /// waiting for the current run to finish; see [`Self::drain_queue`].
     queued: VecDeque<String>,
     tokens_in: u64,
     tokens_out: u64,
@@ -278,7 +280,25 @@ impl AppState {
     }
 
     /// Send a prompt to the agent (or queue it while a run is active).
+    /// `display` is what the conversation shows as the user's turn and is
+    /// also the input line that reproduces the prompt; use
+    /// [`Self::send_prompt_as`] when the two differ.
     fn send_prompt(&mut self, display: String, agent_input: String) {
+        let resubmit = display.clone();
+        self.send_prompt_as(resubmit, display, agent_input);
+    }
+
+    /// Like [`Self::send_prompt`], with `resubmit` as the input line that
+    /// reproduces the prompt (e.g. `/add path` for a prompt that carries the
+    /// file's contents).
+    ///
+    /// While a run is active the prompt is queued as that line — not as the
+    /// expanded `agent_input` or the one-line `display` — and re-run through
+    /// `actions::submit_line` when the run ends. So a queued `/add` or
+    /// `/skill` reads the file or skill, and `/add` re-checks the privacy
+    /// policy, at the moment it is actually sent; and an interrupted queue
+    /// goes back to the input box as lines that can be re-submitted as typed.
+    fn send_prompt_as(&mut self, resubmit: String, display: String, agent_input: String) {
         if let Some(err) = self.llm_error.clone() {
             self.push(ChatItem::message(MessageRole::User, display));
             self.error(setup::explain_build_error(
@@ -289,12 +309,24 @@ impl AppState {
             return;
         }
         if self.processing {
-            self.queued.push_back(display);
+            self.queued.push_back(resubmit);
             self.notify("Queued — it will be sent when the current response finishes");
             return;
         }
         self.push(ChatItem::message(MessageRole::User, display));
         self.start_run(agent_input);
+    }
+
+    /// Re-submit the queued input lines, in order, until one starts a run or
+    /// the queue is empty (a line that produces no run — a refused `/add`, an
+    /// unknown skill — must not stall the ones behind it).
+    fn drain_queue(&mut self) {
+        while !self.processing {
+            let Some(line) = self.queued.pop_front() else {
+                break;
+            };
+            actions::submit_line(self, &line);
+        }
     }
 
     fn start_run(&mut self, agent_input: String) {
@@ -497,12 +529,7 @@ fn handle_ui_event(state: &mut AppState, event: UiEvent) {
             if state.has_user_content() {
                 state.save_conversation();
             }
-            if let Some(next) = state.queued.pop_front() {
-                let agent_input = apply_mode_prefix(&state.ai_mode, &next);
-                state.last_user_input = next.clone();
-                state.push(ChatItem::message(MessageRole::User, next));
-                state.start_run(agent_input);
-            }
+            state.drain_queue();
         }
     }
 }
@@ -896,5 +923,219 @@ mod tests {
         assert_eq!(apply_mode_prefix("chat", "hi"), "hi");
         assert!(apply_mode_prefix("plan", "hi").starts_with("[PLANNING MODE]"));
         assert!(apply_mode_prefix("ask", "hi").ends_with("hi"));
+    }
+
+    // ── Queue handling ──────────────────────────────────────────────────────
+
+    /// A scratch directory removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir()
+                .join(format!("phazeai-cli-{tag}-{}-{nonce}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An `AppState` with no worker thread: `rx` receives what the worker
+    /// would have been told to do.
+    fn test_state(dir: &std::path::Path) -> (AppState, mpsc::UnboundedReceiver<WorkerCommand>) {
+        let (worker_tx, rx) = mpsc::unbounded_channel::<WorkerCommand>();
+        let settings = Settings::default();
+        let context_budget = settings.context_budget();
+        let state = AppState {
+            settings,
+            llm_error: None,
+            theme: Theme::by_name("dark").with_mode(ColorMode::TrueColor),
+            theme_gen: 0,
+            color_mode: ColorMode::TrueColor,
+            input: InputBuffer::default(),
+            history: History::default(),
+            palette_index: 0,
+            palette_dismissed: false,
+            input_scroll: 0,
+            items: Vec::new(),
+            scroll: 0,
+            follow: true,
+            view_height: 0,
+            expand_tools: false,
+            processing: false,
+            run_started: None,
+            cancel_requested: false,
+            status_text: String::new(),
+            pending_approval: None,
+            queued: VecDeque::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: 0.0,
+            context_tokens: None,
+            context_budget,
+            git_branch: None,
+            git_dirty: 0,
+            should_quit: false,
+            quit_armed_at: None,
+            notice: None,
+            show_files: false,
+            session_picker: None,
+            needs_clear: false,
+            clipboard: None,
+            conversation_id: ConversationStore::generate_id(),
+            conversation_store: ConversationStore::with_dir(dir.join("conversations")).unwrap(),
+            approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
+            policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker_tx,
+            ai_mode: "chat".into(),
+            last_user_input: String::new(),
+            companion: Companion::new(),
+        };
+        (state, rx)
+    }
+
+    /// The prompt of the next run handed to the worker, if any.
+    fn run_input(rx: &mut mpsc::UnboundedReceiver<WorkerCommand>) -> Option<String> {
+        match rx.try_recv() {
+            Ok(WorkerCommand::Run(input)) => Some(input),
+            _ => None,
+        }
+    }
+
+    fn turns(state: &AppState, role: MessageRole) -> Vec<String> {
+        state
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ChatItem::Message(m) if m.role == role => Some(m.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn queued_prompts_are_stored_as_their_input_line() {
+        let tmp = TempDir::new("queue");
+        let (mut state, mut rx) = test_state(tmp.path());
+        state.processing = true;
+        state.send_prompt("/skill review".into(), "You are a reviewer…".into());
+        state.send_prompt_as(
+            "/add src/x.rs".into(),
+            "Added x.rs to the context (3 lines)".into(),
+            "contents of x.rs".into(),
+        );
+        assert_eq!(state.queued, ["/skill review", "/add src/x.rs"]);
+        assert!(run_input(&mut rx).is_none());
+        assert!(turns(&state, MessageRole::User).is_empty());
+
+        // Interrupting hands the lines back to the input box, where they can
+        // be re-submitted as typed — not as the expanded text or a summary.
+        state.cancel_run();
+        assert_eq!(state.input.text(), "/skill review\n/add src/x.rs");
+        assert!(state.queued.is_empty());
+    }
+
+    #[test]
+    fn a_queued_add_is_expanded_when_it_is_sent() {
+        let tmp = TempDir::new("add");
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "hello from notes\nsecond line\n").unwrap();
+        let (mut state, mut rx) = test_state(tmp.path());
+        let line = format!("/add {}", file.display());
+
+        // A response is running: the command is queued as typed, nothing is sent.
+        state.processing = true;
+        actions::submit_line(&mut state, &line);
+        assert_eq!(state.queued, [line.as_str()]);
+        assert!(run_input(&mut rx).is_none());
+        assert!(turns(&state, MessageRole::User).is_empty());
+
+        // The run ends: the file is read now and its contents reach the model.
+        state.processing = false;
+        state.drain_queue();
+        let sent = run_input(&mut rx).expect("the dequeued /add starts a run");
+        assert!(sent.contains("hello from notes\nsecond line"), "{sent}");
+        assert!(sent.contains(&file.display().to_string()), "{sent}");
+        assert_eq!(
+            turns(&state, MessageRole::User),
+            ["Added notes.txt to the context (2 lines)"]
+        );
+        assert!(state.processing);
+        assert!(state.queued.is_empty());
+    }
+
+    #[test]
+    fn a_queued_add_of_a_denied_file_is_refused_when_sent_and_the_queue_moves_on() {
+        let tmp = TempDir::new("add-denied");
+        let env = tmp.path().join(".env"); // on the built-in deny list
+        std::fs::write(&env, "SECRET=1\n").unwrap();
+        let (mut state, mut rx) = test_state(tmp.path());
+        state.queued.push_back(format!("/add {}", env.display()));
+        state.queued.push_back("what next?".into());
+
+        state.drain_queue();
+        let sent = run_input(&mut rx).expect("the message behind the refused /add is sent");
+        assert_eq!(sent, "what next?");
+        assert!(run_input(&mut rx).is_none());
+        let errors = turns(&state, MessageRole::Error);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("Not added:"), "{}", errors[0]);
+        assert!(!errors[0].contains("SECRET"));
+        assert_eq!(turns(&state, MessageRole::User), ["what next?"]);
+        assert_eq!(state.last_user_input, "what next?");
+    }
+
+    #[test]
+    fn a_queued_skill_is_resolved_when_sent_not_passed_through_as_text() {
+        let tmp = TempDir::new("skill");
+        let (mut state, mut rx) = test_state(tmp.path());
+        // The skill reaches the model only through its file: an unknown one
+        // produces an error at send time, never a "/skill …" prompt.
+        state
+            .queued
+            .push_back("/skill phazeai-test-no-such-skill-7f3a".into());
+        state.drain_queue();
+        assert!(run_input(&mut rx).is_none());
+        let errors = turns(&state, MessageRole::Error);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("not found"), "{}", errors[0]);
+        assert!(turns(&state, MessageRole::User).is_empty());
+        assert!(!state.processing);
+    }
+
+    #[test]
+    fn a_queued_message_is_sent_with_the_mode_prefix_of_that_moment_one_run_at_a_time() {
+        let tmp = TempDir::new("message");
+        let (mut state, mut rx) = test_state(tmp.path());
+        state.processing = true;
+        actions::submit_line(&mut state, "hello");
+        actions::submit_line(&mut state, "and then");
+        assert_eq!(state.queued, ["hello", "and then"]);
+
+        state.ai_mode = "plan".into();
+        state.processing = false;
+        state.drain_queue();
+        let sent = run_input(&mut rx).unwrap();
+        assert!(sent.starts_with("[PLANNING MODE]"), "{sent}");
+        assert!(sent.ends_with("hello"), "{sent}");
+        assert_eq!(turns(&state, MessageRole::User), ["hello"]);
+        assert_eq!(state.last_user_input, "hello");
+        // Only one run at a time: the rest waits for it to finish.
+        assert!(run_input(&mut rx).is_none());
+        assert_eq!(state.queued, ["and then"]);
     }
 }

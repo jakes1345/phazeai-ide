@@ -59,6 +59,23 @@ fn busy(state: &mut AppState, what: &str) -> bool {
     }
 }
 
+/// Run `line` as the user submitted it: a slash command, or a message for
+/// the agent.
+///
+/// Input queued while a response was running is re-run through here when
+/// the run finishes (see `AppState::drain_queue`), so `/add` and `/skill`
+/// read the file or skill — and `/add` re-checks the privacy policy — at the
+/// moment they are actually sent, exactly as an immediate command does.
+pub(super) fn submit_line(state: &mut AppState, line: &str) {
+    if line.starts_with('/') {
+        run_command(state, crate::commands::handle_command(line.trim_end()));
+        return;
+    }
+    state.last_user_input = line.to_string();
+    let agent_input = super::apply_mode_prefix(&state.ai_mode, line);
+    state.send_prompt(line.to_string(), agent_input);
+}
+
 pub(super) fn open_session_picker(state: &mut AppState) {
     match state.conversation_store.list_recent(30) {
         Ok(list) if list.is_empty() => state.notify("No saved conversations yet"),
@@ -547,7 +564,10 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
                     let prompt = format!(
                         "Here are the contents of `{path_str}` for context. Reply with a one-line acknowledgement only.\n\n```{ext}\n{contents}\n```"
                     );
-                    state.send_prompt(
+                    // Queued (while a response runs) as `/add <path>`, so the
+                    // file is read and checked again when it is actually sent.
+                    state.send_prompt_as(
+                        format!("/add {path_str}"),
                         format!("Added {name} to the context ({lines} lines)"),
                         prompt,
                     );
