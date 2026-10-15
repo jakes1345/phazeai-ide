@@ -154,7 +154,8 @@ jobs:
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3 \
-            xvfb xdotool scrot imagemagick fluxbox
+            xvfb xdotool scrot imagemagick fluxbox \
+            mesa-vulkan-drivers libgl1-mesa-dri
       - name: Test phazeai-ui (state + integration)
         run: cargo test -p phazeai-ui
       - name: Test phazeai-ui tier2 (xvfb screenshot tests)
