@@ -210,6 +210,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         Model
     ),
     cmd!(
+        "/local",
+        [],
+        "",
+        "Show the built-in local AI: model, server, llama.cpp",
+        Model
+    ),
+    cmd!(
         "/discover",
         [],
         "",
@@ -543,6 +550,9 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/version" => CommandResult::Message(format!("PhazeAI CLI v{}", env!("CARGO_PKG_VERSION"))),
         "/models" => CommandResult::ListModels,
         "/discover" => CommandResult::DiscoverModels,
+        "/local" => CommandResult::Message(crate::setup::local_ai_status_text(
+            &phazeai_core::Settings::load(),
+        )),
         "/context" => CommandResult::ShowContext,
 
         // AI Mode switching

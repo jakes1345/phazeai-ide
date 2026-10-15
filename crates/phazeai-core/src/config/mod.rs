@@ -14,6 +14,8 @@ pub struct Settings {
     pub providers: Vec<ProviderEntry>,
     #[serde(default)]
     pub model_routes: HashMap<TaskType, ModelRoute>,
+    #[serde(default)]
+    pub local_ai: crate::local_ai::LocalAiSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +38,9 @@ pub enum LlmProvider {
     OpenRouter,
     LmStudio,
     Gemini,
+    /// PhazeAI's own llama.cpp server (`[local_ai]` section).
+    #[serde(rename = "builtin")]
+    BuiltIn,
 }
 
 impl LlmProvider {
@@ -49,6 +54,7 @@ impl LlmProvider {
             LlmProvider::OpenRouter => ProviderId::OpenRouter,
             LlmProvider::LmStudio => ProviderId::LmStudio,
             LlmProvider::Gemini => ProviderId::Gemini,
+            LlmProvider::BuiltIn => ProviderId::BuiltIn,
         }
     }
 }
@@ -120,6 +126,7 @@ impl Default for Settings {
             },
             providers: Vec::new(),
             model_routes: HashMap::new(),
+            local_ai: Default::default(),
         }
     }
 }
@@ -196,6 +203,7 @@ impl Settings {
                 "fireworks" => ProviderId::Fireworks,
                 "sambanova" => ProviderId::SambaNova,
                 "github" | "github_models" | "githubmodels" => ProviderId::GithubModels,
+                "builtin" | "built-in" | "phazeai-local" => ProviderId::BuiltIn,
                 other => ProviderId::Custom(other.to_string()),
             };
             let config = ProviderConfig {

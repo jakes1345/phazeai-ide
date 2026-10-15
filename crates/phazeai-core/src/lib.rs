@@ -12,6 +12,7 @@ pub mod ext_host;
 pub mod fim;
 pub mod git;
 pub mod llm;
+pub mod local_ai;
 pub mod lsp;
 pub mod mcp;
 pub mod process;

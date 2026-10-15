@@ -328,6 +328,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
         "OpenRouter" => Some(LlmProvider::OpenRouter),
         "LM Studio (Local)" => Some(LlmProvider::LmStudio),
         "Ollama (Local)" => Some(LlmProvider::Ollama),
+        "PhazeAI Local (built-in)" => Some(LlmProvider::BuiltIn),
         _ => None,
     }
 }
@@ -376,6 +377,7 @@ fn provider_problem(settings: &Settings) -> Option<String> {
     use phazeai_core::llm::{discovery::LocalDiscovery, provider::keyring_get};
     let id = settings.llm.provider.to_provider_id();
     match settings.llm.provider {
+        LlmProvider::BuiltIn => phazeai_core::local_ai::readiness_problem(&settings.local_ai),
         LlmProvider::Ollama | LlmProvider::LmStudio => {
             let base = settings
                 .llm
@@ -406,7 +408,7 @@ fn provider_problem(settings: &Settings) -> Option<String> {
                 .unwrap_or(false);
             (!up).then(|| {
                 format!(
-                    "{} isn't running. Start it, or add a cloud key in Settings → AI (some providers have a free tier).",
+                    "{} isn't running. Start it, download a free built-in model in Settings → Local AI, or add a cloud key in Settings → AI.",
                     id.name()
                 )
             })
@@ -1220,6 +1222,7 @@ impl IdeState {
             ext_manager: ext_manager.clone(),
             editor_snapshot: editor_snapshot.clone(),
             new_terminal_nonce: create_rw_signal(0u64),
+            local_ai_focus_nonce: create_rw_signal(0u64),
         };
 
         let editor = EditorState {
@@ -4319,6 +4322,12 @@ pub fn launch_phaze_ide() {
     let is_first_run = !Settings::config_path().exists();
     let settings = Settings::load();
 
+    // Built-in local AI: load the model in the background so it's ready by the
+    // time the user asks something. Stopped in the WindowClosed handler.
+    if settings.llm.provider == LlmProvider::BuiltIn && settings.local_ai.auto_start {
+        phazeai_core::local_ai::LOCAL_AI.start_in_background(settings.local_ai.clone());
+    }
+
     // Compute readiness items before entering the reactive scope (fast, synchronous).
     let readiness_items: Vec<(&'static str, bool, String)> = if is_first_run {
         let ai_problem = provider_problem(&settings);
@@ -4514,6 +4523,11 @@ pub fn launch_phaze_ide() {
                         .on_click_stop(move |_| {
                             setup_state.workbench.show_left_panel.set(true);
                             setup_state.workbench.left_panel_tab.set(Tab::Settings);
+                            // Land on Local AI: the one option that needs no account or key.
+                            setup_state
+                                .workbench
+                                .local_ai_focus_nonce
+                                .update(|n| *n += 1);
                             visible_sig.set(false);
                         })
                         .style(move |s| {
@@ -5620,6 +5634,8 @@ pub fn launch_phaze_ide() {
                 .on_event_stop(EventListener::WindowClosed, {
                     let state = state.clone();
                     move |_| {
+                        // Stop the built-in llama.cpp server (if any).
+                        phazeai_core::local_ai::LOCAL_AI.stop();
                         // Kill sidecar process cleanly on IDE exit.
                         if let Ok(guard) = state.project.sidecar_client.lock() {
                             if let Some(client) = guard.as_ref() {
@@ -5715,6 +5731,18 @@ mod provider_problem_tests {
     fn an_empty_key_variable_name_is_not_ready() {
         let s = settings(LlmProvider::Claude, "", None);
         assert!(provider_problem(&s).is_some());
+    }
+
+    #[test]
+    fn built_in_provider_explains_what_is_missing() {
+        // No server runs in tests, so the built-in provider is never ready, and
+        // the message must point at the place that fixes it.
+        let mut s = settings(LlmProvider::BuiltIn, "", None);
+        let msg = provider_problem(&s).expect("no server running");
+        assert!(msg.contains("Local AI"), "{msg}");
+        s.local_ai.model = Some("not-a-catalog-model".into());
+        let msg = provider_problem(&s).unwrap();
+        assert!(msg.contains("Unknown built-in model"), "{msg}");
     }
 
     #[test]

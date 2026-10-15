@@ -50,4 +50,6 @@ pub struct WorkbenchState {
     pub editor_cmd_tx: std::sync::mpsc::SyncSender<crate::editor_command::EditorCommand>,
     /// Bumped by the command palette "New Terminal Tab" command.
     pub new_terminal_nonce: RwSignal<u64>,
+    /// Bumped to scroll Settings to the Local AI section (first-run "Set up AI →").
+    pub local_ai_focus_nonce: RwSignal<u64>,
 }

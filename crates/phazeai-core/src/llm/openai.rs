@@ -58,6 +58,15 @@ impl OpenAIClient {
         self
     }
 
+    /// Connect directly, ignoring `HTTP(S)_PROXY`. For servers on 127.0.0.1:
+    /// a corporate proxy can't reach the user's loopback interface.
+    pub fn without_proxy(mut self) -> Self {
+        if let Ok(client) = reqwest::Client::builder().no_proxy().build() {
+            self.client = client;
+        }
+        self
+    }
+
     fn build_tool_defs(&self, tools: &[ToolDefinition]) -> Vec<Value> {
         tools
             .iter()

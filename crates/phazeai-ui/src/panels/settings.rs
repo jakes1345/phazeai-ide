@@ -48,6 +48,7 @@ fn provider_name_to_id(name: &str) -> Option<ProviderId> {
         "Fireworks AI" => Some(ProviderId::Fireworks),
         "SambaNova" => Some(ProviderId::SambaNova),
         "GitHub Models" => Some(ProviderId::GithubModels),
+        "PhazeAI Local (built-in)" => Some(ProviderId::BuiltIn),
         _ => None,
     }
 }
@@ -76,6 +77,20 @@ fn provider_status(name: &str) -> ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
             detail: "This provider is disabled in config.toml.".into(),
+        };
+    }
+
+    if provider_id == ProviderId::BuiltIn {
+        let problem = phazeai_core::local_ai::readiness_problem(&settings.local_ai);
+        return ProviderUiStatus {
+            available: problem.is_none(),
+            summary: if problem.is_none() {
+                "Ready"
+            } else {
+                "Set up below"
+            }
+            .into(),
+            detail: problem.unwrap_or_else(|| phazeai_core::local_ai::LOCAL_AI.status().describe()),
         };
     }
 
@@ -639,6 +654,7 @@ fn ai_section(state: IdeState) -> impl IntoView {
         "Cohere",
         "Azure OpenAI",
         "GitHub Models",
+        "PhazeAI Local (built-in)",
         "Ollama (Local)",
         "LM Studio (Local)",
     ];
@@ -1172,6 +1188,8 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         editor_section(state.clone()),
         divider(state.clone()),
         ai_section(state.clone()),
+        divider(state.clone()),
+        crate::panels::local_ai::local_ai_section(state.clone()),
         divider(state.clone()),
         keybindings_section(state.clone()),
         divider(state.clone()),

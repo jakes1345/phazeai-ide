@@ -101,6 +101,38 @@ async fn main() {
     }
 }
 
+/// Stops the built-in local AI server when dropped.
+struct StopLocalAi;
+
+impl Drop for StopLocalAi {
+    fn drop(&mut self) {
+        phazeai_core::local_ai::LOCAL_AI.stop();
+    }
+}
+
+async fn start_local_ai_if_selected(
+    settings: &phazeai_core::Settings,
+    tui: bool,
+) -> Result<Option<StopLocalAi>> {
+    use phazeai_core::local_ai::LOCAL_AI;
+    if settings.llm.provider != phazeai_core::config::LlmProvider::BuiltIn {
+        return Ok(None);
+    }
+    eprintln!("Starting PhazeAI Local (llama.cpp)…");
+    match LOCAL_AI.ensure_running(&settings.local_ai).await {
+        Ok(url) => {
+            eprintln!("PhazeAI Local ready at {url}");
+            Ok(Some(StopLocalAi))
+        }
+        // The TUI still opens and shows why the model isn't available.
+        Err(e) if tui => {
+            eprintln!("PhazeAI Local couldn't start: {e}");
+            Ok(Some(StopLocalAi))
+        }
+        Err(e) => anyhow::bail!("PhazeAI Local couldn't start: {e}"),
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     use std::io::{IsTerminal, Read};
     let stdin_piped = !std::io::stdin().is_terminal();
@@ -166,6 +198,10 @@ async fn run(cli: Cli) -> Result<()> {
         ),
         None => None,
     };
+
+    // The built-in provider needs its llama.cpp server before the first request.
+    // The guard stops it however `run` returns (Ok, `?`, or after the TUI exits).
+    let _local_ai = start_local_ai_if_selected(&settings, tui).await?;
 
     // Auto-provision phaze-beast if needed
     if settings.llm.provider == phazeai_core::config::LlmProvider::Ollama

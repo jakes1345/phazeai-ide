@@ -17,6 +17,7 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "openrouter",
     "ollama",
     "lmstudio",
+    "builtin",
 ];
 
 /// Parse a user-supplied provider name (case-insensitive, with aliases).
@@ -30,6 +31,7 @@ pub fn parse_provider(name: &str) -> Option<LlmProvider> {
         "openrouter" | "or" => LlmProvider::OpenRouter,
         "lmstudio" | "lm-studio" | "lm_studio" => LlmProvider::LmStudio,
         "gemini" | "google" => LlmProvider::Gemini,
+        "builtin" | "built-in" | "phazeai" | "phazeai-local" => LlmProvider::BuiltIn,
         _ => return None,
     })
 }
@@ -45,7 +47,57 @@ pub fn provider_slug(p: &LlmProvider) -> &'static str {
         LlmProvider::OpenRouter => "openrouter",
         LlmProvider::LmStudio => "lmstudio",
         LlmProvider::Gemini => "gemini",
+        LlmProvider::BuiltIn => "builtin",
     }
+}
+
+/// Text for `/local`: what the built-in local AI would run, and whether it can.
+pub fn local_ai_status_text(settings: &Settings) -> String {
+    use phazeai_core::local_ai::{
+        self, catalog, download, install, server, HardwareInfo, LOCAL_AI,
+    };
+    let models_dir = local_ai::models_dir();
+    let hw = HardwareInfo::probe(&models_dir);
+    let mut out = String::from("PhazeAI Local (built-in llama.cpp)\n");
+    out.push_str(&format!(
+        "  Server:       {}\n",
+        LOCAL_AI.status().describe()
+    ));
+    match server::selected_model(&settings.local_ai, &models_dir) {
+        Ok(e) => {
+            let state = if download::is_downloaded(e, &models_dir) {
+                "downloaded"
+            } else {
+                "not downloaded"
+            };
+            out.push_str(&format!("  Model:        {} ({state})\n", e.display_name));
+        }
+        Err(e) => out.push_str(&format!("  Model:        {e}\n")),
+    }
+    let path = std::env::var_os("PATH");
+    let bin = install::find_server_binary(
+        settings.local_ai.server_path.as_deref(),
+        path.as_deref(),
+        &local_ai::llama_cpp_dir(),
+    );
+    match bin {
+        Ok(Some(found)) => out.push_str(&format!("  llama-server: {}\n", found.describe())),
+        Ok(None) => out.push_str(&format!(
+            "  llama-server: not found. {}\n",
+            install::manual_install_hint(std::env::consts::OS)
+        )),
+        Err(e) => out.push_str(&format!("  llama-server: {e}\n")),
+    }
+    out.push_str(&format!("  Hardware:     {}\n", hw.summary()));
+    if let Some(rec) = catalog::recommend(&hw) {
+        out.push_str(&format!("  Recommended:  {}\n", rec.display_name));
+    }
+    out.push_str(&format!("  Models dir:   {}\n", models_dir.display()));
+    out.push_str(
+        "Download models from the IDE (Settings → Local AI). Run `phazeai --provider builtin` \
+         to use one here; the server starts with the CLI and stops when it exits.",
+    );
+    out
 }
 
 /// The provider's default model, as configured in the registry.

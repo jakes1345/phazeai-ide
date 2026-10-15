@@ -8,6 +8,7 @@ pub mod explorer;
 pub mod extensions;
 pub mod git;
 pub mod github_actions;
+pub mod local_ai;
 pub mod makefile;
 pub mod remote;
 pub mod run_debug;
