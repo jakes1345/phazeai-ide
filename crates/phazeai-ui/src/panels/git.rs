@@ -2039,6 +2039,24 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     }
                 })
                 .unwrap_or_default();
+            // Privacy: drop the hunks of files the project's policy denies.
+            let policy = phazeai_core::privacy::policy_for(&root);
+            let (full_diff, omitted) = phazeai_core::privacy::filter_unified_diff(&full_diff, &policy);
+            for path in &omitted {
+                phazeai_core::privacy::audit::record_blocked_file(
+                    path,
+                    "diff withheld by the privacy policy",
+                    "commit message",
+                );
+            }
+            let full_diff = if omitted.is_empty() {
+                full_diff
+            } else {
+                format!(
+                    "{full_diff}\n(Changes to {} file(s) withheld by the project's privacy policy.)\n",
+                    omitted.len()
+                )
+            };
 
             let snippet = if full_diff.len() > 8_000 {
                 let end = full_diff.floor_char_boundary(8_000);

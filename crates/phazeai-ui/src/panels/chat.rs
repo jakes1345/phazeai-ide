@@ -257,6 +257,8 @@ struct SendToAiJob {
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
     sidecar_client: Option<Arc<SidecarClient>>,
+    /// Files whose contents are in `user_message` (for the privacy audit log).
+    attached_files: Vec<std::path::PathBuf>,
 }
 
 fn send_to_ai(job: SendToAiJob) {
@@ -271,6 +273,7 @@ fn send_to_ai(job: SendToAiJob) {
         update_tx,
         cancel_token,
         sidecar_client,
+        attached_files,
     } = job;
 
     std::thread::spawn(move || {
@@ -455,7 +458,10 @@ fn send_to_ai(job: SendToAiJob) {
 
             let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-            let run_fut = agent.run_with_events(&user_message, agent_tx);
+            let run_fut = phazeai_core::privacy::audit::scope(
+                attached_files,
+                agent.run_with_events(&user_message, agent_tx),
+            );
             let drain_fut = async {
                 let mut accumulated = String::new();
                 while let Some(event) = agent_rx.recv().await {
@@ -549,18 +555,35 @@ fn send_to_ai(job: SendToAiJob) {
 ///
 /// Settings are re-loaded from disk on each send so model/provider changes in
 /// the settings panel take effect immediately without restarting.
+/// A chat message with its `@file` mentions expanded.
+#[derive(Debug, Default)]
+struct ExpandedMentions {
+    prompt: String,
+    /// Files whose contents were attached (for the privacy audit log).
+    attached: Vec<std::path::PathBuf>,
+    /// Mentions left out by the privacy policy: (mention, reason).
+    blocked: Vec<(String, String)>,
+}
+
 /// Expand `@filename` mentions in a chat message into file context blocks.
 ///
 /// Scans for `@path/to/file` tokens, resolves each relative to `root`,
-/// reads file contents, and prepends them as context. Returns the expanded prompt.
-fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
+/// reads file contents, and prepends them as context. Files denied by the
+/// project's privacy policy are not read; the prompt says they were withheld
+/// and each refusal is recorded in the privacy audit log.
+fn expand_file_mentions(message: &str, root: &std::path::Path) -> ExpandedMentions {
     static RE: std::sync::LazyLock<Option<regex::Regex>> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"@([\w./\-]+\.\w+)").ok());
     let Some(re) = &*RE else {
-        return message.to_string();
+        return ExpandedMentions {
+            prompt: message.to_string(),
+            ..Default::default()
+        };
     };
     let mut context_blocks = Vec::new();
     let mut clean_msg = message.to_string();
+    let mut out = ExpandedMentions::default();
+    let policy = phazeai_core::privacy::policy_for(root);
 
     let canonical_root = root.canonicalize().ok();
     for cap in re.captures_iter(message) {
@@ -571,6 +594,21 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
             _ => false,
         };
         if file_path.is_file() && in_workspace {
+            if let Some(denial) = policy.check(&file_path) {
+                let reason = denial.reason();
+                phazeai_core::privacy::audit::record_blocked_file(
+                    &policy.display_path(&file_path),
+                    &reason,
+                    "@mention",
+                );
+                clean_msg = clean_msg.replace(
+                    &format!("@{mention}"),
+                    &format!("`{mention}` (not attached: {reason})"),
+                );
+                out.blocked.push((mention.to_string(), reason));
+                continue;
+            }
+            out.attached.push(file_path.clone());
             if let Ok(contents) = std::fs::read_to_string(&file_path) {
                 // Truncate very large files
                 let truncated = if contents.len() > 30_000 {
@@ -593,15 +631,20 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
         }
     }
 
-    if context_blocks.is_empty() {
-        message.to_string()
+    out.prompt = if context_blocks.is_empty() {
+        if out.blocked.is_empty() {
+            message.to_string()
+        } else {
+            clean_msg
+        }
     } else {
         format!(
             "I'm providing the following file(s) as context:\n\n{}\n\nUser request: {}",
             context_blocks.join("\n\n"),
             clean_msg
         )
-    }
+    };
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -994,7 +1037,17 @@ pub fn chat_panel(
 
             // Expand @file mentions into context blocks before sending to AI
             let root = workspace_root.get_untracked();
-            let prompt = expand_file_mentions(&resolved_prompt_raw, &root);
+            let expanded = expand_file_mentions(&resolved_prompt_raw, &root);
+            let prompt = expanded.prompt;
+            let mut attached_files = expanded.attached;
+            attached_files.extend(crate::panels::privacy::take_attachments());
+            if !expanded.blocked.is_empty() {
+                let names: Vec<&str> = expanded.blocked.iter().map(|(m, _)| m.as_str()).collect();
+                crate::app::show_toast(
+                    status_toast,
+                    format!("Not attached (privacy policy): {}", names.join(", ")),
+                );
+            }
 
             messages.update(|list| {
                 list.push(ChatMessage {
@@ -1048,6 +1101,7 @@ pub fn chat_panel(
                 update_tx: (*update_tx).clone(),
                 cancel_token: token,
                 sidecar_client: sc_snapshot,
+                attached_files,
             });
         }
     });
@@ -1439,7 +1493,9 @@ pub fn chat_panel(
                 current_cancel_token.set(Some(token.clone()));
 
                 let root = workspace_root.get_untracked();
-                let prompt = expand_file_mentions(&user_msg, &root);
+                let expanded = expand_file_mentions(&user_msg, &root);
+                let prompt = expanded.prompt;
+                let attached_files = expanded.attached;
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
                 let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
@@ -1471,6 +1527,7 @@ pub fn chat_panel(
                     update_tx: (*update_tx).clone(),
                     cancel_token: token,
                     sidecar_client: sc_snapshot,
+                    attached_files,
                 });
             } else {
                 // #region agent log
@@ -2231,7 +2288,45 @@ pub fn chat_panel(
 
 #[cfg(test)]
 mod tests {
-    use super::{shape_retry_prior_messages, ChatMessage, ChatRole};
+    use super::{expand_file_mentions, shape_retry_prior_messages, ChatMessage, ChatRole};
+
+    #[test]
+    fn mentions_of_denied_files_are_not_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(".phazeai/privacy.toml", "deny = [\"private/**\"]\n");
+        write("src/app.rs", "fn visible() {}");
+        write("config/.env", "API_KEY=sk-live-123");
+        write("private/plan.md", "acquisition target");
+
+        let out = expand_file_mentions(
+            "compare @src/app.rs with @config/.env and @private/plan.md",
+            &root,
+        );
+        assert!(out.prompt.contains("fn visible() {}"));
+        assert!(!out.prompt.contains("sk-live-123"), "{}", out.prompt);
+        assert!(!out.prompt.contains("acquisition target"), "{}", out.prompt);
+        assert!(out
+            .prompt
+            .contains("not attached: blocked by the built-in secrets list"));
+        assert!(out
+            .prompt
+            .contains("not attached: blocked by .phazeai/privacy.toml"));
+        assert_eq!(out.attached, vec![root.join("src/app.rs")]);
+        let blocked: Vec<&str> = out.blocked.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(blocked, vec!["config/.env", "private/plan.md"]);
+
+        // Only denied mentions: the note still reaches the model, no file content.
+        let out = expand_file_mentions("what is in @config/.env?", &root);
+        assert!(out.attached.is_empty());
+        assert!(out.prompt.contains("not attached"));
+        assert!(!out.prompt.contains("sk-live-123"));
+    }
 
     fn msg(role: ChatRole, content: &str, loading: bool, is_error: bool) -> ChatMessage {
         ChatMessage {

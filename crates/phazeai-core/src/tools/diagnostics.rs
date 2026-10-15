@@ -44,6 +44,8 @@ impl Tool for DiagnosticsTool {
                 format!("Path does not exist: {path_str}"),
             ));
         }
+        // Compiler output quotes source lines, so a denied file can't be checked.
+        crate::privacy::tool_check("diagnostics", path, path_str)?;
 
         let language = params
             .get("language")

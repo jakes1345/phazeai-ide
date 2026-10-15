@@ -86,6 +86,18 @@ impl Tool for BashTool {
             }
         }
 
+        // Privacy: refuse commands whose words name a denied file. Best-effort —
+        // see `privacy::command_denial` for what this can and can't see.
+        let policy = crate::privacy::active();
+        if let Some((word, denial)) = crate::privacy::command_denial(&policy, command, &cwd) {
+            let reason = denial.reason();
+            crate::privacy::audit::record_blocked_file(&word, &reason, "bash");
+            return Err(PhazeError::tool(
+                "bash",
+                crate::privacy::refusal(&word, &reason),
+            ));
+        }
+
         // Capture pwd after command so we can track cwd changes (only on success)
         let wrapped_command = format!("{command} && echo \"PWD:$(pwd)\"");
 
