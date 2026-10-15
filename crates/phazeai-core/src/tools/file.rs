@@ -122,6 +122,7 @@ impl Tool for WriteFileTool {
 
         let resolved = sandbox::resolve_target_path("write_file", path)?;
         crate::privacy::tool_check("write_file", &resolved, path)?;
+        crate::privacy::tool_check_protected("write_file", &resolved, path)?;
         if let Some(parent) = resolved.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {

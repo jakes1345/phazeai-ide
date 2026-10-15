@@ -189,12 +189,40 @@ fn split_frontmatter(content: &str) -> (HashMap<String, String>, String) {
     (map, body)
 }
 
-/// Extract the first sentence (or up to 120 chars) from body text.
+/// Extract the first sentence (or up to 120 bytes, cut on a char boundary)
+/// from body text.
 fn first_sentence(text: &str) -> String {
     let s = text.trim();
-    let end = s
-        .find(['.', '!', '?'])
-        .map(|i| i + 1)
-        .unwrap_or(s.len().min(120));
-    s[..end].trim().to_string()
+    let head = match s.find(['.', '!', '?']) {
+        Some(i) => &s[..=i], // ASCII terminator: i + 1 is a char boundary
+        None => crate::text::truncate_bytes(s, 120),
+    };
+    head.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_sentence_never_splits_a_multibyte_char() {
+        // 1 ASCII byte + 50 × 3-byte '€' = 151 bytes; byte 120 falls inside a '€'.
+        let body = format!("a{}", "€".repeat(50));
+        assert!(!body.is_char_boundary(120));
+        let got = first_sentence(&body);
+        assert!(got.len() <= 120 && body.starts_with(&got), "{got:?}");
+        assert_eq!(got, format!("a{}", "€".repeat(39)));
+
+        // Same path through a skill file with no `description:` frontmatter.
+        let skill =
+            parse_skill_file(Path::new("x/unicode-skill.md"), &body, SkillSource::Project).unwrap();
+        assert_eq!(skill.description, got);
+        assert_eq!(skill.name, "unicode skill");
+
+        // Sentence terminators still win, however long the text.
+        let long = format!("{} wins. {}", "é".repeat(100), "x".repeat(300));
+        assert_eq!(first_sentence(&long), format!("{} wins.", "é".repeat(100)));
+        assert_eq!(first_sentence("short"), "short");
+        assert_eq!(first_sentence(""), "");
+    }
 }

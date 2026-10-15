@@ -38,6 +38,8 @@ impl Tool for DeletePathTool {
         // paths (extended list incl. /srv /mnt /media /root), home directory,
         // workspace boundary, and ../ symlink escapes.
         let resolved = sandbox::resolve_within_workspace("delete_path", path_str)?;
+        // The privacy policy (and the directory holding it) can't be deleted by the model.
+        crate::privacy::tool_check_protected_tree("delete_path", &resolved, path_str)?;
         let path = resolved.as_path();
 
         if !path.exists() {
