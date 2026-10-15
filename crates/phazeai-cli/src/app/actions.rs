@@ -112,7 +112,7 @@ pub(super) fn open_external_editor(state: &mut AppState) {
     state.needs_clear = true;
     match status {
         Ok(Ok(s)) if s.success() => match std::fs::read_to_string(&path) {
-            Ok(content) => state.input.set(content.trim_end().to_string()),
+            Ok(content) => state.input.set(editor_text_to_prompt(&content)),
             Err(e) => state.error(format!("Couldn't read the edited prompt: {e}")),
         },
         Ok(Ok(s)) => state.notify(format!("{program} exited with {s}; prompt unchanged")),
@@ -722,8 +722,11 @@ fn grep(state: &mut AppState, pattern: &str) {
     match output {
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
             let total = text.lines().count();
-            if total == 0 {
+            if let Some(problem) = search_failure(out.status.code(), total, &stderr) {
+                state.error(format!("Search failed: {problem}"));
+            } else if total == 0 {
                 state.system(format!("No matches for '{pattern}'."));
             } else {
                 let shown: Vec<&str> = text.lines().take(60).collect();
@@ -999,22 +1002,150 @@ fn undo(state: &mut AppState) {
                 state.system("Nothing to undo — no uncommitted changes.");
                 return;
             }
-            match std::process::Command::new("git")
-                .args(["checkout", "--", "."])
-                .output()
-            {
-                Ok(r) if r.status.success() => {
-                    state.system(format!("Reverted all uncommitted changes:\n{diff_stat}"));
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match revert_tracked_changes(&root) {
+                Ok(()) => {
+                    state.system(format!(
+                        "Reverted all staged and unstaged changes to tracked files (untracked \
+                         files kept):\n{diff_stat}"
+                    ));
                     state.refresh_git();
                 }
-                Ok(r) => state.error(format!(
-                    "git checkout failed: {}",
-                    String::from_utf8_lossy(&r.stderr).trim()
-                )),
-                Err(e) => state.error(format!("Couldn't run git: {e}")),
+                Err(e) => state.error(e),
             }
         }
         Err(e) => state.error(format!("Git not available: {e}")),
+    }
+}
+
+/// Text from `$EDITOR` as a prompt: Windows editors save CRLF line endings,
+/// which would otherwise leave invisible `\r` characters in the input.
+fn editor_text_to_prompt(content: &str) -> String {
+    content.replace("\r\n", "\n").trim_end().to_string()
+}
+
+/// Why a `rg`/`grep` run failed, or `None` when it simply found nothing.
+/// Both tools exit 1 for "no matches" and 2 for an error such as a bad regex.
+fn search_failure(code: Option<i32>, matches: usize, stderr: &str) -> Option<String> {
+    match code {
+        Some(0) | Some(1) if matches > 0 || stderr.trim().is_empty() => None,
+        Some(1) => None,
+        _ => {
+            let detail = stderr.trim();
+            Some(if detail.is_empty() {
+                format!(
+                    "search tool exited with {}",
+                    code.map_or("a signal".to_string(), |c| c.to_string())
+                )
+            } else {
+                detail.lines().take(3).collect::<Vec<_>>().join(" ")
+            })
+        }
+    }
+}
+
+/// Put every tracked file back to HEAD, in the index and the working tree.
+/// `git checkout -- .` alone only resets the working tree to the index, so
+/// staged changes would survive an "undo".
+fn revert_tracked_changes(root: &std::path::Path) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("Couldn't run git: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "git {} failed: {}",
+                args[0],
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    };
+    // `git restore` (2.23+) does both in one step; older git needs two.
+    if run(&[
+        "restore",
+        "--source=HEAD",
+        "--staged",
+        "--worktree",
+        "--",
+        ".",
+    ])
+    .is_ok()
+    {
+        return Ok(());
+    }
+    run(&["reset", "-q", "--", "."])?;
+    run(&["checkout", "--", "."])
+}
+
+#[cfg(test)]
+mod leftover_tests {
+    use super::*;
+
+    #[test]
+    fn editor_text_loses_crlf_and_trailing_whitespace() {
+        assert_eq!(
+            editor_text_to_prompt("line one\r\nline two\r\n"),
+            "line one\nline two"
+        );
+        assert_eq!(editor_text_to_prompt("plain\n\n"), "plain");
+    }
+
+    #[test]
+    fn search_errors_are_reported_not_hidden_as_no_matches() {
+        assert_eq!(search_failure(Some(0), 3, ""), None);
+        assert_eq!(search_failure(Some(1), 0, ""), None);
+        let err = search_failure(Some(2), 0, "rg: error parsing regex: unclosed group\n").unwrap();
+        assert!(err.contains("unclosed group"));
+        assert!(search_failure(None, 0, "").unwrap().contains("signal"));
+    }
+
+    #[test]
+    fn undo_reverts_staged_and_unstaged_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git must be installed");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("b.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        // a: staged change; b: unstaged change; c: untracked.
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        git(&["add", "a.txt"]);
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        std::fs::write(root.join("c.txt"), "new\n").unwrap();
+        assert!(git(&["status", "--porcelain"]).contains("M  a.txt"));
+
+        revert_tracked_changes(root).unwrap();
+
+        let status = git(&["status", "--porcelain"]);
+        assert_eq!(status.trim(), "?? c.txt", "{status}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.txt")).unwrap(),
+            "one\n"
+        );
     }
 }
 

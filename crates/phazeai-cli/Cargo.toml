@@ -36,3 +36,6 @@ unicode-width = "0.2"
 unicode-segmentation = "1.12"
 similar = { workspace = true }
 pulldown-cmark = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

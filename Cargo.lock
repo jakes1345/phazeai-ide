@@ -4232,6 +4232,7 @@ dependencies = [
  "serde_json",
  "similar",
  "syntect",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
