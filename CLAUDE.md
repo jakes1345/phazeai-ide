@@ -30,7 +30,7 @@ cargo fmt --all
 Cargo workspace:
 
 - **`phazeai-ui`** — PRIMARY desktop IDE, GPU-accelerated via Floem (Vello/wgpu renderer)
-- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, DAP, config
+- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, DAP, config, privacy policy, built-in local AI
 - **`phazeai-cli`** — terminal UI (`ratatui`)
 - **`phazeai-sidecar`** — Python semantic search subprocess
 - **`phazeai-plugin-api`** / **`phazeai-plugin-canary`** — native plugin ABI + test plugin
@@ -84,6 +84,7 @@ Key files:
 - `lsp_bridge.rs` — LSP manager, completions, diagnostics signals
 - `theme.rs` — 12 themes, `PhazeTheme` / `PhazePalette`; `custom_theme.rs` loads user themes from `~/.config/phazeai/themes/*.toml`; `tokens.rs` holds the spacing/radius/type scales (use them instead of literal sizes)
 - `panels/design.rs` + `phazeai-core/src/design.rs` — AI design: prompt → self-contained HTML prototype in `.phazeai/designs/`, guided by `.phazeai/design-system.md`
+- `panels/privacy.rs` — Settings › Privacy (policy, local-only toggle, audit log); `panels/local_ai.rs` — Settings › Local AI (hardware, catalog, download, server)
 
 ### Floem Reactive Patterns (CRITICAL)
 
@@ -129,7 +130,43 @@ std::thread::spawn(move || {
 pub type ApprovalFn = Box<dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = bool>>> + Send + Sync>;
 ```
 
-Injected into the agent at construction.
+Injected into the agent at construction. `tools/approval.rs` classifies calls
+(ReadOnly / Write / Execute / Destructive); a bash command is read-only only
+when every `;|&`-separated part is a bare whitelisted program with no
+writing/executing flags — extend the allowlists there, with a test, never by
+substring matching. CLI `-p` mode uses `--allow read|edit|all` (`oneshot.rs`):
+`edit` permits file tools only; any bash call above read-only needs `all`.
+
+### Privacy (`phazeai-core/src/privacy.rs`)
+
+`.phazeai/privacy.toml` (`deny` globs + `local_only`) plus a built-in secrets
+list decide what may reach an AI provider. `privacy::active()` is the
+process-wide policy (reloaded on file change); every tool, `@mention`, editor
+action, FIM request, design job and git-diff prompt checks it, and every LLM
+client is wrapped in `GuardedClient`, which enforces `local_only` per request
+and records the audit log (`privacy::audit`, shown in Settings › Privacy). The
+policy file itself is protected from mutating tools. New code that sends
+project content to a model must go through `PrivacyPolicy::check` and note
+attached files in the audit scope.
+
+### Context compaction & budgets (`phazeai-core/src/context/`)
+
+`Agent::run_with_events` calls `compaction::maybe_compact` before each model
+call: past 80% of the budget, the oldest turns (never splitting a tool call
+from its results, always leaving a user turn first) are folded into a
+model-written summary kept in the system prompt. The budget comes from
+`Settings::context_budget()` (`llm/context_budget.rs`: model window minus
+reply/schema reserve; `[llm] context_tokens` overrides). The IDE chat carries
+the summary across sends (`CompactionState` in `panels/chat.rs`).
+
+### Built-in local AI (`phazeai-core/src/local_ai/`)
+
+`ProviderId::BuiltIn` runs llama.cpp's `llama-server` as a child process on a
+verified-download GGUF from a curated catalog (`catalog.rs`: exact size +
+SHA-256 + license per entry, all Apache-2.0). `hardware.rs` probes RAM/disk,
+`download.rs` resumes and verifies, `install.rs` fetches llama.cpp releases
+(digest-verified; refuses without one), `server.rs` finds/starts/stops the
+server. Config lives in `[local_ai]`; UI in `panels/local_ai.rs`.
 
 ### DAP Debugger (`phazeai-core/src/dap/` + `phazeai-ui/src/debug_session.rs`)
 
