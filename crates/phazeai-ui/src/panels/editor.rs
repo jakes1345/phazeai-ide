@@ -1116,8 +1116,8 @@ pub fn editor_panel(
     close_active_tab_nonce: RwSignal<u64>,
     breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
-    // Channel for FIM (inline AI completion) requests: (prefix, suffix, language).
-    fim_req_tx: std::sync::mpsc::SyncSender<(String, String, String)>,
+    // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
+    fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
     selected_text: RwSignal<String>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
@@ -3982,12 +3982,18 @@ pub fn editor_panel(
                 let doc_for_fim = doc.clone();
                 let fim_gen2 = Arc::clone(&fim_gen);
                 let fim_tx2 = fim_tx.clone();
+                let fim_file = tab.path.clone();
 
                 create_effect(move |_| {
                     if active_idx.get() != Some(i) {
                         return;
                     }
                     let offset = cursor_sig.get().offset();
+                    // Denied files never get ghost-text completions (nothing is sent).
+                    if phazeai_core::privacy::active().is_denied(&fim_file) {
+                        return;
+                    }
+                    let fim_file = fim_file.clone();
 
                     // Bump generation: in-flight request with old gen is silently discarded.
                     let my_gen = fim_gen2.fetch_add(1, Ordering::SeqCst) + 1;
@@ -4062,7 +4068,10 @@ pub fn editor_panel(
                             );
 
                             let msgs = [Message::user(prompt)];
-                            match client.chat(&msgs, &[]).await {
+                            let request = client.chat(&msgs, &[]);
+                            match phazeai_core::privacy::audit::scope(vec![fim_file], request)
+                                .await
+                            {
                                 Ok(resp) => {
                                     let text = resp
                                         .message
@@ -4361,7 +4370,11 @@ pub fn editor_panel(
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("text")
                                     .to_string();
-                                let _ = tx.try_send((prefix, suffix, lang));
+                                // Denied files never get completions (nothing is sent).
+                                if phazeai_core::privacy::active().is_denied(&path2) {
+                                    return;
+                                }
+                                let _ = tx.try_send((path2, prefix, suffix, lang));
                             });
                         }
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.

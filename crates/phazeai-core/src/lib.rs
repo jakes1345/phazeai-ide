@@ -15,6 +15,7 @@ pub mod llm;
 pub mod local_ai;
 pub mod lsp;
 pub mod mcp;
+pub mod privacy;
 pub mod process;
 pub mod project;
 pub mod skills;

@@ -4,6 +4,8 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub struct GrepTool;
 
@@ -53,8 +55,11 @@ impl Tool for GrepTool {
 
         let path = Path::new(search_path);
         let mut matches = Vec::new();
+        // Files the privacy policy hides; only the count is reported.
+        let skipped = Arc::new(AtomicUsize::new(0));
 
         if path.is_file() {
+            crate::privacy::tool_check("grep", path, search_path)?;
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 for (line_num, line) in content.lines().enumerate() {
                     if regex.is_match(line) {
@@ -65,10 +70,25 @@ impl Tool for GrepTool {
                         }));
                     }
                 }
+                if !matches.is_empty() {
+                    crate::privacy::audit::note_file(&crate::privacy::absolutize(path));
+                }
             }
         } else {
             let mut builder = WalkBuilder::new(path);
             builder.hidden(false).git_ignore(true).git_global(true);
+            {
+                let policy = crate::privacy::active();
+                let skipped = skipped.clone();
+                builder.filter_entry(move |e| {
+                    let denied =
+                        e.depth() > 0 && policy.is_denied(&crate::privacy::absolutize(e.path()));
+                    if denied {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    !denied
+                });
+            }
 
             if let Some(glob) = include_pattern {
                 let mut types = ignore::types::TypesBuilder::new();
@@ -88,6 +108,7 @@ impl Tool for GrepTool {
                 let file_path = entry.path();
                 if let Ok(content) = tokio::fs::read_to_string(file_path).await {
                     let file_str = file_path.to_string_lossy();
+                    let before = matches.len();
                     for (line_num, line) in content.lines().enumerate() {
                         if regex.is_match(line) {
                             matches.push(serde_json::json!({
@@ -97,6 +118,9 @@ impl Tool for GrepTool {
                             }));
                         }
                     }
+                    if matches.len() > before {
+                        crate::privacy::audit::note_file(&crate::privacy::absolutize(file_path));
+                    }
                 }
 
                 if matches.len() >= 500 {
@@ -105,10 +129,15 @@ impl Tool for GrepTool {
             }
         }
 
-        Ok(serde_json::json!({
+        let mut out = serde_json::json!({
             "matches": matches,
             "count": matches.len(),
             "pattern": pattern,
-        }))
+        });
+        let skipped = skipped.load(Ordering::Relaxed);
+        if skipped > 0 {
+            out["privacy_skipped"] = serde_json::json!(skipped);
+        }
+        Ok(out)
     }
 }

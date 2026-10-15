@@ -10,6 +10,7 @@ pub mod git;
 pub mod github_actions;
 pub mod local_ai;
 pub mod makefile;
+pub mod privacy;
 pub mod remote;
 pub mod run_debug;
 pub mod search;

@@ -295,6 +295,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Show loaded instructions and project info",
         Project
     ),
+    cmd!(
+        "/privacy",
+        [],
+        "[n]",
+        "Show the AI privacy policy and the last n requests sent",
+        Project
+    ),
     cmd!("/pwd", [], "", "Show the working directory", Project),
     cmd!("/cd", [], "<dir>", "Change the working directory", Project),
     cmd!("/retry", [], "", "Resend the last prompt", Session),
@@ -624,6 +631,13 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/install-github-action" | "/install-github-app" | "/setup-github-action" => {
             CommandResult::InstallGithubApp
         }
+        "/privacy" => match arg {
+            "" => CommandResult::Message(privacy_report(15)),
+            n => match n.parse::<usize>() {
+                Ok(n) => CommandResult::Message(privacy_report(n)),
+                Err(_) => CommandResult::Message("Usage: /privacy [number-of-entries]".into()),
+            },
+        },
 
         // Unknown command
         _ => {
@@ -689,6 +703,52 @@ pub fn help_text() -> String {
 
 fn show_help() -> CommandResult {
     CommandResult::Message(help_text())
+}
+
+/// The effective AI privacy policy and the newest `limit` audit entries.
+pub fn privacy_report(limit: usize) -> String {
+    use phazeai_core::privacy::{self, audit, BUILTIN_DENY, POLICY_FILE};
+    let policy = privacy::active();
+    let mut out = String::from("AI privacy\n\n");
+    match (policy.root(), policy.file_exists()) {
+        (None, _) => out.push_str("No project — only the built-in secrets list applies.\n"),
+        (Some(root), true) => {
+            out.push_str(&format!("Policy: {}\n", root.join(POLICY_FILE).display()))
+        }
+        (Some(root), false) => out.push_str(&format!(
+            "No {POLICY_FILE} in {} — built-in list only, cloud AI allowed.\n\
+             Create it to deny more files or set local_only = true.\n",
+            root.display()
+        )),
+    }
+    if let Some(err) = policy.load_error() {
+        out.push_str(&format!(
+            "ERROR: {err}\nCloud AI is blocked until the file is fixed.\n"
+        ));
+    }
+    out.push_str(&format!(
+        "Local models only: {}\n",
+        if policy.local_only() { "yes" } else { "no" }
+    ));
+    out.push_str("\nNever sent (built-in, always on):\n  ");
+    out.push_str(&BUILTIN_DENY.join("  "));
+    out.push_str("\nNever sent (this project):\n  ");
+    if policy.project_patterns().is_empty() {
+        out.push_str("(none)");
+    } else {
+        out.push_str(&policy.project_patterns().join("  "));
+    }
+    out.push_str(&format!(
+        "\n\nLast {limit} AI requests this session (newest first):\n"
+    ));
+    let entries = audit::recent(limit);
+    if entries.is_empty() {
+        out.push_str("  (nothing sent yet)\n");
+    }
+    for e in entries {
+        out.push_str(&format!("  {}\n", e.summary()));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -769,5 +829,24 @@ mod tests {
         assert!(is_secret_input("/key sk-123"));
         assert!(!is_secret_input("/keys"));
         assert!(!is_secret_input("hello /key"));
+    }
+
+    #[test]
+    fn privacy_command_reports_policy_and_audit() {
+        phazeai_core::privacy::audit::record_blocked_file(".env", "blocked (test)", "cli-test");
+        match handle_command("/privacy 500") {
+            CommandResult::Message(m) => {
+                assert!(m.contains("AI privacy"));
+                assert!(m.contains("id_rsa*"), "built-in list shown");
+                assert!(m.contains("Local models only"));
+                assert!(m.contains("BLOCKED  .env (cli-test)"), "{m}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match handle_command("/privacy lots") {
+            CommandResult::Message(m) => assert!(m.starts_with("Usage")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(help_text().contains("/privacy"));
     }
 }

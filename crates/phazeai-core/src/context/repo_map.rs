@@ -55,11 +55,16 @@ impl RepoMapGenerator {
 
     /// Collect symbols from all source files in the project.
     fn collect_all_symbols(&self) -> Vec<FileSymbols> {
+        // The map is sent to the model, so files the privacy policy denies are left out.
+        let policy = crate::privacy::policy_for(&self.root);
         let walker = ignore::WalkBuilder::new(&self.root)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .max_depth(Some(15))
+            .filter_entry(move |e| {
+                e.depth() == 0 || !policy.is_denied(&crate::privacy::absolutize(e.path()))
+            })
             .build();
 
         let mut results = Vec::new();

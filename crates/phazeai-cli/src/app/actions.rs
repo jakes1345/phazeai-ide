@@ -5,7 +5,7 @@ use phazeai_core::tools::ToolApprovalMode;
 use phazeai_core::{ProviderRegistry, Settings};
 
 use super::chat::{ChatItem, ChatMessage, MessageRole};
-use super::worker::{WorkerCommand, CONTEXT_BUDGET};
+use super::worker::WorkerCommand;
 use super::{AppState, SessionPicker};
 use crate::commands::CommandResult;
 use crate::setup;
@@ -30,7 +30,12 @@ pub(super) fn fmt_tokens(n: u64) -> String {
 fn switch_llm(state: &mut AppState, settings: Settings) -> Result<(), String> {
     match settings.build_llm_client() {
         Ok(llm) => {
-            let _ = state.worker_tx.send(WorkerCommand::SetLlm(llm));
+            let context_budget = settings.context_budget();
+            let _ = state.worker_tx.send(WorkerCommand::SetLlm {
+                llm,
+                context_budget,
+            });
+            state.context_budget = context_budget;
             state.settings = settings;
             state.llm_error = None;
             Ok(())
@@ -152,7 +157,7 @@ fn status_report(state: &AppState) -> String {
         Some(t) => format!(
             "~{} of {} token budget",
             format_tokens(t as u64),
-            format_tokens(CONTEXT_BUDGET as u64)
+            format_tokens(state.context_budget as u64)
         ),
         None => "—".into(),
     };
@@ -523,8 +528,16 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
         }
         CommandResult::AddFile(path_str) => {
             let path = std::path::Path::new(&path_str);
+            let abs = phazeai_core::privacy::absolutize(path);
+            if let Err(reason) = phazeai_core::privacy::check_and_record(&abs, "/add") {
+                state.error(format!(
+                    "Not added: '{path_str}' is {reason}. See /privacy."
+                ));
+                return;
+            }
             match std::fs::read_to_string(path) {
                 Ok(contents) => {
+                    phazeai_core::privacy::audit::attach_to_next_scope(&abs);
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())

@@ -117,6 +117,11 @@ impl Agent {
         self
     }
 
+    /// Change the context budget of a running agent (e.g. after a model switch).
+    pub fn set_context_budget(&mut self, budget: usize) {
+        self.max_context_tokens = budget;
+    }
+
     pub fn with_approval(mut self, f: ApprovalFn) -> Self {
         self.approval_fn = Some(f);
         self
@@ -170,12 +175,28 @@ impl Agent {
     }
 
     /// Run the agent loop, emitting AgentEvents through the channel.
+    ///
+    /// Runs inside a privacy audit scope (unless the caller already opened one,
+    /// e.g. with the files its @mentions attached), so files that tools read
+    /// are attributed to the request that sends them.
     pub async fn run_with_events(
         &self,
         user_input: impl Into<String>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
         let user_input = user_input.into();
+        if crate::privacy::audit::in_scope() {
+            self.run_loop(user_input, event_tx).await
+        } else {
+            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, event_tx)).await
+        }
+    }
+
+    async fn run_loop(
+        &self,
+        user_input: String,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
         let mut iterations = 0;
         let mut tool_executions = Vec::new();
         let mut total_input_tokens: u64 = 0;
@@ -215,10 +236,34 @@ impl Agent {
                 iteration: iterations,
             });
 
+            // Near the budget, fold the oldest messages into a summary rather
+            // than forgetting them. If that fails, the trim below still keeps
+            // the request within budget.
+            match crate::context::compaction::maybe_compact(
+                &self.conversation,
+                self.llm.as_ref(),
+                self.max_context_tokens,
+            )
+            .await
+            {
+                Ok(Some(done)) => {
+                    let _ = event_tx.send(AgentEvent::ContextCompacted {
+                        messages_folded: done.messages_folded,
+                        tokens_before: done.tokens_before,
+                        tokens_after: done.tokens_after,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("context compaction failed, trimming instead: {e}"),
+            }
+            if self.is_cancelled() {
+                let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                return Err(PhazeError::Cancelled);
+            }
+
             let messages = {
                 let mut conversation = self.conversation.lock().await;
-                // Trim conversation to stay within the configured token budget.
-                // Keeps the most recent messages; old ones are evicted from the front.
+                // Hard limit: evict the oldest messages if still over budget.
                 conversation.trim_to_token_budget(self.max_context_tokens);
                 conversation.get_messages()
             };
@@ -492,6 +537,13 @@ impl Agent {
 /// Compute (path, before, after) for write_file and edit_file tools so the UI
 /// can show a diff before the write happens. Returns None for all other tools.
 async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, String, String)> {
+    // Denied files are refused by the tool itself; don't show a diff for them.
+    if let Some(path) = params.get("path").and_then(|p| p.as_str()) {
+        let abs = crate::privacy::absolutize(std::path::Path::new(path));
+        if crate::privacy::active().is_denied(&abs) {
+            return None;
+        }
+    }
     match tool_name {
         "write_file" => {
             let path = params.get("path")?.as_str()?;

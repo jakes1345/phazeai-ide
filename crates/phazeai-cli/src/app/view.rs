@@ -27,7 +27,6 @@ use ratatui::{
 use super::actions::fmt_tokens;
 use super::chat::{needs_gap, spinner_frame, RenderCtx};
 use super::keys::{approval_label, palette_matches};
-use super::worker::CONTEXT_BUDGET;
 use super::AppState;
 use crate::commands::is_secret_input;
 use crate::setup::provider_slug;
@@ -861,7 +860,7 @@ fn draw_hint_bar(f: &mut Frame, area: Rect, state: &AppState) {
         if !right.is_empty() {
             right.push(sep());
         }
-        let pct = ctx * 100 / CONTEXT_BUDGET;
+        let pct = ctx * 100 / state.context_budget.max(1);
         let color = if pct >= 90 {
             t.error
         } else if pct >= 70 {

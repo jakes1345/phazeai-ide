@@ -1,4 +1,5 @@
 mod builder;
+pub mod compaction;
 mod history;
 pub mod persistence;
 pub mod repo_map;
