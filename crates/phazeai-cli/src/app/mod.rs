@@ -55,8 +55,14 @@ pub async fn run_single_prompt(
     let system_prompt = build_system_prompt(extra_instructions);
 
     let refusals = crate::oneshot::Refusals::default();
+    // Ctrl+C stops the run instead of killing this process outright: the
+    // agent drops the running tool, which kills any shell command it started.
+    // Those run in their own process group, so the terminal's SIGINT no
+    // longer reaches them and dying here would leave them running.
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut agent = Agent::new(llm)
         .with_system_prompt(system_prompt)
+        .with_cancel_token(cancel.clone())
         .with_approval(crate::oneshot::approval_fn(
             allow,
             can_ask,
@@ -83,6 +89,20 @@ pub async fn run_single_prompt(
     let agent_handle = tokio::spawn({
         let prompt = prompt.to_string();
         async move { agent.run_with_events(prompt, event_tx).await }
+    });
+    let interrupt = tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+            cancel.store(true, Ordering::SeqCst);
+            eprintln!("\nInterrupted, stopping.");
+            // A second Ctrl+C exits at once.
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        }
     });
 
     let mut last_error: Option<String> = None;
@@ -127,6 +147,7 @@ pub async fn run_single_prompt(
     }
 
     let result = agent_handle.await?;
+    interrupt.abort();
     let refused = refusals.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(note) = crate::oneshot::refusal_summary(&refused) {
         eprintln!("\n{}", paint("33", &note));

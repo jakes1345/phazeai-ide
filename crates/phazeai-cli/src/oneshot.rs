@@ -5,6 +5,10 @@
 //! above the chosen level is asked about on the terminal when there is one,
 //! and refused otherwise (piped input, CI), with a note saying which `--allow`
 //! level would permit it.
+//!
+//! `--allow edit` covers the file tools only. A shell command that writes
+//! (`mkdir`, `cp`, `git push`, `pip install`, `>`) is still a command running
+//! an arbitrary program, so it needs `--allow all` like any other command.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
@@ -15,32 +19,36 @@ use serde_json::Value;
 use crate::tool_view::{approval_preview, PreviewLine};
 
 /// How much `-p` mode may do without asking.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum Allow {
     /// Read files and run read-only commands (ls, cat, grep, git status, ...).
     #[default]
     Read,
-    /// Also create and edit files.
+    /// Also create, edit, copy and move files with the file tools. Shell
+    /// commands stay limited to read-only ones.
     Edit,
-    /// Also run any command.
+    /// Also run any shell command.
     All,
 }
 
 impl Allow {
-    pub fn permits(self, permission: ToolPermission) -> bool {
-        match self {
-            Allow::Read => permission == ToolPermission::ReadOnly,
-            Allow::Edit => permission <= ToolPermission::Write,
-            Allow::All => true,
-        }
+    /// Whether a call to `tool`, classified as `permission`, may run unasked.
+    pub fn permits(self, tool: &str, permission: ToolPermission) -> bool {
+        self >= Allow::needed_for(tool, permission)
     }
 
-    /// The smallest level that permits `permission`.
-    pub fn needed_for(permission: ToolPermission) -> Allow {
+    /// The smallest level that lets `tool` run at `permission` unasked.
+    ///
+    /// A shell command is either read-only or needs `all`: `bash` classified
+    /// as Write (`mkdir`, `cp`, `git push`, `pip install`, `>` redirection)
+    /// still runs an arbitrary program, which `edit` must not cover.
+    pub fn needed_for(tool: &str, permission: ToolPermission) -> Allow {
         match permission {
             ToolPermission::ReadOnly => Allow::Read,
-            ToolPermission::Write => Allow::Edit,
-            ToolPermission::Execute | ToolPermission::Destructive => Allow::All,
+            ToolPermission::Write if tool != "bash" => Allow::Edit,
+            ToolPermission::Write | ToolPermission::Execute | ToolPermission::Destructive => {
+                Allow::All
+            }
         }
     }
 
@@ -56,7 +64,9 @@ impl Allow {
 /// Tool calls refused because nobody could be asked.
 pub type Refusals = Arc<Mutex<Vec<(String, Allow)>>>;
 
-/// One line summarising a tool call, e.g. `bash: cargo build` or `edit_file: src/main.rs`.
+/// One line summarising a tool call, e.g. `bash: cargo build` or
+/// `edit_file: src/main.rs`. The model wrote the text, so control characters
+/// and escape sequences are stripped before it goes anywhere near a terminal.
 pub fn describe_call(name: &str, params: &Value) -> String {
     let detail = match name {
         "bash" => params.get("command").and_then(Value::as_str),
@@ -67,7 +77,7 @@ pub fn describe_call(name: &str, params: &Value) -> String {
     };
     match detail {
         Some(d) => {
-            let first = d.lines().next().unwrap_or("");
+            let first = crate::text::sanitize(d.lines().next().unwrap_or(""));
             let more = if d.lines().nth(1).is_some() {
                 " …"
             } else {
@@ -89,20 +99,17 @@ pub fn approval_fn(allow: Allow, can_ask: bool, refusals: Refusals) -> phazeai_c
         let prompt_lock = prompt_lock.clone();
         Box::pin(async move {
             let permission = ToolApprovalManager::default().classify_tool(&name, &params);
-            if allow.permits(permission) {
+            if allow.permits(&name, permission) {
                 return true;
             }
-            let needed = Allow::needed_for(permission);
+            let needed = Allow::needed_for(&name, permission);
             if !can_ask {
-                eprintln!(
-                    "  ✗ blocked {} (needs {})",
-                    describe_call(&name, &params),
-                    needed.flag()
-                );
+                let call = describe_call(&name, &params);
+                eprintln!("  ✗ blocked {call} (needs {})", needed.flag());
                 refusals
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((describe_call(&name, &params), needed));
+                    .push((call, needed));
                 return false;
             }
             let _guard = prompt_lock.lock().await;
@@ -163,10 +170,10 @@ pub fn can_ask(stdin_piped: bool) -> bool {
 
 /// The note printed after a run in which calls were refused.
 pub fn refusal_summary(refusals: &[(String, Allow)]) -> Option<String> {
-    let highest = refusals.iter().map(|(_, a)| *a).max_by_key(|a| *a as u8)?;
+    let highest = refusals.iter().map(|(_, a)| *a).max()?;
     let what = match highest {
         Allow::Edit => "file changes",
-        _ => "file changes and commands",
+        _ => "file changes and shell commands",
     };
     Some(format!(
         "{} tool call(s) were blocked. Re-run with {} to allow {what}, or run `phazeai` \
@@ -184,13 +191,19 @@ mod tests {
     #[test]
     fn levels_permit_up_to_their_risk() {
         use ToolPermission::*;
-        assert!(Allow::Read.permits(ReadOnly));
-        assert!(!Allow::Read.permits(Write));
-        assert!(Allow::Edit.permits(Write));
-        assert!(!Allow::Edit.permits(Execute));
-        assert!(Allow::All.permits(Destructive));
-        assert_eq!(Allow::needed_for(Write), Allow::Edit);
-        assert_eq!(Allow::needed_for(Destructive), Allow::All);
+        assert!(Allow::Read.permits("read_file", ReadOnly));
+        assert!(Allow::Read.permits("bash", ReadOnly));
+        assert!(!Allow::Read.permits("write_file", Write));
+        assert!(Allow::Edit.permits("write_file", Write));
+        assert!(Allow::Edit.permits("create_directory", Write));
+        // A shell command that writes is still a command.
+        assert!(!Allow::Edit.permits("bash", Write));
+        assert!(!Allow::Edit.permits("bash", Execute));
+        assert!(!Allow::Edit.permits("delete_path", Execute));
+        assert!(Allow::All.permits("bash", Destructive));
+        assert_eq!(Allow::needed_for("write_file", Write), Allow::Edit);
+        assert_eq!(Allow::needed_for("bash", Write), Allow::All);
+        assert_eq!(Allow::needed_for("bash", Destructive), Allow::All);
     }
 
     #[tokio::test]
@@ -215,11 +228,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_level_allows_writes_but_not_commands() {
+    async fn edit_level_allows_file_tools_but_no_command_that_changes_things() {
         let refusals: Refusals = Arc::default();
         let approve = approval_fn(Allow::Edit, false, refusals.clone());
+        // The file tools.
+        assert!(approve("write_file".into(), json!({"path": "x", "content": ""})).await);
         assert!(approve("edit_file".into(), json!({"path": "x"})).await);
-        assert!(!approve("bash".into(), json!({"command": "rm -rf build"})).await);
+        assert!(approve("create_directory".into(), json!({"path": "d"})).await);
+        assert!(
+            approve(
+                "copy_path".into(),
+                json!({"source": "a", "destination": "b"})
+            )
+            .await
+        );
+        assert!(
+            approve(
+                "move_path".into(),
+                json!({"source": "a", "destination": "b"})
+            )
+            .await
+        );
+        // Read-only shell commands still run.
+        assert!(approve("bash".into(), json!({"command": "git status"})).await);
+        // Shell commands classified as Write are commands, not file edits.
+        let blocked = [
+            "mkdir x",
+            "cp a b",
+            "git push",
+            "pip install requests",
+            "echo hi > f",
+            "rm -rf build",
+            "cargo build",
+        ];
+        for cmd in blocked {
+            assert!(
+                !approve("bash".into(), json!({"command": cmd})).await,
+                "{cmd}"
+            );
+        }
+        let got = refusals.lock().unwrap().clone();
+        assert_eq!(got.len(), blocked.len());
+        assert_eq!(got[0], ("bash: mkdir x".to_string(), Allow::All));
+        assert!(got.iter().all(|(_, needed)| *needed == Allow::All));
+        let note = refusal_summary(&got).unwrap();
+        assert!(note.starts_with("7 tool call(s) were blocked"), "{note}");
+        assert!(note.contains("--allow all"), "{note}");
+        assert!(note.contains("shell commands"), "{note}");
         assert_eq!(refusal_summary(&[]), None);
     }
 
@@ -230,5 +285,20 @@ mod tests {
             "bash: make …"
         );
         assert_eq!(describe_call("glob", &json!({})), "glob");
+    }
+
+    #[test]
+    fn describe_call_strips_escape_sequences_and_control_characters() {
+        assert_eq!(
+            describe_call(
+                "bash",
+                &json!({"command": "echo \u{1b}[31mred\u{1b}[0m\rX\u{7}"})
+            ),
+            "bash: echo redX"
+        );
+        assert_eq!(
+            describe_call("write_file", &json!({"path": "a\u{1b}]0;title\u{7}.rs"})),
+            "write_file: a.rs"
+        );
     }
 }

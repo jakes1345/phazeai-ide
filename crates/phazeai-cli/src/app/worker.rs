@@ -244,7 +244,11 @@ pub fn spawn(
                         }
                     }
                     // Drop the (possibly unfinished) run before draining so
-                    // it releases its borrow of the conversation.
+                    // it releases its borrow of the conversation. This also
+                    // ends any tool call still in flight: a `bash` child is
+                    // killed together with its process group when its future
+                    // goes (see `BashTool`), so an interrupted `cargo build`
+                    // does not keep running behind the user's back.
                     drop(run);
                     // Requests from a dropped run can no longer be answered.
                     while approval_rx.try_recv().is_ok() {}
