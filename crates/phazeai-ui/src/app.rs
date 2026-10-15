@@ -1476,49 +1476,82 @@ impl IdeState {
 
 // ── AI prompts from the editor (right-click menu + command palette) ───────────
 
+/// A chat prompt built from the editor, and whether it carries text from the
+/// file. Only a prompt that does is reported to the privacy audit as having
+/// attached that file; one that merely names the file and a line number is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorPrompt {
+    text: String,
+    attaches_file: bool,
+}
+
 /// Pure prompt construction (unit-tested). Uses the *selected text* when there is one;
-/// otherwise points at the line under the cursor (`line0` is 0-based).
+/// otherwise points at the line under the cursor (`line0` is 0-based) by name only.
 fn build_ai_prompt(
     selection: &str,
     path: &std::path::Path,
     line0: u32,
     on_selection: &str,
     on_line: &str,
-) -> String {
+) -> EditorPrompt {
     if !selection.trim().is_empty() {
-        return format!("{on_selection}:\n\n```\n{selection}\n```");
+        return EditorPrompt {
+            text: format!("{on_selection}:\n\n```\n{selection}\n```"),
+            attaches_file: true,
+        };
     }
     let fname = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
-    format!("{on_line} around line {} in {fname}", line0 + 1)
-}
-
-/// Prompt for an editor AI action, or `None` when no file is active.
-fn editor_ai_prompt(state: &IdeState, on_selection: &str, on_line: &str) -> Option<String> {
-    let (path, line, _) = state.editor.active_cursor.get()?;
-    let sel = state.editor.selected_text.get();
-    Some(build_ai_prompt(&sel, &path, line, on_selection, on_line))
-}
-
-/// Send an editor AI action to the chat panel and reveal it.
-fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
-    if let Some(prompt) = editor_ai_prompt(state, on_selection, on_line) {
-        // Privacy: nothing from a denied file goes to the AI.
-        if let Some((path, _, _)) = state.editor.active_cursor.get_untracked() {
-            if !crate::panels::privacy::allow_editor_content(
-                state.workbench.status_toast,
-                &path,
-                "editor AI action",
-            ) {
-                return;
-            }
-            crate::panels::privacy::attach_for_next_send(&path);
-        }
-        state.ai.pending_chat_inject.set(Some(prompt));
-        state.workbench.show_right_panel.set(true);
+    EditorPrompt {
+        text: format!("{on_line} around line {} in {fname}", line0 + 1),
+        attaches_file: false,
     }
+}
+
+/// "Fix with AI" on a diagnostic. A diagnostic message quotes the offending
+/// source (identifiers, expressions, sometimes whole lines), so it counts as
+/// text from the file.
+fn build_fix_prompt(message: &str) -> EditorPrompt {
+    EditorPrompt {
+        text: format!("Fix this error: {message}"),
+        attaches_file: true,
+    }
+}
+
+/// Hand an editor-built prompt about `path` to the chat panel and reveal it.
+///
+/// Refuses (toast + audit "blocked" record) when the privacy policy denies
+/// `path`. The file is handed to the audit as attached only when the prompt
+/// carries its text; the hand-off is made right as the prompt is injected so
+/// it travels with that prompt (the chat drops both together when it cannot
+/// dispatch the prompt).
+fn inject_editor_prompt(state: &IdeState, path: &std::path::Path, prompt: EditorPrompt) {
+    // Privacy: nothing from a denied file goes to the AI.
+    if !crate::panels::privacy::allow_editor_content(
+        state.workbench.status_toast,
+        path,
+        "editor AI action",
+    ) {
+        return;
+    }
+    if prompt.attaches_file {
+        crate::panels::privacy::attach_for_next_send(path);
+    }
+    state.ai.pending_chat_inject.set(Some(prompt.text));
+    state.workbench.show_right_panel.set(true);
+}
+
+/// Send an editor AI action to the chat panel and reveal it (no-op without an
+/// active file).
+fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
+    let Some((path, line, _)) = state.editor.active_cursor.get_untracked() else {
+        return;
+    };
+    let sel = state.editor.selected_text.get_untracked();
+    let prompt = build_ai_prompt(&sel, &path, line, on_selection, on_line);
+    inject_editor_prompt(state, &path, prompt);
 }
 
 // ── Command palette commands ──────────────────────────────────────────────────
@@ -4033,11 +4066,14 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
-                                        s_fix
-                                            .ai
-                                            .pending_chat_inject
-                                            .set(Some(format!("Fix this error: {}", d.message)));
-                                        s_fix.workbench.show_right_panel.set(true);
+                                        // The diagnostic quotes the file's source, so it
+                                        // goes through the same privacy gate and audit as
+                                        // the other editor actions.
+                                        inject_editor_prompt(
+                                            &s_fix,
+                                            path,
+                                            build_fix_prompt(&d.message),
+                                        );
                                     } else {
                                         show_toast(
                                             s_fix.workbench.status_toast,
@@ -5312,36 +5348,15 @@ pub fn launch_phaze_ide() {
                                     return;
                                 }
 
-                                // Ctrl+Shift+E → Explain Selection with AI
+                                // Ctrl+Shift+E → Explain Selection with AI (same path as
+                                // the context-menu entry: privacy gate + audit attach only
+                                // when the selection is sent).
                                 if ctrl && shift && !alt && ch.as_str() == "e" {
-                                    if let Some((ref path, line, _)) =
-                                        state.editor.active_cursor.get()
-                                    {
-                                        if !crate::panels::privacy::allow_editor_content(
-                                            state.workbench.status_toast,
-                                            path,
-                                            "editor AI action",
-                                        ) {
-                                            return;
-                                        }
-                                        crate::panels::privacy::attach_for_next_send(path);
-                                        let sel = state.editor.selected_text.get();
-                                        let fname = path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| "file".to_string());
-                                        let prompt = if !sel.is_empty() {
-                                            format!("Explain this code:\n\n```\n{sel}\n```")
-                                        } else {
-                                            format!(
-                                                "Explain the code around line {} in {}",
-                                                line + 1,
-                                                fname
-                                            )
-                                        };
-                                        state.ai.pending_chat_inject.set(Some(prompt));
-                                        state.workbench.show_right_panel.set(true);
-                                    }
+                                    send_editor_ai_action(
+                                        &state,
+                                        "Explain this code",
+                                        "Explain the code",
+                                    );
                                     return;
                                 }
 
@@ -5701,11 +5716,11 @@ pub fn launch_phaze_ide() {
 
 #[cfg(test)]
 mod ai_prompt_tests {
-    use super::build_ai_prompt;
+    use super::{build_ai_prompt, build_fix_prompt};
     use std::path::Path;
 
     #[test]
-    fn selection_is_quoted_verbatim() {
+    fn selection_is_quoted_verbatim_and_counts_as_attaching_the_file() {
         let p = build_ai_prompt(
             "let x = 1;",
             Path::new("/a/main.rs"),
@@ -5713,11 +5728,12 @@ mod ai_prompt_tests {
             "Explain this code",
             "Explain the code",
         );
-        assert_eq!(p, "Explain this code:\n\n```\nlet x = 1;\n```");
+        assert_eq!(p.text, "Explain this code:\n\n```\nlet x = 1;\n```");
+        assert!(p.attaches_file, "the selection is text from the file");
     }
 
     #[test]
-    fn without_selection_points_at_the_cursor_line() {
+    fn without_selection_points_at_the_cursor_line_and_attaches_nothing() {
         let p = build_ai_prompt(
             "",
             Path::new("/a/b/main.rs"),
@@ -5725,13 +5741,28 @@ mod ai_prompt_tests {
             "Explain this code",
             "Explain the code",
         );
-        assert_eq!(p, "Explain the code around line 42 in main.rs");
+        assert_eq!(p.text, "Explain the code around line 42 in main.rs");
+        assert!(
+            !p.attaches_file,
+            "only the file name and a line number are sent; the audit must not claim the contents were"
+        );
     }
 
     #[test]
     fn whitespace_only_selection_counts_as_no_selection() {
         let p = build_ai_prompt("  \n\t ", Path::new("x.py"), 0, "A", "B");
-        assert_eq!(p, "B around line 1 in x.py");
+        assert_eq!(p.text, "B around line 1 in x.py");
+        assert!(!p.attaches_file);
+    }
+
+    #[test]
+    fn a_diagnostic_fix_carries_source_text() {
+        let p = build_fix_prompt("expected `;`, found `let secret = 1`");
+        assert_eq!(
+            p.text,
+            "Fix this error: expected `;`, found `let secret = 1`"
+        );
+        assert!(p.attaches_file, "diagnostics quote the file's source");
     }
 }
 

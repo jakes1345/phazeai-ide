@@ -295,18 +295,12 @@ fn submit(state: &mut AppState) {
         state.history.reset();
     }
 
-    if text.starts_with('/') {
-        let result = commands::handle_command(text.trim_end());
-        actions::run_command(state, result);
-        if text.starts_with("/cd ") {
-            // The header shows the directory and branch; keep them current.
-            state.refresh_git();
-        }
-        return;
+    // One path for typed and queued input (see `actions::submit_line`).
+    actions::submit_line(state, &text);
+    if text.starts_with("/cd ") {
+        // The header shows the directory and branch; keep them current.
+        state.refresh_git();
     }
-    state.last_user_input = text.clone();
-    let agent_input = super::apply_mode_prefix(&state.ai_mode, &text);
-    state.send_prompt(text, agent_input);
 }
 
 fn handle_approval_key(state: &mut AppState, key: KeyEvent) {
