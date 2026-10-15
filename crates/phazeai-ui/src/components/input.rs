@@ -5,6 +5,7 @@ use floem::{
 };
 
 use crate::theme::PhazeTheme;
+use crate::tokens::{font, radius, space, stroke};
 
 pub fn phaze_input(
     value: RwSignal<String>,
@@ -18,13 +19,13 @@ pub fn phaze_input(
             let t = theme.get();
             let p = &t.palette;
             s.background(p.bg_elevated)
-                .border(1.0)
+                .border(stroke::HAIRLINE)
                 .border_color(p.border)
-                .border_radius(6.0)
+                .border_radius(radius::MD)
                 .color(p.text_primary)
-                .padding_horiz(10.0)
-                .padding_vert(6.0)
-                .font_size(13.0)
+                .padding_horiz(space::MD + space::XXS)
+                .padding_vert(space::SM)
+                .font_size(font::UI)
                 .min_width(0.0)
                 .flex_grow(1.0)
         })

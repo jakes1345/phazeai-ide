@@ -763,7 +763,7 @@ impl IdeState {
         // Whenever theme, font_size, or tab_size changes, persist to config.toml.
         // Done in a background thread to avoid blocking the UI.
         create_effect(move |_| {
-            let theme_name = theme_signal.get().variant.name().to_string();
+            let theme_name = theme_signal.get().display_name().to_string();
             let fs = font_size_signal.get();
             let ts = tab_size_signal.get();
             let auto_save = auto_save_signal.get();
@@ -1175,7 +1175,7 @@ impl IdeState {
                     split_editor_sig.get(),
                     split_editor_down_sig.get(),
                     vim_mode_sig.get(),
-                    theme_signal.get().variant.name().to_string(),
+                    theme_signal.get().display_name().to_string(),
                     zen_mode_sig.get(),
                 )
                 .save_debounced(gen.clone());

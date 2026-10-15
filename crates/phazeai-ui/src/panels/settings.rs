@@ -1,5 +1,5 @@
 use floem::{
-    reactive::{SignalGet, SignalUpdate},
+    reactive::{SignalGet, SignalUpdate, SignalWith},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -13,8 +13,12 @@ use phazeai_core::{
 
 use crate::domain_state::IdeState;
 use crate::{
+    components::button::{phaze_button, ButtonVariant},
     components::icon::{icons, phaze_icon},
+    custom_theme::{export_name_for, export_theme, load_custom_themes, themes_dir},
     theme::{PhazeTheme, ThemeVariant},
+    tokens::{font, radius, space, stroke},
+    util::open_external_url,
 };
 
 #[derive(Clone)]
@@ -235,22 +239,27 @@ fn stepper_row(
 
 // ─── theme tiles ─────────────────────────────────────────────────────────────
 
-fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
+fn theme_tile(name: String, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
     let theme = state.workbench.theme;
     let is_hovered = create_rw_signal(false);
+    let label_name = name.clone();
+    let style_name = name.clone();
 
-    container(label(move || name).style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        let active = t.variant.name() == name;
-        let color = if active { p.accent } else { p.text_secondary };
-        s.font_size(12.0).color(color)
+    container(label(move || label_name.clone()).style({
+        let name = name.clone();
+        move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let active = t.display_name() == name;
+            let color = if active { p.accent } else { p.text_secondary };
+            s.font_size(font::BODY).color(color)
+        }
     }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
-        let active = t.variant.name() == name;
+        let active = t.display_name() == style_name;
         let hovered = is_hovered.get();
         let border_color = if active {
             p.accent
@@ -266,19 +275,23 @@ fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
         } else {
             p.bg_surface
         };
-        s.width(100.0)
-            .padding_vert(7.0)
-            .padding_horiz(4.0)
+        s.min_width(100.0)
+            .padding_vert(space::SM + 1.0)
+            .padding_horiz(space::MD)
             .background(bg)
-            .border(if active { 2.0 } else { 1.0 })
+            .border(if active {
+                stroke::FOCUS
+            } else {
+                stroke::HAIRLINE
+            })
             .border_color(border_color)
-            .border_radius(6.0)
+            .border_radius(radius::MD)
             .items_center()
             .justify_center()
             .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| {
-        theme.set(PhazeTheme::from_name(name));
+        theme.set(PhazeTheme::from_name(&name));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         is_hovered.set(true);
@@ -290,30 +303,150 @@ fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
 
 // ─── sections ────────────────────────────────────────────────────────────────
 
-fn theme_section(state: IdeState) -> impl IntoView {
-    // Build a wrapping grid of tiles for all 12 theme variants
-    let tiles = dyn_stack(
-        move || {
-            ThemeVariant::all()
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (i, v.name()))
-                .collect::<Vec<_>>()
-        },
-        |(i, _name)| *i,
-        {
-            let state = state.clone();
-            move |(_i, name)| theme_tile(name, state.clone())
-        },
+fn tile_grid(names: impl Fn() -> Vec<String> + 'static, state: IdeState) -> impl IntoView {
+    dyn_stack(
+        move || names().into_iter().enumerate().collect::<Vec<_>>(),
+        |(i, name)| (*i, name.clone()),
+        move |(_i, name)| theme_tile(name, state.clone()),
     )
     .style(|s| {
         s.flex_row()
             .flex_wrap(floem::style::FlexWrap::Wrap)
-            .gap(6.0)
+            .gap(space::SM)
             .width_full()
+    })
+}
+
+fn theme_section(state: IdeState) -> impl IntoView {
+    use floem::reactive::create_rw_signal;
+    let theme = state.workbench.theme;
+
+    let built_in = tile_grid(
+        || {
+            ThemeVariant::all()
+                .iter()
+                .map(|v| v.name().to_string())
+                .collect()
+        },
+        state.clone(),
+    );
+
+    // Custom themes are re-read from disk on Reload and after an export, so
+    // edits made in another editor show up without restarting.
+    let loaded = create_rw_signal(load_custom_themes());
+    let custom_names = move || {
+        loaded.with(|l| {
+            l.themes
+                .iter()
+                .map(|t| t.display_name().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let custom = tile_grid(custom_names, state.clone());
+    let status = create_rw_signal(String::new());
+
+    let themes_folder = themes_dir();
+    let help = label(move || {
+        let count = loaded.with(|l| l.themes.len());
+        if count == 0 {
+            "Your themes: none yet. Export the current theme to get an editable copy.".to_string()
+        } else {
+            format!("Your themes ({count})")
+        }
+    })
+    .style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .margin_top(space::LG)
     });
 
-    stack((section_header("THEME", state.clone()), tiles)).style(|s| s.flex_col().width_full())
+    let errors = label(move || {
+        loaded.with(|l| {
+            l.errors
+                .iter()
+                .map(|(path, err)| {
+                    let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                    format!("{}: {err}", file.unwrap_or_default())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    })
+    .style(move |s| {
+        let has_errors = loaded.with(|l| !l.errors.is_empty());
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.error)
+            .apply_if(!has_errors, |s| s.display(floem::style::Display::None))
+    });
+
+    let actions = stack((
+        phaze_button(
+            "Export current",
+            ButtonVariant::Secondary,
+            theme,
+            move || {
+                let current = theme.get_untracked();
+                let name = export_name_for(&current);
+                match export_theme(&current, &name) {
+                    Ok(path) => {
+                        loaded.set(load_custom_themes());
+                        theme.set(PhazeTheme::from_name(&name));
+                        status.set(format!("Saved \"{name}\" to {}", path.display()));
+                    }
+                    Err(e) => status.set(format!("Could not export theme: {e}")),
+                }
+            },
+        ),
+        phaze_button("Open folder", ButtonVariant::Ghost, theme, {
+            let dir = themes_folder.clone();
+            move || {
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = open_external_url(&dir.to_string_lossy()) {
+                    status.set(format!("Could not open {}: {e}", dir.display()));
+                }
+            }
+        }),
+        phaze_button("Reload", ButtonVariant::Ghost, theme, move || {
+            loaded.set(load_custom_themes());
+            // Re-apply the active custom theme so file edits take effect.
+            let active = theme.get_untracked();
+            if active.custom_name.is_some() {
+                theme.set(PhazeTheme::from_name(active.display_name()));
+            }
+            status.set(String::new());
+        }),
+    ))
+    .style(|s| s.flex_row().gap(space::SM).margin_top(space::MD));
+
+    let status_line = label(move || status.get()).style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .apply_if(status.with(|m| m.is_empty()), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    let folder_hint =
+        label(move || format!("Theme files: {}", themes_folder_hint())).style(move |s| {
+            s.font_size(font::CAPTION)
+                .color(theme.get().palette.text_disabled)
+        });
+
+    stack((
+        section_header("THEME", state.clone()),
+        built_in,
+        help,
+        custom,
+        errors,
+        actions,
+        status_line,
+        folder_hint,
+    ))
+    .style(|s| s.flex_col().width_full().gap(space::XS))
+}
+
+fn themes_folder_hint() -> String {
+    themes_dir().display().to_string()
 }
 
 fn editor_section(state: IdeState) -> impl IntoView {

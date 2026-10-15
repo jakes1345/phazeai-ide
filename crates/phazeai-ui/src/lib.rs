@@ -6,6 +6,7 @@ pub mod app;
 pub mod commands;
 pub mod components;
 pub mod crash_recovery;
+pub mod custom_theme;
 pub mod debug_session;
 pub mod domain_state;
 pub mod editor_command;
@@ -13,6 +14,7 @@ pub mod lsp_bridge;
 pub mod notify;
 pub mod panels;
 pub mod theme;
+pub mod tokens;
 pub mod util;
 
 pub use app::launch_phaze_ide;

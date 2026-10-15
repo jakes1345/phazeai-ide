@@ -5,6 +5,7 @@ use floem::{
 };
 
 use crate::theme::PhazeTheme;
+use crate::tokens::{font, radius, space};
 use crate::util::safe_get;
 
 #[derive(Clone)]
@@ -54,10 +55,10 @@ pub fn phaze_tabs(
                     let t = theme.get();
                     let p = &t.palette;
                     let is_active = active_id.get() == item_id;
-                    s.padding_horiz(12.0)
-                        .padding_vert(7.0)
-                        .border_radius(6.0)
-                        .font_size(12.0)
+                    s.padding_horiz(space::LG)
+                        .padding_vert(space::SM + 1.0)
+                        .border_radius(radius::MD)
+                        .font_size(font::BODY)
                         .cursor(floem::style::CursorStyle::Pointer)
                         .apply_if(is_active, |s| {
                             s.background(p.bg_elevated)
@@ -80,7 +81,7 @@ pub fn phaze_tabs(
         let p = &t.palette;
         s.border_bottom(1.0)
             .border_color(p.border)
-            .gap(2.0)
-            .padding_horiz(4.0)
+            .gap(space::XXS)
+            .padding_horiz(space::XS)
     })
 }

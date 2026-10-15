@@ -40,6 +40,14 @@ impl ThemeVariant {
     }
 
     pub fn from_name(s: &str) -> Self {
+        // Display names first: "Cyberpunk 2077" and "Synthwave '84" don't
+        // survive the normalisation below.
+        if let Some(v) = Self::all()
+            .iter()
+            .find(|v| v.name().eq_ignore_ascii_case(s.trim()))
+        {
+            return *v;
+        }
         match s.to_lowercase().replace([' ', '-', '_'], "").as_str() {
             "midnightblue" | "midnight" => Self::MidnightBlue,
             "cyberpunk" | "cyber" => Self::Cyberpunk,
@@ -1139,8 +1147,11 @@ impl PhazePalette {
 /// The active theme — use this throughout all UI components.
 #[derive(Debug, Clone)]
 pub struct PhazeTheme {
+    /// The built-in theme this one is, or (for a custom theme) is based on.
     pub variant: ThemeVariant,
     pub palette: PhazePalette,
+    /// Set for themes loaded from the user's themes folder.
+    pub custom_name: Option<String>,
 }
 
 impl Default for PhazeTheme {
@@ -1154,6 +1165,7 @@ impl PhazeTheme {
         Self {
             variant: ThemeVariant::MidnightBlue,
             palette: PhazePalette::midnight_blue(),
+            custom_name: None,
         }
     }
 
@@ -1161,6 +1173,7 @@ impl PhazeTheme {
         Self {
             variant: ThemeVariant::Dark,
             palette: PhazePalette::dark(),
+            custom_name: None,
         }
     }
 
@@ -1168,6 +1181,7 @@ impl PhazeTheme {
         Self {
             variant: ThemeVariant::Light,
             palette: PhazePalette::light(),
+            custom_name: None,
         }
     }
 
@@ -1189,11 +1203,24 @@ impl PhazeTheme {
         Self {
             variant: v,
             palette,
+            custom_name: None,
         }
     }
 
+    /// The theme called `s`: a custom theme from the user's themes folder if
+    /// one has that name, otherwise the matching built-in theme.
     pub fn from_name(s: &str) -> Self {
+        if let Some(theme) = crate::custom_theme::find_custom_theme(s) {
+            return theme;
+        }
         Self::from_variant(ThemeVariant::from_name(s))
+    }
+
+    /// Name shown in the UI and saved in the session.
+    pub fn display_name(&self) -> &str {
+        self.custom_name
+            .as_deref()
+            .unwrap_or_else(|| self.variant.name())
     }
 
     pub fn is_dark(&self) -> bool {
@@ -1232,6 +1259,13 @@ mod tests {
             default_explorer_width, click_open_width,
             "DEFAULT_EXPLORER_WIDTH ({default_explorer_width}) should not equal the click-open width (260.0)"
         );
+    }
+
+    #[test]
+    fn every_display_name_maps_back_to_its_variant() {
+        for &v in ThemeVariant::all() {
+            assert_eq!(ThemeVariant::from_name(v.name()), v, "{}", v.name());
+        }
     }
 
     // Feature: phazeai-ui-layout-overhaul, Property 2: cosmic theme glass_bg alpha <= 180
