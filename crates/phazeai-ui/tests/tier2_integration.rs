@@ -312,13 +312,16 @@ fn type_text(wid: u64, text: &str) {
 
 // ── Screenshot via ImageMagick import ──────────────────────────────────────────
 
+/// Capture a named scenario screenshot into tests/snapshots/.
 fn screenshot(wid: u64, name: &str) -> DynamicImage {
-    let dir = format!("{}/tests/snapshots", env!("CARGO_MANIFEST_DIR"));
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
     std::fs::create_dir_all(&dir).ok();
-    let path = format!("{dir}/{name}.png");
+    capture(wid, &dir.join(format!("{name}.png")))
+}
 
+fn capture(wid: u64, path: &std::path::Path) -> DynamicImage {
     // Delete existing file so scrot doesn't append _001, _002, etc.
-    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(path).ok();
 
     flush_frames(wid);
 
@@ -326,12 +329,13 @@ fn screenshot(wid: u64, name: &str) -> DynamicImage {
         // Capture the root window: reading the IDE's own window can return a
         // stale frame when wgpu presents through a swapchain.
         Command::new("import")
-            .args(["-window", "root", &path])
+            .args(["-window", "root"])
+            .arg(path)
             .env("DISPLAY", display()),
         Duration::from_secs(20),
     );
 
-    image::open(&path)
+    image::open(path)
         .unwrap_or_else(|_| DynamicImage::ImageRgba8(image::RgbaImage::new(1920, 1080)))
 }
 
@@ -423,7 +427,7 @@ fn wait_until_rendered(wid: u64) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut previous: Option<DynamicImage> = None;
     while Instant::now() < deadline {
-        let shot = screenshot(wid, "_settle");
+        let shot = capture(wid, &std::env::temp_dir().join("phazeai-tier2-settle.png"));
         let painted = !is_blank(&shot) && dominant_fraction(&shot) < 0.85;
         if painted {
             if let Some(prev) = &previous {
