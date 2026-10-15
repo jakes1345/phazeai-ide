@@ -161,6 +161,21 @@ jobs:
       - name: Test phazeai-ui tier2 (xvfb screenshot tests)
         timeout-minutes: 15
         run: xvfb-run -a cargo test -p phazeai-ui --test tier2_integration -- --ignored --test-threads=1
+      - name: Keep GUI test evidence on failure
+        if: failure()
+        run: |
+          mkdir -p tier2-evidence
+          cp crates/phazeai-ui/tests/snapshots/*.png tier2-evidence/ 2>/dev/null || true
+          for d in /tmp/phazeai-ui-tier2-home-*; do
+            [ -f "$d/ide.log" ] && cp "$d/ide.log" "tier2-evidence/$(basename "$d").log"
+          done
+          ls -la tier2-evidence
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tier2-evidence
+          path: tier2-evidence/
+          if-no-files-found: ignore
       - name: Build UI binary
         run: cargo build -p phazeai-ui
 

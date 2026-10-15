@@ -197,7 +197,7 @@ fn launch_ide() -> Ide {
     wait_until_rendered(wid);
 
     // Click into the window center to force real OS-level focus
-    focus_window(wid);
+    focus_window_with_click(wid);
     thread::sleep(Duration::from_millis(800));
 
     ide
@@ -235,6 +235,14 @@ fn focus_window(wid: u64) {
     let id = wid.to_string();
     xdotool(&["windowactivate", "--sync", &id]);
     xdotool(&["windowfocus", "--sync", &id]);
+}
+
+/// Focus plus one click in the editor area. Only used right after launch:
+/// clicking while an overlay such as the command palette is open could land
+/// on one of its rows and run a command.
+fn focus_window_with_click(wid: u64) {
+    focus_window(wid);
+    let id = wid.to_string();
     xdotool(&["mousemove", "--window", &id, "400", "300"]);
     xdotool(&["click", "1"]);
 }
