@@ -100,6 +100,8 @@ enum ComposerUpdate {
     DiffOutput(Vec<DiffCard>),
     /// MCP stdio server(s) restarted.
     McpStatus(String),
+    /// Something worth knowing about this run (e.g. context was compacted).
+    Notice(String),
 }
 
 #[derive(Clone, Debug)]
@@ -175,7 +177,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         create_effect(move |_| {
             let ws = workspace.get();
             let has_git = std::path::Path::new(&ws).join(".git").exists()
-                || std::process::Command::new("git")
+                || phazeai_core::process::std_command("git")
                     .args(["rev-parse", "--is-inside-work-tree"])
                     .current_dir(&ws)
                     .output()
@@ -281,7 +283,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     state.ai.thinking.set(false);
                     cancel_token.set(None);
                 }
-                ComposerUpdate::McpStatus(msg) => {
+                ComposerUpdate::McpStatus(msg) | ComposerUpdate::Notice(msg) => {
                     event_log.update(|log| {
                         log.push(EventLogEntry {
                             kind: EventKind::Warning,
@@ -384,6 +386,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     tools.register(Box::new(BashTool::new(ws.clone())));
                     let mut agent = Agent::new(client)
                         .with_tools(tools)
+                        .with_context_budget(settings.context_budget())
                         .with_cancel_token(token);
 
                     // Register semantic search tools if sidecar is running.
@@ -487,6 +490,17 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                     };
                                     let _ = tx2.send(ComposerUpdate::McpStatus(msg));
                                 }
+                                AgentEvent::ContextCompacted {
+                                    messages_folded,
+                                    tokens_before,
+                                    tokens_after,
+                                } => {
+                                    let _ = tx2.send(ComposerUpdate::Notice(format!(
+                                        "Summarised {messages_folded} earlier messages to stay \
+                                         within the context budget (~{tokens_before} → \
+                                         ~{tokens_after} tokens)"
+                                    )));
+                                }
                                 AgentEvent::Complete { iterations } => {
                                     let _ = tx2.send(ComposerUpdate::Done { iterations });
                                     break;
@@ -503,7 +517,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     let _ = tokio::join!(run_fut, drain_fut);
 
                     // After completion, get git diff to show changed files
-                    if let Ok(output) = std::process::Command::new("git")
+                    if let Ok(output) = phazeai_core::process::std_command("git")
                         .args(["diff", "HEAD"])
                         .current_dir(&ws)
                         .output()

@@ -29,9 +29,8 @@ pub type ApprovalFn = Box<
 
 /// Called before a write_file/edit_file executes.
 /// Arguments: (path, before_content, after_content). Returns true to proceed.
-pub type DiffHookFn = Box<
-    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
->;
+pub type DiffHookFn =
+    Box<dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
@@ -118,6 +117,11 @@ impl Agent {
         self
     }
 
+    /// Change the context budget of a running agent (e.g. after a model switch).
+    pub fn set_context_budget(&mut self, budget: usize) {
+        self.max_context_tokens = budget;
+    }
+
     pub fn with_approval(mut self, f: ApprovalFn) -> Self {
         self.approval_fn = Some(f);
         self
@@ -171,12 +175,28 @@ impl Agent {
     }
 
     /// Run the agent loop, emitting AgentEvents through the channel.
+    ///
+    /// Runs inside a privacy audit scope (unless the caller already opened one,
+    /// e.g. with the files its @mentions attached), so files that tools read
+    /// are attributed to the request that sends them.
     pub async fn run_with_events(
         &self,
         user_input: impl Into<String>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
         let user_input = user_input.into();
+        if crate::privacy::audit::in_scope() {
+            self.run_loop(user_input, event_tx).await
+        } else {
+            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, event_tx)).await
+        }
+    }
+
+    async fn run_loop(
+        &self,
+        user_input: String,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
         let mut iterations = 0;
         let mut tool_executions = Vec::new();
         let mut total_input_tokens: u64 = 0;
@@ -216,10 +236,40 @@ impl Agent {
                 iteration: iterations,
             });
 
+            // Near the budget, fold the oldest messages into a summary rather
+            // than forgetting them. If that fails, the trim below still keeps
+            // the request within budget. Stop applies while the summary is
+            // being written, like anywhere else in the loop.
+            match crate::context::compaction::maybe_compact(
+                &self.conversation,
+                self.llm.as_ref(),
+                self.max_context_tokens,
+                self.cancel_token.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(done)) => {
+                    let _ = event_tx.send(AgentEvent::ContextCompacted {
+                        messages_folded: done.messages_folded,
+                        tokens_before: done.tokens_before,
+                        tokens_after: done.tokens_after,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) if e == crate::context::compaction::CANCELLED => {
+                    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                    return Err(PhazeError::Cancelled);
+                }
+                Err(e) => tracing::warn!("context compaction failed, trimming instead: {e}"),
+            }
+            if self.is_cancelled() {
+                let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                return Err(PhazeError::Cancelled);
+            }
+
             let messages = {
                 let mut conversation = self.conversation.lock().await;
-                // Trim conversation to stay within the configured token budget.
-                // Keeps the most recent messages; old ones are evicted from the front.
+                // Hard limit: evict the oldest messages if still over budget.
                 conversation.trim_to_token_budget(self.max_context_tokens);
                 conversation.get_messages()
             };
@@ -449,13 +499,29 @@ impl Agent {
         };
 
         if let Some(tool) = self.tools.get(tool_name) {
-            match tool.execute(params).await {
-                Ok(value) => {
+            let run = tool.execute(params);
+            // Stop awaiting the tool as soon as the run is cancelled. Dropping
+            // its future stops what it started: a `bash` child is killed along
+            // with its process group (see `BashTool`), so Stop / Esc / Ctrl+C
+            // end a running `cargo build` instead of leaving it behind.
+            let outcome = match &self.cancel_token {
+                Some(token) => tokio::select! {
+                    result = run => Some(result),
+                    _ = cancelled(token) => None,
+                },
+                None => Some(run.await),
+            };
+            match outcome {
+                Some(Ok(value)) => {
                     let result_str =
                         serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                     (true, result_str)
                 }
-                Err(e) => (false, format!("Error: {e}")),
+                Some(Err(e)) => (false, format!("Error: {e}")),
+                None => (
+                    false,
+                    "Interrupted by the user before the tool finished.".to_string(),
+                ),
             }
         } else {
             (false, format!("Tool '{}' not found", tool_name))
@@ -490,12 +556,24 @@ impl Agent {
     }
 }
 
+/// Resolves once `token` is set. Polled, because the token is a plain
+/// `AtomicBool` shared with UI threads that have no async runtime.
+async fn cancelled(token: &AtomicBool) {
+    while !token.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Compute (path, before, after) for write_file and edit_file tools so the UI
 /// can show a diff before the write happens. Returns None for all other tools.
-async fn compute_file_patch(
-    tool_name: &str,
-    params: &Value,
-) -> Option<(String, String, String)> {
+async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, String, String)> {
+    // Denied files are refused by the tool itself; don't show a diff for them.
+    if let Some(path) = params.get("path").and_then(|p| p.as_str()) {
+        let abs = crate::privacy::absolutize(std::path::Path::new(path));
+        if crate::privacy::active().is_denied(&abs) {
+            return None;
+        }
+    }
     match tool_name {
         "write_file" => {
             let path = params.get("path")?.as_str()?;
@@ -534,4 +612,74 @@ fn truncate_str_annotated(s: &str, max_len: usize) -> String {
     let kept: String = s.chars().take(max_len).collect();
     let elided = total - max_len;
     format!("{kept}\n... [truncated, {elided} more chars in tool output sent to model]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::OpenAIClient;
+    use std::time::Duration;
+
+    /// Accept one connection and never answer on it.
+    async fn serve_nothing() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn stop_during_compaction_cancels_the_run_promptly() {
+        // ~1200 tokens of history against a 1000-token budget: the first
+        // iteration asks the model for a summary before anything else.
+        let conversation = Arc::new(Mutex::new(ConversationHistory::new()));
+        {
+            let mut c = conversation.lock().await;
+            for n in 0..12 {
+                let text = format!("turn {n:02} {}", "x".repeat(292));
+                if n % 2 == 0 {
+                    c.add_user_message(text);
+                } else {
+                    c.add_assistant_message(text);
+                }
+            }
+        }
+        let client = OpenAIClient::new("k").with_base_url(serve_nothing().await);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let agent = Agent::new(Box::new(client))
+            .with_context_budget(1000)
+            .with_cancel_token(cancel.clone())
+            .with_shared_conversation(conversation.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let started = std::time::Instant::now();
+        let (result, _) = tokio::join!(agent.run_with_events("one more", tx), async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.store(true, Ordering::Relaxed);
+        });
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(PhazeError::Cancelled)), "{result:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "returned after {elapsed:?}"
+        );
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(m) if m == "Cancelled")),
+            "{events:?}"
+        );
+        // The user message was recorded; nothing was folded or dropped.
+        let c = conversation.lock().await;
+        assert_eq!(c.len(), 13);
+        assert_eq!(c.summary(), None);
+    }
 }

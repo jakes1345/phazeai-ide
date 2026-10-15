@@ -5,7 +5,7 @@ use crate::error::PhazeError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -27,7 +27,7 @@ impl DapClient {
         adapter_cmd: &str,
         adapter_args: &[&str],
     ) -> Result<(Arc<Self>, mpsc::Receiver<DebugEvent>), PhazeError> {
-        let mut child = Command::new(adapter_cmd)
+        let mut child = crate::process::std_command(adapter_cmd)
             .args(adapter_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

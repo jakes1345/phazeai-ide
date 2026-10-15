@@ -64,8 +64,7 @@ fn status_color(
 }
 
 fn fetch_json(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
-    use std::process::Command;
-    let mut cmd = Command::new("curl");
+    let mut cmd = phazeai_core::process::std_command("curl");
     cmd.args([
         "-sf",
         "--max-time",
@@ -93,8 +92,7 @@ fn get_gh_token() -> Option<String> {
 }
 
 fn parse_owner_repo() -> Option<(String, String)> {
-    use std::process::Command;
-    let out = Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;

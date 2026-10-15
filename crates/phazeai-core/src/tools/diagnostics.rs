@@ -44,6 +44,8 @@ impl Tool for DiagnosticsTool {
                 format!("Path does not exist: {path_str}"),
             ));
         }
+        // Compiler output quotes source lines, so a denied file can't be checked.
+        crate::privacy::tool_check("diagnostics", path, path_str)?;
 
         let language = params
             .get("language")
@@ -70,7 +72,7 @@ impl Tool for DiagnosticsTool {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::process::Command::new(command)
+            crate::process::tokio_command(command)
                 .args(&args)
                 .current_dir(path_str)
                 .output(),

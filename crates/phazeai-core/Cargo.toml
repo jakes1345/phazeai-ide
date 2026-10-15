@@ -47,9 +47,18 @@ urlencoding = "2.1"
 libloading = "0.8"
 phazeai-plugin-api = { path = "../phazeai-plugin-api", version = "0.1.0" }
 zip = "2"
+# Built-in local AI: hardware probe, verified model download, llama.cpp install.
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
 plist = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 streaming-iterator = "0.1.9"
+
+[target.'cfg(unix)'.dependencies]
+# Kill a shell command's whole process group when a run is interrupted.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"

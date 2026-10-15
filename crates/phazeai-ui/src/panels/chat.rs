@@ -79,6 +79,22 @@ pub struct ChatMessage {
     pub is_error: bool,
 }
 
+/// Compaction carried from one send to the next.
+///
+/// The agent folds the oldest messages into a model-written summary when the
+/// conversation nears the context budget. Because the panel rebuilds the
+/// agent's history from the UI message list on every send, that summary would
+/// otherwise be lost and the same messages re-summarised each turn. The panel
+/// keeps the summary and the prefix of the UI list it stands for, so the next
+/// send starts from the summary and only the messages after that prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactionState {
+    /// The summary of `messages[..folded]`.
+    pub summary: String,
+    /// How many UI messages, from the start of the list, the summary covers.
+    pub folded: usize,
+}
+
 /// Shared slot for diff approval: carries the oneshot sender for Approve/Reject.
 type DiffApproveSlot = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>;
 
@@ -99,6 +115,8 @@ enum ChatUpdate {
     Cancelled(String),
     /// MCP server process(es) were restarted (stdio recovery).
     McpStatus(String),
+    /// Something the user should know about this run (shown as a toast).
+    Notice(String),
     /// A file-write tool wants user approval. Contains before/after content
     /// and a slot to resolve the blocking diff hook in the agent thread.
     DiffApprovalNeeded {
@@ -115,6 +133,9 @@ enum ChatUpdate {
     },
     /// Cumulative token counts for the completed run.
     TokenUsage { input: u64, output: u64 },
+    /// The run folded earlier messages into a summary; the next send starts
+    /// from this state instead of re-summarising them.
+    Compacted(CompactionState),
 }
 
 fn format_chat_error(raw: &str) -> String {
@@ -244,9 +265,86 @@ fn shape_retry_prior_messages(
     prior_messages
 }
 
+/// The history a run starts from, rebuilt from the UI message list.
+struct RebuiltHistory {
+    history: ConversationHistory,
+    /// The UI index each history message came from, in order.
+    origins: Vec<usize>,
+}
+
+/// Rebuild the model-facing history from the UI list. An earlier compaction's
+/// summary stands in for `prior[..folded]`; loading bubbles, error bubbles and
+/// tool status cards are left out (tool cards are UI-level and not part of
+/// the strict role schema providers expect); a trailing copy of
+/// `user_message` (a retry) is skipped because the agent adds it itself.
+fn rebuild_history(
+    system_prompt: Option<&str>,
+    prior: &[ChatMessage],
+    user_message: &str,
+    compaction: Option<&CompactionState>,
+) -> RebuiltHistory {
+    let mut history = ConversationHistory::new();
+    if let Some(prompt) = system_prompt {
+        history.set_system_prompt(prompt);
+    }
+    let folded = compaction.map_or(0, |c| {
+        history.set_summary(c.summary.as_str());
+        c.folded.min(prior.len())
+    });
+    let mut origins = Vec::new();
+    for (idx, msg) in prior.iter().enumerate().skip(folded) {
+        if msg.loading {
+            continue;
+        }
+        let is_duplicated_retry_user =
+            idx + 1 == prior.len() && msg.role == ChatRole::User && msg.content == user_message;
+        if is_duplicated_retry_user {
+            continue;
+        }
+        match msg.role {
+            ChatRole::User => history.add_user_message(msg.content.clone()),
+            ChatRole::Assistant if !msg.is_error => {
+                history.add_assistant_message(msg.content.clone())
+            }
+            ChatRole::Assistant | ChatRole::Tool => continue,
+        }
+        origins.push(idx);
+    }
+    // The history caps its message count by dropping from the front; keep the
+    // origins aligned with what is left.
+    let dropped = origins.len().saturating_sub(history.len());
+    origins.drain(..dropped);
+    RebuiltHistory { history, origins }
+}
+
+/// The compaction state the next send should start from, after a run whose
+/// history was rebuilt with `origins` and whose own user message sits at UI
+/// index `user_index`. `folded` is how many history messages the run folded
+/// (always from the front) and `summary` the summary it left. `None` means
+/// nothing new was folded: keep the state already held.
+fn compaction_after_run(
+    origins: &[usize],
+    user_index: usize,
+    folded: usize,
+    summary: Option<&str>,
+) -> Option<CompactionState> {
+    if folded == 0 {
+        return None;
+    }
+    Some(CompactionState {
+        summary: summary?.to_string(),
+        // The UI message the first kept history message came from. When every
+        // rebuilt message was folded, the run's own user message is the first
+        // kept one, so the summary covers everything before it.
+        folded: origins.get(folded).copied().unwrap_or(user_index),
+    })
+}
+
 struct SendToAiJob {
     user_message: String,
     prior_messages: Vec<ChatMessage>,
+    /// Compaction carried from earlier sends (see [`CompactionState`]).
+    compaction: Option<CompactionState>,
     settings: Settings,
     workspace_root: std::path::PathBuf,
     mode_hint: &'static str,
@@ -257,12 +355,15 @@ struct SendToAiJob {
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
     sidecar_client: Option<Arc<SidecarClient>>,
+    /// Files whose contents are in `user_message` (for the privacy audit log).
+    attached_files: Vec<std::path::PathBuf>,
 }
 
 fn send_to_ai(job: SendToAiJob) {
     let SendToAiJob {
         user_message,
         prior_messages,
+        compaction,
         settings,
         workspace_root,
         mode_hint,
@@ -271,6 +372,7 @@ fn send_to_ai(job: SendToAiJob) {
         update_tx,
         cancel_token,
         sidecar_client,
+        attached_files,
     } = job;
 
     std::thread::spawn(move || {
@@ -323,65 +425,31 @@ fn send_to_ai(job: SendToAiJob) {
                 }
                 parts.join("\n\n")
             };
-            let base_conversation = if system_prompt.is_empty() {
-                ConversationHistory::new()
-            } else {
-                ConversationHistory::new().with_system_prompt(system_prompt)
-            };
-            let shared_conversation =
-                std::sync::Arc::new(tokio::sync::Mutex::new(base_conversation));
-            {
-                let mut conv = shared_conversation.lock().await;
-                let prior_len = prior_messages.len();
-                let mut restored_users = 0usize;
-                let mut restored_assistants = 0usize;
-                let mut skipped_loading = 0usize;
-                let mut skipped_duplicate_retry = 0usize;
-                for (idx, msg) in prior_messages.into_iter().enumerate() {
-                    if msg.loading {
-                        skipped_loading += 1;
-                        continue;
-                    }
-                    let is_duplicated_retry_user = idx + 1 == prior_len
-                        && msg.role == ChatRole::User
-                        && msg.content == user_message;
-                    if is_duplicated_retry_user {
-                        skipped_duplicate_retry += 1;
-                        continue;
-                    }
-                    match msg.role {
-                        ChatRole::User => {
-                            restored_users += 1;
-                            conv.add_user_message(msg.content);
-                        }
-                        ChatRole::Assistant => {
-                            if msg.is_error {
-                                continue;
-                            }
-                            restored_assistants += 1;
-                            conv.add_assistant_message(msg.content);
-                        }
-                        // Tool bubbles are UI-level status cards and are not part
-                        // of the strict role schema expected by providers.
-                        ChatRole::Tool => {}
-                    }
-                }
-                // #region agent log
-                phazeai_core::debug_ndjson::log(
-                    "0179af",
-                    "full-ide-sweep",
-                    "H14",
-                    "chat.rs:send_to_ai",
-                    "conversation restored before run",
-                    serde_json::json!({
-                        "restoredUsers": restored_users,
-                        "restoredAssistants": restored_assistants,
-                        "skippedLoading": skipped_loading,
-                        "skippedDuplicateRetry": skipped_duplicate_retry,
-                    }),
-                );
-                // #endregion
-            }
+            // The UI index of this run's user message: the bubble pushed (or,
+            // on a retry, kept) right after `prior_messages`.
+            let user_index = prior_messages.len();
+            let RebuiltHistory { history, origins } = rebuild_history(
+                (!system_prompt.is_empty()).then_some(system_prompt.as_str()),
+                &prior_messages,
+                &user_message,
+                compaction.as_ref(),
+            );
+            // #region agent log
+            phazeai_core::debug_ndjson::log(
+                "0179af",
+                "full-ide-sweep",
+                "H14",
+                "chat.rs:send_to_ai",
+                "conversation restored before run",
+                serde_json::json!({
+                    "restored": origins.len(),
+                    "foldedUiMessages": compaction.as_ref().map_or(0, |c| c.folded),
+                    "hasSummary": history.summary().is_some(),
+                }),
+            );
+            // #endregion
+            let shared_conversation = std::sync::Arc::new(tokio::sync::Mutex::new(history));
+            let conversation_after_run = shared_conversation.clone();
 
             // Diff review hook — blocks the agent before any file write until
             // the user approves or rejects the change in the chat panel.
@@ -424,6 +492,7 @@ fn send_to_ai(job: SendToAiJob) {
             });
 
             let mut agent = Agent::new(client)
+                .with_context_budget(settings.context_budget())
                 .with_cancel_token(cancel_token)
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)
@@ -455,9 +524,15 @@ fn send_to_ai(job: SendToAiJob) {
 
             let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-            let run_fut = agent.run_with_events(&user_message, agent_tx);
+            let run_fut = phazeai_core::privacy::audit::scope(
+                attached_files,
+                agent.run_with_events(&user_message, agent_tx),
+            );
+            // Forwards events to the panel and returns the update that ends
+            // the run (sent last, after the compaction state below).
             let drain_fut = async {
                 let mut accumulated = String::new();
+                let mut final_update = None;
                 while let Some(event) = agent_rx.recv().await {
                     match event {
                         AgentEvent::TextDelta(text) => {
@@ -478,6 +553,16 @@ fn send_to_ai(job: SendToAiJob) {
                             };
                             let _ = update_tx.send(ChatUpdate::McpStatus(msg));
                         }
+                        AgentEvent::ContextCompacted {
+                            messages_folded,
+                            tokens_before,
+                            tokens_after,
+                        } => {
+                            let _ = update_tx.send(ChatUpdate::Notice(format!(
+                                "Summarised {messages_folded} earlier messages to stay within \
+                                 the context budget (~{tokens_before} → ~{tokens_after} tokens)"
+                            )));
+                        }
                         AgentEvent::TokenUsage {
                             input_tokens,
                             output_tokens,
@@ -488,7 +573,7 @@ fn send_to_ai(job: SendToAiJob) {
                             });
                         }
                         AgentEvent::Complete { .. } => {
-                            let _ = update_tx.send(ChatUpdate::Done(accumulated.clone()));
+                            final_update = Some(ChatUpdate::Done(accumulated.clone()));
                             // #region agent log
                             phazeai_core::debug_ndjson::log(
                                 "0179af",
@@ -504,7 +589,7 @@ fn send_to_ai(job: SendToAiJob) {
                         AgentEvent::Error(e) => {
                             // Cancellation is a normal user action — don't treat it as an error.
                             if e == "Cancelled" {
-                                let _ = update_tx.send(ChatUpdate::Cancelled(accumulated.clone()));
+                                final_update = Some(ChatUpdate::Cancelled(accumulated.clone()));
                                 // #region agent log
                                 phazeai_core::debug_ndjson::log(
                                     "0179af",
@@ -516,7 +601,7 @@ fn send_to_ai(job: SendToAiJob) {
                                 );
                                 // #endregion
                             } else {
-                                let _ = update_tx.send(ChatUpdate::Err(e));
+                                final_update = Some(ChatUpdate::Err(e));
                                 // #region agent log
                                 phazeai_core::debug_ndjson::log(
                                     "0179af",
@@ -533,9 +618,25 @@ fn send_to_ai(job: SendToAiJob) {
                         _ => {}
                     }
                 }
+                final_update
             };
 
-            let _ = tokio::join!(run_fut, drain_fut);
+            let (_, final_update) = tokio::join!(run_fut, drain_fut);
+
+            // Carry any compaction into the next send. It goes out before the
+            // run's final update, so the panel holds the new state by the time
+            // it lets the user send again.
+            {
+                let conv = conversation_after_run.lock().await;
+                if let Some(state) =
+                    compaction_after_run(&origins, user_index, conv.folded_count(), conv.summary())
+                {
+                    let _ = update_tx.send(ChatUpdate::Compacted(state));
+                }
+            }
+            if let Some(update) = final_update {
+                let _ = update_tx.send(update);
+            }
         });
     });
 }
@@ -549,18 +650,35 @@ fn send_to_ai(job: SendToAiJob) {
 ///
 /// Settings are re-loaded from disk on each send so model/provider changes in
 /// the settings panel take effect immediately without restarting.
+/// A chat message with its `@file` mentions expanded.
+#[derive(Debug, Default)]
+struct ExpandedMentions {
+    prompt: String,
+    /// Files whose contents were attached (for the privacy audit log).
+    attached: Vec<std::path::PathBuf>,
+    /// Mentions left out by the privacy policy: (mention, reason).
+    blocked: Vec<(String, String)>,
+}
+
 /// Expand `@filename` mentions in a chat message into file context blocks.
 ///
 /// Scans for `@path/to/file` tokens, resolves each relative to `root`,
-/// reads file contents, and prepends them as context. Returns the expanded prompt.
-fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
+/// reads file contents, and prepends them as context. Files denied by the
+/// project's privacy policy are not read; the prompt says they were withheld
+/// and each refusal is recorded in the privacy audit log.
+fn expand_file_mentions(message: &str, root: &std::path::Path) -> ExpandedMentions {
     static RE: std::sync::LazyLock<Option<regex::Regex>> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"@([\w./\-]+\.\w+)").ok());
     let Some(re) = &*RE else {
-        return message.to_string();
+        return ExpandedMentions {
+            prompt: message.to_string(),
+            ..Default::default()
+        };
     };
     let mut context_blocks = Vec::new();
     let mut clean_msg = message.to_string();
+    let mut out = ExpandedMentions::default();
+    let policy = phazeai_core::privacy::policy_for(root);
 
     let canonical_root = root.canonicalize().ok();
     for cap in re.captures_iter(message) {
@@ -571,6 +689,21 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
             _ => false,
         };
         if file_path.is_file() && in_workspace {
+            if let Some(denial) = policy.check(&file_path) {
+                let reason = denial.reason();
+                phazeai_core::privacy::audit::record_blocked_file(
+                    &policy.display_path(&file_path),
+                    &reason,
+                    "@mention",
+                );
+                clean_msg = clean_msg.replace(
+                    &format!("@{mention}"),
+                    &format!("`{mention}` (not attached: {reason})"),
+                );
+                out.blocked.push((mention.to_string(), reason));
+                continue;
+            }
+            out.attached.push(file_path.clone());
             if let Ok(contents) = std::fs::read_to_string(&file_path) {
                 // Truncate very large files
                 let truncated = if contents.len() > 30_000 {
@@ -593,17 +726,23 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> String {
         }
     }
 
-    if context_blocks.is_empty() {
-        message.to_string()
+    out.prompt = if context_blocks.is_empty() {
+        if out.blocked.is_empty() {
+            message.to_string()
+        } else {
+            clean_msg
+        }
     } else {
         format!(
             "I'm providing the following file(s) as context:\n\n{}\n\nUser request: {}",
             context_blocks.join("\n\n"),
             clean_msg
         )
-    }
+    };
+    out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn chat_panel(
     theme: RwSignal<PhazeTheme>,
     ai_thinking: RwSignal<bool>,
@@ -672,6 +811,9 @@ pub fn chat_panel(
     let mode = create_rw_signal(AiMode::Chat);
     let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> =
         create_rw_signal(None);
+    // Summary of the oldest messages, carried across sends; reset whenever the
+    // message list is replaced, since it refers to a prefix of that list.
+    let compaction: RwSignal<Option<CompactionState>> = create_rw_signal(None);
 
     // ── Diff review state ─────────────────────────────────────────────────────
     let diff_path: RwSignal<String> = create_rw_signal(String::new());
@@ -731,6 +873,7 @@ pub fn chat_panel(
             return;
         }
         messages.set(vec![welcome_msg()]);
+        compaction.set(None);
         conversation_id.set(ConversationStore::generate_id());
         show_history.set(false);
         active_skill_name.set(None);
@@ -761,6 +904,7 @@ pub fn chat_panel(
                     })
                     .collect();
                 messages.set(new_msgs);
+                compaction.set(None);
                 conversation_id.set(id);
                 show_history.set(false);
             }
@@ -775,6 +919,7 @@ pub fn chat_panel(
             }
             if conversation_id.get_untracked() == id {
                 messages.set(vec![welcome_msg()]);
+                compaction.set(None);
                 conversation_id.set(ConversationStore::generate_id());
             }
             (refresh)();
@@ -873,8 +1018,11 @@ pub fn chat_panel(
                         &workspace_root.get_untracked(),
                     );
                 }
-                ChatUpdate::McpStatus(msg) => {
-                    status_toast.set(Some(msg));
+                ChatUpdate::McpStatus(msg) | ChatUpdate::Notice(msg) => {
+                    crate::app::show_toast(status_toast, msg);
+                }
+                ChatUpdate::Compacted(state) => {
+                    compaction.set(Some(state));
                 }
                 ChatUpdate::DiffApprovalNeeded {
                     path,
@@ -993,7 +1141,17 @@ pub fn chat_panel(
 
             // Expand @file mentions into context blocks before sending to AI
             let root = workspace_root.get_untracked();
-            let prompt = expand_file_mentions(&resolved_prompt_raw, &root);
+            let expanded = expand_file_mentions(&resolved_prompt_raw, &root);
+            let prompt = expanded.prompt;
+            let mut attached_files = expanded.attached;
+            attached_files.extend(crate::panels::privacy::take_attachments());
+            if !expanded.blocked.is_empty() {
+                let names: Vec<&str> = expanded.blocked.iter().map(|(m, _)| m.as_str()).collect();
+                crate::app::show_toast(
+                    status_toast,
+                    format!("Not attached (privacy policy): {}", names.join(", ")),
+                );
+            }
 
             messages.update(|list| {
                 list.push(ChatMessage {
@@ -1039,6 +1197,7 @@ pub fn chat_panel(
             send_to_ai(SendToAiJob {
                 user_message: prompt,
                 prior_messages,
+                compaction: compaction.get_untracked(),
                 settings: live_settings,
                 workspace_root: root,
                 mode_hint: hint,
@@ -1047,6 +1206,7 @@ pub fn chat_panel(
                 update_tx: (*update_tx).clone(),
                 cancel_token: token,
                 sidecar_client: sc_snapshot,
+                attached_files,
             });
         }
     });
@@ -1055,11 +1215,26 @@ pub fn chat_panel(
     {
         let do_send = do_send.clone();
         create_effect(move |_| {
-            if let Some(text) = chat_inject.get() {
-                input_text.set(text);
-                chat_inject.set(None);
-                do_send();
+            let Some(text) = chat_inject.get() else {
+                return;
+            };
+            chat_inject.set(None);
+            if text.trim().is_empty() || is_loading.get_untracked() {
+                // Not dispatched. An editor action hands the file it quotes to
+                // the privacy audit together with its prompt (see
+                // `inject_editor_prompt` in app.rs); drop that hand-off with the
+                // prompt so it is not attributed to an unrelated later send.
+                let _ = crate::panels::privacy::take_attachments();
+                if !text.trim().is_empty() {
+                    crate::app::show_toast(
+                        status_toast,
+                        "AI chat is busy — try again when the current response finishes",
+                    );
+                }
+                return;
             }
+            input_text.set(text);
+            do_send();
         });
     }
 
@@ -1438,7 +1613,9 @@ pub fn chat_panel(
                 current_cancel_token.set(Some(token.clone()));
 
                 let root = workspace_root.get_untracked();
-                let prompt = expand_file_mentions(&user_msg, &root);
+                let expanded = expand_file_mentions(&user_msg, &root);
+                let prompt = expanded.prompt;
+                let attached_files = expanded.attached;
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
                 let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
@@ -1462,6 +1639,7 @@ pub fn chat_panel(
                 send_to_ai(SendToAiJob {
                     user_message: prompt,
                     prior_messages,
+                    compaction: compaction.get_untracked(),
                     settings: live_settings,
                     workspace_root: root,
                     mode_hint: hint,
@@ -1470,6 +1648,7 @@ pub fn chat_panel(
                     update_tx: (*update_tx).clone(),
                     cancel_token: token,
                     sidecar_client: sc_snapshot,
+                    attached_files,
                 });
             } else {
                 // #region agent log
@@ -1558,6 +1737,15 @@ pub fn chat_panel(
                 messages.update(|list| {
                     if i < list.len() {
                         list.remove(i);
+                        // The summary covers a prefix of the list; removing a
+                        // bubble inside that prefix shortens it by one.
+                        compaction.update(|c| {
+                            if let Some(c) = c.as_mut() {
+                                if i < c.folded {
+                                    c.folded -= 1;
+                                }
+                            }
+                        });
                     }
                 });
             });
@@ -1969,7 +2157,6 @@ pub fn chat_panel(
         // Approve button
         let approve_btn = {
             let hov = create_rw_signal(false);
-            let resolve_approve = resolve_approve.clone();
             container(label(|| "✓ Approve").style(move |s| {
                 s.font_size(12.0)
                     .color(floem::peniko::Color::from_rgb8(40, 180, 40))
@@ -2107,7 +2294,6 @@ pub fn chat_panel(
 
         let allow_btn = {
             let hov = create_rw_signal(false);
-            let resolve_allow = resolve_allow.clone();
             container(label(|| "✓ Allow").style(move |s| {
                 s.font_size(12.0)
                     .color(floem::peniko::Color::from_rgb8(40, 180, 40))
@@ -2232,7 +2418,48 @@ pub fn chat_panel(
 
 #[cfg(test)]
 mod tests {
-    use super::{shape_retry_prior_messages, ChatMessage, ChatRole};
+    use super::{
+        compaction_after_run, expand_file_mentions, rebuild_history, shape_retry_prior_messages,
+        ChatMessage, ChatRole, CompactionState,
+    };
+
+    #[test]
+    fn mentions_of_denied_files_are_not_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(".phazeai/privacy.toml", "deny = [\"private/**\"]\n");
+        write("src/app.rs", "fn visible() {}");
+        write("config/.env", "API_KEY=sk-live-123");
+        write("private/plan.md", "acquisition target");
+
+        let out = expand_file_mentions(
+            "compare @src/app.rs with @config/.env and @private/plan.md",
+            &root,
+        );
+        assert!(out.prompt.contains("fn visible() {}"));
+        assert!(!out.prompt.contains("sk-live-123"), "{}", out.prompt);
+        assert!(!out.prompt.contains("acquisition target"), "{}", out.prompt);
+        assert!(out
+            .prompt
+            .contains("not attached: blocked by the built-in secrets list"));
+        assert!(out
+            .prompt
+            .contains("not attached: blocked by .phazeai/privacy.toml"));
+        assert_eq!(out.attached, vec![root.join("src/app.rs")]);
+        let blocked: Vec<&str> = out.blocked.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(blocked, vec!["config/.env", "private/plan.md"]);
+
+        // Only denied mentions: the note still reaches the model, no file content.
+        let out = expand_file_mentions("what is in @config/.env?", &root);
+        assert!(out.attached.is_empty());
+        assert!(out.prompt.contains("not attached"));
+        assert!(!out.prompt.contains("sk-live-123"));
+    }
 
     fn msg(role: ChatRole, content: &str, loading: bool, is_error: bool) -> ChatMessage {
         ChatMessage {
@@ -2287,5 +2514,125 @@ mod tests {
         assert_eq!(shaped[0].content, "u1");
         assert_eq!(shaped[1].content, "a1");
         assert_eq!(shaped[2].content, "u2");
+    }
+
+    /// A typical UI list: welcome bubble, two finished turns (one with a tool
+    /// card and a dismissed-able error), a pending user turn.
+    fn ui_messages() -> Vec<ChatMessage> {
+        vec![
+            msg(ChatRole::Assistant, "Welcome", false, false), // 0
+            msg(ChatRole::User, "u1", false, false),           // 1
+            msg(ChatRole::Assistant, "a1", false, false),      // 2
+            msg(ChatRole::User, "u2", false, false),           // 3
+            msg(ChatRole::Tool, "read_file: ok", false, false), // 4
+            msg(ChatRole::Assistant, "Error: boom", false, true), // 5
+            msg(ChatRole::Assistant, "a2", false, false),      // 6
+            msg(ChatRole::User, "u3", false, false),           // 7
+            msg(ChatRole::Assistant, "", true, false),         // 8 (loading)
+        ]
+    }
+
+    #[test]
+    fn rebuilt_history_skips_the_folded_prefix_and_seeds_the_summary() {
+        let ui = ui_messages();
+
+        // No compaction yet: every real user/assistant message, in order.
+        let rebuilt = rebuild_history(Some("SYS"), &ui, "new question", None);
+        assert_eq!(rebuilt.origins, vec![0, 1, 2, 3, 6, 7]);
+        assert_eq!(rebuilt.history.summary(), None);
+        assert_eq!(rebuilt.history.len(), 6);
+        let sent = rebuilt.history.get_messages();
+        assert_eq!(sent[0].content, "SYS");
+        assert_eq!(sent[1].content, "Welcome");
+        assert_eq!(sent[6].content, "u3");
+
+        // A carried summary stands in for messages[..3]; the rest follow it.
+        let state = CompactionState {
+            summary: "**Goal**: the thing.".to_string(),
+            folded: 3,
+        };
+        let rebuilt = rebuild_history(None, &ui, "new question", Some(&state));
+        assert_eq!(rebuilt.origins, vec![3, 6, 7]);
+        assert_eq!(rebuilt.history.summary(), Some("**Goal**: the thing."));
+        let conv = rebuilt.history.get_conversation_messages();
+        assert_eq!(conv.len(), 3);
+        assert_eq!(conv[0].content, "u2");
+        assert_eq!(conv[2].content, "u3");
+        let sent = rebuilt.history.get_messages();
+        assert_eq!(sent.len(), 4);
+        assert!(sent[0].content.contains("**Goal**: the thing."));
+
+        // A retry of u3: the pending user bubble is left to the agent.
+        let rebuilt = rebuild_history(None, &ui[..8], "u3", Some(&state));
+        assert_eq!(rebuilt.origins, vec![3, 6]);
+
+        // A stale prefix longer than the list cannot panic.
+        let stale = CompactionState {
+            summary: "s".to_string(),
+            folded: 50,
+        };
+        let rebuilt = rebuild_history(None, &ui, "x", Some(&stale));
+        assert!(rebuilt.origins.is_empty());
+        assert_eq!(rebuilt.history.len(), 0);
+        assert_eq!(rebuilt.history.summary(), Some("s"));
+    }
+
+    #[test]
+    fn compaction_state_maps_folded_history_back_to_ui_messages() {
+        // The rebuilt history came from UI messages 0, 1, 2, 3, 6, 7 and the
+        // run's own user message is UI message 9.
+        let origins = [0, 1, 2, 3, 6, 7];
+
+        // Nothing folded: keep whatever state was already held.
+        assert_eq!(compaction_after_run(&origins, 9, 0, None), None);
+        assert_eq!(compaction_after_run(&origins, 9, 0, Some("s")), None);
+
+        // Three history messages folded: the first kept one (history index 3)
+        // is UI message 3, so the summary covers messages[..3].
+        assert_eq!(
+            compaction_after_run(&origins, 9, 3, Some("s")),
+            Some(CompactionState {
+                summary: "s".to_string(),
+                folded: 3,
+            })
+        );
+
+        // Everything rebuilt was folded: the run's user message is the first
+        // kept one, so the summary covers everything before it.
+        assert_eq!(
+            compaction_after_run(&origins, 9, 6, Some("s")),
+            Some(CompactionState {
+                summary: "s".to_string(),
+                folded: 9,
+            })
+        );
+
+        // Folding that left no summary cannot be carried.
+        assert_eq!(compaction_after_run(&origins, 9, 3, None), None);
+    }
+
+    #[test]
+    fn carried_summary_is_not_re_summarised_on_the_next_send() {
+        // Turn 1 folds the first four history messages; turn 2 rebuilds from
+        // the carried state and sends only what the summary doesn't cover.
+        let mut ui = ui_messages();
+        ui.truncate(8); // drop the loading bubble: the run is over
+        let first = rebuild_history(None, &ui, "q1", None);
+        assert_eq!(first.origins, vec![0, 1, 2, 3, 6, 7]);
+        // The agent folded the first three (history 0..3 = UI 0, 1, 2) and
+        // kept from u2, a user turn, as `compaction_point` guarantees.
+        let state = compaction_after_run(&first.origins, 8, 3, Some("folded")).unwrap();
+        assert_eq!(state.folded, 3);
+
+        ui.push(msg(ChatRole::User, "q1", false, false)); // 8
+        ui.push(msg(ChatRole::Assistant, "r1", false, false)); // 9
+        let second = rebuild_history(None, &ui, "q2", Some(&state));
+        assert_eq!(second.history.summary(), Some("folded"));
+        let conv = second.history.get_conversation_messages();
+        let contents: Vec<&str> = conv.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, vec!["u2", "a2", "u3", "q1", "r1"]);
+        assert_eq!(second.origins, vec![3, 6, 7, 8, 9]);
+        // The kept part opens with a user turn, as providers require.
+        assert_eq!(conv[0].role, phazeai_core::llm::Role::User);
     }
 }

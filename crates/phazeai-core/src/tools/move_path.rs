@@ -47,6 +47,17 @@ impl Tool for MovePathTool {
 
         let source_buf = sandbox::resolve_within_workspace("move_path", source)?;
         let dest_buf = sandbox::resolve_target_path("move_path", destination)?;
+        // Moving a denied file to an allowed name would let the model read it.
+        crate::privacy::tool_check_tree("move_path", &source_buf, source)?;
+        crate::privacy::tool_check("move_path", &dest_buf, destination)?;
+        // The privacy policy can't be moved away or replaced by the model.
+        crate::privacy::tool_check_protected_tree("move_path", &source_buf, source)?;
+        crate::privacy::tool_check_protected_dest(
+            "move_path",
+            &source_buf,
+            &dest_buf,
+            destination,
+        )?;
         let source_path = source_buf.as_path();
         let dest_path = dest_buf.as_path();
 

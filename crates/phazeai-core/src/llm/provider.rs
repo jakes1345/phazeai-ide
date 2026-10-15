@@ -26,6 +26,9 @@ pub enum ProviderId {
     SambaNova,
     /// GitHub Models — free inference via GITHUB_TOKEN
     GithubModels,
+    /// PhazeAI's own llama.cpp server (see `crate::local_ai`); no key, dynamic port.
+    #[serde(rename = "builtin")]
+    BuiltIn,
     Custom(String),
 }
 
@@ -50,12 +53,13 @@ impl ProviderId {
             Self::Fireworks => "Fireworks AI",
             Self::SambaNova => "SambaNova",
             Self::GithubModels => "GitHub Models",
+            Self::BuiltIn => "PhazeAI Local (built-in)",
             Self::Custom(name) => name,
         }
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, Self::Ollama | Self::LmStudio)
+        matches!(self, Self::Ollama | Self::LmStudio | Self::BuiltIn)
     }
 
     pub fn needs_api_key(&self) -> bool {
@@ -82,6 +86,8 @@ impl ProviderId {
             Self::Fireworks => endpoints::FIREWORKS_BASE_URL,
             Self::SambaNova => endpoints::SAMBANOVA_BASE_URL,
             Self::GithubModels => endpoints::GITHUB_MODELS_BASE_URL,
+            // Port is chosen when the server starts; see `LOCAL_AI.base_url()`.
+            Self::BuiltIn => "",
             Self::Custom(_) => "",
         }
     }
@@ -106,6 +112,7 @@ impl ProviderId {
             Self::Fireworks => "FIREWORKS_API_KEY",
             Self::SambaNova => "SAMBANOVA_API_KEY",
             Self::GithubModels => "GITHUB_TOKEN",
+            Self::BuiltIn => "",
             Self::Custom(_) => "",
         }
     }
@@ -128,6 +135,7 @@ impl ProviderId {
             Self::Cohere,
             Self::Azure,
             Self::GithubModels,
+            Self::BuiltIn,
             Self::Ollama,
             Self::LmStudio,
         ]
@@ -360,7 +368,26 @@ impl ProviderRegistry {
     }
 
     /// Build an LLM client for a specific provider and model.
+    ///
+    /// Every client is wrapped in [`crate::privacy::GuardedClient`], which
+    /// refuses non-local providers when the active project is `local_only`
+    /// and records each request in the privacy audit log.
     pub fn build_client_for(
+        &self,
+        config: &ProviderConfig,
+        model: &str,
+    ) -> Result<Box<dyn super::LlmClient>, crate::error::PhazeError> {
+        crate::privacy::check_provider(&config.id, &config.base_url, model)?;
+        let inner = self.build_unguarded_client(config, model)?;
+        Ok(Box::new(crate::privacy::GuardedClient::new(
+            inner,
+            config.id.clone(),
+            model,
+            config.base_url.clone(),
+        )))
+    }
+
+    fn build_unguarded_client(
         &self,
         config: &ProviderConfig,
         model: &str,
@@ -381,6 +408,22 @@ impl ProviderRegistry {
             }
             ProviderId::Ollama => {
                 let client = super::OllamaClient::new(model).with_base_url(&config.base_url);
+                Ok(Box::new(client))
+            }
+            ProviderId::BuiltIn => {
+                let local = &crate::local_ai::LOCAL_AI;
+                let base_url = local.base_url().ok_or_else(|| {
+                    crate::error::PhazeError::Config(
+                        "PhazeAI Local isn't running. Start it in Settings → Local AI \
+                         (the `phazeai` CLI starts it by itself when it is the configured provider)."
+                            .to_string(),
+                    )
+                })?;
+                let model = local.running_model().unwrap_or_else(|| model.to_string());
+                let client = super::OpenAIClient::new(String::new())
+                    .with_model(model)
+                    .with_base_url(base_url)
+                    .without_proxy();
                 Ok(Box::new(client))
             }
             // All other providers use OpenAI-compatible API
@@ -851,6 +894,17 @@ impl ProviderRegistry {
                 // Dynamic - must query the server
                 vec![]
             }
+            ProviderId::BuiltIn => crate::local_ai::CATALOG
+                .iter()
+                .map(|e| ModelInfo {
+                    id: e.id.into(),
+                    name: e.display_name.into(),
+                    context_window: e.ctx_size as usize,
+                    supports_tools: true,
+                    input_cost_per_m: 0.0,
+                    output_cost_per_m: 0.0,
+                })
+                .collect(),
             ProviderId::Custom(_) => vec![],
         }
     }
@@ -877,6 +931,7 @@ fn default_model_for(id: &ProviderId) -> &str {
         ProviderId::Fireworks => models::DEFAULT_FIREWORKS_MODEL,
         ProviderId::SambaNova => models::DEFAULT_SAMBANOVA_MODEL,
         ProviderId::GithubModels => models::DEFAULT_GITHUB_MODELS_MODEL,
+        ProviderId::BuiltIn => crate::local_ai::CATALOG[0].id,
         ProviderId::Custom(_) => "default",
     }
 }

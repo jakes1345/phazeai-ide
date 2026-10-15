@@ -56,14 +56,17 @@ fn dap_session_breakpoint_continue_exit() {
         );
     });
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Generous limits: launching the debuggee under gdb/lldb can take well
+    // over five seconds on a loaded CI runner, and a timeout here fails the
+    // test rather than hanging it.
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut saw_stop_at_bp = false;
     let mut saw_frames = false;
     let mut final_idle = false;
     let mut continued = false;
 
     while Instant::now() < deadline {
-        let Ok(update) = update_rx.recv_timeout(Duration::from_secs(5)) else {
+        let Ok(update) = update_rx.recv_timeout(Duration::from_secs(30)) else {
             break;
         };
         match update {

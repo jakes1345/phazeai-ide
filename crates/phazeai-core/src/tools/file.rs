@@ -43,9 +43,11 @@ impl Tool for ReadFileTool {
             .ok_or_else(|| PhazeError::tool("read_file", "Missing required parameter: path"))?;
 
         let resolved = sandbox::resolve_within_workspace("read_file", path)?;
+        crate::privacy::tool_check("read_file", &resolved, path)?;
         let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             PhazeError::tool("read_file", format!("Failed to read '{}': {}", path, e))
         })?;
+        crate::privacy::audit::note_file(&resolved);
 
         let offset = params
             .get("offset")
@@ -119,6 +121,8 @@ impl Tool for WriteFileTool {
             .ok_or_else(|| PhazeError::tool("write_file", "Missing required parameter: content"))?;
 
         let resolved = sandbox::resolve_target_path("write_file", path)?;
+        crate::privacy::tool_check("write_file", &resolved, path)?;
+        crate::privacy::tool_check_protected("write_file", &resolved, path)?;
         if let Some(parent) = resolved.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {

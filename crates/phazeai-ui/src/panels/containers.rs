@@ -8,7 +8,6 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
-use std::process::Command;
 
 #[derive(Clone, Debug)]
 struct ContainerRow {
@@ -19,7 +18,7 @@ struct ContainerRow {
 }
 
 fn docker_ps_parse() -> Result<Vec<ContainerRow>, String> {
-    let output = Command::new("docker")
+    let output = phazeai_core::process::std_command("docker")
         .args([
             "ps",
             "-a",

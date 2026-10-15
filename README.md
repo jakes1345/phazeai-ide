@@ -21,7 +21,7 @@ cargo run -p phazeai-ui          # desktop IDE (primary)
 cargo run -p phazeai-cli         # terminal UI (ratatui)
 ```
 
-First launch creates `~/.config/phazeai/settings.toml`. Open the Settings panel (Ctrl+,) to point at your LLM provider.
+First launch creates `~/.config/phazeai/config.toml`. Open the Settings panel (Ctrl+,) to point at your LLM provider.
 
 ---
 
@@ -74,7 +74,7 @@ First launch creates `~/.config/phazeai/settings.toml`. Open the Settings panel 
 
 ## AI Providers
 
-Configure in the Settings panel or `~/.config/phazeai/settings.toml`:
+Configure in the Settings panel or `~/.config/phazeai/config.toml`:
 
 | Provider | Type | Setup |
 |---|---|---|
@@ -87,7 +87,7 @@ Configure in the Settings panel or `~/.config/phazeai/settings.toml`:
 | Ollama | Local | [Download](https://ollama.ai), `ollama pull <model>` |
 | LM Studio | Local | [Download](https://lmstudio.ai) |
 
-API keys you paste through the Settings panel are stored in the OS keyring (Secret Service / Keychain / Credential Manager), not in `settings.toml`.
+API keys you paste through the Settings panel are stored in the OS keyring (Secret Service / Keychain / Credential Manager), not in `config.toml`.
 
 **Recommended for new users:** install [Ollama](https://ollama.ai), `ollama pull llama3.2`, point PhazeAI at `http://localhost:11434`. Free, offline, no key.
 
@@ -139,7 +139,7 @@ crates/
 └── ollama-rs/             local fork with streaming + chat history
 ```
 
-Config lives at `~/.config/phazeai/settings.toml`; session state at `~/.config/phazeai/session.toml`. Logs roll daily into `~/.config/phazeai/logs/`.
+Config lives at `~/.config/phazeai/config.toml`; session state at `~/.config/phazeai/session.toml`. Logs roll daily into `~/.config/phazeai/logs/`.
 
 ---
 

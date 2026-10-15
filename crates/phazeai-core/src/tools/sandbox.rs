@@ -186,13 +186,14 @@ fn canonicalize_or_parent(p: &Path) -> std::io::Result<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
     // Sandbox tests mutate a process-global, so they must run serially even
-    // though Cargo runs `#[test]` functions in parallel by default.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    // though Cargo runs `#[test]` functions in parallel by default. Other
+    // modules' tests that depend on the workspace root take it too.
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 
     fn with_workspace<F: FnOnce()>(root: Option<PathBuf>, f: F) {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

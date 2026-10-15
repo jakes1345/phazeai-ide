@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -120,7 +120,7 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server by spawning the process and initializing.
     pub fn connect(config: &McpServerConfig) -> Result<Self, String> {
-        let mut cmd = Command::new(&config.command);
+        let mut cmd = crate::process::std_command(&config.command);
         cmd.args(&config.args);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());

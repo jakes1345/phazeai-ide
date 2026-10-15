@@ -44,7 +44,7 @@ pub enum SessionUpdate {
 /// Returns (command, args). codelldb is skipped: it speaks TCP, not stdio.
 pub fn detect_adapter() -> Option<(String, Vec<String>)> {
     fn in_path(bin: &str) -> bool {
-        std::process::Command::new("which")
+        phazeai_core::process::std_command("which")
             .arg(bin)
             .output()
             .map(|o| o.status.success())
@@ -58,7 +58,7 @@ pub fn detect_adapter() -> Option<(String, Vec<String>)> {
     }
     if in_path("gdb") {
         // GDB ≥ 14 ships a built-in DAP interpreter.
-        let ok = std::process::Command::new("gdb")
+        let ok = phazeai_core::process::std_command("gdb")
             .args(["--version"])
             .output()
             .ok()

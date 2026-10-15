@@ -1,12 +1,16 @@
+pub mod blame;
 pub mod chat;
 pub mod composer;
 pub mod containers;
+pub mod design;
 pub mod editor;
 pub mod explorer;
 pub mod extensions;
 pub mod git;
 pub mod github_actions;
+pub mod local_ai;
 pub mod makefile;
+pub mod privacy;
 pub mod remote;
 pub mod run_debug;
 pub mod search;

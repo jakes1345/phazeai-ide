@@ -14,6 +14,8 @@ pub struct Settings {
     pub providers: Vec<ProviderEntry>,
     #[serde(default)]
     pub model_routes: HashMap<TaskType, ModelRoute>,
+    #[serde(default)]
+    pub local_ai: crate::local_ai::LocalAiSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,11 @@ pub struct LlmSettings {
     pub api_key_env: String,
     pub base_url: Option<String>,
     pub max_tokens: u32,
+    /// Conversation tokens the agent may send before compacting older
+    /// messages into a summary. Unset: derived from the model's context
+    /// window (see `llm::context_budget`).
+    #[serde(default)]
+    pub context_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +43,9 @@ pub enum LlmProvider {
     OpenRouter,
     LmStudio,
     Gemini,
+    /// PhazeAI's own llama.cpp server (`[local_ai]` section).
+    #[serde(rename = "builtin")]
+    BuiltIn,
 }
 
 impl LlmProvider {
@@ -49,6 +59,7 @@ impl LlmProvider {
             LlmProvider::OpenRouter => ProviderId::OpenRouter,
             LlmProvider::LmStudio => ProviderId::LmStudio,
             LlmProvider::Gemini => ProviderId::Gemini,
+            LlmProvider::BuiltIn => ProviderId::BuiltIn,
         }
     }
 }
@@ -111,6 +122,7 @@ impl Default for Settings {
                 api_key_env: "".to_string(),
                 base_url: None,
                 max_tokens: defaults::MAX_TOKENS,
+                context_tokens: None,
             },
             editor: EditorSettings::default(),
             sidecar: SidecarSettings {
@@ -120,6 +132,7 @@ impl Default for Settings {
             },
             providers: Vec::new(),
             model_routes: HashMap::new(),
+            local_ai: Default::default(),
         }
     }
 }
@@ -196,6 +209,7 @@ impl Settings {
                 "fireworks" => ProviderId::Fireworks,
                 "sambanova" => ProviderId::SambaNova,
                 "github" | "github_models" | "githubmodels" => ProviderId::GithubModels,
+                "builtin" | "built-in" | "phazeai-local" => ProviderId::BuiltIn,
                 other => ProviderId::Custom(other.to_string()),
             };
             let config = ProviderConfig {
@@ -216,6 +230,27 @@ impl Settings {
     }
 
     /// Build an LLM client from the current settings.
+    /// Conversation tokens the agent may send to the active model before
+    /// compacting. Honours `[llm] context_tokens` when set.
+    pub fn context_budget(&self) -> usize {
+        use crate::llm::context_budget::{budget_for_window, context_budget};
+        let provider = self.llm.provider.to_provider_id();
+        if provider == crate::llm::ProviderId::BuiltIn {
+            // We start the server ourselves, so the window is known exactly.
+            return budget_for_window(
+                self.local_ai.effective_ctx_size() as usize,
+                self.llm.max_tokens as usize,
+                self.llm.context_tokens,
+            );
+        }
+        context_budget(
+            &provider,
+            &self.llm.model,
+            self.llm.max_tokens as usize,
+            self.llm.context_tokens,
+        )
+    }
+
     pub fn build_llm_client(
         &self,
     ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {

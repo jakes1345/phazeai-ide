@@ -45,6 +45,10 @@ impl Tool for ListFilesTool {
 
         let mut builder = WalkBuilder::new(path);
         builder.hidden(false).git_ignore(true).git_global(true);
+        let policy = crate::privacy::active();
+        builder.filter_entry(move |e| {
+            e.depth() == 0 || !policy.is_denied(&crate::privacy::absolutize(e.path()))
+        });
 
         if let Some(depth) = max_depth {
             builder.max_depth(Some(depth));

@@ -12,6 +12,32 @@ pub struct OpenAIClient {
     base_url: String,
 }
 
+/// Build `<base_url>/<path>` for an OpenAI-compatible API.
+///
+/// Providers document their base URL differently: some stop at the host
+/// (`https://api.openai.com`) and some already carry the version segment
+/// (`https://api.mistral.ai/v1`, `.../v1beta/openai/`). Appending `/v1`
+/// unconditionally produced `.../v1/v1/chat/completions` for the latter, so only
+/// add it when the base has no version segment of its own.
+pub(crate) fn openai_compat_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    if base.split('/').any(is_version_segment) {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/v1/{path}")
+    }
+}
+
+/// `v1`, `v2`, `v1beta`, `v1alpha`, ... but not hosts like `v1.example.com`.
+fn is_version_segment(seg: &str) -> bool {
+    let Some(rest) = seg.strip_prefix('v') else {
+        return false;
+    };
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && matches!(&rest[digits..], "" | "beta" | "alpha")
+}
+
 impl OpenAIClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
@@ -29,6 +55,15 @@ impl OpenAIClient {
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
+        self
+    }
+
+    /// Connect directly, ignoring `HTTP(S)_PROXY`. For servers on 127.0.0.1:
+    /// a corporate proxy can't reach the user's loopback interface.
+    pub fn without_proxy(mut self) -> Self {
+        if let Ok(client) = reqwest::Client::builder().no_proxy().build() {
+            self.client = client;
+        }
         self
     }
 
@@ -104,7 +139,7 @@ impl LlmClient for OpenAIClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = openai_compat_url(&self.base_url, "chat/completions");
 
         let oai_messages: Vec<Value> = messages
             .iter()
@@ -217,7 +252,7 @@ impl LlmClient for OpenAIClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = openai_compat_url(&self.base_url, "chat/completions");
 
         let oai_messages: Vec<Value> = messages
             .iter()
@@ -293,9 +328,18 @@ impl LlmClient for OpenAIClient {
         tokio::spawn(async move {
             use futures::StreamExt;
             let mut buffer = String::new();
-            // Maps tool_call index → id, since OpenAI only sends id on the first delta chunk
-            let mut tool_call_ids: std::collections::HashMap<u64, String> =
-                std::collections::HashMap::new();
+            // Maps tool_call index → id, since OpenAI only sends id on the first
+            // delta chunk. Ordered by index so parallel calls finish (and run)
+            // in the order the model wrote them.
+            let mut tool_call_ids: std::collections::BTreeMap<u64, String> =
+                std::collections::BTreeMap::new();
+            let finish_tool_calls =
+                |ids: &mut std::collections::BTreeMap<u64, String>,
+                 tx: &mpsc::UnboundedSender<StreamEvent>| {
+                    for (_, id) in std::mem::take(ids) {
+                        let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
+                    }
+                };
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -319,9 +363,7 @@ impl LlmClient for OpenAIClient {
                     let data = &line[6..];
                     if data == "[DONE]" {
                         // Finalize any tool calls that didn't get an explicit end event
-                        for (_, id) in tool_call_ids.drain() {
-                            let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
-                        }
+                        finish_tool_calls(&mut tool_call_ids, &tx);
                         let _ = tx.unbounded_send(StreamEvent::Done);
                         return;
                     }
@@ -403,9 +445,163 @@ impl LlmClient for OpenAIClient {
                 }
             }
 
+            // Some servers close the stream without `[DONE]`; don't lose the
+            // tool calls they streamed.
+            finish_tool_calls(&mut tool_call_ids, &tx);
             let _ = tx.unbounded_send(StreamEvent::Done);
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::openai_compat_url;
+
+    fn chat(base: &str) -> String {
+        openai_compat_url(base, "chat/completions")
+    }
+
+    #[test]
+    fn host_only_bases_get_v1_added() {
+        assert_eq!(
+            chat("https://api.openai.com"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.together.xyz"),
+            "https://api.together.xyz/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("http://localhost:1234"),
+            "http://localhost:1234/v1/chat/completions"
+        );
+        // Groq and OpenRouter keep a path prefix but no version segment.
+        assert_eq!(
+            chat("https://api.groq.com/openai"),
+            "https://api.groq.com/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://openrouter.ai/api"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn versioned_bases_are_not_double_versioned() {
+        assert_eq!(
+            chat("https://api.mistral.ai/v1"),
+            "https://api.mistral.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.cerebras.ai/v1"),
+            "https://api.cerebras.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.fireworks.ai/inference/v1"),
+            "https://api.fireworks.ai/inference/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://api.cohere.com/compatibility/v1"),
+            "https://api.cohere.com/compatibility/v1/chat/completions"
+        );
+        // Gemini's OpenAI-compat base: trailing slash, v1beta segment.
+        assert_eq!(
+            chat("https://generativelanguage.googleapis.com/v1beta/openai/"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+    }
+
+    #[test]
+    fn trailing_slashes_and_leading_path_slashes_are_tolerated() {
+        assert_eq!(
+            openai_compat_url("https://api.mistral.ai/v1//", "/models"),
+            "https://api.mistral.ai/v1/models"
+        );
+        assert_eq!(
+            openai_compat_url("https://api.openai.com/", "models"),
+            "https://api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn a_version_like_hostname_is_not_a_version_segment() {
+        assert_eq!(
+            chat("https://v1.example.com"),
+            "https://v1.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat("https://example.com/v2"),
+            "https://example.com/v2/chat/completions"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serve one streaming chat response from a real local socket.
+    async fn serve_once(body: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = sock.read(&mut buf).await;
+            let head =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(body.as_bytes()).await.unwrap();
+            sock.shutdown().await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn chunk(v: serde_json::Value) -> String {
+        format!("data: {v}\n\n")
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_end_in_index_order_even_without_done() {
+        let tc = |index: u64, id: Option<&str>, name: Option<&str>, args: &str| {
+            let mut call = serde_json::json!({"index": index, "function": {"arguments": args}});
+            if let Some(id) = id {
+                call["id"] = id.into();
+            }
+            if let Some(name) = name {
+                call["function"]["name"] = name.into();
+            }
+            chunk(serde_json::json!({"choices": [{"delta": {"tool_calls": [call]}}]}))
+        };
+        // Calls interleaved, and the stream closes with no `[DONE]`.
+        let body = [
+            tc(0, Some("call_a"), Some("read_file"), ""),
+            tc(1, Some("call_b"), Some("grep"), ""),
+            tc(1, None, None, "{\"pattern\":\"x\"}"),
+            tc(0, None, None, "{\"path\":\"a\"}"),
+        ]
+        .concat();
+        let base = serve_once(body).await;
+        let client = OpenAIClient::new("test-key").with_base_url(base);
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut ended = Vec::new();
+        let mut done = false;
+        while let Some(ev) = rx.next().await {
+            match ev {
+                StreamEvent::ToolCallEnd { id } => ended.push(id),
+                StreamEvent::Done => done = true,
+                StreamEvent::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        assert_eq!(ended, vec!["call_a", "call_b"]);
+        assert!(done);
     }
 }

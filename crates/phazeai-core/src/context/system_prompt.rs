@@ -157,8 +157,10 @@ impl SystemPromptBuilder {
                 root.join(".ai").join("instructions.md"),
             ];
 
+            // Instruction files listed in the project's privacy deny list are skipped.
+            let policy = crate::privacy::policy_for(root);
             for path in &root_candidates {
-                if path.exists() {
+                if path.exists() && !policy.is_denied(path) {
                     if let Ok(content) = std::fs::read_to_string(path) {
                         instructions.push(content);
                         break; // Only take the first match at project root
@@ -176,7 +178,7 @@ impl SystemPromptBuilder {
 
                 for file in ["CLAUDE.md", "AGENTS.md"] {
                     let parent_file = dir.join(file);
-                    if parent_file.exists() {
+                    if parent_file.exists() && !policy.is_denied(&parent_file) {
                         if let Ok(content) = std::fs::read_to_string(&parent_file) {
                             instructions.push(format!("# From {}\n{}", dir.display(), content));
                         }
@@ -306,7 +308,7 @@ Before tackling complex tasks, outline your plan. Follow this workflow:
 4. **Finalize**: Run tests/builds and summarize your accomplishments.";
 
 const TOOL_GUIDELINES: &str = "\n\n## The PhazeAI Arsenal
-You have 17 powerful tools at your disposal:
+You have a powerful toolbox at your disposal (the exact list for this session is given above):
 
 ### File System
 - `read_file`: Read contents (supports offset/limit for large files).
@@ -378,28 +380,43 @@ const SAFETY_RULES: &str = "\n\n## Safety Rules
 - **Infinite Loops**: Monitor your own iteration count. If stuck, ask the user for a hint.";
 
 /// Collect git info for the system prompt.
+///
+/// The modified-files list leaves out paths the project's privacy policy
+/// denies (the names of secret files are themselves information the model
+/// shouldn't see); status lines whose path can't be parsed are left out too.
 pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
-    let branch = std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+    let git_stdout = |args: &[&str]| {
+        crate::process::std_command("git")
+            .args(crate::privacy::GIT_NO_QUOTE_PATH)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
 
-    let dirty_files = std::process::Command::new("git")
-        .args(["status", "--porcelain", "--short"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
+    let branch = git_stdout(&["branch", "--show-current"]).map(|s| s.trim().to_string());
+
+    let dirty_files = git_stdout(&["status", "--porcelain", "--short"])
+        .map(|status| {
+            // Porcelain paths are relative to the repository top level, which
+            // may be above `root`.
+            let repo_root = git_stdout(&["rev-parse", "--show-toplevel"])
+                .map(|s| PathBuf::from(s.trim()))
+                .filter(|p| p.is_dir())
+                .unwrap_or_else(|| root.to_path_buf());
+            let policy = crate::privacy::policy_for(root);
+            let (kept, omitted) =
+                crate::privacy::filter_status_porcelain(&status, &repo_root, &policy);
+            for path in &omitted {
+                crate::privacy::audit::record_blocked_file(
+                    path,
+                    "left out of the system prompt's modified-files list",
+                    "system prompt",
+                );
+            }
+            kept.iter()
                 .take(20) // Limit to 20 files
                 .map(|l| l.trim().to_string())
                 .collect::<Vec<_>>()
@@ -407,4 +424,84 @@ pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
         .unwrap_or_default();
 
     (branch, dirty_files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be installed");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn git_status_in_system_prompt_omits_denied_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@t"]);
+        git(&root, &["config", "user.name", "t"]);
+        // Force quoting on, so the test proves `-c core.quotePath=false` wins.
+        git(&root, &["config", "core.quotePath", "true"]);
+        for (rel, body) in [
+            ("src/main.rs", "fn main() {}"),
+            ("café.txt", "1"),
+            (".env", "A=1"),
+            ("private/notes.md", "1"),
+        ] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        for rel in ["src/main.rs", "café.txt", ".env", "private/notes.md"] {
+            std::fs::write(root.join(rel), "changed").unwrap();
+        }
+        std::fs::create_dir_all(root.join(".phazeai")).unwrap();
+        std::fs::write(
+            root.join(crate::privacy::POLICY_FILE),
+            "deny = [\"private/**\"]\n",
+        )
+        .unwrap();
+
+        let (branch, dirty) = collect_git_info(&root);
+        assert!(branch.is_some());
+        let joined = dirty.join("\n");
+        assert!(dirty.iter().any(|l| l == "M src/main.rs"), "{joined}");
+        assert!(
+            dirty.iter().any(|l| l == "M café.txt"),
+            "unquoted: {joined}"
+        );
+        assert!(
+            dirty.iter().any(|l| l.starts_with("?? .phazeai")),
+            "{joined}"
+        );
+        assert!(!joined.contains(".env"), "{joined}");
+        assert!(!joined.contains("private"), "{joined}");
+
+        // The same list goes into the prompt text.
+        let prompt = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .with_git_info(branch, dirty)
+            .build();
+        let line = prompt
+            .lines()
+            .find(|l| l.starts_with("- Modified files:"))
+            .expect("modified files line");
+        assert!(line.contains("café.txt"), "{line}");
+        assert!(
+            !line.contains(".env") && !line.contains("private"),
+            "{line}"
+        );
+    }
 }

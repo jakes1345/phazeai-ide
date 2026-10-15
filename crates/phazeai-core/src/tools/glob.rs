@@ -51,11 +51,13 @@ impl Tool for GlobTool {
             .map_err(|e| PhazeError::tool("glob", format!("Failed to build glob set: {e}")))?;
 
         let mut matches = Vec::new();
+        let policy = crate::privacy::active();
 
         let walker = WalkBuilder::new(base_path)
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
+            .filter_entry(move |e| !policy.is_denied(&crate::privacy::absolutize(e.path())))
             .build();
 
         for entry in walker.flatten() {

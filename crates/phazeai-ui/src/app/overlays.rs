@@ -587,6 +587,48 @@ enum InlineEditUpdate {
     Err(String),
 }
 
+/// Upper bound on the file text sent as context for a Ctrl+K request that
+/// has no selection.
+const INLINE_EDIT_CONTEXT_CHARS: usize = 4096;
+
+/// The file a Ctrl+K request works on.
+///
+/// The code that is sent (the selection, or the file text) comes from the
+/// active editor tab — the tab whose cursor and selection the editor mirrors
+/// into `active_cursor` / `selected_text`. `open_file` is the explorer's last
+/// pick and lags behind once the user switches tabs by clicking them (or
+/// closes one), so it is only a fallback for when no tab is active; then
+/// there is no selection either.
+pub(crate) fn inline_edit_source(
+    active_tab: Option<&std::path::Path>,
+    open_file: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    active_tab.or(open_file).map(std::path::Path::to_path_buf)
+}
+
+/// The Ctrl+K prompt: rewrite only the selection when there is one, otherwise
+/// generate a fragment against the (capped) file text.
+pub(crate) fn inline_edit_prompt(instruction: &str, selection: &str, file_ctx: &str) -> String {
+    if !selection.is_empty() {
+        // Selection-scoped: only rewrite the selected region.
+        return format!(
+            "Rewrite ONLY the following code snippet according to the instruction. \
+             Respond with ONLY the rewritten snippet, no explanation, no markdown fences.\n\n\
+             Instruction: {instruction}\n\nCode to rewrite:\n{selection}"
+        );
+    }
+    let file_ctx = if file_ctx.len() > INLINE_EDIT_CONTEXT_CHARS {
+        &file_ctx[..file_ctx.floor_char_boundary(INLINE_EDIT_CONTEXT_CHARS)]
+    } else {
+        file_ctx
+    };
+    format!(
+        "Apply the following edit to the code. \
+         Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
+         Instruction: {instruction}\n\nCode context:\n{file_ctx}"
+    )
+}
+
 pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
     let open = state.ai.inline_edit_open;
     let query = state.ai.inline_edit_query;
@@ -607,7 +649,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     state2.ai.inline_edit_query.set(String::new());
                 }
                 InlineEditUpdate::Err(e) => {
-                    eprintln!("[PhazeAI] Ctrl+K error: {e}");
+                    tracing::warn!(target: "phazeai_ui", "Ctrl+K error: {e}");
                     state2.ai.thinking.set(false);
                     state2.ai.inline_edit_open.set(false);
                     state2.ai.inline_edit_query.set(String::new());
@@ -627,13 +669,15 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
         .style(move |s| {
             let t = state.workbench.theme.get();
             let p = &t.palette;
-            s.width_full().padding_horiz(10.0).padding_vert(8.0)
-             .font_size(14.0)
-             .color(p.text_primary)
-             .background(p.bg_elevated)
-             .border(1.0)
-             .border_color(p.border_focus)
-             .border_radius(6.0)
+            s.width_full()
+                .padding_horiz(10.0)
+                .padding_vert(8.0)
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(6.0)
         })
         .on_event_stop(EventListener::KeyDown, move |ev| {
             if let Event::KeyDown(e) = ev {
@@ -644,55 +688,82 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     }
                     Key::Named(NamedKey::Enter) => {
                         let instruction = query.get();
-                        if instruction.is_empty() { return; }
+                        if instruction.is_empty() {
+                            return;
+                        }
+                        // Privacy: a denied file's code is never sent. The check,
+                        // the selection and the file text all refer to the same
+                        // file — the active tab (see `inline_edit_source`).
+                        let active_tab = state
+                            .editor
+                            .active_cursor
+                            .get_untracked()
+                            .map(|(path, _, _)| path);
+                        let open_file = state.editor.open_file.get_untracked();
+                        let ctx_file =
+                            inline_edit_source(active_tab.as_deref(), open_file.as_deref());
+                        if let Some(ref p) = ctx_file {
+                            if !crate::panels::privacy::allow_editor_content(
+                                state.workbench.status_toast,
+                                p,
+                                "inline edit",
+                            ) {
+                                open.set(false);
+                                query.set(String::new());
+                                return;
+                            }
+                        }
+                        let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
                         ai_thinking.set(true);
                         let selection = state.editor.selected_text.get_untracked();
-                        let file_ctx = state.editor.open_file.get()
-                            .and_then(|p| std::fs::read_to_string(&p).ok())
-                            .unwrap_or_default();
-                        let file_ctx = if file_ctx.len() > 4096 {
-                            file_ctx[..file_ctx.floor_char_boundary(4096)].to_string()
+                        let file_ctx = if selection.is_empty() {
+                            ctx_file
+                                .as_ref()
+                                .and_then(|p| std::fs::read_to_string(p).ok())
+                                .unwrap_or_default()
                         } else {
-                            file_ctx
+                            String::new()
                         };
-                        let prompt = if !selection.is_empty() {
-                            // Selection-scoped: only rewrite the selected region.
-                            format!(
-                                "Rewrite ONLY the following code snippet according to the instruction. \
-                                 Respond with ONLY the rewritten snippet, no explanation, no markdown fences.\n\n\
-                                 Instruction: {instruction}\n\nCode to rewrite:\n{selection}"
-                            )
-                        } else {
-                            format!(
-                                "Apply the following edit to the code. \
-                                 Respond with ONLY the generated code fragment, no explanation, no markdown fences.\n\n\
-                                 Instruction: {instruction}\n\nCode context:\n{file_ctx}"
-                            )
-                        };
+                        let prompt = inline_edit_prompt(&instruction, &selection, &file_ctx);
                         let settings = Settings::load();
                         let tx = update_tx.clone();
                         std::thread::spawn(move || {
                             let rt = match tokio::runtime::Builder::new_current_thread()
-                                .enable_all().build()
+                                .enable_all()
+                                .build()
                             {
                                 Ok(rt) => rt,
-                                Err(e) => { let _ = tx.send(InlineEditUpdate::Err(format!("Runtime: {e}"))); return; }
+                                Err(e) => {
+                                    let _ = tx.send(InlineEditUpdate::Err(format!("Runtime: {e}")));
+                                    return;
+                                }
                             };
                             rt.block_on(async move {
                                 let client = match settings.build_llm_client() {
                                     Ok(c) => c,
-                                    Err(e) => { let _ = tx.send(InlineEditUpdate::Err(format!("LLM: {e}"))); return; }
+                                    Err(e) => {
+                                        let _ = tx.send(InlineEditUpdate::Err(format!("LLM: {e}")));
+                                        return;
+                                    }
                                 };
                                 let agent = Agent::new(client);
-                                let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                                let run_fut = agent.run_with_events(&prompt, agent_tx);
+                                let (agent_tx, mut agent_rx) =
+                                    tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+                                let run_fut = phazeai_core::privacy::audit::scope(
+                                    attached,
+                                    agent.run_with_events(&prompt, agent_tx),
+                                );
                                 let drain_fut = async {
                                     let mut accumulated = String::new();
                                     while let Some(event) = agent_rx.recv().await {
                                         match event {
-                                            AgentEvent::TextDelta(text) => { accumulated.push_str(&text); }
+                                            AgentEvent::TextDelta(text) => {
+                                                accumulated.push_str(&text);
+                                            }
                                             AgentEvent::Complete { .. } => {
-                                                let _ = tx.send(InlineEditUpdate::Done(accumulated.clone()));
+                                                let _ = tx.send(InlineEditUpdate::Done(
+                                                    accumulated.clone(),
+                                                ));
                                                 break;
                                             }
                                             AgentEvent::Error(e) => {
@@ -1393,7 +1464,7 @@ pub(crate) fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                     let root = ws.get();
                     let tx = row_tx.clone();
                     std::thread::spawn(move || {
-                        let out = std::process::Command::new("git")
+                        let out = phazeai_core::process::std_command("git")
                             .args(["checkout", &branch_name])
                             .current_dir(&root)
                             .output();
@@ -1743,4 +1814,55 @@ pub(crate) fn peek_def_overlay(state: IdeState) -> impl IntoView {
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
+}
+
+#[cfg(test)]
+mod inline_edit_tests {
+    use super::{inline_edit_prompt, inline_edit_source, INLINE_EDIT_CONTEXT_CHARS};
+    use std::path::Path;
+
+    #[test]
+    fn the_active_tab_wins_over_the_explorer_pick() {
+        // After clicking a tab, `open_file` still names the explorer's last
+        // pick; the selection comes from the active tab, so that is the file
+        // the privacy check (and the file context) must use.
+        let active = Path::new("/p/secrets/.env");
+        let picked = Path::new("/p/src/main.rs");
+        assert_eq!(
+            inline_edit_source(Some(active), Some(picked)).as_deref(),
+            Some(active)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_explorer_pick_without_an_active_tab() {
+        let picked = Path::new("/p/src/main.rs");
+        assert_eq!(
+            inline_edit_source(None, Some(picked)).as_deref(),
+            Some(picked)
+        );
+        assert_eq!(inline_edit_source(None, None), None);
+    }
+
+    #[test]
+    fn a_selection_scopes_the_prompt_and_leaves_the_file_text_out() {
+        let p = inline_edit_prompt("add docs", "fn a() {}", "SHOULD NOT APPEAR");
+        assert!(p.contains("Instruction: add docs"), "{p}");
+        assert!(p.ends_with("Code to rewrite:\nfn a() {}"), "{p}");
+        assert!(!p.contains("SHOULD NOT APPEAR"));
+    }
+
+    #[test]
+    fn without_a_selection_the_file_text_is_the_context_and_is_capped() {
+        let short = inline_edit_prompt("x", "", "let a = 1;");
+        assert!(short.ends_with("Code context:\nlet a = 1;"), "{short}");
+
+        // 2-byte chars: the cap must land on a char boundary and never panic.
+        let long: String = "é".repeat(INLINE_EDIT_CONTEXT_CHARS);
+        let p = inline_edit_prompt("x", "", &long);
+        let ctx = p.rsplit("Code context:\n").next().unwrap();
+        assert!(ctx.len() <= INLINE_EDIT_CONTEXT_CHARS);
+        assert!(ctx.chars().all(|c| c == 'é'));
+        assert!(!ctx.is_empty());
+    }
 }
