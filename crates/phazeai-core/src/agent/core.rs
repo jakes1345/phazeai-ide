@@ -29,9 +29,8 @@ pub type ApprovalFn = Box<
 
 /// Called before a write_file/edit_file executes.
 /// Arguments: (path, before_content, after_content). Returns true to proceed.
-pub type DiffHookFn = Box<
-    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
->;
+pub type DiffHookFn =
+    Box<dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
@@ -492,10 +491,7 @@ impl Agent {
 
 /// Compute (path, before, after) for write_file and edit_file tools so the UI
 /// can show a diff before the write happens. Returns None for all other tools.
-async fn compute_file_patch(
-    tool_name: &str,
-    params: &Value,
-) -> Option<(String, String, String)> {
+async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, String, String)> {
     match tool_name {
         "write_file" => {
             let path = params.get("path")?.as_str()?;

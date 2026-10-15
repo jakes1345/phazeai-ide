@@ -1,18 +1,19 @@
-// Library interface for phazeai-cli
-// This allows integration tests to access internal modules
+//! PhazeAI terminal UI.
+//!
+//! The binary (`src/main.rs`) is a thin wrapper around [`app`]; everything
+//! lives in this library so the pure pieces (markdown rendering, wrapping,
+//! input editing, command parsing…) are unit-testable.
 
-// NOTE: Since commands.rs and theme.rs are also declared in main.rs,
-// we need to use a path attribute to reference the same source file
-// to avoid "file loaded multiple times" errors.
-
-#[path = "commands.rs"]
+pub mod app;
 pub mod commands;
-
-#[path = "companion.rs"]
 pub mod companion;
-
-#[path = "theme.rs"]
+pub mod input;
+pub mod markdown;
+pub mod setup;
+pub mod term;
+pub mod text;
 pub mod theme;
+pub mod tool_view;
 
 // Re-export commonly used items for easier testing
 pub use commands::{handle_command, CommandResult};

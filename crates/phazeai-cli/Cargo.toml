@@ -32,5 +32,6 @@ globset = { workspace = true }
 ignore = { workspace = true }
 arboard = { workspace = true }
 syntect = { workspace = true }
-syntect-tui = { workspace = true }
+unicode-width = "0.2"
+similar = { workspace = true }
 pulldown-cmark = { workspace = true }
