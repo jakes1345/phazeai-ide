@@ -170,12 +170,28 @@ impl Agent {
     }
 
     /// Run the agent loop, emitting AgentEvents through the channel.
+    ///
+    /// Runs inside a privacy audit scope (unless the caller already opened one,
+    /// e.g. with the files its @mentions attached), so files that tools read
+    /// are attributed to the request that sends them.
     pub async fn run_with_events(
         &self,
         user_input: impl Into<String>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
         let user_input = user_input.into();
+        if crate::privacy::audit::in_scope() {
+            self.run_loop(user_input, event_tx).await
+        } else {
+            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, event_tx)).await
+        }
+    }
+
+    async fn run_loop(
+        &self,
+        user_input: String,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
         let mut iterations = 0;
         let mut tool_executions = Vec::new();
         let mut total_input_tokens: u64 = 0;
@@ -492,6 +508,13 @@ impl Agent {
 /// Compute (path, before, after) for write_file and edit_file tools so the UI
 /// can show a diff before the write happens. Returns None for all other tools.
 async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, String, String)> {
+    // Denied files are refused by the tool itself; don't show a diff for them.
+    if let Some(path) = params.get("path").and_then(|p| p.as_str()) {
+        let abs = crate::privacy::absolutize(std::path::Path::new(path));
+        if crate::privacy::active().is_denied(&abs) {
+            return None;
+        }
+    }
     match tool_name {
         "write_file" => {
             let path = params.get("path")?.as_str()?;

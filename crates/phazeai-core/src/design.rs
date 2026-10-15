@@ -41,7 +41,11 @@ pub fn designs_dir(root: &Path) -> PathBuf {
 
 /// The project's design system, if it has one with any content.
 pub fn load_design_system(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(design_system_path(root)).ok()?;
+    let path = design_system_path(root);
+    if crate::privacy::policy_for(root).is_denied(&path) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
@@ -251,15 +255,17 @@ fn is_style_source(path: &Path) -> bool {
 /// skipping dependencies and build output, within a fixed size budget.
 /// Paths are relative to `root`.
 pub fn collect_style_sources(root: &Path) -> Vec<(PathBuf, String)> {
+    // These are sent to the model: files the privacy policy denies are skipped.
+    let policy = crate::privacy::policy_for(root);
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
-        .filter_entry(|e| {
+        .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),
                 "node_modules" | "target" | "dist" | "build" | ".next" | "vendor"
-            )
+            ) && (e.depth() == 0 || !policy.is_denied(&crate::privacy::absolutize(e.path())))
         })
         .build();
     let mut candidates: Vec<PathBuf> = walker

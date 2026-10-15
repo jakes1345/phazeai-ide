@@ -113,6 +113,10 @@ fn load_from_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
+        // Skill bodies go into the system prompt; honour the privacy deny list.
+        if crate::privacy::active().is_denied(&path) {
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Some(skill) = parse_skill_file(&path, &content, source.clone()) {
                 skills.push(skill);

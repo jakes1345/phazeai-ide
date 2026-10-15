@@ -17,7 +17,28 @@ use crate::llm::Message;
 ///
 /// This is intentionally synchronous-from-a-thread: callers spawn a thread,
 /// call this, then write the result back to a signal via `create_ext_action`.
-pub async fn fim_complete(prefix: &str, suffix: &str, language: &str) -> Result<String, String> {
+///
+/// `path` is the file being edited: completions are skipped entirely (empty
+/// result, nothing sent) when the privacy policy denies it; otherwise it is
+/// recorded in the privacy audit log as the file whose content was sent.
+pub async fn fim_complete(
+    path: &std::path::Path,
+    prefix: &str,
+    suffix: &str,
+    language: &str,
+) -> Result<String, String> {
+    // Silent skip: this runs on every typing pause, so it isn't logged as a block.
+    if crate::privacy::active().is_denied(path) {
+        return Ok(String::new());
+    }
+    crate::privacy::audit::scope(
+        vec![path.to_path_buf()],
+        fim_request(prefix, suffix, language),
+    )
+    .await
+}
+
+async fn fim_request(prefix: &str, suffix: &str, language: &str) -> Result<String, String> {
     let settings = Settings::load();
     let client = settings.build_llm_client().map_err(|e| e.to_string())?;
 

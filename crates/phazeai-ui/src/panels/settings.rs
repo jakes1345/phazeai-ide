@@ -1173,6 +1173,8 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         divider(state.clone()),
         ai_section(state.clone()),
         divider(state.clone()),
+        crate::panels::privacy::privacy_section(state.clone()),
+        divider(state.clone()),
         keybindings_section(state.clone()),
         divider(state.clone()),
         about_section(state.clone()),

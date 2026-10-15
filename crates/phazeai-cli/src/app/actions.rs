@@ -523,8 +523,16 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
         }
         CommandResult::AddFile(path_str) => {
             let path = std::path::Path::new(&path_str);
+            let abs = phazeai_core::privacy::absolutize(path);
+            if let Err(reason) = phazeai_core::privacy::check_and_record(&abs, "/add") {
+                state.error(format!(
+                    "Not added: '{path_str}' is {reason}. See /privacy."
+                ));
+                return;
+            }
             match std::fs::read_to_string(path) {
                 Ok(contents) => {
+                    phazeai_core::privacy::audit::attach_to_next_scope(&abs);
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())

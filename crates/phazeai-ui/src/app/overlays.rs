@@ -645,10 +645,21 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     Key::Named(NamedKey::Enter) => {
                         let instruction = query.get();
                         if instruction.is_empty() { return; }
+                        // Privacy: a denied file's code is never sent.
+                        let ctx_file = state.editor.open_file.get_untracked();
+                        if let Some(ref p) = ctx_file {
+                            if !crate::panels::privacy::allow_editor_content(state.workbench.status_toast, p, "inline edit") {
+                                open.set(false);
+                                query.set(String::new());
+                                return;
+                            }
+                        }
+                        let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
                         ai_thinking.set(true);
                         let selection = state.editor.selected_text.get_untracked();
-                        let file_ctx = state.editor.open_file.get()
-                            .and_then(|p| std::fs::read_to_string(&p).ok())
+                        let file_ctx = ctx_file
+                            .as_ref()
+                            .and_then(|p| std::fs::read_to_string(p).ok())
                             .unwrap_or_default();
                         let file_ctx = if file_ctx.len() > 4096 {
                             file_ctx[..file_ctx.floor_char_boundary(4096)].to_string()
@@ -685,7 +696,10 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                                 };
                                 let agent = Agent::new(client);
                                 let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                                let run_fut = agent.run_with_events(&prompt, agent_tx);
+                                let run_fut = phazeai_core::privacy::audit::scope(
+                                    attached,
+                                    agent.run_with_events(&prompt, agent_tx),
+                                );
                                 let drain_fut = async {
                                     let mut accumulated = String::new();
                                     while let Some(event) = agent_rx.recv().await {

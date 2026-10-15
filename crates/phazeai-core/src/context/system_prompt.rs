@@ -157,8 +157,10 @@ impl SystemPromptBuilder {
                 root.join(".ai").join("instructions.md"),
             ];
 
+            // Instruction files listed in the project's privacy deny list are skipped.
+            let policy = crate::privacy::policy_for(root);
             for path in &root_candidates {
-                if path.exists() {
+                if path.exists() && !policy.is_denied(path) {
                     if let Ok(content) = std::fs::read_to_string(path) {
                         instructions.push(content);
                         break; // Only take the first match at project root
@@ -176,7 +178,7 @@ impl SystemPromptBuilder {
 
                 for file in ["CLAUDE.md", "AGENTS.md"] {
                     let parent_file = dir.join(file);
-                    if parent_file.exists() {
+                    if parent_file.exists() && !policy.is_denied(&parent_file) {
                         if let Ok(content) = std::fs::read_to_string(&parent_file) {
                             instructions.push(format!("# From {}\n{}", dir.display(), content));
                         }

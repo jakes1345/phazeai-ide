@@ -360,7 +360,26 @@ impl ProviderRegistry {
     }
 
     /// Build an LLM client for a specific provider and model.
+    ///
+    /// Every client is wrapped in [`crate::privacy::GuardedClient`], which
+    /// refuses non-local providers when the active project is `local_only`
+    /// and records each request in the privacy audit log.
     pub fn build_client_for(
+        &self,
+        config: &ProviderConfig,
+        model: &str,
+    ) -> Result<Box<dyn super::LlmClient>, crate::error::PhazeError> {
+        crate::privacy::check_provider(&config.id, &config.base_url, model)?;
+        let inner = self.build_unguarded_client(config, model)?;
+        Ok(Box::new(crate::privacy::GuardedClient::new(
+            inner,
+            config.id.clone(),
+            model,
+            config.base_url.clone(),
+        )))
+    }
+
+    fn build_unguarded_client(
         &self,
         config: &ProviderConfig,
         model: &str,

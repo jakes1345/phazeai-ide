@@ -97,20 +97,33 @@ fn run_job(
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Files whose contents go into the prompt, for the privacy audit log.
+    // (Style sources and the design system already skip denied files.)
+    let mut attached: Vec<PathBuf> = Vec::new();
     let (system, prompt) = match job {
-        Job::DesignSystem => (
-            EXTRACT_SYSTEM_PROMPT,
-            extract_prompt(&collect_style_sources(root)),
-        ),
+        Job::DesignSystem => {
+            let sources = collect_style_sources(root);
+            attached.extend(sources.iter().map(|(rel, _)| root.join(rel)));
+            (EXTRACT_SYSTEM_PROMPT, extract_prompt(&sources))
+        }
         Job::NewDesign | Job::Revision => {
             let current = match revise {
-                Some(path) => Some(
-                    std::fs::read_to_string(path)
-                        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?,
-                ),
+                Some(path) => {
+                    phazeai_core::privacy::check_and_record(path, "design revision").map_err(
+                        |reason| format!("Not sent to AI: {} is {reason}", path.display()),
+                    )?;
+                    attached.push(path.to_path_buf());
+                    Some(
+                        std::fs::read_to_string(path)
+                            .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?,
+                    )
+                }
                 None => None,
             };
             let ds = load_design_system(root);
+            if ds.is_some() {
+                attached.push(design::design_system_path(root));
+            }
             (
                 DESIGN_SYSTEM_PROMPT,
                 design_prompt(request, ds.as_deref(), current.as_deref()),
@@ -119,17 +132,14 @@ fn run_job(
     };
 
     let mut last_sent = 0;
-    let reply = rt.block_on(design::complete(
-        client.as_ref(),
-        system,
-        &prompt,
-        cancel,
-        |text| {
+    let reply = rt.block_on(phazeai_core::privacy::audit::scope(
+        attached,
+        design::complete(client.as_ref(), system, &prompt, cancel, |text| {
             if text.len() >= last_sent + PROGRESS_STEP {
                 last_sent = text.len();
                 let _ = tx.try_send(DesignUpdate::Progress(text.len()));
             }
-        },
+        }),
     ))?;
 
     match job {

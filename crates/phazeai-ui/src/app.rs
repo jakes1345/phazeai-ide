@@ -567,6 +567,7 @@ impl IdeState {
         // move_path, copy_path, create_directory, delete_path) refuse paths
         // outside the workspace, including `..` and symlink escapes.
         phazeai_core::tools::sandbox::set_workspace_root(Some(workspace.clone()));
+        phazeai_core::privacy::set_active_project(&workspace);
 
         let git_branch = create_rw_signal("main".to_string());
 
@@ -1494,6 +1495,17 @@ fn editor_ai_prompt(state: &IdeState, on_selection: &str, on_line: &str) -> Opti
 /// Send an editor AI action to the chat panel and reveal it.
 fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
     if let Some(prompt) = editor_ai_prompt(state, on_selection, on_line) {
+        // Privacy: nothing from a denied file goes to the AI.
+        if let Some((path, _, _)) = state.editor.active_cursor.get_untracked() {
+            if !crate::panels::privacy::allow_editor_content(
+                state.workbench.status_toast,
+                &path,
+                "editor AI action",
+            ) {
+                return;
+            }
+            crate::panels::privacy::attach_for_next_send(&path);
+        }
         state.ai.pending_chat_inject.set(Some(prompt));
         state.workbench.show_right_panel.set(true);
     }
@@ -2377,6 +2389,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.color(state.workbench.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
+        crate::panels::privacy::status_indicator(state.clone()),
     ))
     .style(|s| s.items_center().padding_horiz(8.0));
 
@@ -3728,10 +3741,15 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
 }
 
 fn ide_root(state: IdeState) -> impl IntoView {
+    // Keep the AI privacy policy in sync with the workspace root.
+    crate::panels::privacy::install(&state);
+
     // ── FIM inline completion worker ─────────────────────────────────────────
-    // Editors send (prefix, suffix, lang) after a 600ms debounce; this thread
-    // calls the LLM and writes completions back through a signal channel.
-    let (fim_req_tx, fim_req_rx) = std::sync::mpsc::sync_channel::<(String, String, String)>(4);
+    // Editors send (path, prefix, suffix, lang) after a 600ms debounce; this
+    // thread calls the LLM and writes completions back through a signal channel.
+    // `fim_complete` skips files the privacy policy denies.
+    let (fim_req_tx, fim_req_rx) =
+        std::sync::mpsc::sync_channel::<(PathBuf, String, String, String)>(4);
     {
         let ghost_text = state.ai.ghost_text;
         let (fim_result_tx, fim_result_rx) = std::sync::mpsc::sync_channel::<String>(4);
@@ -3744,13 +3762,15 @@ fn ide_root(state: IdeState) -> impl IntoView {
             }
         });
         std::thread::spawn(move || {
-            while let Ok((prefix, suffix, lang)) = fim_req_rx.recv() {
+            while let Ok((path, prefix, suffix, lang)) = fim_req_rx.recv() {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("fim tokio rt");
                 let result = rt
-                    .block_on(phazeai_core::fim::fim_complete(&prefix, &suffix, &lang))
+                    .block_on(phazeai_core::fim::fim_complete(
+                        &path, &prefix, &suffix, &lang,
+                    ))
                     .unwrap_or_default();
                 if !result.is_empty() {
                     let _ = fim_result_tx.try_send(result);
@@ -5276,6 +5296,14 @@ pub fn launch_phaze_ide() {
                                     if let Some((ref path, line, _)) =
                                         state.editor.active_cursor.get()
                                     {
+                                        if !crate::panels::privacy::allow_editor_content(
+                                            state.workbench.status_toast,
+                                            path,
+                                            "editor AI action",
+                                        ) {
+                                            return;
+                                        }
+                                        crate::panels::privacy::attach_for_next_send(path);
                                         let sel = state.editor.selected_text.get();
                                         let fname = path
                                             .file_name()

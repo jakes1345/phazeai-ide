@@ -137,7 +137,12 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             })
             .unwrap_or(cwd);
-        phazeai_core::tools::sandbox::set_workspace_root(Some(workspace));
+        phazeai_core::tools::sandbox::set_workspace_root(Some(workspace.clone()));
+        // The project's AI privacy policy (.phazeai/privacy.toml at the same root).
+        phazeai_core::privacy::set_active_project(&workspace);
+        if let Some(err) = phazeai_core::privacy::active().load_error() {
+            eprintln!("warning: {err} — cloud AI is blocked until it's fixed (see /privacy)");
+        }
     }
 
     let mut settings = phazeai_core::Settings::load();
