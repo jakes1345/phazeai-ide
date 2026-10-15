@@ -348,14 +348,21 @@ pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::Edito
 }
 
 /// Show a toast notification that auto-dismisses after 3 seconds.
-/// Safe to call from any code that has access to `IdeState`.
+/// Safe to call from any code that has access to `IdeState`, including from
+/// inside an effect.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
     use floem::ext_event::create_ext_action;
     use floem::reactive::Scope;
     toast.set(Some(msg.into()));
-    // Use Scope::current() to reuse the caller's scope — no leak.
-    let dismiss = create_ext_action(Scope::current(), move |_: ()| {
+    // The dismiss action gets its own root scope rather than the caller's: an
+    // effect disposes everything created under its scope each time it re-runs,
+    // which would silently drop the dismissal when this is called from one
+    // (the chat panel's update effect re-runs on every streamed token). The
+    // scope is disposed once the action has fired, so nothing leaks.
+    let scope = Scope::new();
+    let dismiss = create_ext_action(scope, move |_: ()| {
         toast.set(None);
+        scope.dispose();
     });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));

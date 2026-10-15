@@ -238,11 +238,13 @@ impl Agent {
 
             // Near the budget, fold the oldest messages into a summary rather
             // than forgetting them. If that fails, the trim below still keeps
-            // the request within budget.
+            // the request within budget. Stop applies while the summary is
+            // being written, like anywhere else in the loop.
             match crate::context::compaction::maybe_compact(
                 &self.conversation,
                 self.llm.as_ref(),
                 self.max_context_tokens,
+                self.cancel_token.as_deref(),
             )
             .await
             {
@@ -254,6 +256,10 @@ impl Agent {
                     });
                 }
                 Ok(None) => {}
+                Err(e) if e == crate::context::compaction::CANCELLED => {
+                    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+                    return Err(PhazeError::Cancelled);
+                }
                 Err(e) => tracing::warn!("context compaction failed, trimming instead: {e}"),
             }
             if self.is_cancelled() {
@@ -582,4 +588,74 @@ fn truncate_str_annotated(s: &str, max_len: usize) -> String {
     let kept: String = s.chars().take(max_len).collect();
     let elided = total - max_len;
     format!("{kept}\n... [truncated, {elided} more chars in tool output sent to model]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::OpenAIClient;
+    use std::time::Duration;
+
+    /// Accept one connection and never answer on it.
+    async fn serve_nothing() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn stop_during_compaction_cancels_the_run_promptly() {
+        // ~1200 tokens of history against a 1000-token budget: the first
+        // iteration asks the model for a summary before anything else.
+        let conversation = Arc::new(Mutex::new(ConversationHistory::new()));
+        {
+            let mut c = conversation.lock().await;
+            for n in 0..12 {
+                let text = format!("turn {n:02} {}", "x".repeat(292));
+                if n % 2 == 0 {
+                    c.add_user_message(text);
+                } else {
+                    c.add_assistant_message(text);
+                }
+            }
+        }
+        let client = OpenAIClient::new("k").with_base_url(serve_nothing().await);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let agent = Agent::new(Box::new(client))
+            .with_context_budget(1000)
+            .with_cancel_token(cancel.clone())
+            .with_shared_conversation(conversation.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let started = std::time::Instant::now();
+        let (result, _) = tokio::join!(agent.run_with_events("one more", tx), async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.store(true, Ordering::Relaxed);
+        });
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(PhazeError::Cancelled)), "{result:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "returned after {elapsed:?}"
+        );
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(m) if m == "Cancelled")),
+            "{events:?}"
+        );
+        // The user message was recorded; nothing was folded or dropped.
+        let c = conversation.lock().await;
+        assert_eq!(c.len(), 13);
+        assert_eq!(c.summary(), None);
+    }
 }
