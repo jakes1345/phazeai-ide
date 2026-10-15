@@ -607,7 +607,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     state2.ai.inline_edit_query.set(String::new());
                 }
                 InlineEditUpdate::Err(e) => {
-                    eprintln!("[PhazeAI] Ctrl+K error: {e}");
+                    tracing::warn!(target: "phazeai_ui", "Ctrl+K error: {e}");
                     state2.ai.thinking.set(false);
                     state2.ai.inline_edit_open.set(false);
                     state2.ai.inline_edit_query.set(String::new());
@@ -1393,7 +1393,7 @@ pub(crate) fn branch_picker_overlay(state: IdeState) -> impl IntoView {
                     let root = ws.get();
                     let tx = row_tx.clone();
                     std::thread::spawn(move || {
-                        let out = std::process::Command::new("git")
+                        let out = phazeai_core::process::std_command("git")
                             .args(["checkout", &branch_name])
                             .current_dir(&root)
                             .output();

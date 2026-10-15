@@ -116,7 +116,7 @@ pub fn tests_panel(state: IdeState) -> impl IntoView {
         let tx = result_tx.clone();
 
         std::thread::spawn(move || {
-            let result = std::process::Command::new("cargo")
+            let result = phazeai_core::process::std_command("cargo")
                 .args(["test", "--workspace", "--", "--test-output", "immediate"])
                 .current_dir(&root)
                 .output();

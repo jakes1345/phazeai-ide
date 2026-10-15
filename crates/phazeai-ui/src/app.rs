@@ -429,7 +429,7 @@ fn provider_problem(settings: &Settings) -> Option<String> {
 fn check_python_ready(settings: &Settings) -> bool {
     let bins = [settings.sidecar.python_path.as_str(), "python3", "python"];
     bins.iter().any(|bin| {
-        std::process::Command::new(bin)
+        phazeai_core::process::std_command(bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -438,7 +438,7 @@ fn check_python_ready(settings: &Settings) -> bool {
 }
 
 fn check_lsp_ready() -> bool {
-    std::process::Command::new("rust-analyzer")
+    phazeai_core::process::std_command("rust-analyzer")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -545,7 +545,7 @@ impl IdeState {
         // are correctly scoped to the project root even when launched from a
         // subdirectory. Fall back to current_dir if not inside a git repo.
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let workspace = std::process::Command::new("git")
+        let workspace = phazeai_core::process::std_command("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(&cwd)
             .output()
@@ -573,7 +573,7 @@ impl IdeState {
         // the signal via a sync channel + create_signal_from_channel.
         let (branch_tx, branch_rx) = std::sync::mpsc::sync_channel::<String>(1);
         std::thread::spawn(move || {
-            let branch = std::process::Command::new("git")
+            let branch = phazeai_core::process::std_command("git")
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .output()
                 .map(|out| {
@@ -2286,7 +2286,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                 let root = s3.project.workspace_root.get();
                 let tx = branch_tx.clone();
                 std::thread::spawn(move || {
-                    let branches = std::process::Command::new("git")
+                    let branches = phazeai_core::process::std_command("git")
                         .args(["branch", "--list"])
                         .current_dir(&root)
                         .output()
@@ -3486,7 +3486,7 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
 /// Run `git diff HEAD -- <path>` and return colored diff lines.
 fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
     let dir = path.parent().unwrap_or(path);
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output();
@@ -3497,7 +3497,7 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
         // Try diff against staged (index) as fallback
-        let out2 = std::process::Command::new("git")
+        let out2 = phazeai_core::process::std_command("git")
             .args(["diff", "--", path.to_str().unwrap_or("")])
             .current_dir(dir)
             .output();

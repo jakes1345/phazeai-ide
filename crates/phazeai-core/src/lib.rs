@@ -13,6 +13,7 @@ pub mod git;
 pub mod llm;
 pub mod lsp;
 pub mod mcp;
+pub mod process;
 pub mod project;
 pub mod skills;
 pub mod syntax;

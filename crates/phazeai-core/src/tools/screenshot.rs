@@ -64,7 +64,7 @@ impl Tool for ScreenshotTool {
         // Detect available screenshot tool and display server
         let (command, args) = detect_screenshot_command(output_path, region)?;
 
-        let output = tokio::process::Command::new(&command)
+        let output = crate::process::tokio_command(&command)
             .args(&args)
             .output()
             .await
@@ -179,7 +179,7 @@ fn which_exists(command: &str) -> bool {
     // Try `{command} --version` first, then `-v` as fallback.
     // This avoids relying on `which` (Unix-only) or `where` (Windows-only).
     for flag in &["--version", "-v"] {
-        match std::process::Command::new(command).arg(flag).output() {
+        match crate::process::std_command(command).arg(flag).output() {
             Ok(o) => {
                 // Exit 0 means the binary exists and understood the flag.
                 // Some tools exit non-zero for --version but still exist; treat

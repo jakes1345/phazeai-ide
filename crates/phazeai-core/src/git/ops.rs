@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::process::Command;
 
 /// Git operations using the system git binary.
 /// Falls back gracefully if git is not installed.
@@ -52,7 +51,7 @@ impl GitOps {
     }
 
     async fn run_git(&self, args: &[&str]) -> Result<String, String> {
-        let output = Command::new("git")
+        let output = crate::process::tokio_command("git")
             .args(args)
             .current_dir(&self.repo_root)
             .stdout(Stdio::piped())

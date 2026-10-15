@@ -144,7 +144,7 @@ fn char_to_status(c: char) -> Option<GitFileStatus> {
 }
 
 fn run_git_status(root: &std::path::Path) -> GitStatusData {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["status", "--porcelain"])
         .current_dir(root)
         .output();
@@ -155,7 +155,7 @@ fn run_git_status(root: &std::path::Path) -> GitStatusData {
 }
 
 fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["commit", "-m", message])
         .current_dir(root)
         .output()
@@ -168,7 +168,7 @@ fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
 }
 
 fn run_git_add(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["add", path])
         .current_dir(root)
         .output()
@@ -181,7 +181,7 @@ fn run_git_add(root: &std::path::Path, path: &str) -> Result<(), String> {
 }
 
 fn run_git_reset(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["reset", "HEAD", "--", path])
         .current_dir(root)
         .output()
@@ -194,7 +194,7 @@ fn run_git_reset(root: &std::path::Path, path: &str) -> Result<(), String> {
 }
 
 fn run_git_discard(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["restore", "--worktree", "--", path])
         .current_dir(root)
         .output()
@@ -209,7 +209,7 @@ fn run_git_discard(root: &std::path::Path, path: &str) -> Result<(), String> {
 /// Returns (current_branch, all_branches).
 fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
     // Current branch
-    let current = std::process::Command::new("git")
+    let current = phazeai_core::process::std_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(root)
         .output()
@@ -229,7 +229,7 @@ fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
         });
 
     // All local branches
-    let branches_raw = std::process::Command::new("git")
+    let branches_raw = phazeai_core::process::std_command("git")
         .args(["branch", "--list"])
         .current_dir(root)
         .output()
@@ -256,7 +256,7 @@ fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
 }
 
 fn run_git_checkout(root: &std::path::Path, branch: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["checkout", branch])
         .current_dir(root)
         .output()
@@ -269,7 +269,7 @@ fn run_git_checkout(root: &std::path::Path, branch: &str) -> Result<(), String> 
 }
 
 fn run_git_checkout_new(root: &std::path::Path, branch: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["checkout", "-b", branch])
         .current_dir(root)
         .output()
@@ -282,7 +282,7 @@ fn run_git_checkout_new(root: &std::path::Path, branch: &str) -> Result<(), Stri
 }
 
 fn run_git_pull(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["pull"])
         .current_dir(root)
         .output()
@@ -295,7 +295,7 @@ fn run_git_pull(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_push(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["push"])
         .current_dir(root)
         .output()
@@ -308,7 +308,7 @@ fn run_git_push(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["stash", "push", "-m", "WIP"])
         .current_dir(root)
         .output()
@@ -321,7 +321,7 @@ fn run_git_stash(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["stash", "pop"])
         .current_dir(root)
         .output()
@@ -334,7 +334,7 @@ fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
-    std::process::Command::new("git")
+    phazeai_core::process::std_command("git")
         .args(["stash", "list"])
         .current_dir(root)
         .output()
@@ -352,7 +352,7 @@ fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
 }
 
 fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["stash", "apply", &format!("stash@{{{idx}}}")])
         .current_dir(root)
         .output()
@@ -365,7 +365,7 @@ fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, Str
 }
 
 fn run_git_stash_drop(root: &std::path::Path, idx: usize) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["stash", "drop", &format!("stash@{{{idx}}}")])
         .current_dir(root)
         .output()
@@ -378,7 +378,7 @@ fn run_git_stash_drop(root: &std::path::Path, idx: usize) -> Result<String, Stri
 }
 
 fn run_git_merge(root: &std::path::Path, branch: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["merge", branch])
         .current_dir(root)
         .output()
@@ -391,7 +391,7 @@ fn run_git_merge(root: &std::path::Path, branch: &str) -> Result<String, String>
 }
 
 fn run_git_cherry_pick(root: &std::path::Path, hash: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["cherry-pick", hash])
         .current_dir(root)
         .output()
@@ -404,7 +404,7 @@ fn run_git_cherry_pick(root: &std::path::Path, hash: &str) -> Result<String, Str
 }
 
 fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
-    std::process::Command::new("git")
+    phazeai_core::process::std_command("git")
         .args(["tag", "--sort=-version:refname"])
         .current_dir(root)
         .output()
@@ -422,7 +422,7 @@ fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
 }
 
 fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["tag", name])
         .current_dir(root)
         .output()
@@ -435,7 +435,7 @@ fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, Stri
 }
 
 fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["push", "--tags"])
         .current_dir(root)
         .output()
@@ -451,7 +451,7 @@ fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
 fn run_git_revert_hunk(root: &std::path::Path, diff_patch: &str) -> Result<String, String> {
     let tmp = std::env::temp_dir().join("phaze_revert_hunk.patch");
     std::fs::write(&tmp, diff_patch).map_err(|e| e.to_string())?;
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["apply", "--reverse", tmp.to_str().unwrap_or("")])
         .current_dir(root)
         .output()
@@ -465,7 +465,7 @@ fn run_git_revert_hunk(root: &std::path::Path, diff_patch: &str) -> Result<Strin
 
 /// Run `git diff HEAD` to get the full working-tree diff.
 fn run_git_diff_head(root: &std::path::Path) -> String {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--no-color"])
         .current_dir(root)
         .output();
@@ -589,7 +589,7 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
 }
 
 fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["fetch", "--all", "--prune"])
         .current_dir(root)
         .output()
@@ -602,7 +602,7 @@ fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["branch", "-d", branch])
         .current_dir(root)
         .output()
@@ -611,7 +611,7 @@ fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String,
         Ok(format!("Deleted branch {branch}"))
     } else {
         // Try force delete
-        let out2 = std::process::Command::new("git")
+        let out2 = phazeai_core::process::std_command("git")
             .args(["branch", "-D", branch])
             .current_dir(root)
             .output()
@@ -626,7 +626,7 @@ fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String,
 
 /// Get the diff for a specific commit hash.
 fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["show", "--stat", "--patch", "--no-color", hash])
         .current_dir(root)
         .output();
@@ -639,7 +639,7 @@ fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
 
 /// Loads the 50 most recent commits via `git log`.
 fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["log", "--format=%h|%s|%an|%ar", "-50"])
         .current_dir(root)
         .output();
@@ -668,7 +668,7 @@ fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
 /// Loads up to 50 recent commits with full hash for the COMMIT LOG section.
 fn run_git_log_full(root: &std::path::Path, limit: usize) -> Vec<CommitLogEntry> {
     let limit_str = limit.to_string();
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["log", "--format=%H|%h|%s|%an|%ar", &format!("-{limit_str}")])
         .current_dir(root)
         .output();
@@ -758,7 +758,7 @@ fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
 /// Run `git blame --date=short <path>` and return per-line blame info.
 fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
     let dir = path.parent().unwrap_or(path);
-    let out = match std::process::Command::new("git")
+    let out = match phazeai_core::process::std_command("git")
         .args(["blame", "--date=short", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output()
@@ -2009,7 +2009,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
         std::thread::spawn(move || {
             // Collect staged diff summary + full diff (capped at 8 kB)
-            let stat = std::process::Command::new("git")
+            let stat = phazeai_core::process::std_command("git")
                 .args(["diff", "--cached", "--stat"])
                 .current_dir(&root)
                 .output()
@@ -2027,7 +2027,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 return;
             }
 
-            let full_diff = std::process::Command::new("git")
+            let full_diff = phazeai_core::process::std_command("git")
                 .args(["diff", "--cached"])
                 .current_dir(&root)
                 .output()

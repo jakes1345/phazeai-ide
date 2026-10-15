@@ -892,15 +892,15 @@ fn about_section(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open")
+        let _ = phazeai_core::process::std_command("xdg-open")
             .arg("https://github.com/phazeai/ide")
             .spawn();
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open")
+        let _ = phazeai_core::process::std_command("open")
             .arg("https://github.com/phazeai/ide")
             .spawn();
         #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("cmd")
+        let _ = phazeai_core::process::std_command("cmd")
             .args(["/c", "start", "https://github.com/phazeai/ide"])
             .spawn();
     });

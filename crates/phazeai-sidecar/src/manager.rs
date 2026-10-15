@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tracing::{info, warn};
 
 /// Manages the Python sidecar process lifecycle.
@@ -51,7 +51,7 @@ impl SidecarManager {
             self.script_path.display()
         );
 
-        let child = Command::new(&self.python_path)
+        let child = phazeai_core::process::tokio_command(&self.python_path)
             .arg(&self.script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -81,7 +81,7 @@ impl SidecarManager {
 
     /// Check if Python is available on the system.
     pub async fn check_python(python_path: &str) -> bool {
-        Command::new(python_path)
+        phazeai_core::process::tokio_command(python_path)
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

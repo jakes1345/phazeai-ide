@@ -89,7 +89,7 @@ impl Tool for BashTool {
         // Capture pwd after command so we can track cwd changes (only on success)
         let wrapped_command = format!("{command} && echo \"PWD:$(pwd)\"");
 
-        let mut cmd = tokio::process::Command::new("bash");
+        let mut cmd = crate::process::tokio_command("bash");
         cmd.arg("-c").arg(&wrapped_command).current_dir(&cwd);
 
         let output =

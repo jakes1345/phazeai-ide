@@ -56,7 +56,7 @@ impl Tool for OpenTool {
             "xdg-open"
         };
 
-        let mut cmd = tokio::process::Command::new(opener);
+        let mut cmd = crate::process::tokio_command(opener);
         if cfg!(target_os = "windows") {
             cmd.args(["/C", "start", "", path_str]);
         } else {

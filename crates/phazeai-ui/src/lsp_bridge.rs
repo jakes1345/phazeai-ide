@@ -245,7 +245,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("[LSP] Failed to build runtime: {e}");
+                tracing::error!(target: "phazeai_ui::lsp", "failed to build LSP runtime: {e}");
                 return;
             }
         };
@@ -277,7 +277,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                         match cmd {
                             Some(LspCommand::OpenFile { path, text }) => {
                                 if let Err(e) = manager.ensure_server_for_file(&path).await {
-                                    eprintln!("[LSP] no server for {}: {e}", path.display());
+                                    tracing::debug!(target: "phazeai_ui::lsp", "no server for {}: {e}", path.display());
                                 } else {
                                     manager.did_open(&path, &text);
                                 }
@@ -296,7 +296,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(items) => {
                                                 let _ = evt_tx.send(LspEvent::Completions(items));
                                             }
-                                            Err(e) => eprintln!("[LSP] completion error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "completion error: {e}")}
                                     });
                                 }
                             }
@@ -309,7 +309,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] definition error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "definition error: {e}")}
                                     });
                                 }
                             }
@@ -323,7 +323,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 let _ = evt_tx.send(LspEvent::Hover(Some(hover)));
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] hover error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "hover error: {e}")}
                                     });
                                 }
                             }
@@ -339,7 +339,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 }
                                             }
                                             Ok(None) => {}
-                                            Err(e) => eprintln!("[LSP] signature_help error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "signature_help error: {e}")}
                                     });
                                 }
                             }
@@ -575,7 +575,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     let _ = evt_tx.send(LspEvent::Definition(vec![loc]));
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] peek definition error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "peek definition error: {e}")}
                                     });
                                 }
                             }
@@ -638,7 +638,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
-                                            Err(e) => eprintln!("[LSP] implementation error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "implementation error: {e}")}
                                     });
                                 }
                             }
@@ -657,7 +657,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     .collect();
                                                 let _ = fold_tx2.try_send(pairs);
                                             }
-                                            Err(e) => eprintln!("[LSP] folding_range error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "folding_range error: {e}")}
                                     }
                                 });
                             }
@@ -694,7 +694,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     }
                                                 }
                                             }
-                                            Err(e) => eprintln!("[LSP] organize imports error: {e}")}
+                                            Err(e) => tracing::debug!(target: "phazeai_ui::lsp", "organize imports error: {e}")}
                                     });
                                 } else {
                                     // Fallback: sort Rust imports locally
@@ -1053,7 +1053,7 @@ fn ripgrep_references(
         _ => return vec![],
     };
 
-    let output = std::process::Command::new("rg")
+    let output = phazeai_core::process::std_command("rg")
         .args(["--json", "-w", &word, workspace.to_string_lossy().as_ref()])
         .output();
 
@@ -1271,7 +1271,7 @@ fn apply_workspace_edit(edit: lsp_types::WorkspaceEdit, old_word: &str, new_name
     }
 
     // No edits from LSP — should not happen, but guard anyway
-    eprintln!("[LSP] apply_workspace_edit: no edits (old={old_word} new={new_name})");
+    tracing::debug!(target: "phazeai_ui::lsp", "apply_workspace_edit: no edits (old={old_word} new={new_name})");
 }
 
 /// Apply a list of LSP TextEdits to a file on disk (sort descending by range so
@@ -1536,7 +1536,7 @@ fn ripgrep_workspace_symbols(query: &str, workspace: &std::path::Path) -> Vec<Sy
         r"(?i)(fn|pub fn|async fn|struct|impl|trait|enum|class|def|function|interface|type)\s+{query}"
     );
 
-    let output = std::process::Command::new("rg")
+    let output = phazeai_core::process::std_command("rg")
         .args([
             "--json",
             "--max-count=100",

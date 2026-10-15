@@ -350,7 +350,7 @@ fn word_at_line_col(line_text: &str, col: usize) -> Option<String> {
 fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
     // Determine git root (walk up from file's dir)
     let dir = path.parent().unwrap_or(path);
-    let out = match std::process::Command::new("git")
+    let out = match phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output()
@@ -1441,7 +1441,7 @@ pub fn editor_panel(
                     _ => None,
                 };
                 if let Some((cmd, args)) = formatter {
-                    let _ = std::process::Command::new(cmd).args(&args).status();
+                    let _ = phazeai_core::process::std_command(cmd).args(&args).status();
                 }
             });
         }
@@ -3898,7 +3898,7 @@ pub fn editor_panel(
                                 "py" => ("black", vec![tmp.to_string_lossy().to_string()]),
                                 _ => return None,
                             };
-                            let ok = std::process::Command::new(cmd)
+                            let ok = phazeai_core::process::std_command(cmd)
                                 .args(&args)
                                 .status()
                                 .ok()?
@@ -4159,7 +4159,7 @@ pub fn editor_panel(
                     let tx = blame_tx.clone();
                     std::thread::spawn(move || {
                         let dir = p.parent().unwrap_or(&p);
-                        let entries = std::process::Command::new("git")
+                        let entries = phazeai_core::process::std_command("git")
                             .args(["blame", "--date=short", "--porcelain"])
                             .arg(&p)
                             .current_dir(dir)

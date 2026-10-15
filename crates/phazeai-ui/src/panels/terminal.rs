@@ -746,7 +746,9 @@ fn single_terminal(
                         *guard = Some(w);
                     }
                 }
-                Err(e) => eprintln!("PTY take_writer error: {e}"),
+                Err(e) => {
+                    tracing::error!(target: "phazeai_ui::terminal", "PTY take_writer error: {e}")
+                }
             }
 
             // Inject PROMPT_COMMAND for OSC 7 (cwd) and OSC 133;A (shell integration) tracking
@@ -769,7 +771,7 @@ fn single_terminal(
             let mut reader = match pair.master.try_clone_reader() {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("PTY clone_reader error: {e}");
+                    tracing::error!(target: "phazeai_ui::terminal", "PTY clone_reader error: {e}");
                     return;
                 }
             };
@@ -1532,7 +1534,7 @@ pub fn terminal_panel(
                     ai_cmd_query.set(String::new());
                 }
                 Err(e) => {
-                    eprintln!("[PhazeAI] AI cmd error: {e}");
+                    tracing::warn!(target: "phazeai_ui", "AI cmd error: {e}");
                     ai_cmd_open.set(false);
                 }
             }

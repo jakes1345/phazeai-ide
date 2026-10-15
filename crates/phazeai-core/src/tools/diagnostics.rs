@@ -70,7 +70,7 @@ impl Tool for DiagnosticsTool {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::process::Command::new(command)
+            crate::process::tokio_command(command)
                 .args(&args)
                 .current_dir(path_str)
                 .output(),

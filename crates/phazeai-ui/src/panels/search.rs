@@ -945,7 +945,7 @@ fn perform_search(
         rg_args.push("-e".to_string());
         rg_args.push(query.clone());
 
-        let rg_result = std::process::Command::new("rg")
+        let rg_result = phazeai_core::process::std_command("rg")
             .args(&rg_args)
             .current_dir(&root)
             .output();

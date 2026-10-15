@@ -379,7 +379,7 @@ const SAFETY_RULES: &str = "\n\n## Safety Rules
 
 /// Collect git info for the system prompt.
 pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
-    let branch = std::process::Command::new("git")
+    let branch = crate::process::std_command("git")
         .args(["branch", "--show-current"])
         .current_dir(root)
         .output()
@@ -392,7 +392,7 @@ pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
             }
         });
 
-    let dirty_files = std::process::Command::new("git")
+    let dirty_files = crate::process::std_command("git")
         .args(["status", "--porcelain", "--short"])
         .current_dir(root)
         .output()

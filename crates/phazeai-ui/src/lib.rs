@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 pub mod app;
 pub mod commands;
@@ -34,24 +34,52 @@ pub fn init_logging() {
     // Keep the guard alive for the lifetime of the app
     std::mem::forget(_guard);
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // RUST_LOG, when set, applies to both outputs unchanged. Otherwise the log
+    // file gets our own info-level events, while the console only shows
+    // warnings and errors. The GPU stack (wgpu/naga) and the windowing layer
+    // report driver details at info level many times per second on some
+    // machines, so they are held to warnings everywhere.
+    let user_filter = std::env::var("RUST_LOG").ok();
+    let filter_for = |default_level: &str| match &user_filter {
+        Some(directives) => EnvFilter::new(directives),
+        None => EnvFilter::new(default_filter(default_level)),
+    };
 
     tracing_subscriber::registry()
-        .with(env_filter)
         .with(
             fmt::layer()
                 .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_target(true)
-                .with_thread_ids(true),
+                .with_thread_ids(true)
+                .with_filter(filter_for("info")),
         )
         .with(
             fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_ansi(true)
-                .with_target(true),
+                .with_ansi(!cfg!(windows))
+                .with_target(true)
+                .with_filter(filter_for("warn")),
         )
         .init();
+}
+
+/// Log directives used when `RUST_LOG` is not set: `level` for everything,
+/// with the chatty graphics and windowing crates capped at `warn`.
+fn default_filter(level: &str) -> String {
+    const NOISY: &[&str] = &[
+        "wgpu",
+        "wgpu_core",
+        "wgpu_hal",
+        "naga",
+        "winit",
+        "cosmic_text",
+    ];
+    let mut directives = level.to_string();
+    for target in NOISY {
+        directives.push_str(&format!(",{target}=warn"));
+    }
+    directives
 }
 
 /// Install a process-wide panic hook that logs the panic (with location and

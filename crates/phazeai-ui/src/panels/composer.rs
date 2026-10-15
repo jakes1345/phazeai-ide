@@ -175,7 +175,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         create_effect(move |_| {
             let ws = workspace.get();
             let has_git = std::path::Path::new(&ws).join(".git").exists()
-                || std::process::Command::new("git")
+                || phazeai_core::process::std_command("git")
                     .args(["rev-parse", "--is-inside-work-tree"])
                     .current_dir(&ws)
                     .output()
@@ -503,7 +503,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     let _ = tokio::join!(run_fut, drain_fut);
 
                     // After completion, get git diff to show changed files
-                    if let Ok(output) = std::process::Command::new("git")
+                    if let Ok(output) = phazeai_core::process::std_command("git")
                         .args(["diff", "HEAD"])
                         .current_dir(&ws)
                         .output()

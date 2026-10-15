@@ -95,7 +95,7 @@ impl LspManager {
         Self::default_configs()
             .into_iter()
             .filter(|config| {
-                std::process::Command::new("which")
+                crate::process::std_command("which")
                     .arg(&config.command)
                     .output()
                     .map(|o| o.status.success())
