@@ -51,6 +51,13 @@ impl Tool for CopyPathTool {
         // Copying a denied file to an allowed name would let the model read it.
         crate::privacy::tool_check_tree("copy_path", &source_buf, source)?;
         crate::privacy::tool_check("copy_path", &dest_buf, destination)?;
+        // The privacy policy can't be replaced by the model (copying it elsewhere is fine).
+        crate::privacy::tool_check_protected_dest(
+            "copy_path",
+            &source_buf,
+            &dest_buf,
+            destination,
+        )?;
         let source_path = source_buf.as_path();
         let dest_path = dest_buf.as_path();
 

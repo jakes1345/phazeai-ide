@@ -51,7 +51,10 @@ impl GitOps {
     }
 
     async fn run_git(&self, args: &[&str]) -> Result<String, String> {
+        // Paths in `diff` / `status` output come back unquoted (non-ASCII as
+        // is), so they can be matched against the privacy deny list.
         let output = crate::process::tokio_command("git")
+            .args(crate::privacy::GIT_NO_QUOTE_PATH)
             .args(args)
             .current_dir(&self.repo_root)
             .stdout(Stdio::piped())
@@ -133,5 +136,41 @@ impl GitOps {
     pub async fn log(&self, count: usize) -> Result<String, String> {
         let count_str = format!("-{count}");
         self.run_git(&["log", &count_str, "--oneline"]).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be installed");
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    #[tokio::test]
+    async fn status_and_diff_report_non_ascii_paths_unquoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        git(root, &["config", "core.quotePath", "true"]);
+        std::fs::write(root.join("café.txt"), "1\n").unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("café.txt"), "2\n").unwrap();
+
+        let ops = GitOps::new(root);
+        let status = ops.status().await.unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "café.txt");
+        let diff = ops.diff(false).await.unwrap();
+        assert!(diff.contains("diff --git a/café.txt b/café.txt"), "{diff}");
+        assert!(!diff.contains("\\303\\251"), "{diff}");
     }
 }

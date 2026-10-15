@@ -71,6 +71,7 @@ impl Tool for EditTool {
 
         let resolved = sandbox::resolve_within_workspace("edit_file", path)?;
         crate::privacy::tool_check("edit_file", &resolved, path)?;
+        crate::privacy::tool_check_protected("edit_file", &resolved, path)?;
         let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
             PhazeError::tool("edit_file", format!("Failed to read '{}': {}", path, e))
         })?;

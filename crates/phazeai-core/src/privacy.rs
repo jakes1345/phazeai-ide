@@ -41,8 +41,15 @@
 //!
 //! - Agent tools: `read_file`, `write_file`, `edit_file`, `diagnostics` refuse
 //!   denied paths; `copy_path` / `move_path` refuse denied sources (including
-//!   directories containing a denied file) and destinations; `grep`, `glob`,
-//!   `list_files`, `find_path` skip denied entries (grep reports only a count).
+//!   directories containing a denied file, symlinks followed) and
+//!   destinations; `grep`, `glob`, `list_files`, `find_path` skip denied
+//!   entries (grep reports only a count).
+//! - The policy file itself is **protected**: the model may read it, but
+//!   `write_file`, `edit_file`, `delete_path`, `move_path`, `copy_path`,
+//!   `create_directory`, `download` and `bash` refuse to change, replace or
+//!   remove `.phazeai/privacy.toml` (or the `.phazeai/` directory holding it),
+//!   so the agent can't lift its own restrictions. See
+//!   [`PrivacyPolicy::is_policy_file`] and [`tool_check_protected`].
 //! - IDE / CLI features that attach file contents leave denied files out:
 //!   @mentions, editor AI actions, inline edit, inline completion, the Design
 //!   panel's style sources and design system, the commit-message diff, project
@@ -66,11 +73,23 @@ use crate::llm::ProviderId;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 /// Location of the policy file, relative to the project root.
 pub const POLICY_FILE: &str = ".phazeai/privacy.toml";
+
+/// Why a mutating tool refuses to touch the policy file (see [`Denial::reason`]).
+pub const PROTECTED_REASON: &str =
+    "the project's privacy policy, which can only be edited by you, in the IDE (Settings › Privacy) or an editor";
+
+/// `git` options that stop it from quoting non-ASCII path names in `diff` and
+/// `status` output (`"caf\303\251.txt"`), so the paths can be compared with
+/// the deny list. Pass before the sub-command: `git -c core.quotePath=false diff`.
+/// Quotes, backslashes and control characters are still escaped;
+/// [`filter_unified_diff`] and [`filter_status_porcelain`] decode those.
+pub const GIT_NO_QUOTE_PATH: &[&str] = &["-c", "core.quotePath=false"];
 
 /// Files that are never sent to any AI, whatever the project file says.
 ///
@@ -132,6 +151,9 @@ local_only = false
 pub enum DenySource {
     BuiltIn,
     Project,
+    /// Not a deny-list hit: the path is the policy file itself (or the
+    /// directory holding it), which the model may read but never change.
+    Protected,
 }
 
 /// Why a path is denied.
@@ -150,6 +172,14 @@ impl Denial {
                 format!("blocked by the built-in secrets list (`{}`)", self.pattern)
             }
             DenySource::Project => format!("blocked by {POLICY_FILE} (`{}`)", self.pattern),
+            DenySource::Protected => PROTECTED_REASON.to_string(),
+        }
+    }
+
+    fn protected() -> Self {
+        Self {
+            source: DenySource::Protected,
+            pattern: POLICY_FILE.to_string(),
         }
     }
 }
@@ -373,6 +403,19 @@ impl PrivacyPolicy {
     /// Both the lexical path and its symlink-resolved form are checked, so a
     /// link named `notes.txt` pointing at `.env` is denied too.
     pub fn check(&self, path: &Path) -> Option<Denial> {
+        let lexical = self.normalized(path);
+        if let Some(d) = self.check_absolute(&lexical) {
+            return Some(d);
+        }
+        match canonicalize_lenient(&lexical) {
+            Some(real) if real != lexical => self.check_absolute(&real),
+            _ => None,
+        }
+    }
+
+    /// `path` made absolute (relative to the project root, else the cwd) with
+    /// `.` and `..` resolved lexically.
+    fn normalized(&self, path: &Path) -> PathBuf {
         let abs = if path.is_absolute() {
             path.to_path_buf()
         } else if let Some(root) = &self.root {
@@ -382,14 +425,75 @@ impl PrivacyPolicy {
                 .map(|c| c.join(path))
                 .unwrap_or_else(|_| path.to_path_buf())
         };
-        let lexical = normalize_lexically(&abs);
-        if let Some(d) = self.check_absolute(&lexical) {
-            return Some(d);
+        normalize_lexically(&abs)
+    }
+
+    /// The lexical and the symlink-resolved forms of `path` (one entry when
+    /// they agree).
+    fn forms(&self, path: &Path) -> Vec<PathBuf> {
+        let lexical = self.normalized(path);
+        let mut out = vec![lexical.clone()];
+        if let Some(real) = canonicalize_lenient(&lexical) {
+            if real != lexical {
+                out.push(real);
+            }
         }
-        match canonicalize_lenient(&lexical) {
-            Some(real) if real != lexical => self.check_absolute(&real),
-            _ => None,
+        out
+    }
+
+    /// Whether `path` is this project's policy file (`.phazeai/privacy.toml`),
+    /// compared by normalised path and after resolving symlinks, whether or
+    /// not the file exists yet. Mutating tools refuse such a path (the model
+    /// could otherwise rewrite the rules that bind it); reading is fine.
+    pub fn is_policy_file(&self, path: &Path) -> bool {
+        let Some(policy) = self.policy_path() else {
+            return false;
+        };
+        self.forms(path).contains(&policy)
+    }
+
+    /// Whether `path` is the policy file or the `.phazeai/` directory that
+    /// holds it — what a shell command must not name (`rm -rf .phazeai`).
+    pub fn is_policy_file_or_dir(&self, path: &Path) -> bool {
+        let Some(policy) = self.policy_path() else {
+            return false;
+        };
+        let dir = policy.parent();
+        self.forms(path)
+            .iter()
+            .any(|p| *p == policy || Some(p.as_path()) == dir)
+    }
+
+    /// Whether `path` is the policy file or any directory containing it (up
+    /// to and including the project root), so deleting or moving `path` would
+    /// remove the policy.
+    pub fn contains_policy_file(&self, path: &Path) -> bool {
+        let Some(policy) = self.policy_path() else {
+            return false;
+        };
+        self.forms(path).iter().any(|p| policy.starts_with(p))
+    }
+
+    /// Whether copying or moving `source` to `dest` would create or replace
+    /// the policy file: `dest` is the file itself, or `dest` is a directory
+    /// the policy lives under and `source` holds the matching relative path
+    /// (e.g. copying `tmp/` → `.phazeai/` when `tmp/privacy.toml` exists, or
+    /// `evil/` → the project root when `evil/.phazeai/privacy.toml` exists).
+    pub fn copy_would_replace_policy_file(&self, source: &Path, dest: &Path) -> bool {
+        let Some(policy) = self.policy_path() else {
+            return false;
+        };
+        if self.is_policy_file(dest) {
+            return true;
         }
+        let source = self.normalized(source);
+        self.forms(dest).iter().any(|d| {
+            policy
+                .strip_prefix(d)
+                .ok()
+                .filter(|rel| !rel.as_os_str().is_empty())
+                .is_some_and(|rel| source.join(rel).symlink_metadata().is_ok())
+        })
     }
 
     fn check_absolute(&self, abs: &Path) -> Option<Denial> {
@@ -621,10 +725,72 @@ pub fn check_and_record(path: &Path, via: &str) -> Result<(), String> {
 
 /// Standard refusal text for tools.
 pub fn refusal(path: &str, reason: &str) -> String {
+    if reason == PROTECTED_REASON {
+        return format!(
+            "REFUSED: '{path}' is {reason}. The AI may read the policy but must not change, replace, \
+             move or delete it; don't try another way."
+        );
+    }
     format!(
         "REFUSED: '{path}' is {reason}. This project's privacy policy keeps that file away from AI models; \
          don't try to access it another way."
     )
+}
+
+fn protected_refusal(tool: &str, shown: &str) -> crate::error::PhazeError {
+    let d = Denial::protected();
+    audit::record_blocked_file(shown, &d.reason(), tool);
+    crate::error::PhazeError::tool(tool, refusal(shown, &d.reason()))
+}
+
+/// Refuse to write, create or replace `path` when it is the active project's
+/// policy file (`write_file`, `edit_file`, `create_directory`, `download`).
+pub fn tool_check_protected(
+    tool: &str,
+    path: &Path,
+    shown: &str,
+) -> Result<(), crate::error::PhazeError> {
+    if active().is_policy_file(&absolutize(path)) {
+        return Err(protected_refusal(tool, shown));
+    }
+    Ok(())
+}
+
+/// Refuse to delete or move `path` when it is the policy file or a directory
+/// containing it (`delete_path`, `move_path` source).
+pub fn tool_check_protected_tree(
+    tool: &str,
+    path: &Path,
+    shown: &str,
+) -> Result<(), crate::error::PhazeError> {
+    let policy = active();
+    let abs = absolutize(path);
+    if policy.contains_policy_file(&abs) {
+        let what = if policy.is_policy_file(&abs) {
+            shown.to_string()
+        } else {
+            format!("{shown} (contains {POLICY_FILE})")
+        };
+        return Err(protected_refusal(tool, &what));
+    }
+    Ok(())
+}
+
+/// Refuse a `copy_path` / `move_path` whose result would create or replace
+/// the policy file (see [`PrivacyPolicy::copy_would_replace_policy_file`]).
+pub fn tool_check_protected_dest(
+    tool: &str,
+    source: &Path,
+    dest: &Path,
+    shown_dest: &str,
+) -> Result<(), crate::error::PhazeError> {
+    if active().copy_would_replace_policy_file(&absolutize(source), &absolutize(dest)) {
+        return Err(protected_refusal(
+            tool,
+            &format!("{shown_dest} (would replace {POLICY_FILE})"),
+        ));
+    }
+    Ok(())
 }
 
 /// Make a tool path absolute (relative paths resolve against the process cwd,
@@ -673,6 +839,12 @@ pub fn tool_check_tree(
 }
 
 /// First denied file at or under `path` (for copy/move of directories).
+///
+/// Symlinks are followed: a directory holding a link to a denied directory
+/// (or file) is denied, since copying it would copy the target's contents.
+/// Every entry is checked by its lexical path *and* its resolved target
+/// ([`PrivacyPolicy::check`]). Link loops are reported by the walker as
+/// errors and skipped, so the walk always terminates.
 pub fn first_denied_under(policy: &PrivacyPolicy, path: &Path) -> Option<(PathBuf, Denial)> {
     let path = absolutize(path);
     if let Some(d) = policy.check(&path) {
@@ -683,6 +855,7 @@ pub fn first_denied_under(policy: &PrivacyPolicy, path: &Path) -> Option<(PathBu
     }
     for entry in ignore::WalkBuilder::new(&path)
         .standard_filters(false)
+        .follow_links(true)
         .build()
         .flatten()
     {
@@ -797,8 +970,7 @@ pub fn ensure_policy_file(root: &Path) -> Result<PathBuf, String> {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
         }
-        std::fs::write(&path, TEMPLATE)
-            .map_err(|e| format!("couldn't write {POLICY_FILE}: {e}"))?;
+        write_atomic(&path, TEMPLATE).map_err(|e| format!("couldn't write {POLICY_FILE}: {e}"))?;
     }
     Ok(path)
 }
@@ -814,11 +986,61 @@ pub fn write_local_only(root: &Path, value: bool) -> Result<(), String> {
     PrivacyPolicy::parse(root, &text).map_err(|e| format!("fix the file first — {e}"))?;
     let updated = set_local_only_in_text(&text, value);
     PrivacyPolicy::parse(root, &updated)?;
-    std::fs::write(&path, updated).map_err(|e| format!("couldn't write {POLICY_FILE}: {e}"))?;
+    write_atomic(&path, &updated).map_err(|e| format!("couldn't write {POLICY_FILE}: {e}"))?;
     if active_root().as_deref() == Some(canonical_root(root).as_path()) {
         set_active_project(root);
     }
     Ok(())
+}
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Name of the temporary file [`write_atomic`] uses for `path`, in the same
+/// directory (so the final rename never crosses filesystems).
+fn atomic_tmp_path(path: &Path) -> PathBuf {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
+/// Replace `path` with `contents` atomically.
+///
+/// The text goes to a fresh temporary file in the same directory, is flushed
+/// to disk, and the temporary file is renamed over `path`. A concurrent reader
+/// — the active-policy reload in [`active`], another PhazeAI process, an
+/// editor — therefore sees either the old file or the new one, never an
+/// empty or partial file (an empty policy parses as "no rules", a partial one
+/// fails closed; both would make requests mid-write behave differently). The
+/// rename is atomic on POSIX and replaces an existing file on Windows; if it
+/// fails anyway, the contents are copied into place as a last resort.
+/// Permissions of an existing file are kept.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = atomic_tmp_path(path);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = file.set_permissions(meta.permissions());
+        }
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(rename_err) => std::fs::copy(&tmp, path)
+                .map(|_| ())
+                .map_err(|_| rename_err),
+        }
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 fn set_local_only_in_text(text: &str, value: bool) -> String {
@@ -854,6 +1076,12 @@ fn set_local_only_in_text(text: &str, value: bool) -> String {
 
 /// Remove the per-file sections of a unified `git diff` whose old or new path
 /// is denied. Returns the filtered diff and the omitted paths.
+///
+/// Paths git quotes C-style (`"caf\303\251.txt"`, `"a\"b"`, `"tab\there"`)
+/// are decoded before the check. A section whose header can't be parsed is
+/// dropped too — it may belong to a denied file — and reported in the omitted
+/// list as `<unparsed diff header: …>`. Run git with [`GIT_NO_QUOTE_PATH`] so
+/// the common non-ASCII case needs no decoding at all.
 pub fn filter_unified_diff(diff: &str, policy: &PrivacyPolicy) -> (String, Vec<String>) {
     let mut out = String::new();
     let mut omitted = Vec::new();
@@ -862,16 +1090,23 @@ pub fn filter_unified_diff(diff: &str, policy: &PrivacyPolicy) -> (String, Vec<S
         if chunk.is_empty() {
             return;
         }
-        let paths = diff_chunk_paths(chunk);
-        if let Some(p) = paths.iter().find(|p| policy.is_denied(Path::new(p))) {
-            omitted.push(p.clone());
-        } else {
-            out.push_str(chunk);
+        match diff_chunk_paths(chunk) {
+            Ok(paths) => {
+                if let Some(p) = paths.iter().find(|p| policy.is_denied(Path::new(p))) {
+                    omitted.push(p.clone());
+                } else {
+                    out.push_str(chunk);
+                }
+            }
+            Err(header) => omitted.push(format!(
+                "<unparsed diff header: {}>",
+                crate::text::truncate_bytes(&header, 200)
+            )),
         }
         chunk.clear();
     };
     for line in diff.split_inclusive('\n') {
-        if line.starts_with("diff --git ") {
+        if is_diff_section_start(line) {
             flush(&mut chunk, &mut out, &mut omitted);
         }
         chunk.push_str(line);
@@ -880,39 +1115,232 @@ pub fn filter_unified_diff(diff: &str, policy: &PrivacyPolicy) -> (String, Vec<S
     (out, omitted)
 }
 
-fn diff_chunk_paths(chunk: &str) -> Vec<String> {
+fn is_diff_section_start(line: &str) -> bool {
+    line.starts_with("diff --git ")
+        || line.starts_with("diff --cc ")
+        || line.starts_with("diff --combined ")
+}
+
+/// Every path named by the headers of one per-file diff section.
+///
+/// `Ok(vec![])` means the text has no header lines at all (a preamble);
+/// `Err(line)` names the first header line that couldn't be parsed.
+fn diff_chunk_paths(chunk: &str) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     for line in chunk.lines() {
-        let line = line.trim_end();
-        if let Some(rest) = line.strip_prefix("diff --git a/") {
-            // "a/P b/P" — split in the middle when both sides are the same path.
-            if rest.len() >= 3 {
-                let mid = (rest.len() - 3) / 2;
-                if rest.is_char_boundary(mid) && rest[mid..].starts_with(" b/") {
-                    paths.push(rest[..mid].to_string());
-                } else if let Some((a, b)) = rest.rsplit_once(" b/") {
-                    paths.push(a.to_string());
-                    paths.push(b.to_string());
-                }
+        let line = line.trim_end_matches('\r');
+        if line.starts_with("@@") {
+            // Hunk bodies follow; a removed line starting with "-- " would
+            // otherwise look like a "--- " header.
+            break;
+        }
+        let fail = || Err(line.to_string());
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            match diff_git_header_paths(rest) {
+                Some(mut p) => paths.append(&mut p),
+                None => return fail(),
             }
-        } else if let Some(p) = line
-            .strip_prefix("--- a/")
-            .or_else(|| line.strip_prefix("+++ b/"))
-            .or_else(|| line.strip_prefix("rename from "))
+        } else if let Some(rest) = line
+            .strip_prefix("diff --cc ")
+            .or_else(|| line.strip_prefix("diff --combined "))
+        {
+            match diff_path_token(rest) {
+                Some((p, "")) => paths.push(p),
+                _ => return fail(),
+            }
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            match diff_path_token(rest) {
+                Some((p, "")) => {
+                    if p != "/dev/null" {
+                        paths.push(strip_diff_prefix(&p, "a/"));
+                    }
+                }
+                _ => return fail(),
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            match diff_path_token(rest) {
+                Some((p, "")) => {
+                    if p != "/dev/null" {
+                        paths.push(strip_diff_prefix(&p, "b/"));
+                    }
+                }
+                _ => return fail(),
+            }
+        } else if let Some(rest) = line
+            .strip_prefix("rename from ")
             .or_else(|| line.strip_prefix("rename to "))
             .or_else(|| line.strip_prefix("copy from "))
             .or_else(|| line.strip_prefix("copy to "))
         {
-            paths.push(p.to_string());
+            match diff_path_token(rest) {
+                Some((p, "")) => paths.push(p),
+                _ => return fail(),
+            }
         }
     }
-    paths
+    Ok(paths)
+}
+
+fn strip_diff_prefix(path: &str, prefix: &str) -> String {
+    path.strip_prefix(prefix).unwrap_or(path).to_string()
+}
+
+/// The two paths of a `diff --git A B` header (without their `a/` / `b/`).
+fn diff_git_header_paths(rest: &str) -> Option<Vec<String>> {
+    let strip = |a: &str, b: &str| vec![strip_diff_prefix(a, "a/"), strip_diff_prefix(b, "b/")];
+    if rest.starts_with('"') {
+        // Quoted first side: its closing quote marks the split.
+        let (a, after) = diff_path_token(rest)?;
+        let (b, tail) = diff_path_token(after.strip_prefix(' ')?)?;
+        return tail.is_empty().then(|| strip(&a, &b));
+    }
+    if let Some(idx) = rest.find(" \"") {
+        // Unquoted old side, quoted new side.
+        let (b, tail) = diff_path_token(&rest[idx + 1..])?;
+        return tail.is_empty().then(|| strip(&rest[..idx], &b));
+    }
+    // Both unquoted: "a/P b/P" — split in the middle when both sides are the
+    // same path (so a space inside P is harmless), else at the last " b/".
+    let mid = (rest.len().checked_sub(1)?) / 2;
+    if rest.is_char_boundary(mid)
+        && rest.as_bytes().get(mid) == Some(&b' ')
+        && rest[..mid].trim_start_matches("a/") == rest[mid + 1..].trim_start_matches("b/")
+    {
+        return Some(strip(&rest[..mid], &rest[mid + 1..]));
+    }
+    let (a, b) = rest.rsplit_once(" b/")?;
+    (!a.is_empty() && !b.is_empty()).then(|| strip(a, b))
+}
+
+/// One path from a diff header: a C-quoted string (decoded) or the rest of
+/// the text up to its end. Returns the path and the text after it.
+fn diff_path_token(s: &str) -> Option<(String, &str)> {
+    match s.strip_prefix('"') {
+        Some(quoted) => c_unquote_prefix(quoted),
+        None => Some((s.to_string(), "")),
+    }
+}
+
+/// Decode a git C-style quoted string. `s` starts right after the opening
+/// quote; returns the decoded text and what follows the closing quote. `None`
+/// when the quote is unterminated, an escape is unknown, or the bytes aren't
+/// UTF-8 (such a path can't be compared with the policy — callers fail closed).
+fn c_unquote_prefix(s: &str) -> Option<(String, &str)> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let text = String::from_utf8(out).ok()?;
+                return Some((text, &s[i + 1..]));
+            }
+            b'\\' => {
+                i += 1;
+                match *bytes.get(i)? {
+                    b'a' => out.push(0x07),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'v' => out.push(0x0b),
+                    b'\\' => out.push(b'\\'),
+                    b'"' => out.push(b'"'),
+                    b'0'..=b'7' => {
+                        let mut value: u32 = 0;
+                        let mut digits = 0;
+                        while digits < 3 && bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                            let d = (bytes[i] - b'0') as u32;
+                            if d > 7 {
+                                break;
+                            }
+                            value = value * 8 + d;
+                            i += 1;
+                            digits += 1;
+                        }
+                        out.push(u8::try_from(value).ok()?);
+                        continue;
+                    }
+                    _ => return None,
+                }
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Keep only the lines of `git status --porcelain` output whose path(s) are
+/// not denied. Paths are relative to `repo_root` (the repository top level);
+/// quoted paths are decoded as in [`filter_unified_diff`]. A line whose path
+/// can't be parsed is dropped (fail closed). Returns the kept lines and the
+/// omitted paths.
+pub fn filter_status_porcelain(
+    status: &str,
+    repo_root: &Path,
+    policy: &PrivacyPolicy,
+) -> (Vec<String>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut omitted = Vec::new();
+    for line in status.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        match porcelain_paths(line) {
+            Some(paths) => match paths.iter().find(|p| policy.is_denied(&repo_root.join(p))) {
+                Some(p) => omitted.push(p.clone()),
+                None => kept.push(line.to_string()),
+            },
+            None => omitted.push(format!(
+                "<unparsed status line: {}>",
+                crate::text::truncate_bytes(line, 200)
+            )),
+        }
+    }
+    (kept, omitted)
+}
+
+/// Paths in one `XY PATH` / `XY ORIG -> PATH` porcelain line.
+fn porcelain_paths(line: &str) -> Option<Vec<String>> {
+    let mut chars = line.chars();
+    let x = chars.next()?;
+    let y = chars.next()?;
+    if chars.next()? != ' ' {
+        return None;
+    }
+    let rest = &line[3..];
+    if rest.is_empty() {
+        return None;
+    }
+    let renamed = matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C');
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let (first, tail) = c_unquote_prefix(quoted)?;
+        if tail.is_empty() {
+            return Some(vec![first]);
+        }
+        let (second, tail) = diff_path_token(tail.strip_prefix(" -> ")?)?;
+        return tail.is_empty().then(|| vec![first, second]);
+    }
+    if renamed {
+        if let Some((a, b)) = rest.split_once(" -> ") {
+            let (b, tail) = diff_path_token(b)?;
+            return tail.is_empty().then(|| vec![a.to_string(), b]);
+        }
+    }
+    Some(vec![rest.to_string()])
 }
 
 /// Best-effort check of a shell command line: returns the first word that
 /// names a denied path (relative words resolve against `cwd`; `~/` expands to
 /// the home directory; a word with `*`, `?` or `[` is expanded against the
-/// entries of its directory, one level deep).
+/// entries of its directory, one level deep). A word naming the policy file
+/// or its `.phazeai/` directory is reported with [`DenySource::Protected`].
 ///
 /// This does **not** see paths produced at run time (variables, command
 /// substitution, recursive tools like `grep -r` or `find`, scripts that open
@@ -923,6 +1351,11 @@ pub fn command_denial(
     command: &str,
     cwd: &Path,
 ) -> Option<(String, Denial)> {
+    let word_denial = |p: &Path| {
+        policy
+            .check(p)
+            .or_else(|| policy.is_policy_file_or_dir(p).then(Denial::protected))
+    };
     for word in shell_words(command) {
         let expanded = if let Some(rest) = word.strip_prefix("~/") {
             match dirs::home_dir() {
@@ -932,11 +1365,11 @@ pub fn command_denial(
         } else {
             cwd.join(&word)
         };
-        if let Some(d) = policy.check(&expanded) {
+        if let Some(d) = word_denial(&expanded) {
             return Some((word, d));
         }
         if word.contains(['*', '?', '[']) {
-            if let Some(hit) = expand_glob_word(policy, &expanded) {
+            if let Some(hit) = expand_glob_word(&word_denial, &expanded) {
                 return Some((format!("{word} → {}", hit.0), hit.1));
             }
         }
@@ -944,7 +1377,10 @@ pub fn command_denial(
     None
 }
 
-fn expand_glob_word(policy: &PrivacyPolicy, pattern_path: &Path) -> Option<(String, Denial)> {
+fn expand_glob_word(
+    denial: &dyn Fn(&Path) -> Option<Denial>,
+    pattern_path: &Path,
+) -> Option<(String, Denial)> {
     let parent = pattern_path.parent()?;
     let name_pat = pattern_path.file_name()?.to_string_lossy().to_string();
     let matcher = build_glob(&name_pat, false).ok()?.compile_matcher();
@@ -953,7 +1389,7 @@ fn expand_glob_word(policy: &PrivacyPolicy, pattern_path: &Path) -> Option<(Stri
         let name = entry.file_name();
         if matcher.is_match(Path::new(&name)) {
             let p = entry.path();
-            if let Some(d) = policy.check(&p) {
+            if let Some(d) = denial(&p) {
                 return Some((name.to_string_lossy().to_string(), d));
             }
         }

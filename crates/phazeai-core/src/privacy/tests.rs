@@ -1,8 +1,8 @@
 use super::*;
 use crate::llm::{LlmClient, LlmResponse, Message, ProviderConfig, ProviderRegistry, StreamEvent};
 use crate::tools::{
-    BashTool, CopyPathTool, EditTool, GlobTool, GrepTool, ListFilesTool, ReadFileTool, Tool,
-    ToolDefinition, WriteFileTool,
+    BashTool, CopyPathTool, CreateDirectoryTool, DeletePathTool, EditTool, GlobTool, GrepTool,
+    ListFilesTool, MovePathTool, ReadFileTool, Tool, ToolDefinition, WriteFileTool,
 };
 use std::sync::Mutex;
 
@@ -184,6 +184,53 @@ fn symlink_to_denied_file_is_denied() {
     assert!(p.is_denied(&root.join("notes.txt")));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_tree_check_follows_symlinks() {
+    use std::os::unix::fs::symlink;
+    let (_d, root) = project(Some(r#"deny = ["secrets/**"]"#));
+    write(&root, "secrets/token.txt", "tok");
+    write(&root, ".env", "A=1");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    // `secrets/**` denies the contents, not the directory entry itself, so a
+    // walk that doesn't descend into the link never sees a denied path.
+    assert!(!p.is_denied(&root.join("secrets")));
+
+    // A directory holding a symlink to the denied directory.
+    write(&root, "pub1/readme.md", "ok");
+    symlink(root.join("secrets"), root.join("pub1/link")).unwrap();
+    let (hit, d) = first_denied_under(&p, &root.join("pub1")).expect("linked dir must be found");
+    assert!(hit.starts_with(root.join("pub1/link")), "{}", hit.display());
+    assert_eq!(d.pattern, "secrets/**");
+
+    // A symlinked file.
+    write(&root, "pub2/readme.md", "ok");
+    symlink(root.join(".env"), root.join("pub2/notes.txt")).unwrap();
+    let (hit, _) = first_denied_under(&p, &root.join("pub2")).unwrap();
+    assert_eq!(hit, root.join("pub2/notes.txt"));
+
+    // A link loop terminates and, with nothing denied, passes.
+    write(&root, "pub3/readme.md", "ok");
+    symlink(root.join("pub3"), root.join("pub3/loop")).unwrap();
+    symlink(&root, root.join("pub3/up")).unwrap(); // loop through the root (contains .env → denied)
+    assert!(first_denied_under(&p, &root.join("pub3")).is_some());
+    std::fs::remove_file(root.join("pub3/up")).unwrap();
+    assert!(first_denied_under(&p, &root.join("pub3")).is_none());
+
+    // Through the tool: the copy is refused and nothing is written.
+    let _g = activate(&root);
+    let err = CopyPathTool
+        .execute(serde_json::json!({ "source": s(&root.join("pub1")), "destination": s(&root.join("out")) }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("REFUSED") && err.contains("pub1/link"),
+        "{err}"
+    );
+    assert!(!root.join("out").exists());
+}
+
 // ── parsing ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -282,6 +329,82 @@ fn write_local_only_preserves_comments() {
     assert_eq!(
         std::fs::read_to_string(root4.join(POLICY_FILE)).unwrap(),
         "nope = 1\n"
+    );
+}
+
+#[test]
+fn policy_writes_are_atomic() {
+    // A large policy, so a non-atomic write would leave a visible window of
+    // empty / partial content.
+    let patterns: Vec<String> = (0..800).map(|i| format!("\"private-{i:03}/**\"")).collect();
+    let body = format!(
+        "# header comment\ndeny = [\n  {}\n]\nlocal_only = false # keep\n",
+        patterns.join(",\n  ")
+    );
+    let (_d, root) = project(Some(&body));
+    let path = root.join(POLICY_FILE);
+    let off = body.clone();
+    let on = body.replace("local_only = false # keep", "local_only = true # keep");
+    assert!(on.len() > 10_000);
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (path, stop, off, on) = (path.clone(), stop.clone(), off.clone(), on.clone());
+        std::thread::spawn(move || {
+            let mut reads = 0usize;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        assert!(
+                            text == off || text == on,
+                            "reader saw a partial file ({} bytes)",
+                            text.len()
+                        );
+                        reads += 1;
+                    }
+                    // Only a rename-less platform could miss the file for an instant.
+                    Err(e) => {
+                        if cfg!(unix) || e.kind() != std::io::ErrorKind::NotFound {
+                            panic!("read failed: {e}");
+                        }
+                    }
+                }
+            }
+            reads
+        })
+    };
+    for i in 0..40 {
+        write_local_only(&root, i % 2 == 0).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(&text, if i % 2 == 0 { &on } else { &off });
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reads = reader.join().expect("reader thread must not panic");
+    assert!(reads > 0);
+
+    // The temp file is renamed over the original, never left behind, and the
+    // comments survive (the file is rewritten whole, from the edited text).
+    let leftovers: Vec<_> = std::fs::read_dir(root.join(".phazeai"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "privacy.toml")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .starts_with("# header comment\n"));
+
+    // ensure_policy_file goes through the same path.
+    let (_d2, root2) = project(None);
+    ensure_policy_file(&root2).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root2.join(POLICY_FILE)).unwrap(),
+        TEMPLATE
+    );
+    assert_eq!(
+        std::fs::read_dir(root2.join(".phazeai")).unwrap().count(),
+        1
     );
 }
 
@@ -534,6 +657,115 @@ diff --git a/old.txt b/public.txt\nrename from old.txt\nrename to public.txt\n";
 }
 
 #[test]
+fn c_unquote_decodes_git_escapes() {
+    let ok = |q: &str| c_unquote_prefix(q).map(|(s, rest)| (s, rest.to_string()));
+    assert_eq!(
+        ok(r#"caf\303\251.txt" tail"#),
+        Some(("café.txt".to_string(), " tail".to_string()))
+    );
+    assert_eq!(
+        ok(r#"a\"b\\c\td\ne\0f""#),
+        Some(("a\"b\\c\td\ne\0f".to_string(), String::new()))
+    );
+    assert_eq!(ok(r#"\101\61x""#), Some(("A1x".to_string(), String::new())));
+    assert_eq!(ok("unterminated"), None);
+    assert_eq!(ok(r#"bad\q""#), None);
+    assert_eq!(ok(r#"\777""#), None, "octal > 255");
+    assert_eq!(ok(r#"\303""#), None, "not UTF-8");
+}
+
+#[test]
+fn quoted_diff_paths_are_decoded_and_unparsable_headers_dropped() {
+    let (_d, root) = project(Some(r#"deny = ["café.txt", "*.secret", "private/**"]"#));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    // The exact forms git emits with core.quotePath=true (non-ASCII as octal)
+    // and =false (quotes, backslashes, tabs still escaped).
+    let diff = "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n\
+                index 1..2 100644\n\
+                --- \"a/caf\\303\\251.txt\"\n\
+                +++ \"b/caf\\303\\251.txt\"\n\
+                @@ -1 +1 @@\n-old\n+secret-in-cafe\n\
+                diff --git \"a/my\\tfile.secret\" \"b/my\\tfile.secret\"\n\
+                new file mode 100644\n--- /dev/null\n+++ \"b/my\\tfile.secret\"\n\
+                @@ -0,0 +1 @@\n+secret-with-tab\n\
+                diff --git a/old.txt \"b/private/q\\\"uote.txt\"\n\
+                rename from old.txt\nrename to \"private/q\\\"uote.txt\"\n\
+                diff --git a/ok.txt b/ok.txt\n--- a/ok.txt\n+++ b/ok.txt\n\
+                @@ -1,2 +1 @@\n--- a/.env\n-x\n+public-change\n\
+                diff --git a/sp ace.txt b/sp ace.txt\n--- a/sp ace.txt\n+++ b/sp ace.txt\n\
+                @@ -1 +1 @@\n-a\n+spaced-change\n\
+                diff --git ???\n@@ -1 +1 @@\n+behind-broken-header\n\
+                diff --git \"a/bad\\q\" \"b/bad\\q\"\n@@ -1 +1 @@\n+behind-bad-escape\n";
+    let (out, omitted) = filter_unified_diff(diff, &p);
+    assert!(out.contains("public-change"), "{out}");
+    assert!(
+        out.contains("--- a/.env"),
+        "a removed line that looks like a header is content, not a path: {out}"
+    );
+    assert!(out.contains("spaced-change"), "{out}");
+    for hidden in [
+        "secret-in-cafe",
+        "secret-with-tab",
+        "q\\\"uote",
+        "behind-broken-header",
+        "behind-bad-escape",
+    ] {
+        assert!(!out.contains(hidden), "{hidden} leaked: {out}");
+    }
+    assert_eq!(
+        omitted,
+        vec![
+            "café.txt".to_string(),
+            "my\tfile.secret".to_string(),
+            "private/q\"uote.txt".to_string(),
+            "<unparsed diff header: diff --git ???>".to_string(),
+            "<unparsed diff header: diff --git \"a/bad\\q\" \"b/bad\\q\">".to_string(),
+        ]
+    );
+    // A combined diff (merge conflict) is a section of its own.
+    let cc = "diff --cc .env\nindex 1,2..3\n--- a/.env\n+++ b/.env\n@@@ -1,1 -1,1 +1,1 @@@\n+K=9\n\
+              diff --git a/ok.txt b/ok.txt\n--- a/ok.txt\n+++ b/ok.txt\n@@ -1 +1 @@\n+fine\n";
+    let (out, omitted) = filter_unified_diff(cc, &p);
+    assert!(out.contains("fine") && !out.contains("K=9"), "{out}");
+    assert_eq!(omitted, vec![".env".to_string()]);
+}
+
+#[test]
+fn status_lines_for_denied_files_are_removed() {
+    let (_d, root) = project(Some(r#"deny = ["private/**", "*.secret"]"#));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let status = " M src/main.rs\n\
+                  ?? \"caf\\303\\251.txt\"\n\
+                  ?? sp ace.txt\n\
+                  R  old.txt -> private/new.txt\n\
+                  R  \"old 2.txt\" -> \"private/new\\t2.txt\"\n\
+                  A  \"tab\\there.secret\"\n\
+                  \x20M .env\n\
+                  ?? \"bad\\q\"\n\
+                  garbage\n";
+    let (kept, omitted) = filter_status_porcelain(status, &root, &p);
+    assert_eq!(
+        kept,
+        vec![
+            " M src/main.rs".to_string(),
+            "?? \"caf\\303\\251.txt\"".to_string(),
+            "?? sp ace.txt".to_string(),
+        ]
+    );
+    assert_eq!(
+        omitted,
+        vec![
+            "private/new.txt".to_string(),
+            "private/new\t2.txt".to_string(),
+            "tab\there.secret".to_string(),
+            ".env".to_string(),
+            "<unparsed status line: ?? \"bad\\q\">".to_string(),
+            "<unparsed status line: garbage>".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn bash_words_naming_denied_files_are_found() {
     let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
     write(&root, "certs/site.pem", "x");
@@ -554,6 +786,47 @@ fn bash_words_naming_denied_files_are_found() {
     assert!(hit("ls certs/*.txt").is_none());
     assert!(hit("cargo test && cat src/main.rs > out.txt").is_none());
     assert!(hit("cat .env.example").is_none());
+}
+
+#[test]
+fn bash_words_naming_the_policy_file_are_protected() {
+    let (_d, root) = project(Some("deny = []\n"));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let hit = |cmd: &str| command_denial(&p, cmd, &root);
+    for cmd in [
+        "echo 'deny = []' > .phazeai/privacy.toml",
+        "cat .phazeai/privacy.toml",
+        "sed -i s/true/false/ ./.phazeai/../.phazeai/privacy.toml",
+        "rm -rf .phazeai",
+        "mv .phazeai .phazeai.bak",
+        "cat .phazeai/*",
+        "vim .phazeai/priv*",
+    ] {
+        let (word, d) = hit(cmd).unwrap_or_else(|| panic!("{cmd} must be refused"));
+        assert_eq!(d.source, DenySource::Protected, "{cmd}");
+        assert_eq!(d.reason(), PROTECTED_REASON);
+        assert!(word.contains(".phazeai"), "{cmd} → {word}");
+        let text = refusal(&word, &d.reason());
+        assert!(text.contains("edited by you"), "{text}");
+    }
+    // Absolute path and a different cwd.
+    let abs = root.join(POLICY_FILE);
+    assert!(hit(&format!("cat {}", abs.display())).is_some());
+    assert!(command_denial(&p, "cat privacy.toml", &root.join(".phazeai")).is_some());
+    // Other files under .phazeai/ are ordinary files.
+    assert!(hit("cat .phazeai/designs/home.html").is_none());
+    assert!(hit("ls .phazeai/skills").is_none());
+    assert!(
+        hit("cat privacy.toml").is_none(),
+        "a privacy.toml elsewhere isn't the policy"
+    );
+    // Without a project root nothing is protected (there is no policy file).
+    assert!(command_denial(
+        &PrivacyPolicy::defaults(),
+        "rm .phazeai/privacy.toml",
+        &root
+    )
+    .is_none());
 }
 
 // ── tool enforcement ──────────────────────────────────────────────────────────
@@ -681,6 +954,186 @@ async fn write_and_edit_refuse_denied_paths() {
         .to_string();
     assert!(err.contains("contains conf/.env"), "{err}");
     assert!(!root.join("pub").exists());
+}
+
+#[tokio::test]
+async fn policy_file_is_protected_from_mutating_tools() {
+    let policy_text = "deny = [\"private/**\"]\nlocal_only = true\n";
+    let (_d, root) = project(Some(policy_text));
+    let policy_path = root.join(POLICY_FILE);
+    write(&root, "src/main.rs", "");
+    write(&root, "other.toml", "deny = []\n");
+    write(&root, "evil/privacy.toml", "deny = []\n");
+    write(&root, "evil2/.phazeai/privacy.toml", "deny = []\n");
+    let _g = activate(&root);
+    assert!(active().local_only());
+
+    let refused = |err: String, tool: &str| {
+        assert!(err.contains("REFUSED"), "{tool}: {err}");
+        assert!(err.contains("privacy policy"), "{tool}: {err}");
+        assert!(err.contains("edited by you"), "{tool}: {err}");
+    };
+    let unchanged = || {
+        assert_eq!(std::fs::read_to_string(&policy_path).unwrap(), policy_text);
+        assert!(active().local_only(), "the policy must still be in force");
+    };
+
+    // write_file, also through `..` and (on Unix) a symlink.
+    let mut targets = vec![
+        s(&policy_path),
+        s(&root.join("src/../.phazeai/privacy.toml")),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&policy_path, root.join("p.toml")).unwrap();
+        targets.push(s(&root.join("p.toml")));
+    }
+    for target in &targets {
+        let err = WriteFileTool
+            .execute(
+                serde_json::json!({ "path": target, "content": "deny = []\nlocal_only = false\n" }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        refused(err, "write_file");
+        unchanged();
+    }
+
+    let err = EditTool
+        .execute(
+            serde_json::json!({ "path": s(&policy_path), "old_text": "true", "new_text": "false" }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    refused(err, "edit_file");
+    unchanged();
+
+    for target in [s(&policy_path), s(&root.join(".phazeai")), s(&root)] {
+        let err = DeletePathTool
+            .execute(serde_json::json!({ "path": target }))
+            .await
+            .unwrap_err()
+            .to_string();
+        refused(err, "delete_path");
+        unchanged();
+    }
+
+    for (src, dst) in [
+        (s(&policy_path), s(&root.join("moved.toml"))),
+        (s(&root.join(".phazeai")), s(&root.join("hidden"))),
+        (s(&root.join("other.toml")), s(&policy_path)),
+        (s(&root.join("evil")), s(&root.join(".phazeai"))),
+        (s(&root.join("evil2")), s(&root)),
+    ] {
+        let err = MovePathTool
+            .execute(serde_json::json!({ "source": src, "destination": dst }))
+            .await
+            .unwrap_err()
+            .to_string();
+        refused(err, "move_path");
+        unchanged();
+        assert!(root.join("other.toml").exists() && !root.join("moved.toml").exists());
+    }
+
+    for (src, dst) in [
+        (s(&root.join("other.toml")), s(&policy_path)),
+        (s(&root.join("evil")), s(&root.join(".phazeai"))),
+        (s(&root.join("evil2")), s(&root)),
+    ] {
+        let err = CopyPathTool
+            .execute(serde_json::json!({ "source": src, "destination": dst }))
+            .await
+            .unwrap_err()
+            .to_string();
+        refused(err, "copy_path");
+        unchanged();
+    }
+
+    // Reading and copying the policy elsewhere are fine; so are other files in .phazeai/.
+    let out = ReadFileTool
+        .execute(serde_json::json!({ "path": s(&policy_path) }))
+        .await
+        .unwrap();
+    assert!(out["content"].as_str().unwrap().contains("private/**"));
+    CopyPathTool
+        .execute(serde_json::json!({ "source": s(&policy_path), "destination": s(&root.join("backup.toml")) }))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("backup.toml")).unwrap(),
+        policy_text
+    );
+    WriteFileTool
+        .execute(serde_json::json!({ "path": s(&root.join(".phazeai/designs/home.html")), "content": "<p>" }))
+        .await
+        .unwrap();
+    CopyPathTool
+        .execute(serde_json::json!({ "source": s(&root.join("evil")), "destination": s(&root.join("elsewhere")) }))
+        .await
+        .unwrap();
+    assert!(audit::recent(audit::CAPACITY).iter().any(|e| matches!(
+        &e.kind,
+        audit::AuditKind::BlockedFile { reason, via, .. } if reason == PROTECTED_REASON && via == "write_file"
+    )));
+}
+
+#[tokio::test]
+async fn policy_path_is_protected_before_the_file_exists() {
+    let (_d, root) = project(None);
+    let _g = activate(&root);
+    let target = s(&root.join(POLICY_FILE));
+    let err = CreateDirectoryTool
+        .execute(serde_json::json!({ "path": target }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("REFUSED") && err.contains("edited by you"),
+        "{err}"
+    );
+    let err = WriteFileTool
+        .execute(serde_json::json!({ "path": target, "content": "deny = []\n" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("REFUSED"), "{err}");
+    assert!(!root.join(POLICY_FILE).exists());
+    assert!(!active().file_exists());
+    // The directory itself may be created (skills, designs live there).
+    CreateDirectoryTool
+        .execute(serde_json::json!({ "path": s(&root.join(".phazeai/skills")) }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn bash_refuses_commands_naming_the_policy_file() {
+    let (_d, root) = project(Some("deny = []\nlocal_only = true\n"));
+    let _g = activate(&root);
+    let bash = BashTool::new(root.clone());
+    for cmd in [
+        "echo 'local_only = false' > .phazeai/privacy.toml",
+        "rm -rf .phazeai",
+        "cat .phazeai/privacy.toml",
+    ] {
+        let err = bash
+            .execute(serde_json::json!({ "command": cmd }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("REFUSED") && err.contains("edited by you"),
+            "{cmd}: {err}"
+        );
+    }
+    assert!(active().local_only());
+    let out = bash
+        .execute(serde_json::json!({ "command": "echo .phazeai/designs" }))
+        .await
+        .unwrap();
+    assert!(out["stdout"].as_str().unwrap().contains(".phazeai/designs"));
 }
 
 #[tokio::test]
