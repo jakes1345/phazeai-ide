@@ -15,7 +15,7 @@ use crate::domain_state::IdeState;
 use crate::{
     components::button::{phaze_button, ButtonVariant},
     components::icon::{icons, phaze_icon},
-    custom_theme::{export_name_for, export_theme, load_custom_themes, themes_dir},
+    custom_theme::{export_name_for, export_theme, load_custom_themes, themes_dir, LoadedThemes},
     theme::{PhazeTheme, ThemeVariant},
     tokens::{font, radius, space, stroke},
     util::open_external_url,
@@ -422,13 +422,11 @@ fn theme_section(state: IdeState) -> impl IntoView {
             }
         }),
         phaze_button("Reload", ButtonVariant::Ghost, theme, move || {
-            loaded.set(load_custom_themes());
-            // Re-apply the active custom theme so file edits take effect.
-            let active = theme.get_untracked();
-            if active.custom_name.is_some() {
-                theme.set(PhazeTheme::from_name(active.display_name()));
-            }
-            status.set(String::new());
+            let fresh = load_custom_themes();
+            let (next, problem) = theme_after_reload(theme.get_untracked(), &fresh);
+            loaded.set(fresh);
+            theme.set(next);
+            status.set(problem.unwrap_or_default());
         }),
     ))
     .style(|s| {
@@ -467,6 +465,46 @@ fn theme_section(state: IdeState) -> impl IntoView {
 
 fn themes_folder_hint() -> String {
     themes_dir().display().to_string()
+}
+
+/// The theme to show after the themes folder was re-read, and a message for
+/// the status line when the active theme couldn't be refreshed.
+///
+/// A custom theme whose file still loads comes back fresh, so edits take
+/// effect. One that no longer loads (a syntax error, a deleted file) stays as
+/// it is on screen: falling back to the built-in Dark theme would silently
+/// throw away the user's choice over a typo in the file.
+pub(crate) fn theme_after_reload(
+    current: PhazeTheme,
+    loaded: &LoadedThemes,
+) -> (PhazeTheme, Option<String>) {
+    let Some(name) = current.custom_name.clone() else {
+        return (current, None);
+    };
+    if let Some(fresh) = loaded
+        .themes
+        .iter()
+        .find(|t| t.display_name().eq_ignore_ascii_case(&name))
+    {
+        return (fresh.clone(), None);
+    }
+    let problems: Vec<String> = loaded
+        .errors
+        .iter()
+        .map(|(path, err)| {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            format!("{}: {err}", file.unwrap_or_default())
+        })
+        .collect();
+    let message = if problems.is_empty() {
+        format!("\"{name}\" is no longer in the themes folder. Keeping it until you pick another theme.")
+    } else {
+        format!(
+            "\"{name}\" didn't reload ({}). Keeping the current colours.",
+            problems.join("; ")
+        )
+    };
+    (current, Some(message))
 }
 
 fn editor_section(state: IdeState) -> impl IntoView {
@@ -1210,4 +1248,59 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
             .height_full()
             .background(p.bg_panel)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::theme_after_reload;
+    use crate::custom_theme::{parse_hex_color, parse_theme, LoadedThemes};
+    use crate::theme::{PhazeTheme, ThemeVariant};
+
+    fn ember(accent: &str) -> PhazeTheme {
+        parse_theme(&format!(
+            "name = \"Ember\"\n[colors]\naccent = \"{accent}\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reload_keeps_a_custom_theme_whose_file_broke() {
+        let current = ember("#ff7a18");
+        let broken = LoadedThemes {
+            themes: Vec::new(),
+            errors: vec![(
+                std::path::PathBuf::from("/themes/ember.toml"),
+                "colors.accent: `red` is not a #rrggbb colour".to_string(),
+            )],
+        };
+        let (next, problem) = theme_after_reload(current.clone(), &broken);
+        assert_eq!(next.display_name(), "Ember");
+        assert_eq!(next.palette.accent, current.palette.accent);
+        let problem = problem.unwrap();
+        assert!(problem.contains("ember.toml"), "{problem}");
+        assert!(problem.contains("not a #rrggbb colour"), "{problem}");
+    }
+
+    #[test]
+    fn reload_applies_a_custom_theme_that_still_loads() {
+        let fresh = LoadedThemes {
+            themes: vec![ember("#00ff00")],
+            errors: Vec::new(),
+        };
+        let (next, problem) = theme_after_reload(ember("#ff7a18"), &fresh);
+        assert_eq!(problem, None);
+        assert_eq!(next.palette.accent, parse_hex_color("#00ff00").unwrap());
+    }
+
+    #[test]
+    fn reload_leaves_built_in_themes_alone_and_reports_missing_files() {
+        let dracula = PhazeTheme::from_variant(ThemeVariant::Dracula);
+        let (next, problem) = theme_after_reload(dracula, &LoadedThemes::default());
+        assert_eq!(next.variant, ThemeVariant::Dracula);
+        assert_eq!(problem, None);
+
+        let (next, problem) = theme_after_reload(ember("#ff7a18"), &LoadedThemes::default());
+        assert_eq!(next.display_name(), "Ember");
+        assert!(problem.unwrap().contains("no longer"));
+    }
 }

@@ -2,11 +2,15 @@
 //!
 //! The cursor is a byte index that is always kept on a char boundary, so
 //! editing never panics on multi-byte input (the old single-line editor
-//! advanced the cursor by one *byte* per character).
+//! advanced the cursor by one *byte* per character). Motion, deletion and
+//! layout work on grapheme clusters, so "⚠️" and ZWJ emoji are one unit, and
+//! widths are measured per cluster as the terminal draws them.
 
 use std::path::PathBuf;
 
-use crate::text::char_width;
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::text::str_width;
 
 #[derive(Default, Clone, Debug)]
 pub struct InputBuffer {
@@ -57,7 +61,7 @@ impl InputBuffer {
 
     fn prev_boundary(&self, pos: usize) -> usize {
         self.text[..pos]
-            .char_indices()
+            .grapheme_indices(true)
             .next_back()
             .map(|(i, _)| i)
             .unwrap_or(0)
@@ -65,9 +69,9 @@ impl InputBuffer {
 
     fn next_boundary(&self, pos: usize) -> usize {
         self.text[pos..]
-            .chars()
+            .graphemes(true)
             .next()
-            .map(|c| pos + c.len_utf8())
+            .map(|g| pos + g.len())
             .unwrap_or(pos)
     }
 
@@ -251,25 +255,28 @@ impl InputBuffer {
         let mut cur_w = 0;
         let mut cursor_pos = None;
 
-        for (i, c) in self.text.char_indices() {
-            if i == self.cursor {
+        for (i, g) in self.text.grapheme_indices(true) {
+            // The cursor normally sits on a cluster boundary; should it land
+            // inside one (column arithmetic counts chars), draw it there.
+            let at_cursor = i <= self.cursor && self.cursor < i + g.len();
+            if at_cursor {
                 cursor_pos = Some((rows.len(), cur_w));
             }
-            if c == '\n' {
+            if g.ends_with('\n') {
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
                 continue;
             }
-            let cw = char_width(c);
-            if cur_w + cw > width {
+            let gw = str_width(g);
+            if cur_w + gw > width {
                 rows.push(std::mem::take(&mut cur));
                 cur_w = 0;
-                if i == self.cursor {
+                if at_cursor {
                     cursor_pos = Some((rows.len(), 0));
                 }
             }
-            cur.push(c);
-            cur_w += cw;
+            cur.push_str(g);
+            cur_w += gw;
         }
         let (mut row, mut col) = cursor_pos.unwrap_or((rows.len(), cur_w));
         rows.push(cur);
@@ -496,6 +503,39 @@ mod tests {
         b.home();
         let (_, r, c) = b.layout(5);
         assert_eq!((r, c), (0, 0));
+    }
+
+    #[test]
+    fn layout_measures_emoji_sequences_like_the_terminal() {
+        // "⚠️" is one 2-cell glyph, so after "⚠️ note" the cursor is at column 7
+        // (per-char widths put it at 6, one cell left of where it is drawn).
+        let b = buf("⚠\u{FE0F} note");
+        let (rows, r, c) = b.layout(20);
+        assert_eq!(rows, vec!["⚠\u{FE0F} note"]);
+        assert_eq!((r, c), (0, 7));
+        // A ZWJ family is 2 cells and never split across rows.
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let b = buf(&format!("ab{family}"));
+        let (rows, r, c) = b.layout(3);
+        assert_eq!(rows, vec!["ab".to_string(), family.to_string()]);
+        assert_eq!((r, c), (1, 2));
+    }
+
+    #[test]
+    fn cursor_motion_and_deletion_treat_emoji_sequences_as_one() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let mut b = buf(&format!("{family}x"));
+        b.left();
+        b.left();
+        assert_eq!(b.cursor(), 0);
+        b.right();
+        assert_eq!(b.cursor(), family.len());
+        b.backspace();
+        assert_eq!(b.text(), "x");
+        let mut b = buf(&format!("{family}x"));
+        b.home();
+        b.delete();
+        assert_eq!(b.text(), "x");
     }
 
     #[test]

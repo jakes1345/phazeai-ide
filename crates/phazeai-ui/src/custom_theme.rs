@@ -218,8 +218,8 @@ pub struct LoadedThemes {
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// Every `*.toml` theme in `dir`, sorted by name. Later duplicates of a name
-/// are reported as errors.
+/// Every `*.toml` theme in `dir` (the extension in any case), sorted by name.
+/// Later duplicates of a name are reported as errors.
 pub fn load_themes_from(dir: &Path) -> LoadedThemes {
     let mut loaded = LoadedThemes::default();
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -228,7 +228,11 @@ pub fn load_themes_from(dir: &Path) -> LoadedThemes {
     let mut paths: Vec<PathBuf> = read
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+        })
         .collect();
     paths.sort();
     for path in paths {
@@ -423,9 +427,11 @@ mod tests {
         std::fs::write(dir.path().join("c.toml"), "name = \"Alpha\"\n").unwrap();
         std::fs::write(dir.path().join("d.toml"), "oops").unwrap();
         std::fs::write(dir.path().join("e.txt"), "name = \"Ignored\"\n").unwrap();
+        // Files saved by tools that upper-case extensions still count.
+        std::fs::write(dir.path().join("upper.TOML"), "name = \"Upper\"\n").unwrap();
         let loaded = load_themes_from(dir.path());
         let names: Vec<&str> = loaded.themes.iter().map(|t| t.display_name()).collect();
-        assert_eq!(names, vec!["Alpha", "Zed"]);
+        assert_eq!(names, vec!["Alpha", "Upper", "Zed"]);
         assert_eq!(loaded.errors.len(), 2);
     }
 }

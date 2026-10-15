@@ -39,13 +39,24 @@ const MAX_INPUT_ROWS: usize = 8;
 
 fn home_relative(path: &std::path::Path) -> String {
     let s = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
-        let h = home.display().to_string();
-        if let Some(rest) = s.strip_prefix(&h) {
-            return format!("~{rest}");
-        }
+    match dirs::home_dir() {
+        Some(home) => home_relative_to(&s, &home.display().to_string()),
+        None => s,
     }
-    s
+}
+
+/// `path` with a leading `home` replaced by `~`, but only when `home` is a
+/// whole path component: `/home/me/x` → `~/x`, while `/home/mesa/x` is left
+/// alone (it is not inside `/home/me`).
+fn home_relative_to(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 fn cwd_display() -> String {
@@ -899,17 +910,10 @@ fn draw_session_picker(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
     let t = &state.theme;
-    let w = area.width.saturating_sub(4).clamp(30, 90);
-    let h = (picker.list.len() as u16 + 2).clamp(5, area.height.saturating_sub(4).max(5));
-    let rect = Rect::new(
-        area.x + (area.width.saturating_sub(w)) / 2,
-        area.y + (area.height.saturating_sub(h)) / 2,
-        w,
-        h,
-    );
-    let rows = h.saturating_sub(2) as usize;
+    let rect = picker_rect(area, picker.list.len());
+    let rows = rect.height.saturating_sub(2) as usize;
     let start = picker.index.saturating_sub(rows.saturating_sub(1));
-    let inner_w = w.saturating_sub(2) as usize;
+    let inner_w = rect.width.saturating_sub(2) as usize;
     let lines: Vec<Line> = picker
         .list
         .iter()
@@ -972,6 +976,23 @@ fn draw_session_picker(f: &mut Frame, area: Rect, state: &AppState) {
         ),
         rect,
     );
+}
+
+/// Where the session picker goes: centred, 30–90 columns wide and tall enough
+/// for `items` rows, but never larger than `area`. Drawing outside the frame
+/// panics in ratatui, so a tiny terminal gets a tiny picker instead.
+fn picker_rect(area: Rect, items: usize) -> Rect {
+    let w = area.width.saturating_sub(4).clamp(30, 90).min(area.width);
+    let wanted = u16::try_from(items).unwrap_or(u16::MAX).saturating_add(2);
+    let h = wanted
+        .clamp(5, area.height.saturating_sub(4).max(5))
+        .min(area.height);
+    Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    )
 }
 
 fn draw_file_tree(f: &mut Frame, area: Rect, theme: &Theme) {
@@ -1070,7 +1091,55 @@ fn draw_file_tree(f: &mut Frame, area: Rect, theme: &Theme) {
 
 #[cfg(test)]
 mod tests {
-    use super::short_path;
+    use super::{home_relative_to, picker_rect, short_path};
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn picker_rect_never_leaves_the_frame() {
+        for (w, h) in [
+            (0, 0),
+            (1, 1),
+            (10, 3),
+            (29, 4),
+            (30, 5),
+            (80, 24),
+            (200, 60),
+        ] {
+            let area = Rect::new(0, 0, w, h);
+            for items in [0, 3, 50] {
+                let r = picker_rect(area, items);
+                assert_eq!(r, r.intersection(area), "{w}x{h} items={items}: {r:?}");
+            }
+        }
+        // Roomy terminals: centred, 90 wide, list height plus the border.
+        let r = picker_rect(Rect::new(2, 1, 100, 40), 3);
+        assert_eq!((r.x, r.y, r.width, r.height), (7, 18, 90, 5));
+        let r = picker_rect(Rect::new(0, 0, 100, 40), 100);
+        assert_eq!(r.height, 36);
+    }
+
+    #[test]
+    fn home_prefix_must_be_a_whole_component() {
+        assert_eq!(
+            home_relative_to("/home/me/project", "/home/me"),
+            "~/project"
+        );
+        assert_eq!(home_relative_to("/home/me", "/home/me"), "~");
+        assert_eq!(
+            home_relative_to("/home/mesa/project", "/home/me"),
+            "/home/mesa/project"
+        );
+        assert_eq!(home_relative_to("/opt/x", "/home/me"), "/opt/x");
+        assert_eq!(home_relative_to("/x", "/"), "/x");
+        assert_eq!(
+            home_relative_to(r"C:\Users\me\code", r"C:\Users\me\"),
+            r"~\code"
+        );
+        assert_eq!(
+            home_relative_to(r"C:\Users\mesa\code", r"C:\Users\me"),
+            r"C:\Users\mesa\code"
+        );
+    }
 
     #[test]
     fn short_path_keeps_trailing_components() {

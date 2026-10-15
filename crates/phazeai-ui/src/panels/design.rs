@@ -19,7 +19,7 @@ use floem::{
 };
 use phazeai_core::design::{
     self, collect_style_sources, design_prompt, extract_html, extract_markdown, extract_prompt,
-    list_designs, load_design_system, new_design_path, save_design_system, DesignEntry,
+    list_designs, load_design_system, new_design_path, replace_design_system, DesignEntry,
     DESIGN_SYSTEM_FILE, DESIGN_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT,
 };
 use phazeai_core::Settings;
@@ -143,16 +143,9 @@ fn run_job(
     ))?;
 
     match job {
-        Job::DesignSystem => {
-            let markdown = extract_markdown(&reply);
-            let path = design::design_system_path(root);
-            if path.exists() {
-                let backup = path.with_extension("previous.md");
-                std::fs::copy(&path, &backup)
-                    .map_err(|e| format!("Couldn't back up the old design system: {e}"))?;
-            }
-            save_design_system(root, &markdown).map_err(|e| e.to_string())
-        }
+        // Keeps the old design system as a backup, and writes nothing if
+        // that backup can't be made.
+        Job::DesignSystem => replace_design_system(root, &extract_markdown(&reply)),
         Job::NewDesign | Job::Revision => {
             let html = extract_html(&reply).ok_or_else(|| {
                 "The model's reply didn't contain an HTML page. Try rephrasing the request."
@@ -510,12 +503,10 @@ pub fn design_panel(state: IdeState) -> impl IntoView {
         }),
         phaze_button("From IDE theme", ButtonVariant::Ghost, theme, move || {
             let root = root_sig.get_untracked();
-            if has_ds.get_untracked() {
-                let path = design::design_system_path(&root);
-                let _ = std::fs::copy(&path, path.with_extension("previous.md"));
-            }
             let md = design_system_from_theme(&theme.get_untracked());
-            match save_design_system(&root, &md) {
+            // Backs up whatever is on disk right now (not what `has_ds` last
+            // saw), and writes nothing if that backup fails.
+            match replace_design_system(&root, &md) {
                 Ok(path) => {
                     refresh();
                     status.set(format!(
@@ -523,7 +514,7 @@ pub fn design_panel(state: IdeState) -> impl IntoView {
                     ));
                     state.editor.open_file.set(Some(path));
                 }
-                Err(e) => status.set(format!("Couldn't write the design system: {e}")),
+                Err(e) => status.set(e),
             }
         }),
         container(phaze_button(
