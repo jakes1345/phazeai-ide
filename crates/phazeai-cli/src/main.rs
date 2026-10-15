@@ -40,8 +40,9 @@ struct Cli {
     resume: Option<String>,
 
     /// What -p mode may do without asking: read (default), edit (also change
-    /// files) or all (also run any command). Anything more is asked about on
-    /// the terminal, or refused when input is piped.
+    /// files with the file tools; shell commands stay read-only) or all (also
+    /// run any command). Anything more is asked about on the terminal, or
+    /// refused when input is piped.
     #[arg(long, value_enum, default_value_t = Allow::Read)]
     allow: Allow,
 

@@ -493,13 +493,29 @@ impl Agent {
         };
 
         if let Some(tool) = self.tools.get(tool_name) {
-            match tool.execute(params).await {
-                Ok(value) => {
+            let run = tool.execute(params);
+            // Stop awaiting the tool as soon as the run is cancelled. Dropping
+            // its future stops what it started: a `bash` child is killed along
+            // with its process group (see `BashTool`), so Stop / Esc / Ctrl+C
+            // end a running `cargo build` instead of leaving it behind.
+            let outcome = match &self.cancel_token {
+                Some(token) => tokio::select! {
+                    result = run => Some(result),
+                    _ = cancelled(token) => None,
+                },
+                None => Some(run.await),
+            };
+            match outcome {
+                Some(Ok(value)) => {
                     let result_str =
                         serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                     (true, result_str)
                 }
-                Err(e) => (false, format!("Error: {e}")),
+                Some(Err(e)) => (false, format!("Error: {e}")),
+                None => (
+                    false,
+                    "Interrupted by the user before the tool finished.".to_string(),
+                ),
             }
         } else {
             (false, format!("Tool '{}' not found", tool_name))
@@ -531,6 +547,14 @@ impl Agent {
                 _ => {}
             }
         }
+    }
+}
+
+/// Resolves once `token` is set. Polled, because the token is a plain
+/// `AtomicBool` shared with UI threads that have no async runtime.
+async fn cancelled(token: &AtomicBool) {
+    while !token.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

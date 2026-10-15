@@ -4252,6 +4252,7 @@ dependencies = [
  "globset",
  "ignore",
  "keyring",
+ "libc",
  "libloading",
  "lsp-types",
  "notify",
