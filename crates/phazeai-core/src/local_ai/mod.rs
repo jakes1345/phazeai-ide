@@ -38,6 +38,19 @@ pub struct LocalAiSettings {
     pub auto_start: bool,
 }
 
+impl LocalAiSettings {
+    /// Context size the built-in server runs with: the override, else the
+    /// selected model's catalog value, else the catalog default.
+    pub fn effective_ctx_size(&self) -> u32 {
+        if let Some(ctx) = self.ctx_size {
+            return ctx;
+        }
+        server::selected_model(self, &models_dir())
+            .map(|entry| entry.ctx_size)
+            .unwrap_or(catalog::DEFAULT_CTX_SIZE)
+    }
+}
+
 impl Default for LocalAiSettings {
     fn default() -> Self {
         Self {

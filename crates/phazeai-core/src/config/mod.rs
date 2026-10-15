@@ -233,8 +233,18 @@ impl Settings {
     /// Conversation tokens the agent may send to the active model before
     /// compacting. Honours `[llm] context_tokens` when set.
     pub fn context_budget(&self) -> usize {
-        crate::llm::context_budget::context_budget(
-            &self.llm.provider.to_provider_id(),
+        use crate::llm::context_budget::{budget_for_window, context_budget};
+        let provider = self.llm.provider.to_provider_id();
+        if provider == crate::llm::ProviderId::BuiltIn {
+            // We start the server ourselves, so the window is known exactly.
+            return budget_for_window(
+                self.local_ai.effective_ctx_size() as usize,
+                self.llm.max_tokens as usize,
+                self.llm.context_tokens,
+            );
+        }
+        context_budget(
+            &provider,
             &self.llm.model,
             self.llm.max_tokens as usize,
             self.llm.context_tokens,

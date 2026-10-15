@@ -31,6 +31,10 @@ pub fn disk_margin(size: u64) -> u64 {
     (size / 10).clamp(1024 * 1024, DISK_MARGIN)
 }
 
+/// Context size used when no model is selected yet; every catalog entry
+/// currently uses it too.
+pub const DEFAULT_CTX_SIZE: u32 = 16_384;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogEntry {
     /// Stable id stored in config (`[local_ai] model`) and sent as the model name.

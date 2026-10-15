@@ -46,10 +46,23 @@ pub fn context_budget(
     max_output_tokens: usize,
     override_tokens: Option<usize>,
 ) -> usize {
+    budget_for_window(
+        context_window(provider, model),
+        max_output_tokens,
+        override_tokens,
+    )
+}
+
+/// [`context_budget`] for a context window already known exactly (the
+/// built-in server is started with a specific `-c` size).
+pub fn budget_for_window(
+    window: usize,
+    max_output_tokens: usize,
+    override_tokens: Option<usize>,
+) -> usize {
     if let Some(explicit) = override_tokens {
         return explicit.max(MIN_BUDGET);
     }
-    let window = context_window(provider, model);
     // Never let the reply reserve eat more than a quarter of a small window.
     let reply = max_output_tokens.min(window / 4);
     window
@@ -94,6 +107,14 @@ mod tests {
         assert_eq!(
             context_budget(&ProviderId::Ollama, "x", 1_000_000, None),
             8_192 - 2_048 - SCHEMA_RESERVE
+        );
+    }
+
+    #[test]
+    fn exact_windows_are_used_as_given() {
+        assert_eq!(
+            budget_for_window(16_384, 4_096, None),
+            16_384 - 4_096 - SCHEMA_RESERVE
         );
     }
 
