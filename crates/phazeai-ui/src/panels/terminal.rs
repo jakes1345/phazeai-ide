@@ -26,6 +26,15 @@ use phazeai_core::Settings;
 use crate::theme::PhazeTheme;
 use std::time::{Duration, Instant};
 
+// ── PTY defaults ──────────────────────────────────────────────────────────────
+
+/// Size of a new PTY before the panel reports its real size. Wide enough for
+/// side-by-side editors (two editors need ~180 columns) and never smaller than
+/// a classic 80×24 terminal.
+pub const DEFAULT_PTY_COLS: u16 = 220;
+pub const DEFAULT_PTY_ROWS: u16 = 40;
+const _: () = assert!(DEFAULT_PTY_COLS >= 180 && DEFAULT_PTY_ROWS >= 24);
+
 // ── Terminal Colors ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -702,8 +711,8 @@ fn single_terminal(
         thread::spawn(move || {
             let pty_system = NativePtySystem::default();
             let pair = match pty_system.openpty(PtySize {
-                rows: 40,
-                cols: 220,
+                rows: DEFAULT_PTY_ROWS,
+                cols: DEFAULT_PTY_COLS,
                 pixel_width: 0,
                 pixel_height: 0,
             }) {

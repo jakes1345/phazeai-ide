@@ -435,7 +435,7 @@ fn parse_git_porcelain(output: &str) -> Vec<GitEntry> {
         .lines()
         .filter(|l| l.len() >= 4)
         .filter_map(|line| {
-            let staged = line.chars().nth(0)?;
+            let staged = line.chars().next()?;
             let unstaged = line.chars().nth(1)?;
             let path = line[3..].trim().to_string();
 

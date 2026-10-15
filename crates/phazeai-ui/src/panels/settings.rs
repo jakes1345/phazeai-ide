@@ -416,7 +416,12 @@ fn theme_section(state: IdeState) -> impl IntoView {
             status.set(String::new());
         }),
     ))
-    .style(|s| s.flex_row().gap(space::SM).margin_top(space::MD));
+    .style(|s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(space::SM)
+            .margin_top(space::MD)
+    });
 
     let status_line = label(move || status.get()).style(move |s| {
         s.font_size(font::CAPTION)

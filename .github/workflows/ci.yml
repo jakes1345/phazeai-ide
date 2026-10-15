@@ -51,7 +51,7 @@ jobs:
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
             libudev-dev libinput-dev libdbus-1-dev python3
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ─────────────────────────────────────────────
   # 3. SECURITY AUDIT
@@ -134,8 +134,7 @@ jobs:
   test-ui:
     name: Test / phazeai-ui
     runs-on: ubuntu-latest
-    # The xvfb screenshot tests have hung until GitHub's 6h limit; fail fast instead.
-    timeout-minutes: 30
+    timeout-minutes: 40
     needs: fmt
     steps:
       - uses: actions/checkout@v4
@@ -159,7 +158,8 @@ jobs:
       - name: Test phazeai-ui (state + integration)
         run: cargo test -p phazeai-ui
       - name: Test phazeai-ui tier2 (xvfb screenshot tests)
-        run: xvfb-run -a cargo test -p phazeai-ui --test tier2_integration -- --ignored
+        timeout-minutes: 15
+        run: xvfb-run -a cargo test -p phazeai-ui --test tier2_integration -- --ignored --test-threads=1
       - name: Build UI binary
         run: cargo build -p phazeai-ui
 

@@ -2256,6 +2256,47 @@ where
         })
 }
 
+/// Status-bar AI indicator backed by the same check as first-run setup.
+/// Re-checked every 20s in the background (provider, key or local server can
+/// change at any time); clicking it opens Settings when something is wrong.
+fn ai_status_item(state: IdeState) -> impl IntoView {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+    let problem = floem::ext_event::create_signal_from_channel(rx);
+    std::thread::spawn(move || loop {
+        let result = provider_problem(&Settings::load());
+        if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = tx.try_send(result) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(20));
+    });
+    let theme = state.workbench.theme;
+    label(move || match problem.get() {
+        None => "Checking AI…  ".to_string(),
+        Some(None) => "AI Ready  ".to_string(),
+        Some(Some(_)) => "AI not ready  ".to_string(),
+    })
+    .style(move |s| {
+        let p = theme.get().palette;
+        let color = match problem.get() {
+            None => p.text_muted,
+            Some(None) => p.success,
+            Some(Some(_)) => p.warning,
+        };
+        s.color(color)
+            .font_size(11.0)
+            .apply_if(matches!(problem.get(), Some(Some(_))), |s| {
+                s.cursor(floem::style::CursorStyle::Pointer)
+            })
+    })
+    .on_click_stop(move |_| {
+        if let Some(Some(why)) = problem.get_untracked() {
+            show_toast(state.workbench.status_toast, why);
+            state.workbench.show_left_panel.set(true);
+            state.workbench.left_panel_tab.set(Tab::Settings);
+        }
+    })
+}
+
 fn status_bar(state: IdeState) -> impl IntoView {
     // Branch clickable button — click to open branch picker overlay
     let branch_btn = {
@@ -2544,10 +2585,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     .apply_if(!on_diag, |s| s.display(floem::style::Display::None))
             })
         },
-        label(|| "AI Ready  ").style(move |s| {
-            s.color(state.workbench.theme.get().palette.success)
-                .font_size(11.0)
-        }),
+        ai_status_item(state.clone()),
         // Git blame for current cursor line
         label(move || {
             let blame = state.editor.active_blame.get();
@@ -4197,8 +4235,13 @@ fn ide_root(state: IdeState) -> impl IntoView {
     // Bottom panel (terminal etc.)
     let bottom_raw = bottom_panel(state.clone());
     let bottom_panel_max = state.workbench.bottom_panel_maximized;
+    let show_bottom = state.workbench.show_bottom_panel;
     let bottom = container(bottom_raw).style(move |s| {
-        let s = s.apply_if(zen.get(), |s| s.display(floem::style::Display::None));
+        // Hide the wrapper too: a hidden panel inside a fixed-height wrapper
+        // still reserved 220px of empty space under the editor.
+        let s = s.apply_if(zen.get() || !show_bottom.get(), |s| {
+            s.display(floem::style::Display::None)
+        });
         if bottom_panel_max.get() {
             s.flex_grow(10.0).min_height(0.0)
         } else {
