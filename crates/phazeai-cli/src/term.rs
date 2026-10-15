@@ -23,14 +23,35 @@ use crossterm::{
 
 /// Whether we pushed keyboard-enhancement flags (must be popped on exit).
 static ENHANCED_KEYS: AtomicBool = AtomicBool::new(false);
+/// Whether bracketed paste was enabled (legacy Windows consoles can't).
+static BRACKETED_PASTE: AtomicBool = AtomicBool::new(false);
 /// Whether the TUI currently owns the terminal.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Put the terminal into TUI mode.
+/// Put the terminal into TUI mode. If a step after raw mode fails, raw mode
+/// is undone again before the error is returned, so the shell stays usable.
 pub fn enter() -> io::Result<()> {
     enable_raw_mode()?;
+    ACTIVE.store(true, Ordering::SeqCst);
+    match set_up_screen() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            leave();
+            Err(e)
+        }
+    }
+}
+
+/// Everything after raw mode: the alternate screen (required), then
+/// bracketed paste and kitty keyboard flags where the terminal has them.
+fn set_up_screen() -> io::Result<()> {
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(out, EnterAlternateScreen)?;
+    // Legacy Windows consoles don't support bracketed paste; pastes then
+    // arrive as key events, which `keys.rs` handles by burst detection.
+    if execute!(out, EnableBracketedPaste).is_ok() {
+        BRACKETED_PASTE.store(true, Ordering::SeqCst);
+    }
     // Lets terminals that support the kitty protocol report Shift+Enter
     // distinctly from Enter. Unsupported terminals are left untouched.
     if matches!(supports_keyboard_enhancement(), Ok(true))
@@ -42,7 +63,6 @@ pub fn enter() -> io::Result<()> {
     {
         ENHANCED_KEYS.store(true, Ordering::SeqCst);
     }
-    ACTIVE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -55,7 +75,10 @@ pub fn leave() {
     if ENHANCED_KEYS.swap(false, Ordering::SeqCst) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
+    if BRACKETED_PASTE.swap(false, Ordering::SeqCst) {
+        let _ = execute!(out, DisableBracketedPaste);
+    }
+    let _ = execute!(out, LeaveAlternateScreen, Show);
     let _ = disable_raw_mode();
     let _ = out.flush();
 }
@@ -85,8 +108,13 @@ pub struct TerminalGuard;
 impl TerminalGuard {
     pub fn new() -> io::Result<Self> {
         install_panic_hook();
-        enter()?;
-        Ok(Self)
+        enable_raw_mode()?;
+        ACTIVE.store(true, Ordering::SeqCst);
+        // From here on dropping the guard restores the terminal, so a failure
+        // in the rest of the setup can't strand the shell in raw mode.
+        let guard = Self;
+        set_up_screen()?;
+        Ok(guard)
     }
 }
 

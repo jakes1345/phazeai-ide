@@ -1,5 +1,6 @@
 //! Keyboard handling.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,6 +13,29 @@ use crate::commands::{self, matching_commands};
 
 /// How long a first Ctrl+C on an idle, empty prompt stays "armed".
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
+
+/// An Enter arriving this soon after the previous key is part of a paste, not
+/// a keystroke, and inserts a newline instead of sending the prompt.
+///
+/// Windows consoles deliver pastes as a burst of plain key events (no
+/// `Event::Paste`), so without this the first pasted line would be sent on
+/// its own. Keyboard auto-repeat tops out around 30 Hz (≈33 ms apart), so
+/// nothing typed by hand arrives within 8 ms of the key before it. Keys are
+/// timed as they are handled, so a redraw that outlasts the gap between two
+/// keystrokes could still misfire; the cost is a newline instead of a send,
+/// and the next Enter sends.
+const PASTE_BURST: Duration = Duration::from_millis(8);
+
+thread_local! {
+    /// When the previous key event was handled (keys arrive on one thread).
+    static LAST_KEY_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Whether an Enter handled at `now` is part of a paste burst, given when the
+/// previous key was handled.
+fn enter_is_pasted(previous: Option<Instant>, now: Instant) -> bool {
+    previous.is_some_and(|at| now.saturating_duration_since(at) < PASTE_BURST)
+}
 
 pub(super) fn handle_paste(state: &mut AppState, text: &str) {
     if state.pending_approval.is_some() || state.session_picker.is_some() {
@@ -41,6 +65,8 @@ fn scroll_down(state: &mut AppState, n: usize) {
 }
 
 pub(super) fn handle_key(state: &mut AppState, key: KeyEvent) {
+    let now = Instant::now();
+    let previous_key_at = LAST_KEY_AT.replace(Some(now));
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -158,7 +184,9 @@ pub(super) fn handle_key(state: &mut AppState, key: KeyEvent) {
         (KeyCode::Enter, _, _) => {
             // A trailing backslash continues the prompt on a new line.
             let text = state.input.text();
-            if text.ends_with('\\') && state.input.cursor() == text.len() {
+            if enter_is_pasted(previous_key_at, now) {
+                newline(state);
+            } else if text.ends_with('\\') && state.input.cursor() == text.len() {
                 state.input.backspace();
                 newline(state);
             } else {
@@ -401,5 +429,24 @@ pub(super) fn approval_label(mode: &ToolApprovalMode) -> &'static str {
         ToolApprovalMode::AutoApprove => "auto-approve",
         ToolApprovalMode::AlwaysAsk => "ask",
         ToolApprovalMode::AskOnce => "ask-once",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_within_a_paste_burst_inserts_a_newline() {
+        let t0 = Instant::now();
+        // Pasted lines arrive microseconds apart.
+        assert!(enter_is_pasted(Some(t0), t0));
+        assert!(enter_is_pasted(Some(t0), t0 + Duration::from_millis(2)));
+        // Typing, even with auto-repeat, is much slower than the threshold.
+        assert!(!enter_is_pasted(Some(t0), t0 + PASTE_BURST));
+        assert!(!enter_is_pasted(Some(t0), t0 + Duration::from_millis(40)));
+        assert!(!enter_is_pasted(Some(t0), t0 + Duration::from_secs(3)));
+        // The first key ever is a keystroke.
+        assert!(!enter_is_pasted(None, t0));
     }
 }

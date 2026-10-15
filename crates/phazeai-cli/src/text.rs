@@ -3,10 +3,16 @@
 //!
 //! Everything here measures in terminal *cells* (via `unicode-width`), never
 //! in bytes, so multi-byte and wide (CJK / emoji) characters are handled
-//! correctly and nothing ever slices a `str` off a char boundary.
+//! correctly and nothing ever slices a `str` off a char boundary. Text is
+//! walked by grapheme cluster, not by char, and each cluster is measured as a
+//! whole: "⚠️" (U+26A0 + VS16) and ZWJ emoji such as a family are one 2-cell
+//! glyph on screen, which per-char widths undercount — and ratatui measures
+//! the same way when it draws, so wrapped lines fit and the cursor lands
+//! where it is drawn.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Make text from tools, files or the model safe to draw: strips ANSI escape
@@ -95,13 +101,13 @@ pub fn truncate_to_width(s: &str, max: usize) -> String {
     }
     let mut out = String::new();
     let mut w = 0;
-    for c in s.chars() {
-        let cw = char_width(c);
-        if w + cw > max - 1 {
+    for g in s.graphemes(true) {
+        let gw = str_width(g);
+        if w + gw > max - 1 {
             break;
         }
-        out.push(c);
-        w += cw;
+        out.push_str(g);
+        w += gw;
     }
     out.push('…');
     out
@@ -132,16 +138,16 @@ pub fn truncate_spans(spans: &[Span<'static>], max: usize) -> Vec<Span<'static>>
     'outer: for span in spans {
         let mut buf = String::new();
         last_style = span.style;
-        for c in span.content.chars() {
-            let cw = char_width(c);
-            if w + cw > budget {
+        for g in span.content.graphemes(true) {
+            let gw = str_width(g);
+            if w + gw > budget {
                 if !buf.is_empty() {
                     out.push(Span::styled(buf, span.style));
                 }
                 break 'outer;
             }
-            buf.push(c);
-            w += cw;
+            buf.push_str(g);
+            w += gw;
         }
         if !buf.is_empty() {
             out.push(Span::styled(buf, span.style));
@@ -181,15 +187,16 @@ enum TokenKind {
 fn tokenize(spans: &[Span<'static>], mode: WrapMode) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();
     for span in spans {
-        for c in span.content.chars() {
-            let kind = if c == '\n' {
+        for g in span.content.graphemes(true) {
+            // "\r\n" is one grapheme; either way it is a line break.
+            let kind = if g.contains('\n') {
                 TokenKind::Newline
-            } else if mode == WrapMode::Word && (c == ' ' || c == '\t') {
+            } else if mode == WrapMode::Word && (g == " " || g == "\t") {
                 TokenKind::Space
             } else {
                 TokenKind::Word
             };
-            let c = if c == '\t' { ' ' } else { c };
+            let g = if g == "\t" { " " } else { g };
             let needs_new = match tokens.last() {
                 None => true,
                 Some(t) => t.kind != kind || kind == TokenKind::Newline,
@@ -205,10 +212,10 @@ fn tokenize(spans: &[Span<'static>], mode: WrapMode) -> Vec<Token> {
             if kind == TokenKind::Newline {
                 continue;
             }
-            tok.width += char_width(c);
+            tok.width += str_width(g);
             match tok.pieces.last_mut() {
-                Some((text, style)) if *style == span.style => text.push(c),
-                _ => tok.pieces.push((c.to_string(), span.style)),
+                Some((text, style)) if *style == span.style => text.push_str(g),
+                _ => tok.pieces.push((g.to_string(), span.style)),
             }
         }
     }
@@ -267,17 +274,17 @@ impl LineBuilder {
         self.width = 0;
     }
 
-    /// Push a token that is wider than a full line, splitting it by chars.
+    /// Push a token that is wider than a full line, splitting it between
+    /// grapheme clusters (never inside one).
     fn push_split(&mut self, tok: &Token) {
         for (text, style) in &tok.pieces {
-            for c in text.chars() {
-                let cw = char_width(c);
-                if self.width + cw > self.avail() && self.width > 0 {
+            for g in text.graphemes(true) {
+                let gw = str_width(g);
+                if self.width + gw > self.avail() && self.width > 0 {
                     self.flush();
                 }
-                let mut buf = [0u8; 4];
-                self.push_piece(c.encode_utf8(&mut buf), *style);
-                self.width += cw;
+                self.push_piece(g, *style);
+                self.width += gw;
             }
         }
     }
@@ -486,6 +493,61 @@ mod tests {
             assert!(str_width(l) <= 6, "{l:?} too wide");
         }
         assert_eq!(lines.concat(), "日本語のテキストです");
+    }
+
+    #[test]
+    fn emoji_sequences_are_measured_as_one_glyph() {
+        // U+26A0 + VS16 is drawn as a 2-cell emoji; a ZWJ family is one glyph.
+        assert_eq!(str_width("⚠\u{FE0F}"), 2);
+        assert_eq!(str_width("👨\u{200D}👩\u{200D}👧"), 2);
+        assert_eq!(str_width("⚠\u{FE0F} note"), 7);
+    }
+
+    #[test]
+    fn wrapping_keeps_emoji_sequences_whole_and_within_width() {
+        let warn = "⚠\u{FE0F}";
+        // Counted per char, "⚠️" is 1 cell and "⚠️x" would overflow a 2-cell line.
+        let lines = wrap_spans(
+            &[Span::raw(format!("{warn}x"))],
+            2,
+            &[],
+            &[],
+            WrapMode::Char,
+        );
+        let texts: Vec<String> = lines.iter().map(text_of).collect();
+        assert_eq!(texts, vec![warn.to_string(), "x".to_string()]);
+        assert_eq!(wrap_str("⚠\u{FE0F} note", 4), vec!["⚠\u{FE0F}", "note"]);
+
+        let family = "👨\u{200D}👩\u{200D}👧";
+        // 2 + 1 + 2 cells fit on a 5-cell line (per char it would be 6 + 1 + 2).
+        assert_eq!(
+            wrap_str(&format!("{family} ok"), 5),
+            vec![format!("{family} ok")]
+        );
+        // Never split inside the sequence, even when the line is too narrow.
+        let lines = wrap_spans(
+            &[Span::raw(family.to_string())],
+            1,
+            &[],
+            &[],
+            WrapMode::Char,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(text_of(&lines[0]), family);
+        for l in wrap_str(&format!("{family}{family}{family}"), 4) {
+            assert!(str_width(&l) <= 4, "{l:?}");
+            assert_eq!(l.len() % family.len(), 0, "split inside a sequence: {l:?}");
+        }
+    }
+
+    #[test]
+    fn truncation_keeps_emoji_sequences_whole() {
+        assert_eq!(truncate_to_width("⚠\u{FE0F} note", 3), "⚠\u{FE0F}…");
+        assert_eq!(truncate_to_width("⚠\u{FE0F} note", 2), "…");
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let out = truncate_spans(&[Span::raw(format!("{family}{family}"))], 3);
+        let s: String = out.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(s, format!("{family}…"));
     }
 
     #[test]

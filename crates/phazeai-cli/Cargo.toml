@@ -33,5 +33,6 @@ ignore = { workspace = true }
 arboard = { workspace = true }
 syntect = { workspace = true }
 unicode-width = "0.2"
+unicode-segmentation = "1.12"
 similar = { workspace = true }
 pulldown-cmark = { workspace = true }
