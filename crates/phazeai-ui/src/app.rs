@@ -112,6 +112,7 @@ pub enum Tab {
     Search,
     Git,
     Composer,
+    Design,
     Settings,
     Terminal,
     Extensions,
@@ -1949,6 +1950,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
         activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
+        activity_bar_btn(icons::DESIGN, Tab::Design, state.clone()),
         activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
         activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
         activity_bar_btn(icons::CONTAINER, Tab::Containers, state.clone()),
@@ -2118,6 +2120,17 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
+    let design_wrap = container(crate::panels::design::design_panel(state.clone())).style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Design, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
+
     let settings_wrap = container(settings_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
@@ -2143,6 +2156,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             github_wrap,
             tests_wrap,
             composer_wrap,
+            design_wrap,
             settings_wrap,
         ))
         .style(|s| s.width_full().height_full()),

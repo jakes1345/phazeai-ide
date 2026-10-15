@@ -2,6 +2,7 @@ pub mod blame;
 pub mod chat;
 pub mod composer;
 pub mod containers;
+pub mod design;
 pub mod editor;
 pub mod explorer;
 pub mod extensions;

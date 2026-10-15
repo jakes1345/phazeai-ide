@@ -72,7 +72,7 @@ Supported providers: Anthropic Claude, OpenAI, Groq, Together.ai, OpenRouter, Ge
 
 `IdeState` (in `domain_state/mod.rs`) is a `#[derive(Clone)]` struct of `RwSignal<T>` fields shared across all panels via Floem's reactive system. No `Arc<Mutex<>>` needed — signals are `Copy` and UI-thread-only.
 
-Panels: `editor`, `chat`, `explorer`, `git`, `terminal`, `search`, `settings`, `ai_panel`.
+Panels: `editor`, `chat`, `explorer`, `git`, `terminal`, `search`, `settings`, `design`, `ai_panel`.
 
 Key files:
 - `domain_state/mod.rs` — `IdeState` decomposition (`WorkbenchState`, `EditorState`, `AiState`, `ProjectState`)
@@ -82,7 +82,8 @@ Key files:
 - `panels/chat.rs` — AI chat with real streaming via `Agent::run_with_events()`
 - `panels/git.rs` — git status, stage/commit UI
 - `lsp_bridge.rs` — LSP manager, completions, diagnostics signals
-- `theme.rs` — 12 themes, `PhazeTheme` / `PhazePalette`
+- `theme.rs` — 12 themes, `PhazeTheme` / `PhazePalette`; `custom_theme.rs` loads user themes from `~/.config/phazeai/themes/*.toml`; `tokens.rs` holds the spacing/radius/type scales (use them instead of literal sizes)
+- `panels/design.rs` + `phazeai-core/src/design.rs` — AI design: prompt → self-contained HTML prototype in `.phazeai/designs/`, guided by `.phazeai/design-system.md`
 
 ### Floem Reactive Patterns (CRITICAL)
 
