@@ -872,6 +872,55 @@ fn run_skill(state: &mut AppState, name: &str, args: &str) {
     }
 }
 
+/// A workflow that answers `@phazeai` comments using this CLI, built from
+/// `repo`. The agent runs with `--allow read`, so it can read the checkout
+/// but not change files or run commands, and only trusted commenters can
+/// trigger it (each run spends the repository's API credits).
+pub(crate) fn github_action_workflow(repo: &str) -> String {
+    format!(
+        r#"name: PhazeAI
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  answer:
+    if: >-
+      contains(github.event.comment.body, '@phazeai') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo
+          key: phazeai-cli-${{{{ runner.os }}}}
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install the PhazeAI CLI
+        run: cargo install --locked --git {repo} phazeai-cli
+      - name: Ask PhazeAI (read-only)
+        env:
+          ANTHROPIC_API_KEY: ${{{{ secrets.ANTHROPIC_API_KEY }}}}
+          COMMENT: ${{{{ github.event.comment.body }}}}
+        run: phazeai --provider anthropic --allow read --no-color -p "$COMMENT" > reply.md
+      - name: Post the answer
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          NUMBER: ${{{{ github.event.issue.number || github.event.pull_request.number }}}}
+        run: gh issue comment "$NUMBER" --repo "$GITHUB_REPOSITORY" --body-file reply.md
+"#
+    )
+}
+
 fn install_github_action(state: &mut AppState) {
     let workflow_dir = std::path::Path::new(".github/workflows");
     if let Err(e) = std::fs::create_dir_all(workflow_dir) {
@@ -886,34 +935,13 @@ fn install_github_action(state: &mut AppState) {
         ));
         return;
     }
-    let workflow_content = r#"name: PhazeAI Code Action
-
-on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-
-jobs:
-  phazeai:
-    if: contains(github.event.comment.body, '@phazeai') || contains(github.event.comment.body, '/phazeai')
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      pull-requests: write
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run PhazeAI Action
-        uses: phazeai/phazeai-code-action@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          provider: "anthropic"  # Options: anthropic, openai, ollama
-          model: "claude-sonnet-4-20250514" # Options: any supported model by provider
-"#;
+    let workflow_content = github_action_workflow(env!("CARGO_PKG_REPOSITORY"));
     match std::fs::write(&workflow_path, workflow_content) {
         Ok(()) => state.system(format!(
-            "Created {}. Commit and push it to enable PhazeAI automation.",
+            "Created {}. Add an ANTHROPIC_API_KEY repository secret (Settings → Secrets \
+             and variables → Actions), then commit and push the file. Comment `@phazeai \
+             <question>` on an issue or pull request to get an answer; only the repo's \
+             owner, members and collaborators can trigger it, and it can only read code.",
             workflow_path.display()
         )),
         Err(e) => state.error(format!("Couldn't write the workflow file: {e}")),
@@ -954,5 +982,25 @@ fn undo(state: &mut AppState) {
             }
         }
         Err(e) => state.error(format!("Git not available: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::github_action_workflow;
+
+    #[test]
+    fn workflow_builds_this_cli_and_only_reads() {
+        let text = github_action_workflow("https://github.com/example/repo");
+        assert!(text
+            .contains("cargo install --locked --git https://github.com/example/repo phazeai-cli"));
+        assert!(text.contains("--allow read"));
+        assert!(text.contains("contents: read"));
+        assert!(text.contains("author_association"));
+        assert!(text.contains("${{ secrets.ANTHROPIC_API_KEY }}"));
+        assert!(text.contains("${{ github.event.comment.body }}"));
+        // The comment reaches the shell only through an environment variable.
+        assert!(!text.contains("-p \"${{"));
+        assert!(!text.contains("phazeai-code-action"));
     }
 }

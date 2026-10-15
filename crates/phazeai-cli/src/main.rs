@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use phazeai_cli::app;
+use phazeai_cli::oneshot::{self, Allow};
 use phazeai_cli::setup;
 use phazeai_cli::theme::{ColorMode, Theme};
 
@@ -37,6 +38,12 @@ struct Cli {
     /// Resume a specific conversation by ID (prefix match)
     #[arg(long)]
     resume: Option<String>,
+
+    /// What -p mode may do without asking: read (default), edit (also change
+    /// files) or all (also run any command). Anything more is asked about on
+    /// the terminal, or refused when input is piped.
+    #[arg(long, value_enum, default_value_t = Allow::Read)]
+    allow: Allow,
 
     /// Path to custom instructions file
     #[arg(long)]
@@ -199,14 +206,23 @@ async fn run(cli: Cli) -> Result<()> {
             &final_prompt,
             extra_instructions.as_deref(),
             color,
+            cli.allow,
+            oneshot::can_ask(stdin_piped),
         )
         .await?;
     } else if stdin_piped {
         if stdin_data.trim().is_empty() {
             anyhow::bail!("stdin was empty; pass a prompt with -p or pipe some text in");
         }
-        app::run_single_prompt(&settings, &stdin_data, extra_instructions.as_deref(), color)
-            .await?;
+        app::run_single_prompt(
+            &settings,
+            &stdin_data,
+            extra_instructions.as_deref(),
+            color,
+            cli.allow,
+            false,
+        )
+        .await?;
     } else {
         app::run_tui(
             settings,

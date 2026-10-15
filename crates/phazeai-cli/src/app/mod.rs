@@ -42,6 +42,8 @@ pub async fn run_single_prompt(
     prompt: &str,
     extra_instructions: Option<&str>,
     color: ColorMode,
+    allow: crate::oneshot::Allow,
+    can_ask: bool,
 ) -> Result<()> {
     let llm = settings.build_llm_client().map_err(|e| {
         anyhow::anyhow!(setup::explain_build_error(
@@ -52,7 +54,14 @@ pub async fn run_single_prompt(
     })?;
     let system_prompt = build_system_prompt(extra_instructions);
 
-    let mut agent = Agent::new(llm).with_system_prompt(system_prompt);
+    let refusals = crate::oneshot::Refusals::default();
+    let mut agent = Agent::new(llm)
+        .with_system_prompt(system_prompt)
+        .with_approval(crate::oneshot::approval_fn(
+            allow,
+            can_ask,
+            refusals.clone(),
+        ));
     if let Some(client) = try_start_sidecar().await {
         let client = Arc::new(client);
         agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
@@ -117,7 +126,12 @@ pub async fn run_single_prompt(
         }
     }
 
-    match agent_handle.await? {
+    let result = agent_handle.await?;
+    let refused = refusals.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(note) = crate::oneshot::refusal_summary(&refused) {
+        eprintln!("\n{}", paint("33", &note));
+    }
+    match result {
         Ok(_) => Ok(()),
         Err(e) => {
             let raw = last_error.unwrap_or_else(|| e.to_string());
