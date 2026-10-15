@@ -1,4 +1,4 @@
-use crate::llm::Message;
+use crate::llm::{Message, Role};
 use std::collections::VecDeque;
 
 pub struct ConversationHistory {
@@ -8,6 +8,9 @@ pub struct ConversationHistory {
     /// Summary of messages that were compacted away (see [`Self::compact`]).
     /// Sent to the model as part of the system prompt.
     summary: Option<String>,
+    /// Messages removed by [`Self::compact`] since this history was created
+    /// or last cleared.
+    folded: usize,
 }
 
 impl ConversationHistory {
@@ -17,6 +20,7 @@ impl ConversationHistory {
             max_messages: 100,
             system_prompt: None,
             summary: None,
+            folded: 0,
         }
     }
 
@@ -30,12 +34,27 @@ impl ConversationHistory {
         self
     }
 
+    /// Start from an earlier compaction: `summary` stands for messages that
+    /// are not in this history (a UI that rebuilds the history every turn
+    /// carries the summary over this way).
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.set_summary(summary);
+        self
+    }
+
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
         self.system_prompt = Some(prompt.into());
     }
 
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    /// Set the compaction summary; blank text clears it.
+    pub fn set_summary(&mut self, summary: impl Into<String>) {
+        let summary = summary.into();
+        let trimmed = summary.trim();
+        self.summary = (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     pub fn add_user_message(&mut self, content: impl Into<String>) {
@@ -100,6 +119,7 @@ impl ConversationHistory {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.summary = None;
+        self.folded = 0;
     }
 
     /// The summary of compacted messages, if any compaction has happened.
@@ -107,10 +127,18 @@ impl ConversationHistory {
         self.summary.as_deref()
     }
 
+    /// How many messages [`Self::compact`] has folded into the summary since
+    /// this history was created or last cleared.
+    pub fn folded_count(&self) -> usize {
+        self.folded
+    }
+
     /// Where to cut so that roughly `keep_recent_tokens` of the newest
     /// messages stay verbatim and everything before the cut can be
-    /// summarised. The cut never separates a tool call from its results.
-    /// Returns `None` when there's too little to be worth compacting.
+    /// summarised. The kept part always starts with a plain user message:
+    /// providers reject a conversation that opens with an assistant turn or a
+    /// tool result, and starting at a user turn also keeps every tool call
+    /// with its results. Returns `None` when there's nothing worth compacting.
     pub fn compaction_point(&self, keep_recent_tokens: usize) -> Option<usize> {
         let len = self.messages.len();
         let mut kept = 0usize;
@@ -123,27 +151,19 @@ impl ConversationHistory {
             kept += cost;
             cut -= 1;
         }
-        // Move forward to a safe boundary: the first kept message must not be
-        // a tool result, and the last compacted one must not be a tool call
-        // still waiting for its results.
-        while cut < len && !self.is_safe_cut(cut) {
-            cut += 1;
-        }
-        // Always keep at least the newest message verbatim.
-        if cut >= len {
-            cut = len - 1;
-            while cut > 0 && !self.is_safe_cut(cut) {
-                cut -= 1;
-            }
-        }
+        // Keep from the first user turn at or after the budget cut. When the
+        // budget would keep no whole turn, keep the newest one verbatim.
+        let cut = (cut..len)
+            .find(|&i| self.starts_turn(i))
+            .or_else(|| (0..len).rev().find(|&i| self.starts_turn(i)))?;
         (cut >= MIN_MESSAGES_TO_COMPACT).then_some(cut)
     }
 
-    fn is_safe_cut(&self, cut: usize) -> bool {
-        if cut == 0 || cut >= self.messages.len() {
-            return cut == 0;
-        }
-        self.messages[cut].tool_call_id.is_none() && self.messages[cut - 1].tool_calls.is_none()
+    /// A plain user message (not a tool result): the only message a
+    /// conversation sent to a provider may start with.
+    fn starts_turn(&self, i: usize) -> bool {
+        let m = &self.messages[i];
+        m.role == Role::User && m.tool_call_id.is_none()
     }
 
     /// A plain-text transcript of the first `upto` messages, for the model
@@ -182,8 +202,8 @@ impl ConversationHistory {
     pub fn compact(&mut self, upto: usize, summary: impl Into<String>) {
         let upto = upto.min(self.messages.len());
         self.messages.drain(..upto);
-        let summary = summary.into();
-        self.summary = (!summary.trim().is_empty()).then(|| summary.trim().to_string());
+        self.folded += upto;
+        self.set_summary(summary);
     }
 
     pub fn len(&self) -> usize {
@@ -212,6 +232,10 @@ impl ConversationHistory {
         }
     }
 
+    /// Drop the oldest turn: the front message, the results of any tool calls
+    /// it made, and everything else before the next plain user message, so
+    /// what remains still opens with a user turn (providers reject a
+    /// conversation that starts with an assistant turn or a tool result).
     fn drop_oldest_message_group(&mut self) {
         let Some(front) = self.messages.pop_front() else {
             return;
@@ -229,6 +253,10 @@ impl ConversationHistory {
                     .map(|id| !evicted_ids.contains(id))
                     .unwrap_or(true)
             });
+        }
+
+        while !self.messages.is_empty() && !self.starts_turn(0) {
+            self.messages.pop_front();
         }
     }
 
@@ -328,8 +356,160 @@ mod tests {
             small.add_message(msg(true, n));
         }
         assert_eq!(small.compaction_point(1000), None);
-        // The newest message always stays, even with no recent budget.
-        assert_eq!(h.compaction_point(0), Some(9));
+        // The newest turn always stays, even with no recent budget.
+        assert_eq!(h.compaction_point(0), Some(8));
+        // Nothing to compact: no underflow, no panic.
+        assert_eq!(ConversationHistory::new().compaction_point(0), None);
+        assert_eq!(ConversationHistory::new().compaction_point(1000), None);
+    }
+
+    #[test]
+    fn compaction_point_keeps_from_a_plain_user_message() {
+        // user/assistant alternate; the budget cut lands on an assistant turn.
+        let mut h = ConversationHistory::new();
+        for n in 0..10 {
+            h.add_message(msg(n % 2 == 0, n));
+        }
+        // 15 tokens keep only message 9 (assistant); the cut moves back to 8.
+        assert_eq!(h.compaction_point(15), Some(8));
+        // 35 tokens keep 7, 8, 9: 7 is an assistant turn, so keep from 8.
+        assert_eq!(h.compaction_point(35), Some(8));
+        // 45 tokens keep 6..=9 and 6 is a user turn.
+        assert_eq!(h.compaction_point(45), Some(6));
+
+        // The first kept message is never a tool result either.
+        let mut h = ConversationHistory::new();
+        h.add_message(msg(true, 0));
+        h.add_message(msg(false, 1));
+        h.add_message(msg(true, 2));
+        h.add_message(msg(false, 3));
+        h.add_message(msg(true, 4));
+        h.add_message(Message::assistant_with_tools(
+            "x".repeat(30),
+            vec![ToolCall {
+                id: "a".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "bash".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        h.add_tool_result("a", "y".repeat(30));
+        h.add_message(msg(false, 7));
+        // Budget for the tool result and the reply only: back up to message 4.
+        assert_eq!(h.compaction_point(20), Some(4));
+        // No budget at all: still the newest user turn.
+        assert_eq!(h.compaction_point(0), Some(4));
+
+        // A history with no plain user message after the cut, and none before
+        // it either, cannot be compacted.
+        let mut h = ConversationHistory::new();
+        for n in 0..6 {
+            h.add_message(msg(false, n));
+        }
+        assert_eq!(h.compaction_point(10), None);
+    }
+
+    #[test]
+    fn trimming_never_leaves_an_assistant_turn_or_tool_result_first() {
+        let call = |id: &str| ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let first_is_plain_user = |h: &ConversationHistory| {
+            h.get_conversation_messages().first().is_none_or(|m| {
+                m.role == Role::User && m.tool_call_id.is_none() && m.tool_calls.is_none()
+            })
+        };
+
+        // Token-budget trim: dropping the first user message takes its
+        // whole turn (assistant reply, tool call, tool results) with it.
+        let mut h = ConversationHistory::new();
+        h.add_message(msg(true, 0));
+        h.add_message(Message::assistant_with_tools("", vec![call("c1")]));
+        h.add_tool_result("c1", "r".repeat(30));
+        h.add_message(msg(false, 3));
+        h.add_message(msg(true, 4));
+        h.add_message(msg(false, 5));
+        // 25 tokens fit the last turn (20) but not the assistant reply before it.
+        h.trim_to_token_budget(25);
+        let kept = h.get_conversation_messages();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].content, msg(true, 4).content);
+        assert!(first_is_plain_user(&h));
+
+        // Message-count trim, one message at a time.
+        let mut h = ConversationHistory::new().with_max_messages(3);
+        h.add_message(msg(true, 0));
+        h.add_message(msg(false, 1));
+        h.add_message(msg(true, 2));
+        assert!(first_is_plain_user(&h));
+        h.add_message(msg(false, 3)); // over the cap: drops 0 and its reply 1
+        assert_eq!(h.len(), 2);
+        assert!(first_is_plain_user(&h));
+        assert_eq!(
+            h.get_conversation_messages()[0].content,
+            msg(true, 2).content
+        );
+
+        // Trimming a history that opens with an assistant message skips to the
+        // first user turn.
+        let mut h = ConversationHistory::new();
+        h.add_message(msg(false, 0));
+        h.add_message(msg(false, 1));
+        h.add_message(msg(true, 2));
+        h.add_message(msg(false, 3));
+        h.trim_to_token_budget(25);
+        assert_eq!(h.len(), 2);
+        assert!(first_is_plain_user(&h));
+
+        // Over budget with every message after the first being a tool
+        // exchange: nothing valid can be kept, so nothing is.
+        let mut h = ConversationHistory::new();
+        h.add_message(msg(true, 0));
+        h.add_message(Message::assistant_with_tools("", vec![call("c2")]));
+        h.add_tool_result("c2", "r".repeat(300));
+        h.trim_to_token_budget(50);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn summary_can_be_seeded_and_folded_messages_are_counted() {
+        let mut h = ConversationHistory::new().with_summary("  carried over  ");
+        assert_eq!(h.summary(), Some("carried over"));
+        assert_eq!(h.folded_count(), 0);
+        for n in 0..6 {
+            h.add_message(msg(n % 2 == 0, n));
+        }
+        // The seeded summary is sent with the messages and counts as tokens.
+        let messages = h.get_messages();
+        assert_eq!(messages.len(), 7);
+        assert_eq!(
+            messages[0].content,
+            format!("{SUMMARY_HEADING}\ncarried over")
+        );
+        let without = ConversationHistory::new();
+        assert!(h.estimate_tokens() > without.estimate_tokens() + 6 * 10);
+
+        h.compact(2, "merged");
+        assert_eq!(h.folded_count(), 2);
+        h.compact(2, "merged again");
+        assert_eq!(h.folded_count(), 4);
+        assert_eq!(h.summary(), Some("merged again"));
+        assert_eq!(h.len(), 2);
+
+        h.set_summary("   ");
+        assert_eq!(h.summary(), None);
+        h.set_summary("back");
+        assert_eq!(h.summary(), Some("back"));
+        h.clear();
+        assert_eq!(h.folded_count(), 0);
+        assert_eq!(h.summary(), None);
     }
 
     #[test]
