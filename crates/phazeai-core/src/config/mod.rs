@@ -23,6 +23,11 @@ pub struct LlmSettings {
     pub api_key_env: String,
     pub base_url: Option<String>,
     pub max_tokens: u32,
+    /// Conversation tokens the agent may send before compacting older
+    /// messages into a summary. Unset: derived from the model's context
+    /// window (see `llm::context_budget`).
+    #[serde(default)]
+    pub context_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +116,7 @@ impl Default for Settings {
                 api_key_env: "".to_string(),
                 base_url: None,
                 max_tokens: defaults::MAX_TOKENS,
+                context_tokens: None,
             },
             editor: EditorSettings::default(),
             sidecar: SidecarSettings {
@@ -216,6 +222,17 @@ impl Settings {
     }
 
     /// Build an LLM client from the current settings.
+    /// Conversation tokens the agent may send to the active model before
+    /// compacting. Honours `[llm] context_tokens` when set.
+    pub fn context_budget(&self) -> usize {
+        crate::llm::context_budget::context_budget(
+            &self.llm.provider.to_provider_id(),
+            &self.llm.model,
+            self.llm.max_tokens as usize,
+            self.llm.context_tokens,
+        )
+    }
+
     pub fn build_llm_client(
         &self,
     ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {

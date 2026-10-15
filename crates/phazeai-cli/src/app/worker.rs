@@ -15,17 +15,17 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::tool_view::{approval_preview, unanswered_tool_calls, ApprovalPolicy, PreviewLine};
 
-/// Token budget the agent trims its context to. Passed explicitly so the
-/// status line can show usage against the real limit.
-pub const CONTEXT_BUDGET: usize = 32_768;
-
 pub enum WorkerCommand {
     /// Run the agent on a prompt.
     Run(String),
     /// Forget the conversation context.
     Clear,
-    /// Replace the LLM client (provider / model / key change).
-    SetLlm(Box<dyn LlmClient>),
+    /// Replace the LLM client (provider / model / key change) and the
+    /// context budget that goes with the new model.
+    SetLlm {
+        llm: Box<dyn LlmClient>,
+        context_budget: usize,
+    },
     /// Replace the context with restored (role, content) pairs.
     Restore(Vec<(String, String)>),
 }
@@ -57,6 +57,8 @@ pub struct WorkerConfig {
     pub approval_manager: Arc<Mutex<ToolApprovalManager>>,
     pub policy: Arc<Mutex<ApprovalPolicy>>,
     pub cancel: Arc<AtomicBool>,
+    /// Conversation tokens the agent may send before compacting.
+    pub context_budget: usize,
 }
 
 fn build_approval_fn(
@@ -123,7 +125,7 @@ async fn build_agent(
     let mut agent = Agent::new(llm)
         .with_system_prompt(cfg.system_prompt.clone())
         .with_shared_conversation(conversation)
-        .with_context_budget(CONTEXT_BUDGET)
+        .with_context_budget(cfg.context_budget)
         .with_approval(approval)
         .with_cancel_token(cfg.cancel.clone());
 
@@ -196,11 +198,19 @@ pub fn spawn(
                         }
                     }
                 }
-                WorkerCommand::SetLlm(llm) => match agent.as_mut() {
-                    Some(a) => a.swap_llm(llm),
+                WorkerCommand::SetLlm {
+                    llm,
+                    context_budget,
+                } => match agent.as_mut() {
+                    Some(a) => {
+                        a.swap_llm(llm);
+                        a.set_context_budget(context_budget);
+                    }
                     None => {
-                        agent =
-                            Some(build_agent(llm, &cfg, conversation.clone(), &approval_tx).await)
+                        let mut built =
+                            build_agent(llm, &cfg, conversation.clone(), &approval_tx).await;
+                        built.set_context_budget(context_budget);
+                        agent = Some(built);
                     }
                 },
                 WorkerCommand::Run(prompt) => {

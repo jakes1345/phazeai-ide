@@ -192,6 +192,8 @@ pub(crate) struct AppState {
     tokens_out: u64,
     cost: f64,
     context_tokens: Option<usize>,
+    /// Conversation tokens the agent may send before compacting.
+    context_budget: usize,
 
     // Environment
     git_branch: Option<String>,
@@ -552,6 +554,16 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                 state.pending_approval = None;
             }
         }
+        AgentEvent::ContextCompacted {
+            messages_folded,
+            tokens_before,
+            tokens_after,
+        } => {
+            state.system(format!(
+                "Summarised {messages_folded} earlier messages to stay within the context \
+                 budget (~{tokens_before} → ~{tokens_after} tokens)."
+            ));
+        }
         AgentEvent::TokenUsage {
             input_tokens,
             output_tokens,
@@ -616,6 +628,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
     let policy = Arc::new(Mutex::new(ApprovalPolicy::default()));
     let cancel = Arc::new(AtomicBool::new(false));
 
+    let context_budget = settings.context_budget();
     let mut state = AppState {
         settings,
         llm_error,
@@ -642,6 +655,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         tokens_out: 0,
         cost: 0.0,
         context_tokens: None,
+        context_budget,
         git_branch: None,
         git_dirty: 0,
         should_quit: false,
@@ -698,6 +712,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             approval_manager,
             policy,
             cancel,
+            context_budget: state.context_budget,
         },
         worker_rx,
         ui_tx,

@@ -100,6 +100,8 @@ enum ComposerUpdate {
     DiffOutput(Vec<DiffCard>),
     /// MCP stdio server(s) restarted.
     McpStatus(String),
+    /// Something worth knowing about this run (e.g. context was compacted).
+    Notice(String),
 }
 
 #[derive(Clone, Debug)]
@@ -281,7 +283,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     state.ai.thinking.set(false);
                     cancel_token.set(None);
                 }
-                ComposerUpdate::McpStatus(msg) => {
+                ComposerUpdate::McpStatus(msg) | ComposerUpdate::Notice(msg) => {
                     event_log.update(|log| {
                         log.push(EventLogEntry {
                             kind: EventKind::Warning,
@@ -384,6 +386,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     tools.register(Box::new(BashTool::new(ws.clone())));
                     let mut agent = Agent::new(client)
                         .with_tools(tools)
+                        .with_context_budget(settings.context_budget())
                         .with_cancel_token(token);
 
                     // Register semantic search tools if sidecar is running.
@@ -486,6 +489,17 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                         format!("MCP servers reconnected: {}", servers.join(", "))
                                     };
                                     let _ = tx2.send(ComposerUpdate::McpStatus(msg));
+                                }
+                                AgentEvent::ContextCompacted {
+                                    messages_folded,
+                                    tokens_before,
+                                    tokens_after,
+                                } => {
+                                    let _ = tx2.send(ComposerUpdate::Notice(format!(
+                                        "Summarised {messages_folded} earlier messages to stay \
+                                         within the context budget (~{tokens_before} → \
+                                         ~{tokens_after} tokens)"
+                                    )));
                                 }
                                 AgentEvent::Complete { iterations } => {
                                     let _ = tx2.send(ComposerUpdate::Done { iterations });

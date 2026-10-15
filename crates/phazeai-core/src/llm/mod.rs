@@ -1,4 +1,5 @@
 mod claude;
+pub mod context_budget;
 pub mod discovery;
 pub mod key_setup;
 pub mod model_router;

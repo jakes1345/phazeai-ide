@@ -99,6 +99,8 @@ enum ChatUpdate {
     Cancelled(String),
     /// MCP server process(es) were restarted (stdio recovery).
     McpStatus(String),
+    /// Something the user should know about this run (shown as a toast).
+    Notice(String),
     /// A file-write tool wants user approval. Contains before/after content
     /// and a slot to resolve the blocking diff hook in the agent thread.
     DiffApprovalNeeded {
@@ -427,6 +429,7 @@ fn send_to_ai(job: SendToAiJob) {
             });
 
             let mut agent = Agent::new(client)
+                .with_context_budget(settings.context_budget())
                 .with_cancel_token(cancel_token)
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)
@@ -483,6 +486,16 @@ fn send_to_ai(job: SendToAiJob) {
                                 format!("MCP servers reconnected: {}", servers.join(", "))
                             };
                             let _ = update_tx.send(ChatUpdate::McpStatus(msg));
+                        }
+                        AgentEvent::ContextCompacted {
+                            messages_folded,
+                            tokens_before,
+                            tokens_after,
+                        } => {
+                            let _ = update_tx.send(ChatUpdate::Notice(format!(
+                                "Summarised {messages_folded} earlier messages to stay within \
+                                 the context budget (~{tokens_before} → ~{tokens_after} tokens)"
+                            )));
                         }
                         AgentEvent::TokenUsage {
                             input_tokens,
@@ -917,7 +930,7 @@ pub fn chat_panel(
                         &workspace_root.get_untracked(),
                     );
                 }
-                ChatUpdate::McpStatus(msg) => {
+                ChatUpdate::McpStatus(msg) | ChatUpdate::Notice(msg) => {
                     status_toast.set(Some(msg));
                 }
                 ChatUpdate::DiffApprovalNeeded {
