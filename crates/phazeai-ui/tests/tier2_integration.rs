@@ -74,6 +74,21 @@ fn test_home_dir() -> PathBuf {
 /// steal each other's focus and window ids.
 static DISPLAY_LOCK: Mutex<()> = Mutex::new(());
 
+/// Append a timestamped line to the harness log, which CI uploads when a GUI
+/// test fails so the cause can be read without reproducing it.
+fn harness_log(msg: impl AsRef<str>) {
+    use std::io::Write;
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let ms = START.get_or_init(Instant::now).elapsed().as_millis();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("phazeai-tier2-harness.log"))
+    {
+        let _ = writeln!(f, "[{ms:>7} ms] {}", msg.as_ref());
+    }
+}
+
 /// Run `cmd`, killing it if it takes longer than `limit`. A wedged xdotool or
 /// `import` must fail the test, not hang CI.
 fn run_with_timeout(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
@@ -233,8 +248,22 @@ fn wait_for_window(name: &str, retries: u32) -> u64 {
 /// focus it, then click inside so winit sees pointer + focus events.
 fn focus_window(wid: u64) {
     let id = wid.to_string();
+    // Re-activating a window that already has focus is not a no-op under every
+    // window manager, and any focus churn can drop the keyboard focus of the
+    // text box inside an open overlay. Only act when the focus is elsewhere.
+    let before = xdotool_out(&["getwindowfocus"]);
+    if before == id {
+        return;
+    }
+    harness_log(format!(
+        "focus_window: {id} is not focused (focus is on '{before}'), activating"
+    ));
     xdotool(&["windowactivate", "--sync", &id]);
     xdotool(&["windowfocus", "--sync", &id]);
+    harness_log(format!(
+        "focus_window: now focused '{}'",
+        xdotool_out(&["getwindowfocus"])
+    ));
 }
 
 /// Focus plus one click in the editor area. Only used right after launch:
@@ -280,10 +309,24 @@ fn force_repaint(wid: u64) {
 
 /// Run an xdotool command with the current DISPLAY.
 fn xdotool(args: &[&str]) {
+    let ok = run_with_timeout(
+        Command::new("xdotool").args(args).env("DISPLAY", display()),
+        Duration::from_secs(10),
+    )
+    .is_some_and(|o| o.status.success());
+    if !ok {
+        harness_log(format!("xdotool {args:?} failed or timed out"));
+    }
+}
+
+/// Run an xdotool command and return its trimmed stdout ("" on failure).
+fn xdotool_out(args: &[&str]) -> String {
     run_with_timeout(
         Command::new("xdotool").args(args).env("DISPLAY", display()),
         Duration::from_secs(10),
-    );
+    )
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default()
 }
 
 /// Send a key combo to a specific window ID via XTEST (real events, not synthetic).
@@ -331,6 +374,10 @@ fn type_text(wid: u64, text: &str) {
     // #endregion
     focus_window(wid);
     thread::sleep(Duration::from_millis(200));
+    harness_log(format!(
+        "type_text {text:?}: X focus on '{}' (window {wid})",
+        xdotool_out(&["getwindowfocus"])
+    ));
     // No --window: uses XTEST for real events
     xdotool(&["type", "--clearmodifiers", "--delay", "60", text]);
     thread::sleep(Duration::from_millis(700));

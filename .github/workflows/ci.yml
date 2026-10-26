@@ -166,6 +166,7 @@ jobs:
         run: |
           mkdir -p tier2-evidence
           cp crates/phazeai-ui/tests/snapshots/*.png tier2-evidence/ 2>/dev/null || true
+          cp /tmp/phazeai-tier2-harness.log tier2-evidence/ 2>/dev/null || true
           for d in /tmp/phazeai-ui-tier2-home-*; do
             [ -f "$d/ide.log" ] && cp "$d/ide.log" "tier2-evidence/$(basename "$d").log"
           done
