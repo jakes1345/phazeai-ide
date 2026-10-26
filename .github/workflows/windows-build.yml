@@ -1,0 +1,61 @@
+name: Windows build
+
+# Builds a downloadable Windows test build (zip artifact). Nothing is published:
+# public releases still come only from release.yml on a version tag.
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Build / Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93'
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-test-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-test-build-
+
+      - name: Build release binaries
+        run: cargo build --release -p phazeai-ui -p phazeai-cli --target x86_64-pc-windows-msvc
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $out = "target/x86_64-pc-windows-msvc/release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "$out/phazeai-ui.exe", "$out/phazeai.exe" dist/
+          @"
+          PhazeAI IDE - Windows test build (unsigned)
+
+          phazeai-ui.exe   the desktop IDE (double-click to run)
+          phazeai.exe      the terminal version
+
+          Windows SmartScreen may warn that the app is unrecognised because it is not
+          code-signed. Choose "More info" then "Run anyway" only if you trust this build.
+          "@ | Out-File -FilePath dist/README.txt -Encoding UTF8
+          Compress-Archive -Path dist/* -DestinationPath phazeai-ide-windows-x64.zip
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: phazeai-ide-windows-x64
+          path: phazeai-ide-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14

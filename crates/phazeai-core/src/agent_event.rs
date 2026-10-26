@@ -29,6 +29,12 @@ pub enum AgentEvent {
         output_tokens: u64,
     },
     Error(String),
+    /// Older messages were summarised to stay within the context budget.
+    ContextCompacted {
+        messages_folded: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+    },
     /// One or more MCP stdio servers were unhealthy and were respawned.
     McpReconnected {
         servers: Vec<String>,

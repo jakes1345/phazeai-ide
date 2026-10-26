@@ -112,6 +112,7 @@ pub enum Tab {
     Search,
     Git,
     Composer,
+    Design,
     Settings,
     Terminal,
     Extensions,
@@ -327,11 +328,12 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
         "OpenRouter" => Some(LlmProvider::OpenRouter),
         "LM Studio (Local)" => Some(LlmProvider::LmStudio),
         "Ollama (Local)" => Some(LlmProvider::Ollama),
+        "PhazeAI Local (built-in)" => Some(LlmProvider::BuiltIn),
         _ => None,
     }
 }
 
-/// Serializes all settings.toml load-mutate-save cycles. Both the editor
+/// Serializes all config.toml load-mutate-save cycles. Both the editor
 /// settings effect and the provider/model effect write from background
 /// threads; without this lock concurrent writers clobber each other's fields.
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -346,14 +348,21 @@ pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::Edito
 }
 
 /// Show a toast notification that auto-dismisses after 3 seconds.
-/// Safe to call from any code that has access to `IdeState`.
+/// Safe to call from any code that has access to `IdeState`, including from
+/// inside an effect.
 pub fn show_toast(toast: RwSignal<Option<String>>, msg: impl Into<String>) {
     use floem::ext_event::create_ext_action;
     use floem::reactive::Scope;
     toast.set(Some(msg.into()));
-    // Use Scope::current() to reuse the caller's scope — no leak.
-    let dismiss = create_ext_action(Scope::current(), move |_: ()| {
+    // The dismiss action gets its own root scope rather than the caller's: an
+    // effect disposes everything created under its scope each time it re-runs,
+    // which would silently drop the dismissal when this is called from one
+    // (the chat panel's update effect re-runs on every streamed token). The
+    // scope is disposed once the action has fired, so nothing leaks.
+    let scope = Scope::new();
+    let dismiss = create_ext_action(scope, move |_: ()| {
         toast.set(None);
+        scope.dispose();
     });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
@@ -366,14 +375,63 @@ fn load_editor_settings() -> phazeai_core::config::EditorSettings {
     Settings::load().editor
 }
 
-fn check_provider_ready(settings: &Settings) -> bool {
+/// Why the configured AI provider cannot be used yet, or `None` when it is ready.
+///
+/// A fresh install defaults to Ollama, so "local" must mean *reachable*, not just
+/// "doesn't need a key" - otherwise the first-run checklist ticks AI as configured for
+/// exactly the person who has nothing set up.
+fn provider_problem(settings: &Settings) -> Option<String> {
+    use phazeai_core::llm::{discovery::LocalDiscovery, provider::keyring_get};
+    let id = settings.llm.provider.to_provider_id();
     match settings.llm.provider {
-        LlmProvider::Ollama | LlmProvider::LmStudio => true,
+        LlmProvider::BuiltIn => phazeai_core::local_ai::readiness_problem(&settings.local_ai),
+        LlmProvider::Ollama | LlmProvider::LmStudio => {
+            let base = settings
+                .llm
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| id.default_base_url())
+                .to_string();
+            let local = matches!(settings.llm.provider, LlmProvider::Ollama);
+            let up = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map(|rt| {
+                    rt.block_on(async {
+                        let probe = async {
+                            if local {
+                                LocalDiscovery::ollama_available(&base).await
+                            } else {
+                                LocalDiscovery::lm_studio_available(&base).await
+                            }
+                        };
+                        tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                            .await
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            (!up).then(|| {
+                format!(
+                    "{} isn't running. Start it, download a free built-in model in Settings → Local AI, or add a cloud key in Settings → AI.",
+                    id.name()
+                )
+            })
+        }
         _ => {
-            !settings.llm.api_key_env.is_empty()
-                && std::env::var(&settings.llm.api_key_env)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
+            // A key saved through Settings lives in the OS keyring, not the environment.
+            let env = &settings.llm.api_key_env;
+            let has_key = !env.is_empty()
+                && (keyring_get(env).is_some_and(|k| !k.is_empty())
+                    || std::env::var(env).map(|v| !v.is_empty()).unwrap_or(false));
+            (!has_key).then(|| {
+                format!(
+                    "No {} key found. Add one in Settings → AI (some providers have a free tier).",
+                    id.name()
+                )
+            })
         }
     }
 }
@@ -381,7 +439,7 @@ fn check_provider_ready(settings: &Settings) -> bool {
 fn check_python_ready(settings: &Settings) -> bool {
     let bins = [settings.sidecar.python_path.as_str(), "python3", "python"];
     bins.iter().any(|bin| {
-        std::process::Command::new(bin)
+        phazeai_core::process::std_command(bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -390,7 +448,7 @@ fn check_python_ready(settings: &Settings) -> bool {
 }
 
 fn check_lsp_ready() -> bool {
-    std::process::Command::new("rust-analyzer")
+    phazeai_core::process::std_command("rust-analyzer")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -497,7 +555,7 @@ impl IdeState {
         // are correctly scoped to the project root even when launched from a
         // subdirectory. Fall back to current_dir if not inside a git repo.
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let workspace = std::process::Command::new("git")
+        let workspace = phazeai_core::process::std_command("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(&cwd)
             .output()
@@ -518,6 +576,7 @@ impl IdeState {
         // move_path, copy_path, create_directory, delete_path) refuse paths
         // outside the workspace, including `..` and symlink escapes.
         phazeai_core::tools::sandbox::set_workspace_root(Some(workspace.clone()));
+        phazeai_core::privacy::set_active_project(&workspace);
 
         let git_branch = create_rw_signal("main".to_string());
 
@@ -525,7 +584,7 @@ impl IdeState {
         // the signal via a sync channel + create_signal_from_channel.
         let (branch_tx, branch_rx) = std::sync::mpsc::sync_channel::<String>(1);
         std::thread::spawn(move || {
-            let branch = std::process::Command::new("git")
+            let branch = phazeai_core::process::std_command("git")
                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .output()
                 .map(|out| {
@@ -715,7 +774,7 @@ impl IdeState {
         // Whenever theme, font_size, or tab_size changes, persist to config.toml.
         // Done in a background thread to avoid blocking the UI.
         create_effect(move |_| {
-            let theme_name = theme_signal.get().variant.name().to_string();
+            let theme_name = theme_signal.get().display_name().to_string();
             let fs = font_size_signal.get();
             let ts = tab_size_signal.get();
             let auto_save = auto_save_signal.get();
@@ -1081,7 +1140,7 @@ impl IdeState {
             });
         }
 
-        // Persist provider + model changes to settings.toml whenever they change.
+        // Persist provider + model changes to config.toml whenever they change.
         create_effect(move |_| {
             let provider_name = ai_provider_sig.get();
             let model = ai_model_sig.get();
@@ -1127,7 +1186,7 @@ impl IdeState {
                     split_editor_sig.get(),
                     split_editor_down_sig.get(),
                     vim_mode_sig.get(),
-                    theme_signal.get().variant.name().to_string(),
+                    theme_signal.get().display_name().to_string(),
                     zen_mode_sig.get(),
                 )
                 .save_debounced(gen.clone());
@@ -1171,6 +1230,7 @@ impl IdeState {
             ext_manager: ext_manager.clone(),
             editor_snapshot: editor_snapshot.clone(),
             new_terminal_nonce: create_rw_signal(0u64),
+            local_ai_focus_nonce: create_rw_signal(0u64),
         };
 
         let editor = EditorState {
@@ -1412,6 +1472,86 @@ impl IdeState {
 
         state
     }
+}
+
+// ── AI prompts from the editor (right-click menu + command palette) ───────────
+
+/// A chat prompt built from the editor, and whether it carries text from the
+/// file. Only a prompt that does is reported to the privacy audit as having
+/// attached that file; one that merely names the file and a line number is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorPrompt {
+    text: String,
+    attaches_file: bool,
+}
+
+/// Pure prompt construction (unit-tested). Uses the *selected text* when there is one;
+/// otherwise points at the line under the cursor (`line0` is 0-based) by name only.
+fn build_ai_prompt(
+    selection: &str,
+    path: &std::path::Path,
+    line0: u32,
+    on_selection: &str,
+    on_line: &str,
+) -> EditorPrompt {
+    if !selection.trim().is_empty() {
+        return EditorPrompt {
+            text: format!("{on_selection}:\n\n```\n{selection}\n```"),
+            attaches_file: true,
+        };
+    }
+    let fname = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    EditorPrompt {
+        text: format!("{on_line} around line {} in {fname}", line0 + 1),
+        attaches_file: false,
+    }
+}
+
+/// "Fix with AI" on a diagnostic. A diagnostic message quotes the offending
+/// source (identifiers, expressions, sometimes whole lines), so it counts as
+/// text from the file.
+fn build_fix_prompt(message: &str) -> EditorPrompt {
+    EditorPrompt {
+        text: format!("Fix this error: {message}"),
+        attaches_file: true,
+    }
+}
+
+/// Hand an editor-built prompt about `path` to the chat panel and reveal it.
+///
+/// Refuses (toast + audit "blocked" record) when the privacy policy denies
+/// `path`. The file is handed to the audit as attached only when the prompt
+/// carries its text; the hand-off is made right as the prompt is injected so
+/// it travels with that prompt (the chat drops both together when it cannot
+/// dispatch the prompt).
+fn inject_editor_prompt(state: &IdeState, path: &std::path::Path, prompt: EditorPrompt) {
+    // Privacy: nothing from a denied file goes to the AI.
+    if !crate::panels::privacy::allow_editor_content(
+        state.workbench.status_toast,
+        path,
+        "editor AI action",
+    ) {
+        return;
+    }
+    if prompt.attaches_file {
+        crate::panels::privacy::attach_for_next_send(path);
+    }
+    state.ai.pending_chat_inject.set(Some(prompt.text));
+    state.workbench.show_right_panel.set(true);
+}
+
+/// Send an editor AI action to the chat panel and reveal it (no-op without an
+/// active file).
+fn send_editor_ai_action(state: &IdeState, on_selection: &str, on_line: &str) {
+    let Some((path, line, _)) = state.editor.active_cursor.get_untracked() else {
+        return;
+    };
+    let sel = state.editor.selected_text.get_untracked();
+    let prompt = build_ai_prompt(&sel, &path, line, on_selection, on_line);
+    inject_editor_prompt(state, &path, prompt);
 }
 
 // ── Command palette commands ──────────────────────────────────────────────────
@@ -1694,22 +1834,7 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         },
         PaletteCommand {
             label: "Explain Selection with AI (Ctrl+Shift+E)",
-            action: |s| {
-                if let Some((ref path, line, _)) = s.editor.active_cursor.get() {
-                    let sel = s.editor.selected_text.get();
-                    let fname = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "file".to_string());
-                    let prompt = if !sel.is_empty() {
-                        format!("Explain this code:\n\n```\n{sel}\n```")
-                    } else {
-                        format!("Explain the code around line {} in {}", line + 1, fname)
-                    };
-                    s.ai.pending_chat_inject.set(Some(prompt));
-                    s.workbench.show_right_panel.set(true);
-                }
-            },
+            action: |s| send_editor_ai_action(&s, "Explain this code", "Explain the code"),
         },
         PaletteCommand {
             label: "Go to Next Problem (F8)",
@@ -1880,6 +2005,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
         activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
+        activity_bar_btn(icons::DESIGN, Tab::Design, state.clone()),
         activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
         activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
         activity_bar_btn(icons::CONTAINER, Tab::Containers, state.clone()),
@@ -2049,6 +2175,17 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
+    let design_wrap = container(crate::panels::design::design_panel(state.clone())).style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Design, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
+
     let settings_wrap = container(settings_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
@@ -2074,6 +2211,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             github_wrap,
             tests_wrap,
             composer_wrap,
+            design_wrap,
             settings_wrap,
         ))
         .style(|s| s.width_full().height_full()),
@@ -2173,6 +2311,47 @@ where
         })
 }
 
+/// Status-bar AI indicator backed by the same check as first-run setup.
+/// Re-checked every 20s in the background (provider, key or local server can
+/// change at any time); clicking it opens Settings when something is wrong.
+fn ai_status_item(state: IdeState) -> impl IntoView {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Option<String>>(1);
+    let problem = floem::ext_event::create_signal_from_channel(rx);
+    std::thread::spawn(move || loop {
+        let result = provider_problem(&Settings::load());
+        if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = tx.try_send(result) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(20));
+    });
+    let theme = state.workbench.theme;
+    label(move || match problem.get() {
+        None => "Checking AI…  ".to_string(),
+        Some(None) => "AI Ready  ".to_string(),
+        Some(Some(_)) => "AI not ready  ".to_string(),
+    })
+    .style(move |s| {
+        let p = theme.get().palette;
+        let color = match problem.get() {
+            None => p.text_muted,
+            Some(None) => p.success,
+            Some(Some(_)) => p.warning,
+        };
+        s.color(color)
+            .font_size(11.0)
+            .apply_if(matches!(problem.get(), Some(Some(_))), |s| {
+                s.cursor(floem::style::CursorStyle::Pointer)
+            })
+    })
+    .on_click_stop(move |_| {
+        if let Some(Some(why)) = problem.get_untracked() {
+            show_toast(state.workbench.status_toast, why);
+            state.workbench.show_left_panel.set(true);
+            state.workbench.left_panel_tab.set(Tab::Settings);
+        }
+    })
+}
+
 fn status_bar(state: IdeState) -> impl IntoView {
     // Branch clickable button — click to open branch picker overlay
     let branch_btn = {
@@ -2217,7 +2396,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                 let root = s3.project.workspace_root.get();
                 let tx = branch_tx.clone();
                 std::thread::spawn(move || {
-                    let branches = std::process::Command::new("git")
+                    let branches = phazeai_core::process::std_command("git")
                         .args(["branch", "--list"])
                         .current_dir(&root)
                         .output()
@@ -2253,6 +2432,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.color(state.workbench.theme.get().palette.text_secondary)
                 .font_size(11.0)
         }),
+        crate::panels::privacy::status_indicator(state.clone()),
     ))
     .style(|s| s.items_center().padding_horiz(8.0));
 
@@ -2461,10 +2641,7 @@ fn status_bar(state: IdeState) -> impl IntoView {
                     .apply_if(!on_diag, |s| s.display(floem::style::Display::None))
             })
         },
-        label(|| "AI Ready  ").style(move |s| {
-            s.color(state.workbench.theme.get().palette.success)
-                .font_size(11.0)
-        }),
+        ai_status_item(state.clone()),
         // Git blame for current cursor line
         label(move || {
             let blame = state.editor.active_blame.get();
@@ -3417,7 +3594,7 @@ fn git_diff_view(state: IdeState) -> impl IntoView {
 /// Run `git diff HEAD -- <path>` and return colored diff lines.
 fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
     let dir = path.parent().unwrap_or(path);
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output();
@@ -3428,7 +3605,7 @@ fn run_git_diff(path: &std::path::Path) -> Vec<(String, u8)> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
         // Try diff against staged (index) as fallback
-        let out2 = std::process::Command::new("git")
+        let out2 = phazeai_core::process::std_command("git")
             .args(["diff", "--", path.to_str().unwrap_or("")])
             .current_dir(dir)
             .output();
@@ -3606,11 +3783,77 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
     })
 }
 
+/// Close the topmost open overlay or popup. Returns true if one was closed.
+///
+/// Escape reaches this from two places: the root key handler, and — when a
+/// focused text box swallowed the key (Floem clears the focus and stops the
+/// event) — the root's key-up handler.
+pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
+    // Go to Line and Workspace Symbols sit above every popup below and hold a
+    // focused text box (which loses focus on Escape), so they must close first.
+    if state.editor.ws_syms_open.get() {
+        state.editor.ws_syms_open.set(false);
+        state.editor.ws_syms_query.set(String::new());
+        return true;
+    }
+    if state.editor.goto_overlay_open.get() {
+        state.editor.goto_overlay_open.set(false);
+        state.editor.goto_overlay_input.set(String::new());
+        return true;
+    }
+    if state.editor.peek_def_open.get() {
+        state.editor.peek_def_open.set(false);
+        state.editor.peek_def_lines.set(vec![]);
+        return true;
+    }
+    if state.project.branch_picker_open.get() {
+        state.project.branch_picker_open.set(false);
+        return true;
+    }
+    if state.editor.rename_open.get() {
+        state.editor.rename_open.set(false);
+        return true;
+    }
+    if state.editor.sig_help.get().is_some() {
+        state.editor.sig_help.set(None);
+        return true;
+    }
+    if state.editor.code_actions_open.get() {
+        state.editor.code_actions_open.set(false);
+        return true;
+    }
+    if state.ai.inline_edit_open.get() {
+        state.ai.inline_edit_open.set(false);
+        state.ai.inline_edit_query.set(String::new());
+        return true;
+    }
+    if state.editor.completion_open.get() {
+        state.editor.completion_open.set(false);
+        return true;
+    }
+    if state.workbench.file_picker_open.get() {
+        state.workbench.file_picker_open.set(false);
+        state.workbench.file_picker_query.set(String::new());
+        return true;
+    }
+    if state.workbench.command_palette_open.get() {
+        state.workbench.command_palette_open.set(false);
+        state.workbench.command_palette_query.set(String::new());
+        return true;
+    }
+    false
+}
+
 fn ide_root(state: IdeState) -> impl IntoView {
+    // Keep the AI privacy policy in sync with the workspace root.
+    crate::panels::privacy::install(&state);
+
     // ── FIM inline completion worker ─────────────────────────────────────────
-    // Editors send (prefix, suffix, lang) after a 600ms debounce; this thread
-    // calls the LLM and writes completions back through a signal channel.
-    let (fim_req_tx, fim_req_rx) = std::sync::mpsc::sync_channel::<(String, String, String)>(4);
+    // Editors send (path, prefix, suffix, lang) after a 600ms debounce; this
+    // thread calls the LLM and writes completions back through a signal channel.
+    // `fim_complete` skips files the privacy policy denies.
+    let (fim_req_tx, fim_req_rx) =
+        std::sync::mpsc::sync_channel::<(PathBuf, String, String, String)>(4);
     {
         let ghost_text = state.ai.ghost_text;
         let (fim_result_tx, fim_result_rx) = std::sync::mpsc::sync_channel::<String>(4);
@@ -3623,13 +3866,15 @@ fn ide_root(state: IdeState) -> impl IntoView {
             }
         });
         std::thread::spawn(move || {
-            while let Ok((prefix, suffix, lang)) = fim_req_rx.recv() {
+            while let Ok((path, prefix, suffix, lang)) = fim_req_rx.recv() {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("fim tokio rt");
                 let result = rt
-                    .block_on(phazeai_core::fim::fim_complete(&prefix, &suffix, &lang))
+                    .block_on(phazeai_core::fim::fim_complete(
+                        &path, &prefix, &suffix, &lang,
+                    ))
                     .unwrap_or_default();
                 if !result.is_empty() {
                     let _ = fim_result_tx.try_send(result);
@@ -3843,42 +4088,36 @@ fn ide_root(state: IdeState) -> impl IntoView {
                         // AI-powered context menu items
                         let s_explain = s.clone();
                         let s_tests = s.clone();
+                        let s_refactor = s.clone();
+                        let s_docs = s.clone();
                         let s_fix = s.clone();
                         let s_run = s.clone();
                         let s_run_file = s.clone();
                         let menu = menu
                             .separator()
                             .entry(MenuItem::new("🤖 Explain Selection").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_explain.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_explain.ai.pending_chat_inject.set(Some(format!(
-                                        "Explain the code around line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_explain.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(&s_explain, "Explain this code", "Explain the code");
                             }))
                             .entry(MenuItem::new("🧪 Generate Tests").action(move || {
-                                if let Some((ref path, line, _)) =
-                                    s_tests.editor.active_cursor.get()
-                                {
-                                    let fname = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| "file".to_string());
-                                    s_tests.ai.pending_chat_inject.set(Some(format!(
-                                        "Generate unit tests for the function at line {} in {}",
-                                        line + 1,
-                                        fname
-                                    )));
-                                    s_tests.workbench.show_right_panel.set(true);
-                                }
+                                send_editor_ai_action(
+                                    &s_tests,
+                                    "Write unit tests for this code, following the testing conventions already used in this project",
+                                    "Write unit tests for the function",
+                                );
+                            }))
+                            .entry(MenuItem::new("✨ Refactor with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_refactor,
+                                    "Refactor this code for readability and idiomatic style without changing its behaviour",
+                                    "Refactor the code",
+                                );
+                            }))
+                            .entry(MenuItem::new("📝 Add Docs with AI").action(move || {
+                                send_editor_ai_action(
+                                    &s_docs,
+                                    "Add concise doc comments to this code, matching the project's existing style",
+                                    "Add concise doc comments to the item",
+                                );
                             }))
                             .entry(MenuItem::new("🔧 Fix with AI").action(move || {
                                 if let Some((ref path, line, _)) = s_fix.editor.active_cursor.get()
@@ -3888,11 +4127,14 @@ fn ide_root(state: IdeState) -> impl IntoView {
                                         .iter()
                                         .find(|d| d.path == *path && d.line == (line + 1));
                                     if let Some(d) = cur_diag {
-                                        s_fix
-                                            .ai
-                                            .pending_chat_inject
-                                            .set(Some(format!("Fix this error: {}", d.message)));
-                                        s_fix.workbench.show_right_panel.set(true);
+                                        // The diagnostic quotes the file's source, so it
+                                        // goes through the same privacy gate and audit as
+                                        // the other editor actions.
+                                        inject_editor_prompt(
+                                            &s_fix,
+                                            path,
+                                            build_fix_prompt(&d.message),
+                                        );
                                     } else {
                                         show_toast(
                                             s_fix.workbench.status_toast,
@@ -4120,8 +4362,13 @@ fn ide_root(state: IdeState) -> impl IntoView {
     // Bottom panel (terminal etc.)
     let bottom_raw = bottom_panel(state.clone());
     let bottom_panel_max = state.workbench.bottom_panel_maximized;
+    let show_bottom = state.workbench.show_bottom_panel;
     let bottom = container(bottom_raw).style(move |s| {
-        let s = s.apply_if(zen.get(), |s| s.display(floem::style::Display::None));
+        // Hide the wrapper too: a hidden panel inside a fixed-height wrapper
+        // still reserved 220px of empty space under the editor.
+        let s = s.apply_if(zen.get() || !show_bottom.get(), |s| {
+            s.display(floem::style::Display::None)
+        });
         if bottom_panel_max.get() {
             s.flex_grow(10.0).min_height(0.0)
         } else {
@@ -4199,23 +4446,30 @@ pub fn launch_phaze_ide() {
     let is_first_run = !Settings::config_path().exists();
     let settings = Settings::load();
 
+    // Built-in local AI: load the model in the background so it's ready by the
+    // time the user asks something. Stopped in the WindowClosed handler.
+    if settings.llm.provider == LlmProvider::BuiltIn && settings.local_ai.auto_start {
+        phazeai_core::local_ai::LOCAL_AI.start_in_background(settings.local_ai.clone());
+    }
+
     // Compute readiness items before entering the reactive scope (fast, synchronous).
-    let readiness_items: Vec<(&'static str, bool, &'static str)> = if is_first_run {
+    let readiness_items: Vec<(&'static str, bool, String)> = if is_first_run {
+        let ai_problem = provider_problem(&settings);
         vec![
             (
-                "AI provider configured",
-                check_provider_ready(&settings),
-                "Set your API key env var in Settings → AI Provider",
+                "AI provider ready",
+                ai_problem.is_none(),
+                ai_problem.unwrap_or_default(),
             ),
             (
                 "Python available",
                 check_python_ready(&settings),
-                "Install Python 3 or set sidecar.python_path in settings.toml",
+                "Install Python 3 or set sidecar.python_path in config.toml".to_string(),
             ),
             (
                 "rust-analyzer found",
                 check_lsp_ready(),
-                "Install rust-analyzer for LSP features (cargo install rust-analyzer)",
+                "Install rust-analyzer for LSP features (cargo install rust-analyzer)".to_string(),
             ),
         ]
     } else {
@@ -4316,6 +4570,10 @@ pub fn launch_phaze_ide() {
                 });
 
                 // First-run readiness banner — shown once if any checks fail.
+                // Set when an Escape key-down reaches the root handler. A focused
+                // text box swallows Escape (Floem clears its focus and stops the
+                // event), so then only the key-up arrives; see the KeyUp handler.
+                let escape_down_seen = std::rc::Rc::new(std::cell::Cell::new(false));
                 let readiness_banner = {
                     let items = readiness_items.clone();
                     let has_issues = items.iter().any(|(_, ok, _)| !ok);
@@ -4382,8 +4640,38 @@ pub fn launch_phaze_ide() {
                             .margin_bottom(10.0)
                     });
 
-                    container(stack((header, rows)).style(|s| s.flex_col().width(300.0))).style(
-                        move |s| {
+                    // One click from "AI isn't set up" to the place that fixes it.
+                    let ai_missing = items.first().map(|(_, ok, _)| !ok).unwrap_or(false);
+                    let setup_state = state.clone();
+                    let setup_btn =
+                        container(label(|| "Set up AI →".to_string()).style(move |s| {
+                            let p = title_theme.get().palette;
+                            s.font_size(12.0).color(p.accent)
+                        }))
+                        .on_click_stop(move |_| {
+                            setup_state.workbench.show_left_panel.set(true);
+                            setup_state.workbench.left_panel_tab.set(Tab::Settings);
+                            // Land on Local AI: the one option that needs no account or key.
+                            setup_state
+                                .workbench
+                                .local_ai_focus_nonce
+                                .update(|n| *n += 1);
+                            visible_sig.set(false);
+                        })
+                        .style(move |s| {
+                            let p = theme.get().palette;
+                            s.padding_horiz(10.0)
+                                .padding_vert(5.0)
+                                .margin_top(4.0)
+                                .border(1.0)
+                                .border_color(p.accent)
+                                .border_radius(4.0)
+                                .cursor(floem::style::CursorStyle::Pointer)
+                                .apply_if(!ai_missing, |s| s.display(floem::style::Display::None))
+                        });
+
+                    container(stack((header, rows, setup_btn)).style(|s| s.flex_col().width(300.0)))
+                        .style(move |s| {
                             let p = theme.get().palette;
                             let shown = visible_sig.get();
                             s.absolute()
@@ -4401,8 +4689,7 @@ pub fn launch_phaze_ide() {
                                 .box_shadow_color(p.glow)
                                 .box_shadow_spread(0.0)
                                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
-                        },
-                    )
+                        })
                 };
 
                 stack((
@@ -4427,10 +4714,30 @@ pub fn launch_phaze_ide() {
                     let p = &t.palette;
                     s.width_full().height_full().background(p.bg_base)
                 })
+                .on_event_cont(EventListener::KeyUp, {
+                    let state = state.clone();
+                    let escape_down_seen = escape_down_seen.clone();
+                    move |event| {
+                        if let Event::KeyUp(key_event) = event {
+                            if key_event.key.logical_key
+                                == Key::Named(floem::keyboard::NamedKey::Escape)
+                                && !escape_down_seen.replace(false)
+                            {
+                                close_topmost_overlay(&state);
+                            }
+                        }
+                    }
+                })
                 .on_event_stop(EventListener::KeyDown, {
                     let state = state.clone();
+                    let escape_down_seen = escape_down_seen.clone();
                     move |event| {
                         if let Event::KeyDown(key_event) = event {
+                            if key_event.key.logical_key
+                                == Key::Named(floem::keyboard::NamedKey::Escape)
+                            {
+                                escape_down_seen.set(true);
+                            }
                             let ctrl = key_event.modifiers.contains(Modifiers::CONTROL);
                             let shift = key_event.modifiers.contains(Modifiers::SHIFT);
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
@@ -4448,47 +4755,7 @@ pub fn launch_phaze_ide() {
                             if let Key::Named(ref named) = key_event.key.logical_key {
                                 match named {
                                     floem::keyboard::NamedKey::Escape => {
-                                        if state.editor.peek_def_open.get() {
-                                            state.editor.peek_def_open.set(false);
-                                            state.editor.peek_def_lines.set(vec![]);
-                                            return;
-                                        }
-                                        if state.project.branch_picker_open.get() {
-                                            state.project.branch_picker_open.set(false);
-                                            return;
-                                        }
-                                        if state.editor.rename_open.get() {
-                                            state.editor.rename_open.set(false);
-                                            return;
-                                        }
-                                        if state.editor.sig_help.get().is_some() {
-                                            state.editor.sig_help.set(None);
-                                            return;
-                                        }
-                                        if state.editor.code_actions_open.get() {
-                                            state.editor.code_actions_open.set(false);
-                                            return;
-                                        }
-                                        if state.ai.inline_edit_open.get() {
-                                            state.ai.inline_edit_open.set(false);
-                                            state.ai.inline_edit_query.set(String::new());
-                                            return;
-                                        }
-                                        if state.editor.completion_open.get() {
-                                            state.editor.completion_open.set(false);
-                                            return;
-                                        }
-                                        if state.workbench.file_picker_open.get() {
-                                            state.workbench.file_picker_open.set(false);
-                                            state.workbench.file_picker_query.set(String::new());
-                                            return;
-                                        }
-                                        if state.workbench.command_palette_open.get() {
-                                            state.workbench.command_palette_open.set(false);
-                                            state
-                                                .workbench
-                                                .command_palette_query
-                                                .set(String::new());
+                                        if close_topmost_overlay(&state) {
                                             return;
                                         }
                                         // Vim: Escape enters Normal mode / exits ex/visual
@@ -5126,28 +5393,15 @@ pub fn launch_phaze_ide() {
                                     return;
                                 }
 
-                                // Ctrl+Shift+E → Explain Selection with AI
+                                // Ctrl+Shift+E → Explain Selection with AI (same path as
+                                // the context-menu entry: privacy gate + audit attach only
+                                // when the selection is sent).
                                 if ctrl && shift && !alt && ch.as_str() == "e" {
-                                    if let Some((ref path, line, _)) =
-                                        state.editor.active_cursor.get()
-                                    {
-                                        let sel = state.editor.selected_text.get();
-                                        let fname = path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| "file".to_string());
-                                        let prompt = if !sel.is_empty() {
-                                            format!("Explain this code:\n\n```\n{sel}\n```")
-                                        } else {
-                                            format!(
-                                                "Explain the code around line {} in {}",
-                                                line + 1,
-                                                fname
-                                            )
-                                        };
-                                        state.ai.pending_chat_inject.set(Some(prompt));
-                                        state.workbench.show_right_panel.set(true);
-                                    }
+                                    send_editor_ai_action(
+                                        &state,
+                                        "Explain this code",
+                                        "Explain the code",
+                                    );
                                     return;
                                 }
 
@@ -5475,6 +5729,8 @@ pub fn launch_phaze_ide() {
                 .on_event_stop(EventListener::WindowClosed, {
                     let state = state.clone();
                     move |_| {
+                        // Stop the built-in llama.cpp server (if any).
+                        phazeai_core::local_ai::LOCAL_AI.stop();
                         // Kill sidecar process cleanly on IDE exit.
                         if let Ok(guard) = state.project.sidecar_client.lock() {
                             if let Some(client) = guard.as_ref() {
@@ -5501,4 +5757,113 @@ pub fn launch_phaze_ide() {
             ),
         )
         .run();
+}
+
+#[cfg(test)]
+mod ai_prompt_tests {
+    use super::{build_ai_prompt, build_fix_prompt};
+    use std::path::Path;
+
+    #[test]
+    fn selection_is_quoted_verbatim_and_counts_as_attaching_the_file() {
+        let p = build_ai_prompt(
+            "let x = 1;",
+            Path::new("/a/main.rs"),
+            4,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p.text, "Explain this code:\n\n```\nlet x = 1;\n```");
+        assert!(p.attaches_file, "the selection is text from the file");
+    }
+
+    #[test]
+    fn without_selection_points_at_the_cursor_line_and_attaches_nothing() {
+        let p = build_ai_prompt(
+            "",
+            Path::new("/a/b/main.rs"),
+            41,
+            "Explain this code",
+            "Explain the code",
+        );
+        assert_eq!(p.text, "Explain the code around line 42 in main.rs");
+        assert!(
+            !p.attaches_file,
+            "only the file name and a line number are sent; the audit must not claim the contents were"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_selection_counts_as_no_selection() {
+        let p = build_ai_prompt("  \n\t ", Path::new("x.py"), 0, "A", "B");
+        assert_eq!(p.text, "B around line 1 in x.py");
+        assert!(!p.attaches_file);
+    }
+
+    #[test]
+    fn a_diagnostic_fix_carries_source_text() {
+        let p = build_fix_prompt("expected `;`, found `let secret = 1`");
+        assert_eq!(
+            p.text,
+            "Fix this error: expected `;`, found `let secret = 1`"
+        );
+        assert!(p.attaches_file, "diagnostics quote the file's source");
+    }
+}
+
+#[cfg(test)]
+mod provider_problem_tests {
+    use super::provider_problem;
+    use phazeai_core::{config::LlmProvider, Settings};
+
+    fn settings(provider: LlmProvider, env: &str, base_url: Option<&str>) -> Settings {
+        let mut s = Settings::default();
+        s.llm.provider = provider;
+        s.llm.api_key_env = env.to_string();
+        s.llm.base_url = base_url.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn missing_key_is_reported_with_the_provider_name() {
+        let s = settings(LlmProvider::Groq, "PHAZEAI_TEST_NO_SUCH_KEY_VAR", None);
+        let msg = provider_problem(&s).expect("no key should be a problem");
+        assert!(msg.contains("Groq") && msg.contains("Settings"), "{msg}");
+    }
+
+    #[test]
+    fn a_key_in_the_environment_counts_as_ready() {
+        // PATH is set (and non-empty) in every environment the tests run in.
+        let s = settings(LlmProvider::Groq, "PATH", None);
+        assert_eq!(provider_problem(&s), None);
+    }
+
+    #[test]
+    fn an_empty_key_variable_name_is_not_ready() {
+        let s = settings(LlmProvider::Claude, "", None);
+        assert!(provider_problem(&s).is_some());
+    }
+
+    #[test]
+    fn built_in_provider_explains_what_is_missing() {
+        // No server runs in tests, so the built-in provider is never ready, and
+        // the message must point at the place that fixes it.
+        let mut s = settings(LlmProvider::BuiltIn, "", None);
+        let msg = provider_problem(&s).expect("no server running");
+        assert!(msg.contains("Local AI"), "{msg}");
+        s.local_ai.model = Some("not-a-catalog-model".into());
+        let msg = provider_problem(&s).unwrap();
+        assert!(msg.contains("Unknown built-in model"), "{msg}");
+    }
+
+    #[test]
+    fn local_providers_are_only_ready_when_reachable() {
+        // Port 9 (discard) has nothing listening: a fresh install with Ollama as the
+        // default provider but no Ollama must not be reported as configured.
+        for p in [LlmProvider::Ollama, LlmProvider::LmStudio] {
+            let s = settings(p, "", Some("http://127.0.0.1:9"));
+            let msg = provider_problem(&s).expect("unreachable local server is a problem");
+            assert!(msg.contains("isn't running"), "{msg}");
+        }
+    }
 }

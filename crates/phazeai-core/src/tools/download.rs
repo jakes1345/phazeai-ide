@@ -61,6 +61,9 @@ impl Tool for DownloadTool {
             .unwrap_or(false);
 
         let resolved = sandbox::resolve_target_path("download", output_path)?;
+        // Same rules as write_file: no denied targets, and never the privacy policy.
+        crate::privacy::tool_check("download", &resolved, output_path)?;
+        crate::privacy::tool_check_protected("download", &resolved, output_path)?;
         let path = resolved.as_path();
 
         if path.exists() && !overwrite {

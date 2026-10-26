@@ -87,8 +87,34 @@ impl Tool for CodeSearchTool {
             }
         };
 
-        Ok(result)
+        Ok(filter_search_result(result))
     }
+}
+
+/// Drop matches (and their snippets) for files the privacy policy denies, and
+/// note the remaining files in the privacy audit log.
+pub fn filter_search_result(mut result: Value) -> Value {
+    let policy = phazeai_core::privacy::active();
+    let mut removed = 0usize;
+    if let Some(matches) = result.get_mut("matches").and_then(|m| m.as_array_mut()) {
+        matches.retain(|m| {
+            let Some(file) = m.get("file").and_then(|f| f.as_str()) else {
+                return true;
+            };
+            let path = phazeai_core::privacy::absolutize(std::path::Path::new(file));
+            if policy.is_denied(&path) {
+                removed += 1;
+                false
+            } else {
+                phazeai_core::privacy::audit::note_file(&path);
+                true
+            }
+        });
+    }
+    if removed > 0 {
+        result["privacy_skipped"] = Value::from(removed);
+    }
+    result
 }
 
 /// Tool to build the sidecar TF-IDF search index for the project.
@@ -144,5 +170,29 @@ impl Tool for BuildIndexTool {
             })?;
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_results_for_denied_files_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let secret = root.join("prod.pem");
+        let code = root.join("main.rs");
+        let result = serde_json::json!({
+            "matches": [
+                {"file": secret.to_string_lossy(), "score": 0.9, "snippet": "-----BEGIN"},
+                {"file": code.to_string_lossy(), "score": 0.5, "snippet": "fn main"},
+            ]
+        });
+        let filtered = filter_search_result(result);
+        let matches = filtered["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["snippet"], "fn main");
+        assert_eq!(filtered["privacy_skipped"], 1);
     }
 }

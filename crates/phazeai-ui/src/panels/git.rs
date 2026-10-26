@@ -4,12 +4,15 @@
 //! Provides commit message input, commit button, and file click-to-open.
 //! Also includes branch switching, pull/push, stash, and commit history.
 
+use std::path::{Path, PathBuf};
+
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
+use phazeai_core::privacy::PrivacyPolicy;
 use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
 
 use crate::domain_state::IdeState;
@@ -144,7 +147,7 @@ fn char_to_status(c: char) -> Option<GitFileStatus> {
 }
 
 fn run_git_status(root: &std::path::Path) -> GitStatusData {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["status", "--porcelain"])
         .current_dir(root)
         .output();
@@ -155,7 +158,7 @@ fn run_git_status(root: &std::path::Path) -> GitStatusData {
 }
 
 fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["commit", "-m", message])
         .current_dir(root)
         .output()
@@ -168,7 +171,7 @@ fn run_git_commit(root: &std::path::Path, message: &str) -> Result<(), String> {
 }
 
 fn run_git_add(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["add", path])
         .current_dir(root)
         .output()
@@ -181,7 +184,7 @@ fn run_git_add(root: &std::path::Path, path: &str) -> Result<(), String> {
 }
 
 fn run_git_reset(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["reset", "HEAD", "--", path])
         .current_dir(root)
         .output()
@@ -194,7 +197,7 @@ fn run_git_reset(root: &std::path::Path, path: &str) -> Result<(), String> {
 }
 
 fn run_git_discard(root: &std::path::Path, path: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["restore", "--worktree", "--", path])
         .current_dir(root)
         .output()
@@ -209,7 +212,7 @@ fn run_git_discard(root: &std::path::Path, path: &str) -> Result<(), String> {
 /// Returns (current_branch, all_branches).
 fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
     // Current branch
-    let current = std::process::Command::new("git")
+    let current = phazeai_core::process::std_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(root)
         .output()
@@ -229,7 +232,7 @@ fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
         });
 
     // All local branches
-    let branches_raw = std::process::Command::new("git")
+    let branches_raw = phazeai_core::process::std_command("git")
         .args(["branch", "--list"])
         .current_dir(root)
         .output()
@@ -256,7 +259,7 @@ fn run_git_branches(root: &std::path::Path) -> (String, Vec<String>) {
 }
 
 fn run_git_checkout(root: &std::path::Path, branch: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["checkout", branch])
         .current_dir(root)
         .output()
@@ -269,7 +272,7 @@ fn run_git_checkout(root: &std::path::Path, branch: &str) -> Result<(), String> 
 }
 
 fn run_git_checkout_new(root: &std::path::Path, branch: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["checkout", "-b", branch])
         .current_dir(root)
         .output()
@@ -282,7 +285,7 @@ fn run_git_checkout_new(root: &std::path::Path, branch: &str) -> Result<(), Stri
 }
 
 fn run_git_pull(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["pull"])
         .current_dir(root)
         .output()
@@ -295,7 +298,7 @@ fn run_git_pull(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_push(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["push"])
         .current_dir(root)
         .output()
@@ -308,7 +311,7 @@ fn run_git_push(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["stash", "push", "-m", "WIP"])
         .current_dir(root)
         .output()
@@ -321,7 +324,7 @@ fn run_git_stash(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["stash", "pop"])
         .current_dir(root)
         .output()
@@ -334,7 +337,7 @@ fn run_git_stash_pop(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
-    std::process::Command::new("git")
+    phazeai_core::process::std_command("git")
         .args(["stash", "list"])
         .current_dir(root)
         .output()
@@ -352,7 +355,7 @@ fn run_git_stash_list(root: &std::path::Path) -> Vec<(usize, String)> {
 }
 
 fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["stash", "apply", &format!("stash@{{{idx}}}")])
         .current_dir(root)
         .output()
@@ -365,7 +368,7 @@ fn run_git_stash_apply(root: &std::path::Path, idx: usize) -> Result<String, Str
 }
 
 fn run_git_stash_drop(root: &std::path::Path, idx: usize) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["stash", "drop", &format!("stash@{{{idx}}}")])
         .current_dir(root)
         .output()
@@ -378,7 +381,7 @@ fn run_git_stash_drop(root: &std::path::Path, idx: usize) -> Result<String, Stri
 }
 
 fn run_git_merge(root: &std::path::Path, branch: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["merge", branch])
         .current_dir(root)
         .output()
@@ -391,7 +394,7 @@ fn run_git_merge(root: &std::path::Path, branch: &str) -> Result<String, String>
 }
 
 fn run_git_cherry_pick(root: &std::path::Path, hash: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["cherry-pick", hash])
         .current_dir(root)
         .output()
@@ -404,7 +407,7 @@ fn run_git_cherry_pick(root: &std::path::Path, hash: &str) -> Result<String, Str
 }
 
 fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
-    std::process::Command::new("git")
+    phazeai_core::process::std_command("git")
         .args(["tag", "--sort=-version:refname"])
         .current_dir(root)
         .output()
@@ -422,7 +425,7 @@ fn run_git_tag_list(root: &std::path::Path) -> Vec<String> {
 }
 
 fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["tag", name])
         .current_dir(root)
         .output()
@@ -435,7 +438,7 @@ fn run_git_tag_create(root: &std::path::Path, name: &str) -> Result<String, Stri
 }
 
 fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
-    let r = std::process::Command::new("git")
+    let r = phazeai_core::process::std_command("git")
         .args(["push", "--tags"])
         .current_dir(root)
         .output()
@@ -451,7 +454,7 @@ fn run_git_tag_push(root: &std::path::Path) -> Result<String, String> {
 fn run_git_revert_hunk(root: &std::path::Path, diff_patch: &str) -> Result<String, String> {
     let tmp = std::env::temp_dir().join("phaze_revert_hunk.patch");
     std::fs::write(&tmp, diff_patch).map_err(|e| e.to_string())?;
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["apply", "--reverse", tmp.to_str().unwrap_or("")])
         .current_dir(root)
         .output()
@@ -465,7 +468,7 @@ fn run_git_revert_hunk(root: &std::path::Path, diff_patch: &str) -> Result<Strin
 
 /// Run `git diff HEAD` to get the full working-tree diff.
 fn run_git_diff_head(root: &std::path::Path) -> String {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--no-color"])
         .current_dir(root)
         .output();
@@ -475,6 +478,327 @@ fn run_git_diff_head(root: &std::path::Path) -> String {
         Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(),
         Err(e) => e.to_string(),
     }
+}
+
+// ── AI commit message: what may be sent ──────────────────────────────────────
+
+/// Top level of the git repository that contains `dir`, or `None` when git
+/// can't tell (no repository, git missing).
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = phazeai_core::process::std_command("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    (!top.is_empty()).then(|| PathBuf::from(top))
+}
+
+/// Stdout of `git -c core.quotePath=false <args>` run in `dir`; empty on
+/// failure. `core.quotePath=false` keeps non-ASCII path bytes as they are
+/// instead of C-quoting them (`"caf\303\251.txt"`), so the paths git prints
+/// line up with the privacy policy's.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    phazeai_core::process::std_command("git")
+        .args(["-c", "core.quotePath=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).to_string()
+            } else {
+                String::new()
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn push_unique(list: &mut Vec<String>, item: String) {
+    if !list.contains(&item) {
+        list.push(item);
+    }
+}
+
+/// Whether the policy denies `path` as git prints it: relative to the
+/// repository's top level, which is not necessarily the workspace root.
+fn denied_in_repo(policy: &PrivacyPolicy, repo_root: &Path, path: &str) -> bool {
+    policy.is_denied(&repo_root.join(path))
+}
+
+/// Remove the per-file sections of a `git diff` whose old or new path the
+/// privacy policy denies. Returns the filtered diff and the omitted
+/// (repo-relative) paths.
+///
+/// git prints paths relative to the repository's top level, so they are
+/// resolved against `repo_root` before being checked. The workspace may be
+/// a subfolder of the repository, in which case resolving them against the
+/// workspace instead (what `phazeai_core::privacy::filter_unified_diff`
+/// does) lines them up with the wrong files and lets denied hunks through.
+fn filter_staged_diff(
+    diff: &str,
+    repo_root: &Path,
+    policy: &PrivacyPolicy,
+) -> (String, Vec<String>) {
+    let mut out = String::new();
+    let mut omitted: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    let flush = |chunk: &mut String, out: &mut String, omitted: &mut Vec<String>| {
+        if chunk.is_empty() {
+            return;
+        }
+        let paths = diff_chunk_paths(chunk);
+        match paths.iter().find(|p| denied_in_repo(policy, repo_root, p)) {
+            Some(p) => push_unique(omitted, p.clone()),
+            None => out.push_str(chunk),
+        }
+        chunk.clear();
+    };
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            flush(&mut chunk, &mut out, &mut omitted);
+        }
+        chunk.push_str(line);
+    }
+    flush(&mut chunk, &mut out, &mut omitted);
+    (out, omitted)
+}
+
+/// The old/new paths named by the header lines of one `diff --git` section,
+/// with git's C-quoting undone. Stops at the first hunk, where `---`/`+++`
+/// would be content.
+fn diff_chunk_paths(chunk: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in chunk.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with("@@ ") {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            for p in diff_git_line_paths(rest) {
+                push_unique(&mut paths, p);
+            }
+        } else if let Some(v) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
+        {
+            // `--- a/P`, `+++ b/P`; `/dev/null` for added/deleted files.
+            let (p, _) = git_path_token(v);
+            if let Some(p) = p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")) {
+                push_unique(&mut paths, p.to_string());
+            }
+        } else if let Some(v) = line
+            .strip_prefix("rename from ")
+            .or_else(|| line.strip_prefix("rename to "))
+            .or_else(|| line.strip_prefix("copy from "))
+            .or_else(|| line.strip_prefix("copy to "))
+        {
+            let (p, _) = git_path_token(v);
+            push_unique(&mut paths, p);
+        }
+    }
+    paths
+}
+
+/// Paths on a `diff --git ` line, prefixes stripped: `a/P b/P`, or
+/// `"a/P" "b/Q"` when git had to quote them.
+fn diff_git_line_paths(rest: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    if rest.starts_with('"') {
+        let (first, remainder) = git_path_token(rest);
+        if let Some(p) = first.strip_prefix("a/") {
+            paths.push(p.to_string());
+        }
+        let (second, _) = git_path_token(remainder.trim_start());
+        if let Some(p) = second.strip_prefix("b/") {
+            push_unique(&mut paths, p.to_string());
+        }
+        return paths;
+    }
+    let Some(rest) = rest.strip_prefix("a/") else {
+        return paths;
+    };
+    // Both sides are the same path unless the file was renamed or copied;
+    // a path may itself contain " b/", so prefer the symmetric split.
+    if rest.len() >= 3 {
+        let mid = (rest.len() - 3) / 2;
+        if rest.is_char_boundary(mid)
+            && rest[mid..].starts_with(" b/")
+            && rest[..mid] == rest[mid + 3..]
+        {
+            paths.push(rest[..mid].to_string());
+            return paths;
+        }
+    }
+    match rest.rsplit_once(" b/") {
+        Some((old, new)) => {
+            paths.push(old.to_string());
+            push_unique(&mut paths, new.to_string());
+        }
+        None => paths.push(rest.to_string()),
+    }
+    paths
+}
+
+/// One path token as git prints it: either C-quoted (`"..."`, escapes
+/// undone, octal bytes decoded) or the rest of the line. Returns the path
+/// and whatever follows the token.
+fn git_path_token(s: &str) -> (String, &str) {
+    let Some(inner) = s.strip_prefix('"') else {
+        return (s.trim_end().to_string(), "");
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4];
+    let mut it = inner.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        match c {
+            '"' => {
+                return (
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                    &inner[i + 1..],
+                )
+            }
+            '\\' => match it.next() {
+                Some((_, 'n')) => bytes.push(b'\n'),
+                Some((_, 't')) => bytes.push(b'\t'),
+                Some((_, 'r')) => bytes.push(b'\r'),
+                Some((_, 'a')) => bytes.push(0x07),
+                Some((_, 'b')) => bytes.push(0x08),
+                Some((_, 'f')) => bytes.push(0x0c),
+                Some((_, 'v')) => bytes.push(0x0b),
+                Some((_, d)) if d.is_digit(8) => {
+                    let mut v = d.to_digit(8).unwrap_or(0);
+                    for _ in 0..2 {
+                        match it.peek() {
+                            Some((_, e)) if e.is_digit(8) => {
+                                v = v * 8 + e.to_digit(8).unwrap_or(0);
+                                it.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    bytes.push((v & 0xff) as u8);
+                }
+                // `\\`, `\"` and anything unexpected: the character itself.
+                Some((_, other)) => bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes()),
+                None => break,
+            },
+            _ => bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes()),
+        }
+    }
+    // Unterminated quote: take what there is.
+    (String::from_utf8_lossy(&bytes).into_owned(), "")
+}
+
+/// One entry of `git diff --numstat -z`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedFile {
+    /// Previous path when renamed or copied.
+    old: Option<String>,
+    path: String,
+    /// `None` for binary files.
+    added: Option<u64>,
+    deleted: Option<u64>,
+}
+
+/// Parse `git diff --numstat -z` output: `A\tD\tPATH\0` per file, or
+/// `A\tD\t\0OLD\0NEW\0` for a rename or copy; `-` counts mark binary files.
+/// Unlike `--stat`, this never truncates or quotes a path.
+fn parse_numstat_z(out: &str) -> Vec<StagedFile> {
+    let mut files = Vec::new();
+    let mut fields = out.split('\0');
+    while let Some(rec) = fields.next() {
+        if rec.is_empty() {
+            continue;
+        }
+        let mut parts = rec.splitn(3, '\t');
+        let (Some(a), Some(d), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let count = |s: &str| s.parse::<u64>().ok();
+        let (added, deleted) = (count(a), count(d));
+        if path.is_empty() {
+            let (Some(old), Some(new)) = (fields.next(), fields.next()) else {
+                break;
+            };
+            files.push(StagedFile {
+                old: Some(old.to_string()),
+                path: new.to_string(),
+                added,
+                deleted,
+            });
+        } else {
+            files.push(StagedFile {
+                old: None,
+                path: path.to_string(),
+                added,
+                deleted,
+            });
+        }
+    }
+    files
+}
+
+/// The stats block of the commit-message prompt with denied files left out:
+/// one line per file, then git's summary line (which still counts every
+/// staged file) and a note on how many were withheld. Returns the block and
+/// the omitted (repo-relative) paths.
+fn stats_for_prompt(
+    files: &[StagedFile],
+    repo_root: &Path,
+    policy: &PrivacyPolicy,
+) -> (String, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut omitted = Vec::new();
+    let (mut ins, mut del) = (0u64, 0u64);
+    for f in files {
+        ins += f.added.unwrap_or(0);
+        del += f.deleted.unwrap_or(0);
+        let denied = f
+            .old
+            .iter()
+            .chain(std::iter::once(&f.path))
+            .find(|p| denied_in_repo(policy, repo_root, p));
+        if let Some(p) = denied {
+            push_unique(&mut omitted, p.clone());
+            continue;
+        }
+        let name = match &f.old {
+            Some(old) => format!("{old} => {}", f.path),
+            None => f.path.clone(),
+        };
+        let change = match (f.added, f.deleted) {
+            (Some(a), Some(d)) => format!("+{a} -{d}"),
+            _ => "binary".to_string(),
+        };
+        lines.push(format!(" {name} | {change}"));
+    }
+    lines.push(diffstat_summary(files.len(), ins, del));
+    if !omitted.is_empty() {
+        lines.push(format!(
+            " ({} file(s) withheld by the project's privacy policy)",
+            omitted.len()
+        ));
+    }
+    (lines.join("\n"), omitted)
+}
+
+/// git's ` N files changed, X insertions(+), Y deletions(-)` line.
+fn diffstat_summary(files: usize, ins: u64, del: u64) -> String {
+    let plural = |n: u64| if n == 1 { "" } else { "s" };
+    let mut s = format!(" {files} file{} changed", plural(files as u64));
+    if ins > 0 {
+        s.push_str(&format!(", {ins} insertion{}(+)", plural(ins)));
+    }
+    if del > 0 {
+        s.push_str(&format!(", {del} deletion{}(-)", plural(del)));
+    }
+    s
 }
 
 /// A single rendered line from a diff, carrying enough context to extract a hunk patch.
@@ -589,7 +913,7 @@ fn parse_diff_display(raw: &str) -> (Vec<DiffDisplayLine>, Vec<String>) {
 }
 
 fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["fetch", "--all", "--prune"])
         .current_dir(root)
         .output()
@@ -602,7 +926,7 @@ fn run_git_fetch(root: &std::path::Path) -> Result<String, String> {
 }
 
 fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["branch", "-d", branch])
         .current_dir(root)
         .output()
@@ -611,7 +935,7 @@ fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String,
         Ok(format!("Deleted branch {branch}"))
     } else {
         // Try force delete
-        let out2 = std::process::Command::new("git")
+        let out2 = phazeai_core::process::std_command("git")
             .args(["branch", "-D", branch])
             .current_dir(root)
             .output()
@@ -626,7 +950,7 @@ fn run_git_delete_branch(root: &std::path::Path, branch: &str) -> Result<String,
 
 /// Get the diff for a specific commit hash.
 fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["show", "--stat", "--patch", "--no-color", hash])
         .current_dir(root)
         .output();
@@ -639,7 +963,7 @@ fn run_git_show_diff(root: &std::path::Path, hash: &str) -> String {
 
 /// Loads the 50 most recent commits via `git log`.
 fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["log", "--format=%h|%s|%an|%ar", "-50"])
         .current_dir(root)
         .output();
@@ -668,7 +992,7 @@ fn run_git_log(root: &std::path::Path) -> Vec<CommitEntry> {
 /// Loads up to 50 recent commits with full hash for the COMMIT LOG section.
 fn run_git_log_full(root: &std::path::Path, limit: usize) -> Vec<CommitLogEntry> {
     let limit_str = limit.to_string();
-    let out = std::process::Command::new("git")
+    let out = phazeai_core::process::std_command("git")
         .args(["log", "--format=%H|%h|%s|%an|%ar", &format!("-{limit_str}")])
         .current_dir(root)
         .output();
@@ -758,7 +1082,7 @@ fn parse_blame_line(line_no: usize, raw: &str) -> BlameEntry {
 /// Run `git blame --date=short <path>` and return per-line blame info.
 fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
     let dir = path.parent().unwrap_or(path);
-    let out = match std::process::Command::new("git")
+    let out = match phazeai_core::process::std_command("git")
         .args(["blame", "--date=short", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output()
@@ -1946,12 +2270,15 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     let ai_gen_hov = create_rw_signal(false);
     let state_ai = state.clone();
 
-    let (ai_commit_tx, ai_commit_rx) = std::sync::mpsc::sync_channel::<String>(1);
+    // Ok: the generated message; Err: why none was generated (status line).
+    let (ai_commit_tx, ai_commit_rx) = std::sync::mpsc::sync_channel::<Result<String, String>>(1);
     let ai_commit_result_sig = create_signal_from_channel(ai_commit_rx);
     create_effect(move |_| {
         if let Some(result) = ai_commit_result_sig.get() {
-            if !result.is_empty() {
-                commit_msg.set(result);
+            match result {
+                Ok(msg) if !msg.is_empty() => commit_msg.set(msg),
+                Ok(_) => {}
+                Err(why) => status_msg.set(why),
             }
             ai_gen_active.set(false);
         }
@@ -2008,37 +2335,59 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
         let tx = ai_commit_tx.clone();
 
         std::thread::spawn(move || {
-            // Collect staged diff summary + full diff (capped at 8 kB)
-            let stat = std::process::Command::new("git")
-                .args(["diff", "--cached", "--stat"])
-                .current_dir(&root)
-                .output()
-                .map(|o| {
-                    if o.status.success() {
-                        String::from_utf8_lossy(&o.stdout).trim().to_string()
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default();
+            // Privacy: git prints paths relative to the repository's top
+            // level, and the workspace may be a subfolder of it, so denied
+            // files are looked up against the top level. Without it nothing
+            // is sent (fail closed).
+            let Some(repo_root) = git_toplevel(&root) else {
+                let _ = tx.send(Err(
+                    "Couldn't find the git repository root; nothing was sent to the AI."
+                        .to_string(),
+                ));
+                return;
+            };
+            let policy = phazeai_core::privacy::policy_for(&root);
 
-            if stat.is_empty() {
-                let _ = tx.send("No staged changes.".to_string());
+            // Staged files (never truncated or quoted) → stats block minus
+            // the denied files.
+            let files =
+                parse_numstat_z(&git_stdout(&root, &["diff", "--cached", "--numstat", "-z"]));
+            if files.is_empty() {
+                let _ = tx.send(Err("No staged changes.".to_string()));
                 return;
             }
+            let (stat, stat_omitted) = stats_for_prompt(&files, &repo_root, &policy);
 
-            let full_diff = std::process::Command::new("git")
-                .args(["diff", "--cached"])
-                .current_dir(&root)
-                .output()
-                .map(|o| {
-                    if o.status.success() {
-                        String::from_utf8_lossy(&o.stdout).to_string()
-                    } else {
-                        String::new()
-                    }
-                })
-                .unwrap_or_default();
+            // Full staged diff (capped at 8 kB) minus the denied files' hunks.
+            let full_diff = git_stdout(&root, &["diff", "--cached"]);
+            let (full_diff, mut omitted) = filter_staged_diff(&full_diff, &repo_root, &policy);
+            for path in stat_omitted {
+                push_unique(&mut omitted, path);
+            }
+            for path in &omitted {
+                phazeai_core::privacy::audit::record_blocked_file(
+                    &policy.display_path(&repo_root.join(path)),
+                    "diff withheld by the privacy policy",
+                    "commit message",
+                );
+            }
+            if full_diff.trim().is_empty() {
+                let why = if omitted.is_empty() {
+                    "Couldn't read the staged diff."
+                } else {
+                    "All staged changes are withheld by the project's privacy policy."
+                };
+                let _ = tx.send(Err(why.to_string()));
+                return;
+            }
+            let full_diff = if omitted.is_empty() {
+                full_diff
+            } else {
+                format!(
+                    "{full_diff}\n(Changes to {} file(s) withheld by the project's privacy policy.)\n",
+                    omitted.len()
+                )
+            };
 
             let snippet = if full_diff.len() > 8_000 {
                 let end = full_diff.floor_char_boundary(8_000);
@@ -2060,8 +2409,8 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                 .build()
             {
                 Ok(rt) => rt,
-                Err(_) => {
-                    let _ = tx.send(String::new());
+                Err(e) => {
+                    let _ = tx.send(Err(format!("Couldn't start the AI runtime: {e}")));
                     return;
                 }
             };
@@ -2069,7 +2418,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             let result = rt.block_on(async move {
                 let client = match settings.build_llm_client() {
                     Ok(c) => c,
-                    Err(_) => return String::new(),
+                    Err(e) => return Err(format!("AI commit message: {e}")),
                 };
                 let agent = Agent::new(client);
                 let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -2085,7 +2434,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     }
                 };
                 let _ = tokio::join!(run_fut, drain_fut);
-                accumulated.trim().to_string()
+                Ok(accumulated.trim().to_string())
             });
 
             let _ = tx.send(result);
@@ -4395,4 +4744,168 @@ fn git_section(
     });
 
     stack((header, rows, empty_state)).style(|s| s.flex_col().width_full())
+}
+
+#[cfg(test)]
+mod ai_commit_privacy_tests {
+    use super::{
+        diff_chunk_paths, diffstat_summary, filter_staged_diff, git_path_token, parse_numstat_z,
+        stats_for_prompt, StagedFile,
+    };
+    use phazeai_core::privacy::PrivacyPolicy;
+    use std::path::Path;
+
+    // The workspace is a subfolder of the repository: git prints `ws/...`
+    // paths, while the policy's `secrets/**` is anchored at the workspace.
+    const REPO: &str = "/repo";
+    const WORKSPACE: &str = "/repo/ws";
+
+    fn policy() -> PrivacyPolicy {
+        PrivacyPolicy::parse(Path::new(WORKSPACE), "deny = [\"secrets/**\"]\n").unwrap()
+    }
+
+    fn chunk(path: &str) -> String {
+        format!(
+            "diff --git a/{path} b/{path}\nindex 1..2 100644\n--- a/{path}\n+++ b/{path}\n\
+             @@ -1 +1 @@\n-old\n+new\n"
+        )
+    }
+
+    fn file(old: Option<&str>, path: &str, added: Option<u64>, deleted: Option<u64>) -> StagedFile {
+        StagedFile {
+            old: old.map(str::to_string),
+            path: path.to_string(),
+            added,
+            deleted,
+        }
+    }
+
+    #[test]
+    fn denied_files_are_resolved_against_the_repo_top_level() {
+        let diff = chunk("ws/secrets/key.pem") + &chunk("ws/src/main.rs");
+        let (kept, omitted) = filter_staged_diff(&diff, Path::new(REPO), &policy());
+        assert_eq!(omitted, vec!["ws/secrets/key.pem".to_string()]);
+        assert_eq!(kept, chunk("ws/src/main.rs"));
+    }
+
+    #[test]
+    fn built_in_denials_apply_outside_the_workspace() {
+        let diff = chunk("other/.env") + &chunk("ws/src/lib.rs");
+        let (kept, omitted) = filter_staged_diff(&diff, Path::new(REPO), &policy());
+        assert_eq!(omitted, vec!["other/.env".to_string()]);
+        assert_eq!(kept, chunk("ws/src/lib.rs"));
+    }
+
+    #[test]
+    fn a_rename_into_a_denied_folder_is_withheld() {
+        let diff = "diff --git a/ws/notes.txt b/ws/secrets/notes.txt\nsimilarity index 90%\n\
+                    rename from ws/notes.txt\nrename to ws/secrets/notes.txt\nindex 1..2 100644\n\
+                    --- a/ws/notes.txt\n+++ b/ws/secrets/notes.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        let (kept, omitted) = filter_staged_diff(diff, Path::new(REPO), &policy());
+        assert!(kept.is_empty(), "{kept}");
+        assert_eq!(omitted, vec!["ws/secrets/notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn quoted_paths_are_unquoted_before_the_check() {
+        // git C-quotes a path with control characters even with quotePath=false.
+        let diff = "diff --git \"a/ws/secrets/caf\\303\\251\\t1.pem\" \"b/ws/secrets/caf\\303\\251\\t1.pem\"\n\
+                    index 1..2 100644\n--- \"a/ws/secrets/caf\\303\\251\\t1.pem\"\n\
+                    +++ \"b/ws/secrets/caf\\303\\251\\t1.pem\"\n@@ -1 +1 @@\n-a\n+b\n";
+        let (kept, omitted) = filter_staged_diff(diff, Path::new(REPO), &policy());
+        assert!(kept.is_empty(), "{kept}");
+        assert_eq!(omitted, vec!["ws/secrets/café\t1.pem".to_string()]);
+    }
+
+    #[test]
+    fn header_parsing_handles_spaces_renames_and_hunk_content() {
+        assert_eq!(
+            diff_chunk_paths("diff --git a/ws/my file.rs b/ws/my file.rs\n"),
+            vec!["ws/my file.rs"]
+        );
+        // Equal-length sides: the symmetric split must not swallow the new name.
+        assert_eq!(
+            diff_chunk_paths("diff --git a/ws/secrets/a.rs b/ws/private/a.rs\n"),
+            vec!["ws/secrets/a.rs", "ws/private/a.rs"]
+        );
+        // A `---` line inside a hunk is content, not a header.
+        let paths = diff_chunk_paths(
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n--- a/ws/secrets/z\n",
+        );
+        assert_eq!(paths, vec!["x"]);
+    }
+
+    #[test]
+    fn quoted_tokens_decode_escapes_and_report_the_remainder() {
+        let (p, rest) = git_path_token("\"a/x\\ty\\\"z\\\\\" \"b/q\"");
+        assert_eq!(p, "a/x\ty\"z\\");
+        assert_eq!(rest, " \"b/q\"");
+        let (p, rest) = git_path_token("plain path\n");
+        assert_eq!((p.as_str(), rest), ("plain path", ""));
+        let (p, _) = git_path_token("\"unterminated");
+        assert_eq!(p, "unterminated");
+    }
+
+    #[test]
+    fn numstat_z_parses_plain_binary_and_renamed_entries() {
+        let out = "3\t1\tws/src/main.rs\0-\t-\tws/img.png\x001\t1\t\0ws/old.rs\0ws/new.rs\0";
+        assert_eq!(
+            parse_numstat_z(out),
+            vec![
+                file(None, "ws/src/main.rs", Some(3), Some(1)),
+                file(None, "ws/img.png", None, None),
+                file(Some("ws/old.rs"), "ws/new.rs", Some(1), Some(1)),
+            ]
+        );
+        assert!(parse_numstat_z("").is_empty());
+    }
+
+    #[test]
+    fn stats_leave_denied_files_out_but_keep_the_totals() {
+        let files = vec![
+            file(None, "ws/src/main.rs", Some(3), Some(1)),
+            file(None, "ws/secrets/key.pem", Some(1), Some(0)),
+            file(Some("ws/a.rs"), "ws/secrets/b.rs", Some(2), Some(2)),
+            file(None, "ws/img.png", None, None),
+        ];
+        let (block, omitted) = stats_for_prompt(&files, Path::new(REPO), &policy());
+        assert_eq!(
+            omitted,
+            vec![
+                "ws/secrets/key.pem".to_string(),
+                "ws/secrets/b.rs".to_string()
+            ]
+        );
+        assert!(!block.contains("secrets"), "{block}");
+        assert_eq!(
+            block,
+            " ws/src/main.rs | +3 -1\n ws/img.png | binary\n\
+             \x204 files changed, 6 insertions(+), 3 deletions(-)\n\
+             \x20(2 file(s) withheld by the project's privacy policy)"
+        );
+    }
+
+    #[test]
+    fn a_rename_shows_both_names() {
+        let files = vec![file(Some("ws/old.rs"), "ws/new.rs", Some(1), Some(0))];
+        let (block, omitted) = stats_for_prompt(&files, Path::new(REPO), &policy());
+        assert!(omitted.is_empty());
+        assert_eq!(
+            block,
+            " ws/old.rs => ws/new.rs | +1 -0\n 1 file changed, 1 insertion(+)"
+        );
+    }
+
+    #[test]
+    fn summary_line_matches_git() {
+        assert_eq!(diffstat_summary(1, 0, 0), " 1 file changed");
+        assert_eq!(
+            diffstat_summary(2, 1, 1),
+            " 2 files changed, 1 insertion(+), 1 deletion(-)"
+        );
+        assert_eq!(
+            diffstat_summary(3, 10, 0),
+            " 3 files changed, 10 insertions(+)"
+        );
+    }
 }

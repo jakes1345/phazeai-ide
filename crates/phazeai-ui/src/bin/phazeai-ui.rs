@@ -1,3 +1,7 @@
+// Release builds on Windows are GUI programs: no console window opens with the
+// IDE. Logs go to %APPDATA%\phazeai\logs. Debug builds keep the console.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 fn main() {
     // The Floem view tree (~6000 lines of nested panels) exceeds the default
     // OS main thread stack. Set RLIMIT_STACK to unlimited before constructing

@@ -5,6 +5,7 @@ use floem::{
 };
 
 use crate::theme::PhazeTheme;
+use crate::tokens::{font, radius, space, stroke};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
@@ -65,14 +66,14 @@ pub fn phaze_button(
                     p.error.with_alpha(0.5),
                 ),
             };
-            s.padding_horiz(12.0)
-                .padding_vert(6.0)
-                .border_radius(6.0)
+            s.padding_horiz(space::LG)
+                .padding_vert(space::SM)
+                .border_radius(radius::MD)
                 .background(bg)
                 .color(fg)
-                .border(1.0)
+                .border(stroke::HAIRLINE)
                 .border_color(border_color)
-                .font_size(13.0)
+                .font_size(font::UI)
                 .cursor(floem::style::CursorStyle::Pointer)
         })
         .on_click_stop(move |_| on_click())
@@ -108,10 +109,10 @@ pub fn phaze_icon_button(
             let fg = if active { p.accent } else { p.text_secondary };
             s.width(32.0)
                 .height(32.0)
-                .border_radius(6.0)
+                .border_radius(radius::MD)
                 .background(bg)
                 .color(fg)
-                .font_size(16.0)
+                .font_size(font::HEADING)
                 .items_center()
                 .justify_center()
                 .cursor(floem::style::CursorStyle::Pointer)

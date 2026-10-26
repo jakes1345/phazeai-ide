@@ -1,17 +1,24 @@
 use floem::{
-    reactive::{SignalGet, SignalUpdate},
+    reactive::{SignalGet, SignalUpdate, SignalWith},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
 use phazeai_core::{
-    llm::provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+    llm::{
+        key_setup::{check_api_key, key_help},
+        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+    },
     Settings,
 };
 
 use crate::domain_state::IdeState;
 use crate::{
+    components::button::{phaze_button, ButtonVariant},
     components::icon::{icons, phaze_icon},
+    custom_theme::{export_name_for, export_theme, load_custom_themes, themes_dir, LoadedThemes},
     theme::{PhazeTheme, ThemeVariant},
+    tokens::{font, radius, space, stroke},
+    util::open_external_url,
 };
 
 #[derive(Clone)]
@@ -41,6 +48,7 @@ fn provider_name_to_id(name: &str) -> Option<ProviderId> {
         "Fireworks AI" => Some(ProviderId::Fireworks),
         "SambaNova" => Some(ProviderId::SambaNova),
         "GitHub Models" => Some(ProviderId::GithubModels),
+        "PhazeAI Local (built-in)" => Some(ProviderId::BuiltIn),
         _ => None,
     }
 }
@@ -68,7 +76,21 @@ fn provider_status(name: &str) -> ProviderUiStatus {
         return ProviderUiStatus {
             available: false,
             summary: "Disabled".into(),
-            detail: "This provider is disabled in settings.toml.".into(),
+            detail: "This provider is disabled in config.toml.".into(),
+        };
+    }
+
+    if provider_id == ProviderId::BuiltIn {
+        let problem = phazeai_core::local_ai::readiness_problem(&settings.local_ai);
+        return ProviderUiStatus {
+            available: problem.is_none(),
+            summary: if problem.is_none() {
+                "Ready"
+            } else {
+                "Set up below"
+            }
+            .into(),
+            detail: problem.unwrap_or_else(|| phazeai_core::local_ai::LOCAL_AI.status().describe()),
         };
     }
 
@@ -232,22 +254,27 @@ fn stepper_row(
 
 // ─── theme tiles ─────────────────────────────────────────────────────────────
 
-fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
+fn theme_tile(name: String, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
     let theme = state.workbench.theme;
     let is_hovered = create_rw_signal(false);
+    let label_name = name.clone();
+    let style_name = name.clone();
 
-    container(label(move || name).style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        let active = t.variant.name() == name;
-        let color = if active { p.accent } else { p.text_secondary };
-        s.font_size(12.0).color(color)
+    container(label(move || label_name.clone()).style({
+        let name = name.clone();
+        move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let active = t.display_name() == name;
+            let color = if active { p.accent } else { p.text_secondary };
+            s.font_size(font::BODY).color(color)
+        }
     }))
     .style(move |s| {
         let t = theme.get();
         let p = &t.palette;
-        let active = t.variant.name() == name;
+        let active = t.display_name() == style_name;
         let hovered = is_hovered.get();
         let border_color = if active {
             p.accent
@@ -263,19 +290,23 @@ fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
         } else {
             p.bg_surface
         };
-        s.width(100.0)
-            .padding_vert(7.0)
-            .padding_horiz(4.0)
+        s.min_width(100.0)
+            .padding_vert(space::SM + 1.0)
+            .padding_horiz(space::MD)
             .background(bg)
-            .border(if active { 2.0 } else { 1.0 })
+            .border(if active {
+                stroke::FOCUS
+            } else {
+                stroke::HAIRLINE
+            })
             .border_color(border_color)
-            .border_radius(6.0)
+            .border_radius(radius::MD)
             .items_center()
             .justify_center()
             .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| {
-        theme.set(PhazeTheme::from_name(name));
+        theme.set(PhazeTheme::from_name(&name));
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         is_hovered.set(true);
@@ -287,30 +318,193 @@ fn theme_tile(name: &'static str, state: IdeState) -> impl IntoView {
 
 // ─── sections ────────────────────────────────────────────────────────────────
 
-fn theme_section(state: IdeState) -> impl IntoView {
-    // Build a wrapping grid of tiles for all 12 theme variants
-    let tiles = dyn_stack(
-        move || {
-            ThemeVariant::all()
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (i, v.name()))
-                .collect::<Vec<_>>()
-        },
-        |(i, _name)| *i,
-        {
-            let state = state.clone();
-            move |(_i, name)| theme_tile(name, state.clone())
-        },
+fn tile_grid(names: impl Fn() -> Vec<String> + 'static, state: IdeState) -> impl IntoView {
+    dyn_stack(
+        move || names().into_iter().enumerate().collect::<Vec<_>>(),
+        |(i, name)| (*i, name.clone()),
+        move |(_i, name)| theme_tile(name, state.clone()),
     )
     .style(|s| {
         s.flex_row()
             .flex_wrap(floem::style::FlexWrap::Wrap)
-            .gap(6.0)
+            .gap(space::SM)
             .width_full()
+    })
+}
+
+fn theme_section(state: IdeState) -> impl IntoView {
+    use floem::reactive::create_rw_signal;
+    let theme = state.workbench.theme;
+
+    let built_in = tile_grid(
+        || {
+            ThemeVariant::all()
+                .iter()
+                .map(|v| v.name().to_string())
+                .collect()
+        },
+        state.clone(),
+    );
+
+    // Custom themes are re-read from disk on Reload and after an export, so
+    // edits made in another editor show up without restarting.
+    let loaded = create_rw_signal(load_custom_themes());
+    let custom_names = move || {
+        loaded.with(|l| {
+            l.themes
+                .iter()
+                .map(|t| t.display_name().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let custom = tile_grid(custom_names, state.clone());
+    let status = create_rw_signal(String::new());
+
+    let themes_folder = themes_dir();
+    let help = label(move || {
+        let count = loaded.with(|l| l.themes.len());
+        if count == 0 {
+            "Your themes: none yet. Export the current theme to get an editable copy.".to_string()
+        } else {
+            format!("Your themes ({count})")
+        }
+    })
+    .style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .margin_top(space::LG)
     });
 
-    stack((section_header("THEME", state.clone()), tiles)).style(|s| s.flex_col().width_full())
+    let errors = label(move || {
+        loaded.with(|l| {
+            l.errors
+                .iter()
+                .map(|(path, err)| {
+                    let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                    format!("{}: {err}", file.unwrap_or_default())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    })
+    .style(move |s| {
+        let has_errors = loaded.with(|l| !l.errors.is_empty());
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.error)
+            .apply_if(!has_errors, |s| s.display(floem::style::Display::None))
+    });
+
+    let actions = stack((
+        phaze_button(
+            "Export current",
+            ButtonVariant::Secondary,
+            theme,
+            move || {
+                let current = theme.get_untracked();
+                let name = export_name_for(&current);
+                match export_theme(&current, &name) {
+                    Ok(path) => {
+                        loaded.set(load_custom_themes());
+                        theme.set(PhazeTheme::from_name(&name));
+                        status.set(format!("Saved \"{name}\" to {}", path.display()));
+                    }
+                    Err(e) => status.set(format!("Could not export theme: {e}")),
+                }
+            },
+        ),
+        phaze_button("Open folder", ButtonVariant::Ghost, theme, {
+            let dir = themes_folder.clone();
+            move || {
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = open_external_url(&dir.to_string_lossy()) {
+                    status.set(format!("Could not open {}: {e}", dir.display()));
+                }
+            }
+        }),
+        phaze_button("Reload", ButtonVariant::Ghost, theme, move || {
+            let fresh = load_custom_themes();
+            let (next, problem) = theme_after_reload(theme.get_untracked(), &fresh);
+            loaded.set(fresh);
+            theme.set(next);
+            status.set(problem.unwrap_or_default());
+        }),
+    ))
+    .style(|s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(space::SM)
+            .margin_top(space::MD)
+    });
+
+    let status_line = label(move || status.get()).style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .apply_if(status.with(|m| m.is_empty()), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
+    let folder_hint =
+        label(move || format!("Theme files: {}", themes_folder_hint())).style(move |s| {
+            s.font_size(font::CAPTION)
+                .color(theme.get().palette.text_disabled)
+        });
+
+    stack((
+        section_header("THEME", state.clone()),
+        built_in,
+        help,
+        custom,
+        errors,
+        actions,
+        status_line,
+        folder_hint,
+    ))
+    .style(|s| s.flex_col().width_full().gap(space::XS))
+}
+
+fn themes_folder_hint() -> String {
+    themes_dir().display().to_string()
+}
+
+/// The theme to show after the themes folder was re-read, and a message for
+/// the status line when the active theme couldn't be refreshed.
+///
+/// A custom theme whose file still loads comes back fresh, so edits take
+/// effect. One that no longer loads (a syntax error, a deleted file) stays as
+/// it is on screen: falling back to the built-in Dark theme would silently
+/// throw away the user's choice over a typo in the file.
+pub(crate) fn theme_after_reload(
+    current: PhazeTheme,
+    loaded: &LoadedThemes,
+) -> (PhazeTheme, Option<String>) {
+    let Some(name) = current.custom_name.clone() else {
+        return (current, None);
+    };
+    if let Some(fresh) = loaded
+        .themes
+        .iter()
+        .find(|t| t.display_name().eq_ignore_ascii_case(&name))
+    {
+        return (fresh.clone(), None);
+    }
+    let problems: Vec<String> = loaded
+        .errors
+        .iter()
+        .map(|(path, err)| {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            format!("{}: {err}", file.unwrap_or_default())
+        })
+        .collect();
+    let message = if problems.is_empty() {
+        format!("\"{name}\" is no longer in the themes folder. Keeping it until you pick another theme.")
+    } else {
+        format!(
+            "\"{name}\" didn't reload ({}). Keeping the current colours.",
+            problems.join("; ")
+        )
+    };
+    (current, Some(message))
 }
 
 fn editor_section(state: IdeState) -> impl IntoView {
@@ -498,6 +692,7 @@ fn ai_section(state: IdeState) -> impl IntoView {
         "Cohere",
         "Azure OpenAI",
         "GitHub Models",
+        "PhazeAI Local (built-in)",
         "Ollama (Local)",
         "LM Studio (Local)",
     ];
@@ -654,6 +849,46 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         }
     };
 
+    let test_fn = {
+        move || {
+            use floem::{ext_event::create_ext_action, reactive::Scope};
+            let Some(id) = provider_name_to_id(&ai_provider.get()) else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            let settings = Settings::load();
+            let registry = settings.build_provider_registry();
+            let Some(cfg) = registry.get_config(&id) else {
+                feedback.set("Unknown provider.".into());
+                return;
+            };
+            // Test what is typed; fall back to the key already saved.
+            let typed = key_input.get().trim().to_string();
+            let key = if typed.is_empty() {
+                cfg.api_key().unwrap_or_default()
+            } else {
+                typed
+            };
+            if key.is_empty() {
+                feedback.set("Paste a key first.".into());
+                return;
+            }
+            feedback.set("Testing…".into());
+            let base_url = cfg.base_url.clone();
+            let send = create_ext_action(Scope::new(), move |msg: String| feedback.set(msg));
+            std::thread::spawn(move || {
+                let msg = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(check_api_key(&id, &base_url, &key)).message(),
+                    Err(e) => format!("Could not start the check: {e}"),
+                };
+                send(msg);
+            });
+        }
+    };
+
     let input = text_input(key_input)
         .placeholder("Paste API key — cleared after Save")
         .style(move |s| {
@@ -692,6 +927,23 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| save_fn());
 
+    let test_btn = container(label(|| "Test"))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.padding_horiz(10.0)
+                .padding_vert(4.0)
+                .font_size(12.0)
+                .color(p.text_primary)
+                .background(p.bg_surface)
+                .border(1.0)
+                .border_color(p.border)
+                .border_radius(4.0)
+                .margin_left(4.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+        })
+        .on_click_stop(move |_| test_fn());
+
     let clear_btn = container(label(|| "Clear"))
         .style(move |s| {
             let t = theme.get();
@@ -709,13 +961,57 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         })
         .on_click_stop(move |_| clear_fn());
 
-    let input_row =
-        stack((input, save_btn, clear_btn)).style(|s| s.flex_row().items_center().width_full());
+    let input_row = stack((input, save_btn, test_btn, clear_btn))
+        .style(|s| s.flex_row().items_center().width_full());
 
     let feedback_line = label(move || feedback.get()).style(move |s| {
         let t = theme.get();
         let p = &t.palette;
         s.font_size(11.0).color(p.text_muted).margin_top(4.0)
+    });
+
+    // Where to get a key, and what the free tier costs you (limits, training).
+    let help_text = move || {
+        provider_name_to_id(&ai_provider.get())
+            .and_then(|id| key_help(&id))
+            .map(|h| {
+                if h.free_tier {
+                    format!("Free tier available. {}", h.note)
+                } else {
+                    h.note.to_string()
+                }
+            })
+            .unwrap_or_default()
+    };
+    let get_key_btn = container(label(|| "Get a key ↗"))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let has_link = provider_name_to_id(&ai_provider.get())
+                .and_then(|id| key_help(&id))
+                .is_some();
+            s.padding_horiz(10.0)
+                .padding_vert(3.0)
+                .font_size(12.0)
+                .color(p.accent)
+                .border(1.0)
+                .border_color(p.accent)
+                .border_radius(4.0)
+                .margin_top(6.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(!has_link, |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| {
+            if let Some(h) = provider_name_to_id(&ai_provider.get()).and_then(|id| key_help(&id)) {
+                if let Err(e) = crate::util::open_external_url(h.signup_url) {
+                    feedback.set(format!("Could not open the browser: {e}"));
+                }
+            }
+        });
+    let help_line = label(help_text).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.font_size(11.0).color(p.text_muted).margin_top(6.0)
     });
 
     stack((
@@ -726,6 +1022,8 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
         }),
         input_row,
         feedback_line,
+        help_line,
+        get_key_btn,
     ))
     .style(move |s| {
         let needs = provider_name_to_id(&ai_provider.get())
@@ -786,15 +1084,15 @@ fn about_section(state: IdeState) -> impl IntoView {
     })
     .on_click_stop(move |_| {
         #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open")
+        let _ = phazeai_core::process::std_command("xdg-open")
             .arg("https://github.com/phazeai/ide")
             .spawn();
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open")
+        let _ = phazeai_core::process::std_command("open")
             .arg("https://github.com/phazeai/ide")
             .spawn();
         #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("cmd")
+        let _ = phazeai_core::process::std_command("cmd")
             .args(["/c", "start", "https://github.com/phazeai/ide"])
             .spawn();
     });
@@ -929,6 +1227,9 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         divider(state.clone()),
         ai_section(state.clone()),
         divider(state.clone()),
+        crate::panels::local_ai::local_ai_section(state.clone()),
+        crate::panels::privacy::privacy_section(state.clone()),
+        divider(state.clone()),
         keybindings_section(state.clone()),
         divider(state.clone()),
         about_section(state.clone()),
@@ -947,4 +1248,59 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
             .height_full()
             .background(p.bg_panel)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::theme_after_reload;
+    use crate::custom_theme::{parse_hex_color, parse_theme, LoadedThemes};
+    use crate::theme::{PhazeTheme, ThemeVariant};
+
+    fn ember(accent: &str) -> PhazeTheme {
+        parse_theme(&format!(
+            "name = \"Ember\"\n[colors]\naccent = \"{accent}\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reload_keeps_a_custom_theme_whose_file_broke() {
+        let current = ember("#ff7a18");
+        let broken = LoadedThemes {
+            themes: Vec::new(),
+            errors: vec![(
+                std::path::PathBuf::from("/themes/ember.toml"),
+                "colors.accent: `red` is not a #rrggbb colour".to_string(),
+            )],
+        };
+        let (next, problem) = theme_after_reload(current.clone(), &broken);
+        assert_eq!(next.display_name(), "Ember");
+        assert_eq!(next.palette.accent, current.palette.accent);
+        let problem = problem.unwrap();
+        assert!(problem.contains("ember.toml"), "{problem}");
+        assert!(problem.contains("not a #rrggbb colour"), "{problem}");
+    }
+
+    #[test]
+    fn reload_applies_a_custom_theme_that_still_loads() {
+        let fresh = LoadedThemes {
+            themes: vec![ember("#00ff00")],
+            errors: Vec::new(),
+        };
+        let (next, problem) = theme_after_reload(ember("#ff7a18"), &fresh);
+        assert_eq!(problem, None);
+        assert_eq!(next.palette.accent, parse_hex_color("#00ff00").unwrap());
+    }
+
+    #[test]
+    fn reload_leaves_built_in_themes_alone_and_reports_missing_files() {
+        let dracula = PhazeTheme::from_variant(ThemeVariant::Dracula);
+        let (next, problem) = theme_after_reload(dracula, &LoadedThemes::default());
+        assert_eq!(next.variant, ThemeVariant::Dracula);
+        assert_eq!(problem, None);
+
+        let (next, problem) = theme_after_reload(ember("#ff7a18"), &LoadedThemes::default());
+        assert_eq!(next.display_name(), "Ember");
+        assert!(problem.unwrap().contains("no longer"));
+    }
 }

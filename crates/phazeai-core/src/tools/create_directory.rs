@@ -34,6 +34,8 @@ impl Tool for CreateDirectoryTool {
         })?;
 
         let resolved = sandbox::resolve_target_path("create_directory", path_str)?;
+        // A directory at the policy file's path would stop the user creating the policy.
+        crate::privacy::tool_check_protected("create_directory", &resolved, path_str)?;
         let path = resolved.as_path();
         let already_existed = path.exists();
 

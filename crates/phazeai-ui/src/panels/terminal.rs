@@ -26,6 +26,15 @@ use phazeai_core::Settings;
 use crate::theme::PhazeTheme;
 use std::time::{Duration, Instant};
 
+// ── PTY defaults ──────────────────────────────────────────────────────────────
+
+/// Size of a new PTY before the panel reports its real size. Wide enough for
+/// side-by-side editors (two editors need ~180 columns) and never smaller than
+/// a classic 80×24 terminal.
+pub const DEFAULT_PTY_COLS: u16 = 220;
+pub const DEFAULT_PTY_ROWS: u16 = 40;
+const _: () = assert!(DEFAULT_PTY_COLS >= 180 && DEFAULT_PTY_ROWS >= 24);
+
 // ── Terminal Colors ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -702,8 +711,8 @@ fn single_terminal(
         thread::spawn(move || {
             let pty_system = NativePtySystem::default();
             let pair = match pty_system.openpty(PtySize {
-                rows: 40,
-                cols: 220,
+                rows: DEFAULT_PTY_ROWS,
+                cols: DEFAULT_PTY_COLS,
                 pixel_width: 0,
                 pixel_height: 0,
             }) {
@@ -746,7 +755,9 @@ fn single_terminal(
                         *guard = Some(w);
                     }
                 }
-                Err(e) => eprintln!("PTY take_writer error: {e}"),
+                Err(e) => {
+                    tracing::error!(target: "phazeai_ui::terminal", "PTY take_writer error: {e}")
+                }
             }
 
             // Inject PROMPT_COMMAND for OSC 7 (cwd) and OSC 133;A (shell integration) tracking
@@ -769,7 +780,7 @@ fn single_terminal(
             let mut reader = match pair.master.try_clone_reader() {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("PTY clone_reader error: {e}");
+                    tracing::error!(target: "phazeai_ui::terminal", "PTY clone_reader error: {e}");
                     return;
                 }
             };
@@ -1532,7 +1543,7 @@ pub fn terminal_panel(
                     ai_cmd_query.set(String::new());
                 }
                 Err(e) => {
-                    eprintln!("[PhazeAI] AI cmd error: {e}");
+                    tracing::warn!(target: "phazeai_ui", "AI cmd error: {e}");
                     ai_cmd_open.set(false);
                 }
             }

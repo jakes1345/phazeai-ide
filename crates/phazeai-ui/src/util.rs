@@ -18,21 +18,20 @@ pub fn safe_get_memo<T: Clone + 'static>(memo: Memo<T>, default: T) -> T {
 
 /// Best-effort open a URL or file in the system browser / file handler.
 pub fn open_external_url(url: &str) -> Result<(), String> {
-    use std::process::Command;
     if cfg!(target_os = "linux") {
-        Command::new("xdg-open")
+        phazeai_core::process::std_command("xdg-open")
             .arg(url)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
     } else if cfg!(target_os = "macos") {
-        Command::new("open")
+        phazeai_core::process::std_command("open")
             .arg(url)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
     } else if cfg!(target_os = "windows") {
-        Command::new("cmd")
+        phazeai_core::process::std_command("cmd")
             .args(["/C", "start", "", url])
             .spawn()
             .map(|_| ())
@@ -65,8 +64,7 @@ pub fn shell_quote_single(path: &str) -> String {
 pub fn snapshot_listening_ports() -> Result<Vec<String>, String> {
     #[cfg(target_os = "linux")]
     {
-        use std::process::Command;
-        let out = Command::new("ss")
+        let out = phazeai_core::process::std_command("ss")
             .args(["-ltnH"])
             .output()
             .map_err(|e| format!("ss: {}", e))?;
@@ -90,7 +88,7 @@ pub fn snapshot_listening_ports() -> Result<Vec<String>, String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        let out = Command::new("lsof")
+        let out = phazeai_core::process::std_command("lsof")
             .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
             .output()
             .map_err(|e| format!("lsof: {}", e))?;

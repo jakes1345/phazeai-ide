@@ -350,7 +350,7 @@ fn word_at_line_col(line_text: &str, col: usize) -> Option<String> {
 fn git_changed_lines(path: &std::path::Path) -> Vec<(usize, u8)> {
     // Determine git root (walk up from file's dir)
     let dir = path.parent().unwrap_or(path);
-    let out = match std::process::Command::new("git")
+    let out = match phazeai_core::process::std_command("git")
         .args(["diff", "HEAD", "--", path.to_str().unwrap_or("")])
         .current_dir(dir)
         .output()
@@ -1116,8 +1116,8 @@ pub fn editor_panel(
     close_active_tab_nonce: RwSignal<u64>,
     breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
-    // Channel for FIM (inline AI completion) requests: (prefix, suffix, language).
-    fim_req_tx: std::sync::mpsc::SyncSender<(String, String, String)>,
+    // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
+    fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
     selected_text: RwSignal<String>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
@@ -1405,7 +1405,15 @@ pub fn editor_panel(
             return;
         };
         let content = doc.text().to_string();
-        if std::fs::write(&tab.path, content).is_ok() {
+        let write_result = std::fs::write(&tab.path, content);
+        if let Err(e) = &write_result {
+            // Don't lose work silently: keep the tab modified and say why.
+            crate::notify::error_dialog(
+                "Save failed",
+                crate::notify::save_failure_message(&tab.path, e),
+            );
+        }
+        if write_result.is_ok() {
             tab.dirty.set(false);
             crate::crash_recovery::clear_recovery(&tab.path);
             // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
@@ -1433,7 +1441,7 @@ pub fn editor_panel(
                     _ => None,
                 };
                 if let Some((cmd, args)) = formatter {
-                    let _ = std::process::Command::new(cmd).args(&args).status();
+                    let _ = phazeai_core::process::std_command(cmd).args(&args).status();
                 }
             });
         }
@@ -3890,7 +3898,7 @@ pub fn editor_panel(
                                 "py" => ("black", vec![tmp.to_string_lossy().to_string()]),
                                 _ => return None,
                             };
-                            let ok = std::process::Command::new(cmd)
+                            let ok = phazeai_core::process::std_command(cmd)
                                 .args(&args)
                                 .status()
                                 .ok()?
@@ -3924,7 +3932,14 @@ pub fn editor_panel(
                     }
                     last_snf.set(n);
                     let content = doc_snf.text().to_string();
-                    if std::fs::write(&tab_path_snf, content).is_ok() {
+                    let write_result = std::fs::write(&tab_path_snf, content);
+                    if let Err(e) = &write_result {
+                        crate::notify::error_dialog(
+                            "Save failed",
+                            crate::notify::save_failure_message(&tab_path_snf, e),
+                        );
+                    }
+                    if write_result.is_ok() {
                         tab_dirty_snf.set(false);
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
                             path: tab_path_snf.clone(),
@@ -3967,12 +3982,18 @@ pub fn editor_panel(
                 let doc_for_fim = doc.clone();
                 let fim_gen2 = Arc::clone(&fim_gen);
                 let fim_tx2 = fim_tx.clone();
+                let fim_file = tab.path.clone();
 
                 create_effect(move |_| {
                     if active_idx.get() != Some(i) {
                         return;
                     }
                     let offset = cursor_sig.get().offset();
+                    // Denied files never get ghost-text completions (nothing is sent).
+                    if phazeai_core::privacy::active().is_denied(&fim_file) {
+                        return;
+                    }
+                    let fim_file = fim_file.clone();
 
                     // Bump generation: in-flight request with old gen is silently discarded.
                     let my_gen = fim_gen2.fetch_add(1, Ordering::SeqCst) + 1;
@@ -4047,7 +4068,10 @@ pub fn editor_panel(
                             );
 
                             let msgs = [Message::user(prompt)];
-                            match client.chat(&msgs, &[]).await {
+                            let request = client.chat(&msgs, &[]);
+                            match phazeai_core::privacy::audit::scope(vec![fim_file], request)
+                                .await
+                            {
                                 Ok(resp) => {
                                     let text = resp
                                         .message
@@ -4134,46 +4158,29 @@ pub fn editor_panel(
                         blame_data.set(data);
                     }
                 });
-                // Trigger effect: re-runs on save, spawns background git blame.
+                // Trigger effect: blame on open and after each save only. (It used to re-run on
+                // every keystroke because `dirty` is set on every edit.)
                 create_effect(move |_| {
-                    let _dirty = safe_get(dirty, false);
+                    if safe_get(dirty, false) {
+                        return;
+                    }
                     let p = blame_path.clone();
                     let tx = blame_tx.clone();
                     std::thread::spawn(move || {
                         let dir = p.parent().unwrap_or(&p);
-                        let out = std::process::Command::new("git")
+                        let entries = phazeai_core::process::std_command("git")
                             .args(["blame", "--date=short", "--porcelain"])
                             .arg(&p)
                             .current_dir(dir)
-                            .output();
-                        let mut entries: Vec<(String, String)> = vec![];
-                        if let Ok(output) = out {
-                            if output.status.success() {
-                                let text = String::from_utf8_lossy(&output.stdout);
-                                let mut cur_author = String::new();
-                                let mut cur_date = String::new();
-                                for line in text.lines() {
-                                    if let Some(rest) = line.strip_prefix("author ") {
-                                        cur_author = rest.to_string();
-                                    } else if let Some(rest) = line.strip_prefix("author-time ") {
-                                        // porcelain gives unix timestamp; convert to date
-                                        if let Ok(ts) = rest.parse::<i64>() {
-                                            let secs_per_day = 86400;
-                                            let days = ts / secs_per_day;
-                                            let y = 1970 + (days / 365);
-                                            cur_date = format!("{y}");
-                                        }
-                                    } else if let Some(rest) = line.strip_prefix("committer-time ")
-                                    {
-                                        // Use committer date as fallback
-                                        let _ = rest;
-                                    } else if line.starts_with('\t') {
-                                        // Content line = one blame entry complete
-                                        entries.push((cur_author.clone(), cur_date.clone()));
-                                    }
-                                }
-                            }
-                        }
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| {
+                                super::blame::parse_blame_porcelain(&String::from_utf8_lossy(
+                                    &o.stdout,
+                                ))
+                            })
+                            .unwrap_or_default();
                         let _ = tx.send(entries);
                     });
                 });
@@ -4363,7 +4370,11 @@ pub fn editor_panel(
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("text")
                                     .to_string();
-                                let _ = tx.try_send((prefix, suffix, lang));
+                                // Denied files never get completions (nothing is sent).
+                                if phazeai_core::privacy::active().is_denied(&path2) {
+                                    return;
+                                }
+                                let _ = tx.try_send((path2, prefix, suffix, lang));
                             });
                         }
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.

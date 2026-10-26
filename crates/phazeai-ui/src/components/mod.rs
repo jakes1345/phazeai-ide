@@ -1,4 +1,5 @@
 pub mod button;
+pub mod focus;
 pub mod icon;
 pub mod input;
 pub mod panel;
@@ -6,6 +7,7 @@ pub mod scroll;
 pub mod tabs;
 
 pub use button::{phaze_button, phaze_icon_button, ButtonVariant};
+pub use focus::{focus_while_open, FocusWhenOpen};
 pub use icon::phaze_icon;
 pub use input::phaze_input;
 pub use panel::{phaze_glass_panel, phaze_panel};

@@ -831,7 +831,7 @@ fn test_trim_to_token_budget_clears_all_when_single_message_exceeds_budget() {
 fn test_trim_to_token_budget_preserves_recency() {
     let mut history = ConversationHistory::new();
     for i in 0..10u32 {
-        history.add_user_message(&format!("message number {i}"));
+        history.add_user_message(format!("message number {i}"));
     }
     let before_tokens = history.estimate_tokens();
     // Trim to half

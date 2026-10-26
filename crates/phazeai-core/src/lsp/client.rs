@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -78,7 +78,7 @@ impl LspClient {
         workspace_root: &Path,
         event_tx: mpsc::UnboundedSender<LspEvent>,
     ) -> Result<Self, String> {
-        let mut child = Command::new(server_cmd)
+        let mut child = crate::process::std_command(server_cmd)
             .args(server_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
