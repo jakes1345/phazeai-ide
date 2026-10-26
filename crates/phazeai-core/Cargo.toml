@@ -46,7 +46,7 @@ lsp-types = { workspace = true }
 urlencoding = "2.1"
 libloading = "0.8"
 phazeai-plugin-api = { path = "../phazeai-plugin-api", version = "0.1.0" }
-zip = "2"
+zip = "9"
 # Built-in local AI: hardware probe, verified model download, llama.cpp install.
 sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 sha2 = "0.10"

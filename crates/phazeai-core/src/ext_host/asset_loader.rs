@@ -28,10 +28,35 @@ fn extensions_dir() -> PathBuf {
 
 /// Install a .vsix file by extracting it and parsing its manifest.
 pub fn install_vsix(vsix_path: &Path) -> Result<InstalledExtension, String> {
+    install_vsix_into(vsix_path, &extensions_dir())
+}
+
+/// [`install_vsix`] into an explicit extensions folder.
+///
+/// Entry names come from the archive and are untrusted: every one must stay
+/// inside the extension's own folder, or the whole install is refused.
+fn install_vsix_into(
+    vsix_path: &Path,
+    extensions_root: &Path,
+) -> Result<InstalledExtension, String> {
     let file =
         std::fs::File::open(vsix_path).map_err(|e| format!("Failed to open VSIX file: {}", e))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read VSIX ZIP: {}", e))?;
+
+    // Refuse the whole archive before writing anything if any entry would
+    // land outside the extension folder.
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+        if entry.enclosed_name().is_none() {
+            return Err(format!(
+                "Refusing VSIX: entry '{}' points outside the extension folder",
+                String::from_utf8_lossy(entry.name_raw())
+            ));
+        }
+    }
 
     // Read package.json from the archive
     let manifest = read_manifest_from_zip(&mut archive)?;
@@ -43,7 +68,7 @@ pub fn install_vsix(vsix_path: &Path) -> Result<InstalledExtension, String> {
         manifest.name,
         manifest.version
     );
-    let install_dir = extensions_dir().join(&ext_id);
+    let install_dir = extensions_root.join(&ext_id);
     let _ = std::fs::create_dir_all(&install_dir);
 
     // Extract all files from the "extension/" prefix in the VSIX
@@ -51,16 +76,22 @@ pub fn install_vsix(vsix_path: &Path) -> Result<InstalledExtension, String> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
-        let name = entry.name().to_string();
-
-        // VSIX files have entries under "extension/" prefix
-        let rel_path = if let Some(stripped) = name.strip_prefix("extension/") {
-            stripped.to_string()
-        } else {
-            name.clone()
+        // `enclosed_name` rejects absolute paths and `..` components.
+        let Some(enclosed) = entry.enclosed_name() else {
+            return Err(format!(
+                "Refusing VSIX: entry '{}' points outside the extension folder",
+                String::from_utf8_lossy(entry.name_raw())
+            ));
         };
+        let name = enclosed.to_string_lossy().into_owned();
 
-        if rel_path.is_empty() || name.ends_with('/') {
+        // VSIX files have entries under the "extension/" prefix.
+        let rel_path = enclosed
+            .strip_prefix("extension")
+            .unwrap_or(&enclosed)
+            .to_path_buf();
+
+        if rel_path.as_os_str().is_empty() || entry.is_dir() {
             // Directory entry
             let dir_path = install_dir.join(&rel_path);
             let _ = std::fs::create_dir_all(dir_path);
@@ -313,6 +344,118 @@ pub fn strip_json_comments(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    /// Write a .vsix (a zip) with the given `(entry name, contents)` pairs.
+    fn make_vsix(path: &Path, entries: &[(&str, &str)]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, body) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    const MANIFEST: &str = r#"{"name":"demo","version":"1.0.0","publisher":"acme"}"#;
+
+    #[test]
+    fn a_normal_vsix_installs_under_its_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let vsix = dir.path().join("demo.vsix");
+        make_vsix(
+            &vsix,
+            &[
+                ("extension/package.json", MANIFEST),
+                ("extension/themes/dark.json", "{}"),
+            ],
+        );
+        let root = dir.path().join("extensions");
+        let installed = install_vsix_into(&vsix, &root).unwrap();
+        assert_eq!(installed.root_dir, root.join("acme.demo-1.0.0"));
+        assert!(root.join("acme.demo-1.0.0/package.json").is_file());
+        assert!(root.join("acme.demo-1.0.0/themes/dark.json").is_file());
+    }
+
+    /// The zip writer refuses `..` and absolute names, so build the hostile
+    /// archive the way an attacker would: write a same-length placeholder name,
+    /// then patch the name bytes (local header and central directory) in the file.
+    fn make_hostile_vsix(path: &Path, placeholder: &str, evil: &str) {
+        assert_eq!(placeholder.len(), evil.len());
+        make_vsix(
+            path,
+            &[("extension/package.json", MANIFEST), (placeholder, "pwned")],
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let (p, e) = (placeholder.as_bytes(), evil.as_bytes());
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        let mut patched = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(p) {
+                out.extend_from_slice(e);
+                i += p.len();
+                patched += 1;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        assert_eq!(
+            patched, 2,
+            "name appears in the local header and the directory"
+        );
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn a_vsix_entry_that_escapes_the_folder_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for (placeholder, evil) in [
+            ("extension/XX/XX/escape.txt", "extension/../../escape.txt"),
+            ("XX/escape.txt", "../escape.txt"),
+            (
+                "extension/XX/XX/XX/XX/escape.txt",
+                "extension/../../../../escape.txt",
+            ),
+        ] {
+            let vsix = dir.path().join("evil.vsix");
+            make_hostile_vsix(&vsix, placeholder, evil);
+            let root = dir.path().join("extensions");
+            let err = install_vsix_into(&vsix, &root).unwrap_err();
+            assert!(
+                err.contains("outside the extension folder"),
+                "{evil}: {err}"
+            );
+            assert!(!dir.path().join("escape.txt").exists(), "{evil}");
+            assert!(!root.exists(), "{evil}: nothing may be created");
+        }
+    }
+
+    #[test]
+    fn an_absolute_vsix_entry_is_confined_to_the_extension_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let abs_name = format!(
+            "/{}/escape.txt",
+            outside.strip_prefix("/").unwrap().display()
+        );
+        // Same-length placeholder: swap the leading '/' for a letter.
+        let placeholder = format!("X{}", &abs_name[1..]);
+        let vsix = dir.path().join("abs.vsix");
+        make_hostile_vsix(&vsix, &placeholder, &abs_name);
+        let root = dir.path().join("extensions");
+        install_vsix_into(&vsix, &root).unwrap();
+        // Written under the extension's folder, never at the absolute path.
+        assert!(!outside.join("escape.txt").exists());
+        let rerooted = root
+            .join("acme.demo-1.0.0")
+            .join(outside.strip_prefix("/").unwrap())
+            .join("escape.txt");
+        assert!(rerooted.is_file(), "{}", rerooted.display());
+    }
 
     #[test]
     fn strip_line_comment() {
