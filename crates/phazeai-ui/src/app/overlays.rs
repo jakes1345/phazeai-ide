@@ -14,11 +14,106 @@ use floem::{
 use phazeai_core::constants::ui as ui_const;
 use phazeai_core::{Agent, AgentEvent, Settings};
 
+use crate::components::FocusWhenOpen;
 use crate::domain_state::IdeState;
 use crate::lsp_bridge::{CodeAction, CompletionEntry, LspCommand};
 use crate::util::safe_get;
 
 use super::{all_commands, show_toast, Tab};
+
+/// Most files the picker keeps; beyond this the list is cut, shallowest first.
+const FILE_PICKER_LIMIT: usize = 2000;
+
+/// Directories the file picker never lists or descends into. Skipping them
+/// while walking (rather than filtering their contents afterwards) matters:
+/// `target/` and `node_modules/` hold hundreds of thousands of files, and
+/// walking them first left the picker on "Searching workspace files…" for a
+/// long time.
+fn is_picker_skipped_dir(name: &str) -> bool {
+    matches!(name, "target" | ".git" | "node_modules" | ".cache")
+}
+
+/// Files under `root` for the file picker: at most `limit`, shallowest and
+/// alphabetically first, without dot-files or the skipped directories.
+fn list_workspace_files(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
+        .max_depth(10)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| {
+            e.depth() == 0
+                || !(e.file_type().is_dir()
+                    && is_picker_skipped_dir(&e.file_name().to_string_lossy()))
+        })
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.into_path())
+        .collect();
+    // Shallow files first so the 2000-file cut keeps the ones people open.
+    files.sort_by_key(|p| p.components().count());
+    files.truncate(limit);
+    files
+}
+
+#[cfg(test)]
+mod picker_walk_tests {
+    use super::list_workspace_files;
+
+    fn touch(root: &std::path::Path, rel: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn skips_build_and_vcs_directories_but_keeps_dot_directories_with_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in [
+            "a.rs",
+            "src/b.rs",
+            ".github/workflows/ci.yml",
+            ".env",
+            "target/debug/huge.rlib",
+            "node_modules/pkg/index.js",
+            ".git/config",
+            "web/node_modules/pkg/x.js",
+            ".cache/data",
+        ] {
+            touch(root, f);
+        }
+        let names: Vec<String> = list_workspace_files(root, 100)
+            .into_iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(names, vec!["a.rs", "src/b.rs", ".github/workflows/ci.yml"]);
+    }
+
+    #[test]
+    fn the_cut_keeps_the_shallowest_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(root, "deep/er/est/z.rs");
+        touch(root, "top.rs");
+        touch(root, "mid/m.rs");
+        let names: Vec<String> = list_workspace_files(root, 2)
+            .into_iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(names, vec!["top.rs", "mid/m.rs"]);
+    }
+}
 
 // ── File picker overlay (Ctrl+P) ──────────────────────────────────────────────
 
@@ -46,22 +141,7 @@ pub(crate) fn file_picker(state: IdeState) -> impl IntoView {
         last_root.set(Some(root.clone()));
         let tx = files_tx.clone();
         std::thread::spawn(move || {
-            let files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(&root)
-                .max_depth(10)
-                .into_iter()
-                .flatten()
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    let p = e.path().to_string_lossy();
-                    !p.contains("/target/")
-                        && !p.contains("/.git/")
-                        && !p.contains("/node_modules/")
-                        && !p.contains("/.cache/")
-                })
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .map(|e| e.into_path())
-                .take(2000)
-                .collect();
+            let files = list_workspace_files(&root, FILE_PICKER_LIMIT);
             let _ = tx.send(files);
         });
     });
@@ -86,19 +166,33 @@ pub(crate) fn file_picker(state: IdeState) -> impl IntoView {
             .collect()
     };
 
-    let search_box = text_input(query).style(move |s| {
-        let t = state.workbench.theme.get();
-        let p = &t.palette;
-        s.width_full()
-            .padding(10.0)
-            .font_size(14.0)
-            .color(p.text_primary)
-            .background(p.bg_elevated)
-            .border(1.0)
-            .border_color(p.border_focus)
-            .border_radius(6.0)
-            .margin_bottom(8.0)
-    });
+    let picker_open = state.workbench.file_picker_open;
+    let search_box = text_input(query)
+        .focus_when_open(move || picker_open.get())
+        .on_enter({
+            let state = state.clone();
+            move || {
+                // Enter opens the top match, exactly like clicking the first row.
+                if let Some((_, path)) = filtered().into_iter().next() {
+                    state.editor.open_file.set(Some(path));
+                    state.workbench.file_picker_open.set(false);
+                    state.workbench.file_picker_query.set(String::new());
+                }
+            }
+        })
+        .style(move |s| {
+            let t = state.workbench.theme.get();
+            let p = &t.palette;
+            s.width_full()
+                .padding(10.0)
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(6.0)
+                .margin_bottom(8.0)
+        });
 
     let items_view = scroll(
         dyn_stack(filtered, |(idx, _)| *idx, {
@@ -265,19 +359,33 @@ pub(crate) fn command_palette(state: IdeState) -> impl IntoView {
 
     let row_hovered: RwSignal<Option<usize>> = create_rw_signal(None);
 
-    let search_box = text_input(query).style(move |s| {
-        let t = state.workbench.theme.get();
-        let p = &t.palette;
-        s.width_full()
-            .padding(10.0)
-            .font_size(14.0)
-            .color(p.text_primary)
-            .background(p.bg_elevated)
-            .border(1.0)
-            .border_color(p.border_focus)
-            .border_radius(6.0)
-            .margin_bottom(8.0)
-    });
+    let palette_open = state.workbench.command_palette_open;
+    let search_box = text_input(query)
+        .focus_when_open(move || palette_open.get())
+        .on_enter({
+            let state = state.clone();
+            move || {
+                // Enter runs the top match, exactly like clicking the first row.
+                if let Some((_, _, action)) = commands_list().into_iter().next() {
+                    action(state.clone());
+                    state.workbench.command_palette_open.set(false);
+                    state.workbench.command_palette_query.set(String::new());
+                }
+            }
+        })
+        .style(move |s| {
+            let t = state.workbench.theme.get();
+            let p = &t.palette;
+            s.width_full()
+                .padding(10.0)
+                .font_size(14.0)
+                .color(p.text_primary)
+                .background(p.bg_elevated)
+                .border(1.0)
+                .border_color(p.border_focus)
+                .border_radius(6.0)
+                .margin_bottom(8.0)
+        });
 
     let items_view = scroll(
         dyn_stack(commands_list, |(idx, lbl, _action)| (*idx, *lbl), {
@@ -650,6 +758,13 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 }
                 InlineEditUpdate::Err(e) => {
                     tracing::warn!(target: "phazeai_ui", "Ctrl+K error: {e}");
+                    // Say so on screen too: the box closing alone looks like success.
+                    let first_line = e.lines().next().unwrap_or("").trim();
+                    let shown = phazeai_core::text::truncate_bytes(first_line, 160);
+                    show_toast(
+                        state2.workbench.status_toast,
+                        format!("AI edit failed: {shown}"),
+                    );
                     state2.ai.thinking.set(false);
                     state2.ai.inline_edit_open.set(false);
                     state2.ai.inline_edit_query.set(String::new());
@@ -665,6 +780,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
     });
 
     let input = text_input(query)
+        .focus_when_open(move || open.get())
         .placeholder("e.g. \"add error handling\", \"convert to async\", \"add JSDoc\"")
         .style(move |s| {
             let t = state.workbench.theme.get();
@@ -679,108 +795,94 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 .border_color(p.border_focus)
                 .border_radius(6.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |ev| {
-            if let Event::KeyDown(e) = ev {
-                match &e.key.logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        open.set(false);
-                        query.set(String::new());
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        let instruction = query.get();
-                        if instruction.is_empty() {
-                            return;
-                        }
-                        // Privacy: a denied file's code is never sent. The check,
-                        // the selection and the file text all refer to the same
-                        // file — the active tab (see `inline_edit_source`).
-                        let active_tab = state
-                            .editor
-                            .active_cursor
-                            .get_untracked()
-                            .map(|(path, _, _)| path);
-                        let open_file = state.editor.open_file.get_untracked();
-                        let ctx_file =
-                            inline_edit_source(active_tab.as_deref(), open_file.as_deref());
-                        if let Some(ref p) = ctx_file {
-                            if !crate::panels::privacy::allow_editor_content(
-                                state.workbench.status_toast,
-                                p,
-                                "inline edit",
-                            ) {
-                                open.set(false);
-                                query.set(String::new());
-                                return;
-                            }
-                        }
-                        let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
-                        ai_thinking.set(true);
-                        let selection = state.editor.selected_text.get_untracked();
-                        let file_ctx = if selection.is_empty() {
-                            ctx_file
-                                .as_ref()
-                                .and_then(|p| std::fs::read_to_string(p).ok())
-                                .unwrap_or_default()
-                        } else {
-                            String::new()
-                        };
-                        let prompt = inline_edit_prompt(&instruction, &selection, &file_ctx);
-                        let settings = Settings::load();
-                        let tx = update_tx.clone();
-                        std::thread::spawn(move || {
-                            let rt = match tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                            {
-                                Ok(rt) => rt,
-                                Err(e) => {
-                                    let _ = tx.send(InlineEditUpdate::Err(format!("Runtime: {e}")));
-                                    return;
-                                }
-                            };
-                            rt.block_on(async move {
-                                let client = match settings.build_llm_client() {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        let _ = tx.send(InlineEditUpdate::Err(format!("LLM: {e}")));
-                                        return;
-                                    }
-                                };
-                                let agent = Agent::new(client);
-                                let (agent_tx, mut agent_rx) =
-                                    tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                                let run_fut = phazeai_core::privacy::audit::scope(
-                                    attached,
-                                    agent.run_with_events(&prompt, agent_tx),
-                                );
-                                let drain_fut = async {
-                                    let mut accumulated = String::new();
-                                    while let Some(event) = agent_rx.recv().await {
-                                        match event {
-                                            AgentEvent::TextDelta(text) => {
-                                                accumulated.push_str(&text);
-                                            }
-                                            AgentEvent::Complete { .. } => {
-                                                let _ = tx.send(InlineEditUpdate::Done(
-                                                    accumulated.clone(),
-                                                ));
-                                                break;
-                                            }
-                                            AgentEvent::Error(e) => {
-                                                let _ = tx.send(InlineEditUpdate::Err(e));
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                };
-                                let _ = tokio::join!(run_fut, drain_fut);
-                            });
-                        });
-                    }
-                    _ => {}
+        .on_enter(move || {
+            let instruction = query.get();
+            if instruction.is_empty() {
+                return;
+            }
+            // Privacy: a denied file's code is never sent. The check,
+            // the selection and the file text all refer to the same
+            // file — the active tab (see `inline_edit_source`).
+            let active_tab = state
+                .editor
+                .active_cursor
+                .get_untracked()
+                .map(|(path, _, _)| path);
+            let open_file = state.editor.open_file.get_untracked();
+            let ctx_file = inline_edit_source(active_tab.as_deref(), open_file.as_deref());
+            if let Some(ref p) = ctx_file {
+                if !crate::panels::privacy::allow_editor_content(
+                    state.workbench.status_toast,
+                    p,
+                    "inline edit",
+                ) {
+                    open.set(false);
+                    query.set(String::new());
+                    return;
                 }
             }
+            let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
+            ai_thinking.set(true);
+            let selection = state.editor.selected_text.get_untracked();
+            let file_ctx = if selection.is_empty() {
+                ctx_file
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let prompt = inline_edit_prompt(&instruction, &selection, &file_ctx);
+            let settings = Settings::load();
+            let tx = update_tx.clone();
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = tx.send(InlineEditUpdate::Err(format!("Runtime: {e}")));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let client = match settings.build_llm_client() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(InlineEditUpdate::Err(format!("LLM: {e}")));
+                            return;
+                        }
+                    };
+                    let agent = Agent::new(client);
+                    let (agent_tx, mut agent_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+                    let run_fut = phazeai_core::privacy::audit::scope(
+                        attached,
+                        agent.run_with_events(&prompt, agent_tx),
+                    );
+                    let drain_fut = async {
+                        let mut accumulated = String::new();
+                        while let Some(event) = agent_rx.recv().await {
+                            match event {
+                                AgentEvent::TextDelta(text) => {
+                                    accumulated.push_str(&text);
+                                }
+                                AgentEvent::Complete { .. } => {
+                                    let _ = tx.send(InlineEditUpdate::Done(accumulated.clone()));
+                                    break;
+                                }
+                                AgentEvent::Error(e) => {
+                                    let _ = tx.send(InlineEditUpdate::Err(e));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    };
+                    let _ = tokio::join!(run_fut, drain_fut);
+                });
+            });
         });
 
     let badge = label(|| "✦ AI Edit").style(move |s| {
@@ -1071,7 +1173,9 @@ pub(crate) fn rename_overlay(state: IdeState) -> impl IntoView {
     let cursor = state.editor.active_cursor;
     let ws = state.project.workspace_root.get_untracked();
 
-    let input = text_input(query).style(|s| s.width(320.0).padding(8.0).font_size(14.0));
+    let input = text_input(query)
+        .focus_when_open(move || open.get())
+        .style(|s| s.width(320.0).padding(8.0).font_size(14.0));
 
     let confirm = {
         let lsp_cmd2 = lsp_cmd.clone();
@@ -1307,6 +1411,7 @@ pub(crate) fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
     .style(|s| s.max_height(320.0).width_full());
 
     let search_box = text_input(query)
+        .focus_when_open(move || open.get())
         .style(move |s| {
             let p = theme.get().palette;
             s.width_full()
@@ -1317,17 +1422,10 @@ pub(crate) fn workspace_symbols_overlay(state: IdeState) -> impl IntoView {
                 .padding_horiz(12.0)
                 .padding_vert(8.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |e| {
-            if let Event::KeyDown(ke) = e {
-                match ke.key.logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        open.set(false);
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        open.set(false);
-                    }
-                    _ => {}
-                }
+        .on_enter(move || {
+            if let Some(sym) = filtered().into_iter().next() {
+                open.set(false);
+                goto_line.set(sym.line);
             }
         });
 
@@ -1642,6 +1740,7 @@ pub(crate) fn goto_overlay(state: IdeState) -> impl IntoView {
     let toast = state.workbench.status_toast;
 
     let input_view = text_input(input_sig)
+        .focus_when_open(move || open.get())
         .placeholder("Line or line:col")
         .style(move |s| {
             let p = theme.get().palette;
@@ -1652,26 +1751,15 @@ pub(crate) fn goto_overlay(state: IdeState) -> impl IntoView {
                 .border(0.0)
                 .padding_horiz(4.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |e| {
-            if let Event::KeyDown(ke) = e {
-                match &ke.key.logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        open.set(false);
-                        input_sig.set(String::new());
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        let text = input_sig.get_untracked();
-                        open.set(false);
-                        input_sig.set(String::new());
-                        let parts: Vec<&str> = text.trim().splitn(2, ':').collect();
-                        if let Ok(line) = parts[0].parse::<u32>() {
-                            goto_line.set(line.saturating_sub(1));
-                        } else {
-                            show_toast(toast, format!("Invalid: {text}"));
-                        }
-                    }
-                    _ => {}
-                }
+        .on_enter(move || {
+            let text = input_sig.get_untracked();
+            open.set(false);
+            input_sig.set(String::new());
+            let parts: Vec<&str> = text.trim().splitn(2, ':').collect();
+            if let Ok(line) = parts[0].parse::<u32>() {
+                goto_line.set(line.saturating_sub(1));
+            } else {
+                show_toast(toast, format!("Invalid: {text}"));
             }
         });
 

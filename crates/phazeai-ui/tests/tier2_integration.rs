@@ -249,16 +249,33 @@ fn focus_window_with_click(wid: u64) {
 
 /// Under Xvfb's software Vulkan the window shows the frame *before* the last
 /// one presented, so a change made by a keystroke stays invisible until
-/// something else repaints. Hovering on and off an activity-bar button forces
-/// fresh frames, so the capture reflects the current state.
-fn flush_frames(wid: u64) {
+/// something else repaints. Resizing the window by one pixel and back forces
+/// a full relayout and present, so the next capture shows the current state.
+/// (Hover tricks don't work: they only repaint when a hover style changes,
+/// and an open overlay hides the elements underneath.)
+fn force_repaint(wid: u64) {
     let id = wid.to_string();
-    for _ in 0..2 {
-        xdotool(&["mousemove", "--window", &id, "24", "100"]);
-        thread::sleep(Duration::from_millis(400));
-        xdotool(&["mousemove", "--window", &id, "24", "700"]);
-        thread::sleep(Duration::from_millis(400));
-    }
+    let Some(out) = run_with_timeout(
+        Command::new("xdotool")
+            .args(["getwindowgeometry", "--shell", &id])
+            .env("DISPLAY", display()),
+        Duration::from_secs(5),
+    ) else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = |name: &str| -> Option<u32> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().parse().ok())
+    };
+    let (Some(w), Some(h)) = (field("WIDTH="), field("HEIGHT=")) else {
+        return;
+    };
+    xdotool(&["windowsize", &id, &(w + 1).to_string(), &h.to_string()]);
+    thread::sleep(Duration::from_millis(800));
+    xdotool(&["windowsize", &id, &w.to_string(), &h.to_string()]);
+    thread::sleep(Duration::from_millis(1200));
 }
 
 /// Run an xdotool command with the current DISPLAY.
@@ -291,6 +308,7 @@ fn send_keys(wid: u64, combo: &str) {
         "ctrl+p" => "ctrl+p",
         "ctrl+backslash" => "ctrl+backslash",
         "escape" => "Escape",
+        "Return" => "Return",
         other => other,
     };
 
@@ -331,7 +349,7 @@ fn capture(wid: u64, path: &std::path::Path) -> DynamicImage {
     // Delete existing file so scrot doesn't append _001, _002, etc.
     std::fs::remove_file(path).ok();
 
-    flush_frames(wid);
+    force_repaint(wid);
 
     run_with_timeout(
         // Capture the root window: reading the IDE's own window can return a
@@ -581,20 +599,38 @@ fn scenario_command_palette_type_filter() {
     let ide = launch_ide();
     let wid = ide.wid;
 
-    send_keys(wid, "ctrl+p");
-    thread::sleep(Duration::from_millis(400));
-    let empty = screenshot(wid, "s5_palette_empty");
-    assert!(!is_blank(&empty), "App rendered blank screen");
+    let baseline = screenshot(wid, "s5_baseline");
+    assert!(!is_blank(&baseline), "App rendered blank screen");
 
-    type_text(wid, "toggle");
+    // Ctrl+P must put the keyboard in the search box: no click in between.
+    send_keys(wid, "ctrl+p");
+    let empty = screenshot(wid, "s5_palette_empty");
+    assert!(
+        diff_percent(&baseline, &empty) > 5.0,
+        "the file picker did not open"
+    );
+
+    type_text(wid, "cargo.toml");
     let filtered = screenshot(wid, "s5_palette_filtered");
     let diff = diff_percent(&empty, &filtered);
     assert!(
         diff > 0.5,
-        "Palette filter: expected list to change, diff was {diff:.2}%"
+        "typing in the picker had no effect (list unchanged), diff was {diff:.2}%"
     );
 
-    send_keys(wid, "escape");
+    // Enter opens the top match: the picker closes and a file tab appears.
+    send_keys(wid, "Return");
+    let opened = screenshot(wid, "s5_palette_opened");
+    let closed_diff = diff_percent(&filtered, &opened);
+    assert!(
+        closed_diff > 5.0,
+        "Enter did not close the picker, diff was {closed_diff:.2}%"
+    );
+    let tab_diff = diff_percent(&baseline, &opened);
+    assert!(
+        tab_diff > 1.0,
+        "Enter did not open a file, diff from the start was {tab_diff:.2}%"
+    );
 }
 
 // ── Scenario 6: Stability — paired toggles cancel out ────────────────────────

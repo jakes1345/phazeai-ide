@@ -3783,6 +3783,65 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
     })
 }
 
+/// Close the topmost open overlay or popup. Returns true if one was closed.
+///
+/// Escape reaches this from two places: the root key handler, and — when a
+/// focused text box swallowed the key (Floem clears the focus and stops the
+/// event) — the root's key-up handler.
+pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
+    if state.editor.peek_def_open.get() {
+        state.editor.peek_def_open.set(false);
+        state.editor.peek_def_lines.set(vec![]);
+        return true;
+    }
+    if state.project.branch_picker_open.get() {
+        state.project.branch_picker_open.set(false);
+        return true;
+    }
+    if state.editor.rename_open.get() {
+        state.editor.rename_open.set(false);
+        return true;
+    }
+    if state.editor.sig_help.get().is_some() {
+        state.editor.sig_help.set(None);
+        return true;
+    }
+    if state.editor.code_actions_open.get() {
+        state.editor.code_actions_open.set(false);
+        return true;
+    }
+    if state.ai.inline_edit_open.get() {
+        state.ai.inline_edit_open.set(false);
+        state.ai.inline_edit_query.set(String::new());
+        return true;
+    }
+    if state.editor.completion_open.get() {
+        state.editor.completion_open.set(false);
+        return true;
+    }
+    if state.workbench.file_picker_open.get() {
+        state.workbench.file_picker_open.set(false);
+        state.workbench.file_picker_query.set(String::new());
+        return true;
+    }
+    if state.workbench.command_palette_open.get() {
+        state.workbench.command_palette_open.set(false);
+        state.workbench.command_palette_query.set(String::new());
+        return true;
+    }
+    if state.editor.ws_syms_open.get() {
+        state.editor.ws_syms_open.set(false);
+        state.editor.ws_syms_query.set(String::new());
+        return true;
+    }
+    if state.editor.goto_overlay_open.get() {
+        state.editor.goto_overlay_open.set(false);
+        state.editor.goto_overlay_input.set(String::new());
+        return true;
+    }
+    false
+}
+
 fn ide_root(state: IdeState) -> impl IntoView {
     // Keep the AI privacy policy in sync with the workspace root.
     crate::panels::privacy::install(&state);
@@ -4509,6 +4568,10 @@ pub fn launch_phaze_ide() {
                 });
 
                 // First-run readiness banner — shown once if any checks fail.
+                // Set when an Escape key-down reaches the root handler. A focused
+                // text box swallows Escape (Floem clears its focus and stops the
+                // event), so then only the key-up arrives; see the KeyUp handler.
+                let escape_down_seen = std::rc::Rc::new(std::cell::Cell::new(false));
                 let readiness_banner = {
                     let items = readiness_items.clone();
                     let has_issues = items.iter().any(|(_, ok, _)| !ok);
@@ -4649,10 +4712,30 @@ pub fn launch_phaze_ide() {
                     let p = &t.palette;
                     s.width_full().height_full().background(p.bg_base)
                 })
+                .on_event_cont(EventListener::KeyUp, {
+                    let state = state.clone();
+                    let escape_down_seen = escape_down_seen.clone();
+                    move |event| {
+                        if let Event::KeyUp(key_event) = event {
+                            if key_event.key.logical_key
+                                == Key::Named(floem::keyboard::NamedKey::Escape)
+                                && !escape_down_seen.replace(false)
+                            {
+                                close_topmost_overlay(&state);
+                            }
+                        }
+                    }
+                })
                 .on_event_stop(EventListener::KeyDown, {
                     let state = state.clone();
+                    let escape_down_seen = escape_down_seen.clone();
                     move |event| {
                         if let Event::KeyDown(key_event) = event {
+                            if key_event.key.logical_key
+                                == Key::Named(floem::keyboard::NamedKey::Escape)
+                            {
+                                escape_down_seen.set(true);
+                            }
                             let ctrl = key_event.modifiers.contains(Modifiers::CONTROL);
                             let shift = key_event.modifiers.contains(Modifiers::SHIFT);
                             let alt = key_event.modifiers.contains(Modifiers::ALT);
@@ -4670,47 +4753,7 @@ pub fn launch_phaze_ide() {
                             if let Key::Named(ref named) = key_event.key.logical_key {
                                 match named {
                                     floem::keyboard::NamedKey::Escape => {
-                                        if state.editor.peek_def_open.get() {
-                                            state.editor.peek_def_open.set(false);
-                                            state.editor.peek_def_lines.set(vec![]);
-                                            return;
-                                        }
-                                        if state.project.branch_picker_open.get() {
-                                            state.project.branch_picker_open.set(false);
-                                            return;
-                                        }
-                                        if state.editor.rename_open.get() {
-                                            state.editor.rename_open.set(false);
-                                            return;
-                                        }
-                                        if state.editor.sig_help.get().is_some() {
-                                            state.editor.sig_help.set(None);
-                                            return;
-                                        }
-                                        if state.editor.code_actions_open.get() {
-                                            state.editor.code_actions_open.set(false);
-                                            return;
-                                        }
-                                        if state.ai.inline_edit_open.get() {
-                                            state.ai.inline_edit_open.set(false);
-                                            state.ai.inline_edit_query.set(String::new());
-                                            return;
-                                        }
-                                        if state.editor.completion_open.get() {
-                                            state.editor.completion_open.set(false);
-                                            return;
-                                        }
-                                        if state.workbench.file_picker_open.get() {
-                                            state.workbench.file_picker_open.set(false);
-                                            state.workbench.file_picker_query.set(String::new());
-                                            return;
-                                        }
-                                        if state.workbench.command_palette_open.get() {
-                                            state.workbench.command_palette_open.set(false);
-                                            state
-                                                .workbench
-                                                .command_palette_query
-                                                .set(String::new());
+                                        if close_topmost_overlay(&state) {
                                             return;
                                         }
                                         // Vim: Escape enters Normal mode / exits ex/visual
