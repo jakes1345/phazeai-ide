@@ -741,6 +741,17 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
     let open = state.ai.inline_edit_open;
     let query = state.ai.inline_edit_query;
     let ai_thinking = state.ai.thinking;
+    // True from submitting an edit until its result (or error) arrives, so a
+    // second Enter or a held key can't start a second request and insert twice.
+    // (`ai.thinking` is shared with chat, so it can't serve as this guard.)
+    let in_flight = create_rw_signal(false);
+    // A request that never reports back must not block later edits: reopening
+    // the box starts fresh.
+    create_effect(move |_| {
+        if open.get() {
+            in_flight.set(false);
+        }
+    });
 
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<InlineEditUpdate>(64);
     let update_sig = create_signal_from_channel(update_rx);
@@ -749,6 +760,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
         let state2 = state.clone();
         create_effect(move |_| {
             let Some(upd) = update_sig.get() else { return };
+            in_flight.set(false);
             match upd {
                 InlineEditUpdate::Done(text) => {
                     state2.editor.pending_completion.set(Some((text, 0)));
@@ -797,7 +809,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
         })
         .on_enter(move || {
             let instruction = query.get();
-            if instruction.is_empty() {
+            if instruction.is_empty() || in_flight.get_untracked() {
                 return;
             }
             // Privacy: a denied file's code is never sent. The check,
@@ -822,6 +834,7 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                 }
             }
             let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
+            in_flight.set(true);
             ai_thinking.set(true);
             let selection = state.editor.selected_text.get_untracked();
             let file_ctx = if selection.is_empty() {

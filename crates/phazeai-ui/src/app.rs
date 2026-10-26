@@ -3789,6 +3789,18 @@ fn bottom_panel(state: IdeState) -> impl IntoView {
 /// focused text box swallowed the key (Floem clears the focus and stops the
 /// event) — the root's key-up handler.
 pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
+    // Go to Line and Workspace Symbols sit above every popup below and hold a
+    // focused text box (which loses focus on Escape), so they must close first.
+    if state.editor.ws_syms_open.get() {
+        state.editor.ws_syms_open.set(false);
+        state.editor.ws_syms_query.set(String::new());
+        return true;
+    }
+    if state.editor.goto_overlay_open.get() {
+        state.editor.goto_overlay_open.set(false);
+        state.editor.goto_overlay_input.set(String::new());
+        return true;
+    }
     if state.editor.peek_def_open.get() {
         state.editor.peek_def_open.set(false);
         state.editor.peek_def_lines.set(vec![]);
@@ -3827,16 +3839,6 @@ pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
     if state.workbench.command_palette_open.get() {
         state.workbench.command_palette_open.set(false);
         state.workbench.command_palette_query.set(String::new());
-        return true;
-    }
-    if state.editor.ws_syms_open.get() {
-        state.editor.ws_syms_open.set(false);
-        state.editor.ws_syms_query.set(String::new());
-        return true;
-    }
-    if state.editor.goto_overlay_open.get() {
-        state.editor.goto_overlay_open.set(false);
-        state.editor.goto_overlay_input.set(String::new());
         return true;
     }
     false
