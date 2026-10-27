@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod privacy;
 pub mod process;
 pub mod project;
+pub mod search;
 pub mod skills;
 pub mod syntax;
 pub mod telemetry;
@@ -41,5 +42,6 @@ pub use llm::{
     StreamEvent, UsageTracker,
 };
 pub use lsp::{LspClient, LspEvent, LspManager};
+pub use search::{BuildIndexTool, CodeSearch, CodeSearchTool};
 pub use skills::{discover_skills, find_skill, skills_menu_block, Skill, SkillSource};
 pub use tools::{Tool, ToolDefinition, ToolRegistry, ToolResult};
