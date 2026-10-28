@@ -481,6 +481,11 @@ fn diff_stats(a: &DynamicImage, b: &DynamicImage) -> (f64, Option<(u32, u32, u32
 /// unpainted window (black, or the window manager's background) is nearly
 /// all one colour; the IDE's UI never is.
 fn dominant_fraction(img: &DynamicImage) -> f64 {
+    top_colors_fraction(img, 1)
+}
+
+/// Share of the sampled pixels held by the `n` most common colours.
+fn top_colors_fraction(img: &DynamicImage, n: usize) -> f64 {
     let (w, h) = img.dimensions();
     let mut counts = std::collections::HashMap::new();
     let mut total = 0u32;
@@ -490,8 +495,20 @@ fn dominant_fraction(img: &DynamicImage) -> f64 {
             total += 1;
         }
     }
-    let top = counts.values().copied().max().unwrap_or(0);
-    top as f64 / total.max(1) as f64
+    let mut sizes: Vec<u32> = counts.into_values().collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    sizes.iter().take(n).sum::<u32>() as f64 / total.max(1) as f64
+}
+
+/// Whether `img` shows the IDE rather than a blank or half-drawn frame.
+///
+/// A window that is mapped but has not presented its first frame shows what is
+/// behind it: Xvfb's root window, a two-tone checkerboard with a logo. That is
+/// not black and is perfectly still, so "not blank, then stable" alone accepts
+/// it as the settled UI. Its two checker colours cover about 96% of the frame;
+/// a real IDE frame's two most common colours cover about 60%.
+fn looks_painted(img: &DynamicImage) -> bool {
+    !is_blank(img) && dominant_fraction(img) < 0.85 && top_colors_fraction(img, 2) < 0.90
 }
 
 /// Wait (up to 60s) until the window shows the painted UI and two captures
@@ -501,8 +518,7 @@ fn wait_until_rendered(wid: u64) {
     let mut previous: Option<DynamicImage> = None;
     while Instant::now() < deadline {
         let shot = capture(wid, &std::env::temp_dir().join("phazeai-tier2-settle.png"));
-        let painted = !is_blank(&shot) && dominant_fraction(&shot) < 0.85;
-        if painted {
+        if looks_painted(&shot) {
             if let Some(prev) = &previous {
                 if diff_percent(prev, &shot) < 0.5 {
                     return;
@@ -532,6 +548,67 @@ fn is_blank(img: &DynamicImage) -> bool {
         }
     }
     true
+}
+
+// ── Frame classifier (needs no display, so it runs in plain `cargo test`) ─────
+
+/// Xvfb's root window: a two-tone checkerboard with a white logo in the middle.
+fn desktop_frame() -> DynamicImage {
+    DynamicImage::ImageRgba8(image::RgbaImage::from_fn(1280, 1024, |x, y| {
+        let (dx, dy) = (x as f64 - 640.0, y as f64 - 480.0);
+        if dx * dx + dy * dy < 140.0 * 140.0 {
+            Rgba([255, 255, 255, 255])
+        } else if (x / 16 + y / 16) % 2 == 0 {
+            Rgba([102, 102, 102, 255])
+        } else {
+            Rgba([153, 153, 153, 255])
+        }
+    }))
+}
+
+/// Shaped like the IDE: an editor, a sidebar and a chat panel as large flat
+/// regions (50% / 16% / 22%) and a status bar in many shades.
+fn ide_frame() -> DynamicImage {
+    DynamicImage::ImageRgba8(image::RgbaImage::from_fn(1280, 1024, |x, y| match (x, y) {
+        (_, 900..) => Rgba([40 + (x % 200) as u8, 30, 90, 255]),
+        (..=229, _) => Rgba([20, 16, 52, 255]),
+        (960.., _) => Rgba([26, 20, 70, 255]),
+        _ => Rgba([14, 11, 38, 255]),
+    }))
+}
+
+#[test]
+fn the_bare_desktop_is_not_taken_for_a_painted_ide() {
+    let desktop = desktop_frame();
+    // Not black and no single colour dominates: this is what the old check
+    // accepted as "the UI has settled", so it took the desktop as a baseline.
+    assert!(!is_blank(&desktop));
+    assert!(dominant_fraction(&desktop) < 0.85);
+    assert!(top_colors_fraction(&desktop, 2) > 0.90);
+    assert!(!looks_painted(&desktop));
+}
+
+#[test]
+fn an_ide_shaped_frame_counts_as_painted() {
+    let ide = ide_frame();
+    assert!(top_colors_fraction(&ide, 2) < 0.90);
+    assert!(looks_painted(&ide));
+}
+
+#[test]
+fn blank_and_flat_frames_are_not_painted() {
+    let black = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        1280,
+        1024,
+        Rgba([0, 0, 0, 255]),
+    ));
+    let flat = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        1280,
+        1024,
+        Rgba([14, 10, 40, 255]),
+    ));
+    assert!(!looks_painted(&black));
+    assert!(!looks_painted(&flat));
 }
 
 // ── Scenario 1: Toggle terminal (Ctrl+J) ─────────────────────────────────────
