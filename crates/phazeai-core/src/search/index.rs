@@ -5,13 +5,17 @@
 //! few hits that are returned.
 //!
 //! Chunk ids only grow, so every posting list stays sorted by chunk and each
-//! file owns one contiguous id range. Removing a file physically deletes its
-//! postings (by binary-searching that range in the lists of the file's own
-//! terms), which keeps document frequencies, the chunk count and the average
-//! chunk length exact at all times; only the small chunk table keeps
-//! tombstones, and [`Index::compact`] renumbers it once enough have piled up.
-//! Scores depend only on the live chunks, so an index that went through any
-//! sequence of updates ranks exactly like one built from scratch.
+//! file owns one contiguous id range. Removing a file only kills its chunks
+//! and leaves their postings where they are; the chunk count, the average
+//! chunk length and (counted among the live chunks of each query term when a
+//! query runs) the document frequencies stay exact at all times, and ranking
+//! skips postings of dead chunks. [`Index::compact`] drops the dead postings
+//! and renumbers the chunks once enough have piled up, in one pass over the
+//! index. Rewriting the posting lists of every affected term for each batch of
+//! replaced files instead made a re-sync after a branch switch or a formatter
+//! run quadratic in the number of files (5 times a fresh build at 16,000
+//! files). Scores depend only on the live chunks, so an index that went
+//! through any sequence of updates ranks exactly like one built from scratch.
 
 use super::paths::path_key;
 use std::collections::HashMap;
@@ -22,9 +26,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
 const NONE: u32 = u32::MAX;
-/// Up to this many files are removed by draining each posting list range by
-/// range; more use a single retain pass over the affected lists.
-const DRAIN_MAX_FILES: usize = 8;
 /// Dead chunk-table slots tolerated before compaction (and at least as many as live chunks / 2).
 #[cfg(not(test))]
 const COMPACT_MIN_DEAD: usize = 4096;
@@ -126,8 +127,6 @@ pub(crate) struct FileMeta {
     pub seq: u64,
     chunk_first: u32,
     chunk_count: u32,
-    /// Every term occurring in the file's chunks, once each.
-    terms: Box<[u32]>,
 }
 
 /// A ranked file: its best chunk.
@@ -160,6 +159,23 @@ pub(crate) struct Index {
     total_bytes: u64,
     /// Bumped by every change to a file; see [`Index::apply`].
     seq: u64,
+    /// Test seam: runs when the index is freed, on the freeing thread.
+    #[cfg(test)]
+    drop_hook: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl Drop for Index {
+    fn drop(&mut self) {
+        if let Some(hook) = &self.drop_hook {
+            hook();
+        }
+    }
+}
+
+/// Whether the dead chunks are enough to be worth a pass over the index.
+fn compaction_due(dead: usize, live: usize) -> bool {
+    dead > COMPACT_MIN_DEAD && dead > live / 2
 }
 
 fn round4(x: f64) -> f64 {
@@ -180,7 +196,14 @@ impl Index {
             total_len: 0,
             total_bytes: 0,
             seq: 0,
+            #[cfg(test)]
+            drop_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_drop_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.drop_hook = Some(Box::new(hook));
     }
 
     pub(crate) fn file_count(&self) -> usize {
@@ -242,23 +265,25 @@ impl Index {
             if existing.is_some_and(|id| self.slot(id).seq > plan_seq) {
                 continue;
             }
-            // Whatever was read, the old version of the file is out of date.
-            if let Some(id) = existing {
-                dead.push(id);
-            }
             // `removed` counts every file that leaves the index, so
             // `indexed - removed` is always the change in file count.
             let left = usize::from(existing.is_some());
+            // A file that was read, or turned out to be gone or unindexable,
+            // makes the old version out of date. A read that failed says
+            // nothing about the content (a sharing violation on Windows, an
+            // offline placeholder, EACCES): the old entry stays, its stamp no
+            // longer matches the disk, and the next search or sync reads the
+            // file again instead of losing it until a manual rebuild.
+            if !matches!(item, Parsed::Failed(_)) {
+                dead.extend(existing);
+            }
             match item {
                 Parsed::File(pf) => adds.push((pf, existing.is_some())),
                 Parsed::Skipped(_) => {
                     applied.skipped += 1;
                     applied.removed += left;
                 }
-                Parsed::Failed(_) => {
-                    applied.errors += 1;
-                    applied.removed += left;
-                }
+                Parsed::Failed(_) => applied.errors += 1,
                 Parsed::Gone(_) => applied.removed += left,
             }
         }
@@ -275,7 +300,7 @@ impl Index {
                 applied.indexed += 1;
             }
         }
-        if self.dead_chunks > COMPACT_MIN_DEAD && self.dead_chunks > self.live_chunks / 2 {
+        if compaction_due(self.dead_chunks, self.live_chunks) {
             self.compact();
         }
         applied
@@ -291,7 +316,7 @@ impl Index {
             .collect();
         ids.sort_unstable();
         self.remove_ids(&ids);
-        if self.dead_chunks > COMPACT_MIN_DEAD && self.dead_chunks > self.live_chunks / 2 {
+        if compaction_due(self.dead_chunks, self.live_chunks) {
             self.compact();
         }
         ids.len()
@@ -329,7 +354,6 @@ impl Index {
         });
         let chunk_first = self.chunks.len() as u32;
         let chunk_count = chunks.len() as u32;
-        let mut file_terms: Vec<u32> = Vec::new();
         for pc in chunks {
             let cid = self.chunks.len() as u32;
             self.chunks.push(ChunkMeta {
@@ -342,11 +366,8 @@ impl Index {
             for (term, tf) in pc.terms {
                 let t = self.intern(&term);
                 self.postings[t as usize].push(Posting { chunk: cid, tf });
-                file_terms.push(t);
             }
         }
-        file_terms.sort_unstable();
-        file_terms.dedup();
         self.live_chunks += chunk_count as usize;
         self.total_bytes += stamp.size;
         self.seq += 1;
@@ -357,54 +378,13 @@ impl Index {
             seq: self.seq,
             chunk_first,
             chunk_count,
-            terms: file_terms.into_boxed_slice(),
         });
         true
     }
 
-    /// Remove files by slot; `ids` is sorted and free of duplicates.
+    /// Remove files by slot; `ids` is sorted and free of duplicates. Their
+    /// chunks die; the postings stay until the next compaction.
     fn remove_ids(&mut self, ids: &[u32]) {
-        if ids.is_empty() {
-            return;
-        }
-        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(ids.len());
-        let mut terms: Vec<u32> = Vec::new();
-        for &id in ids {
-            let f = self.slot(id);
-            if f.chunk_count > 0 {
-                ranges.push((f.chunk_first, f.chunk_first + f.chunk_count));
-                terms.extend_from_slice(&f.terms);
-            }
-        }
-        ranges.sort_unstable();
-        terms.sort_unstable();
-        terms.dedup();
-        if ranges.len() <= DRAIN_MAX_FILES {
-            for &t in &terms {
-                let list = &mut self.postings[t as usize];
-                // Back to front so earlier ranges keep their positions.
-                for &(a, b) in ranges.iter().rev() {
-                    let lo = list.partition_point(|p| p.chunk < a);
-                    let hi = lo + list[lo..].partition_point(|p| p.chunk < b);
-                    list.drain(lo..hi);
-                }
-                if list.is_empty() {
-                    *list = Vec::new();
-                }
-            }
-        } else {
-            let mut dead = vec![false; self.chunks.len()];
-            for &(a, b) in &ranges {
-                dead[a as usize..b as usize].fill(true);
-            }
-            for &t in &terms {
-                let list = &mut self.postings[t as usize];
-                list.retain(|p| !dead[p.chunk as usize]);
-                if list.is_empty() {
-                    *list = Vec::new();
-                }
-            }
-        }
         for &id in ids {
             let Some(f) = self.files[id as usize].take() else {
                 continue;
@@ -422,8 +402,11 @@ impl Index {
         }
     }
 
-    /// Renumber the live chunks densely and forget terms nobody uses. Order is
-    /// preserved, so posting lists stay sorted and file ranges contiguous.
+    /// Drop the postings of dead chunks, renumber the live chunks densely and
+    /// forget terms nobody uses. Order is preserved, so posting lists stay
+    /// sorted and file ranges contiguous. One pass over the posting lists in
+    /// memory order and one over the term table, without rebuilding either
+    /// (rebuilding the table took 360 ms at 320,000 terms, the write lock held).
     fn compact(&mut self) {
         let mut remap = vec![NONE; self.chunks.len()];
         let mut chunks = Vec::with_capacity(self.live_chunks);
@@ -433,34 +416,42 @@ impl Index {
                 chunks.push(*c);
             }
         }
-        let old_terms = std::mem::take(&mut self.terms);
         let mut term_remap = vec![NONE; self.postings.len()];
-        let mut terms = HashMap::with_capacity(old_terms.len());
-        let mut postings: Vec<Vec<Posting>> = Vec::with_capacity(old_terms.len());
-        for (text, old) in old_terms {
-            let mut list = std::mem::take(&mut self.postings[old as usize]);
+        let mut kept = 0;
+        for (old, slot) in term_remap.iter_mut().enumerate() {
+            let list = &mut self.postings[old];
+            list.retain_mut(|p| match remap[p.chunk as usize] {
+                NONE => false,
+                live => {
+                    p.chunk = live;
+                    true
+                }
+            });
             if list.is_empty() {
                 continue;
             }
-            for p in &mut list {
-                p.chunk = remap[p.chunk as usize];
+            // Give back memory only where a good part of the list went.
+            if list.len() < list.capacity() / 2 {
+                list.shrink_to_fit();
             }
-            list.shrink_to_fit();
-            term_remap[old as usize] = postings.len() as u32;
-            terms.insert(text, postings.len() as u32);
-            postings.push(list);
+            *slot = kept as u32;
+            self.postings.swap(kept, old);
+            kept += 1;
         }
+        self.postings.truncate(kept);
+        self.terms.retain(|_, id| match term_remap[*id as usize] {
+            NONE => false,
+            live => {
+                *id = live;
+                true
+            }
+        });
         for f in self.files.iter_mut().flatten() {
             if f.chunk_count > 0 {
                 f.chunk_first = remap[f.chunk_first as usize];
             }
-            for t in f.terms.iter_mut() {
-                *t = term_remap[*t as usize];
-            }
         }
         self.chunks = chunks;
-        self.terms = terms;
-        self.postings = postings;
         self.dead_chunks = 0;
     }
 
@@ -481,7 +472,14 @@ impl Index {
             .iter()
             .filter_map(|t| {
                 let id = *self.terms.get(t.as_str())? as usize;
-                let df = self.postings[id].len();
+                let list = &self.postings[id];
+                let df = if self.dead_chunks == 0 {
+                    list.len()
+                } else {
+                    list.iter()
+                        .filter(|p| self.chunks[p.chunk as usize].file != NONE)
+                        .count()
+                };
                 (df > 0).then(|| (id, (1.0 + (n - df as f64 + 0.5) / (df as f64 + 0.5)).ln()))
             })
             .collect();
@@ -497,6 +495,9 @@ impl Index {
         for &(id, idf) in &present {
             for p in &self.postings[id] {
                 let c = p.chunk as usize;
+                if self.chunks[c].file == NONE {
+                    continue;
+                }
                 let dl = f64::from(self.chunks[c].len);
                 let tf = f64::from(p.tf);
                 score[c] += idf * tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * dl / avgdl));
@@ -566,6 +567,12 @@ impl Index {
         self.dead_chunks
     }
 
+    /// Postings in all lists, those of dead chunks included.
+    #[cfg(test)]
+    pub(crate) fn posting_count(&self) -> usize {
+        self.postings.iter().map(Vec::len).sum()
+    }
+
     /// Check every structural invariant; panics with a description when one is broken.
     #[cfg(test)]
     pub(crate) fn assert_consistent(&self) {
@@ -593,49 +600,25 @@ impl Index {
             for c in f.chunk_first..f.chunk_first + f.chunk_count {
                 assert_eq!(self.chunks[c as usize].file, id as u32, "chunk owner");
             }
-            let mut distinct = f.terms.to_vec();
-            distinct.sort_unstable();
-            distinct.dedup();
-            assert_eq!(distinct.len(), f.terms.len(), "file terms are distinct");
         }
         assert_eq!(counted, self.by_key.len(), "file count");
         assert_eq!(bytes, self.total_bytes, "total bytes");
-        let mut posting_total = 0;
+        assert_eq!(
+            self.terms.len(),
+            self.postings.len(),
+            "one posting list per term"
+        );
+        assert!(self
+            .terms
+            .values()
+            .all(|&t| (t as usize) < self.postings.len()));
         for (t, list) in self.postings.iter().enumerate() {
             assert!(
                 list.windows(2).all(|w| w[0].chunk < w[1].chunk),
                 "postings of term {t} are not strictly sorted"
             );
-            for p in list {
-                assert_ne!(
-                    self.chunks[p.chunk as usize].file, NONE,
-                    "posting of a dead chunk"
-                );
-                assert!(p.tf > 0);
-            }
-            posting_total += list.len();
+            // Postings of dead chunks wait for the next compaction.
+            assert!(list.iter().all(|p| p.tf > 0));
         }
-        let from_files: usize = self
-            .files
-            .iter()
-            .flatten()
-            .map(|f| {
-                f.terms
-                    .iter()
-                    .map(|&t| {
-                        self.postings[t as usize]
-                            .iter()
-                            .filter(|p| {
-                                p.chunk >= f.chunk_first && p.chunk < f.chunk_first + f.chunk_count
-                            })
-                            .count()
-                    })
-                    .sum::<usize>()
-            })
-            .sum();
-        assert_eq!(
-            posting_total, from_files,
-            "every posting belongs to a listed term of its file"
-        );
     }
 }

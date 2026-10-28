@@ -80,6 +80,15 @@ fn sync(cs: &CodeSearch, paths: &[PathBuf]) -> BuildStats {
     st
 }
 
+/// Make searches trust the index for the rest of the test. A search also walks
+/// the disk (once per interval) and so would drop a file the policy now denies
+/// before the query-time check ever saw it; tests of that check on its own call
+/// this right after the build, before they change anything.
+fn freeze(cs: &CodeSearch) {
+    cs.set_resync_after(Duration::from_secs(3600));
+    cs.search_blocking("freeze", 1).unwrap();
+}
+
 /// Serialises tests that change the process-wide active privacy project.
 struct Active {
     _guard: MutexGuard<'static, ()>,
@@ -461,9 +470,13 @@ fn partial_builds_touch_only_their_paths() {
     let st = cs.build_blocking(&[PathBuf::from("src")]).unwrap();
     assert_eq!((st.indexed, st.total_files), (2, 2));
     assert_eq!(indexed(&cs), ["src/a.rs", "src/deep/b.rs"]);
+    // A hand-made partial index is not "the root, built".
+    let status = cs.status();
+    assert!(!status.built && !status.building, "{status:?}");
+    // The first search therefore indexes the rest instead of ranking src/ alone.
+    assert_eq!(found(&search(&cs, "three"), &root), ["docs/c.md"]);
     assert!(cs.status().built);
-    // Searching an already built index does not build the rest.
-    assert!(search(&cs, "three").matches.is_empty());
+    assert_eq!(indexed(&cs), ["docs/c.md", "src/a.rs", "src/deep/b.rs"]);
     // A file path works too, and removal is scoped to what was asked for.
     fs::remove_file(root.join("src/a.rs")).unwrap();
     fs::remove_file(root.join("docs/c.md")).unwrap();
@@ -472,10 +485,42 @@ fn partial_builds_touch_only_their_paths() {
     let st = cs.build_blocking(&[root.join("src/a.rs")]).unwrap();
     assert_eq!(st.removed, 1);
     assert_eq!(st.errors, 0, "{:?}", st.warnings);
-    assert_eq!(indexed(&cs), ["src/deep/b.rs"]);
+    assert_eq!(indexed(&cs), ["docs/c.md", "src/deep/b.rs"]);
     let st = build(&cs);
     assert_eq!(st.total_files, 1);
-    assert_eq!(st.removed, 0);
+    assert_eq!(st.removed, 1, "docs/c.md is gone from the disk");
+}
+
+#[test]
+fn only_a_build_that_covers_the_root_marks_it_built() {
+    let (_d, root) = proj();
+    write(&root, "src/a.rs", "fn one() {}\n");
+    write(&root, "docs/c.md", "three\n");
+    // Naming the root itself, in either spelling, is a build of the root.
+    for whole in [
+        root.clone(),
+        PathBuf::from("."),
+        root.join("src").join(".."),
+    ] {
+        let cs = CodeSearch::new(&root);
+        let st = cs.build_blocking(std::slice::from_ref(&whole)).unwrap();
+        assert_eq!(st.total_files, 2, "{whole:?}");
+        assert!(cs.status().built, "{whole:?}");
+    }
+    // Several parts that do not add up to the root do not.
+    let cs = CodeSearch::new(&root);
+    cs.build_blocking(&[root.join("src"), root.join("docs")])
+        .unwrap();
+    assert!(!cs.status().built);
+    // Neither does a path that is not there.
+    let cs = CodeSearch::new(&root);
+    cs.build_blocking(&[PathBuf::from("missing")]).unwrap();
+    assert!(!cs.status().built);
+    // A partial build after the root was built does not undo it.
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    cs.build_blocking(&[root.join("src")]).unwrap();
+    assert!(cs.status().built);
 }
 
 #[test]
@@ -895,6 +940,7 @@ fn a_policy_change_after_indexing_applies_at_query_time_and_at_the_next_sync() {
     let cs = CodeSearch::new(&root);
     let st = build(&cs);
     assert_eq!((st.total_files, st.privacy_skipped), (3, 0));
+    freeze(&cs);
     assert_eq!(found(&search(&cs, "zebrafish"), &root).len(), 2);
 
     // The policy appears: the indexed file is dropped from results and counted.
@@ -939,6 +985,7 @@ fn denied_files_do_not_use_up_result_slots() {
     let _a = activate(&root);
     let cs = CodeSearch::new(&root);
     build(&cs);
+    freeze(&cs);
     write(&root, ".phazeai/privacy.toml", "deny = [\"private/**\"]\n");
     let r = cs.search_blocking("needle", 2).unwrap();
     assert_eq!(r.matches.len(), 2);
@@ -957,6 +1004,7 @@ fn hits_in_denied_files_are_dropped_and_counted() {
     let secret = write(&root, "prod.pem", "-----BEGIN PRIVATE KEY needle\n");
     let cs = CodeSearch::new(&root);
     build(&cs);
+    freeze(&cs);
     assert_eq!(
         indexed(&cs),
         ["main.rs"],
@@ -1341,7 +1389,8 @@ fn corpus() -> Vec<(String, String)> {
 
 #[test]
 fn removing_files_gives_the_same_index_as_never_adding_them() {
-    // 3 removals take the per-range drain path, 12 the single retain pass.
+    // A few removals leave dead chunks behind, more than the compaction
+    // trigger compact them away; both rank like an index without the files.
     for removed in [1usize, 3, 8, 9, 12, 30] {
         let docs = corpus();
         let mut full = Index::new();
@@ -1379,6 +1428,60 @@ fn removing_files_gives_the_same_index_as_never_adding_them() {
         }
         assert_eq!(full.file_count(), fresh.file_count());
         assert_eq!(full.chunk_count(), fresh.chunk_count());
+    }
+}
+
+#[test]
+fn removal_leaves_the_postings_for_the_next_compaction_and_never_ranks_them() {
+    let docs = corpus();
+    let load = |files: &[(String, String)]| {
+        let mut idx = Index::new();
+        idx.apply(
+            u64::MAX,
+            &[],
+            files
+                .iter()
+                .map(|(p, t)| Parsed::File(parsed(p, t)))
+                .collect(),
+        );
+        idx
+    };
+    let mut idx = load(&docs);
+    let postings = idx.posting_count();
+    let gone: Vec<PathBuf> = docs.iter().take(2).map(|(p, _)| PathBuf::from(p)).collect();
+    idx.apply(u64::MAX, &gone, Vec::new());
+    // The lists were not rewritten (rewriting them for every batch of replaced
+    // files made a re-sync quadratic), yet the dead postings are invisible.
+    assert_eq!(idx.posting_count(), postings);
+    assert!(
+        idx.dead_chunks() > 0 && idx.dead_chunks() <= 16,
+        "below the trigger"
+    );
+    idx.assert_consistent();
+    let fresh = load(&docs[2..]);
+    for q in QUERIES {
+        assert_eq!(ranking(&idx, q), ranking(&fresh, q), "{q}");
+    }
+    // Replacing files kills their old chunks the same way.
+    let (path, text) = &docs[5];
+    idx.apply(u64::MAX, &[], vec![Parsed::File(parsed(path, text))]);
+    for q in QUERIES {
+        assert_eq!(ranking(&idx, q), ranking(&fresh, q), "after replacing: {q}");
+    }
+    // Enough dead chunks to be worth it: one pass drops every dead posting.
+    let more: Vec<PathBuf> = docs
+        .iter()
+        .skip(2)
+        .take(20)
+        .map(|(p, _)| PathBuf::from(p))
+        .collect();
+    idx.apply(u64::MAX, &more, Vec::new());
+    assert_eq!(idx.dead_chunks(), 0, "compacted");
+    assert!(idx.posting_count() < postings);
+    idx.assert_consistent();
+    let fresh = load(&docs[22..]);
+    for q in QUERIES {
+        assert_eq!(ranking(&idx, q), ranking(&fresh, q), "compacted: {q}");
     }
 }
 
@@ -2084,4 +2187,391 @@ fn defaults_match_the_contract() {
         (l.max_files, l.max_file_bytes, l.max_total_bytes),
         (50_000, 1 << 20, 256 << 20)
     );
+}
+
+// ── identifiers longer than a token ──────────────────────────────────────────
+
+#[test]
+fn long_descriptive_identifiers_and_file_names_are_found_by_their_words() {
+    let (_d, root) = proj();
+    with_fillers(&root);
+    write(
+        &root,
+        "tests/long_names.rs",
+        "fn a_partial_build_before_the_first_search_does_not_stop_the_search_from_indexing_the_rest() {}\n\
+         fn shouldReturnEmptyListWhenUserHasNoPermissionsAndAccountIsDisabledForTenant() {}\n",
+    );
+    // The words of a file name longer than a token count as path words too.
+    write(
+        &root,
+        "docs/a_very_long_file_name_that_describes_everything_about_the_quarantined_widget_pipeline.md",
+        "nothing of the title is repeated in here\n",
+    );
+    let cs = CodeSearch::new(&root);
+    for query in [
+        "partial build indexing",
+        "empty list permissions tenant",
+        // The identifier itself, as the old whole-run search took it.
+        "shouldReturnEmptyListWhenUserHasNoPermissionsAndAccountIsDisabledForTenant",
+        "a_partial_build_before_the_first_search_does_not_stop_the_search_from_indexing_the_rest",
+    ] {
+        assert_eq!(
+            found(&search(&cs, query), &root),
+            ["tests/long_names.rs"],
+            "{query}"
+        );
+    }
+    let by_path = search(&cs, "quarantined widget pipeline");
+    assert_eq!(
+        found(&by_path, &root),
+        ["docs/a_very_long_file_name_that_describes_everything_about_the_quarantined_widget_pipeline.md"]
+    );
+}
+
+// ── searches see what changed on disk ────────────────────────────────────────
+
+#[test]
+fn a_search_finds_what_changed_on_disk_since_the_last_one() {
+    let (_d, root) = proj();
+    with_fillers(&root);
+    let a = write(&root, "src/a.rs", "fn alphaoriginal() {}\n");
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    // A word an edit added to an indexed file is in no posting list, so no
+    // ranked candidate could lead the search to it; a new file is in none
+    // either; a file removed since is still indexed.
+    fs::write(&a, "fn alphaoriginal() {}\nfn alphaaddedbyedit() {}\n").unwrap();
+    write(&root, "src/fresh.rs", "fn freshlycreated() {}\n");
+    fs::remove_file(root.join("src/io.rs")).unwrap();
+    assert_eq!(found(&search(&cs, "alphaaddedbyedit"), &root), ["src/a.rs"]);
+    assert_eq!(
+        found(&search(&cs, "freshlycreated"), &root),
+        ["src/fresh.rs"]
+    );
+    let files = indexed(&cs);
+    assert!(files.contains(&"src/fresh.rs".to_string()), "{files:?}");
+    assert!(
+        !files.contains(&"src/io.rs".to_string()),
+        "a file that vanished is dropped from the index, not only hidden: {files:?}"
+    );
+    cs.with_index(Index::assert_consistent);
+}
+
+#[test]
+fn searches_do_not_walk_the_tree_more_than_once_per_interval() {
+    let (_d, root) = proj();
+    with_fillers(&root);
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    cs.set_resync_after(Duration::from_secs(3600));
+    // This search walks (the last build does not count as one)...
+    assert!(!search(&cs, "render").matches.is_empty());
+    // ...so the next one, within the interval, trusts the index.
+    write(&root, "src/late.rs", "fn latearrival() {}\n");
+    assert!(search(&cs, "latearrival").matches.is_empty());
+    // Editor saves and builds do not wait for the interval.
+    cs.set_resync_after(Duration::ZERO);
+    assert_eq!(found(&search(&cs, "latearrival"), &root), ["src/late.rs"]);
+}
+
+#[test]
+fn a_search_does_not_wait_for_the_build_that_is_running() {
+    let (_d, root) = proj();
+    for i in 0..20 {
+        write(&root, &format!("old/f{i}.rs"), "fn alphaword() {}\n");
+    }
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    cs.set_resync_after(Duration::ZERO);
+    for i in 0..200 {
+        write(&root, &format!("new/f{i}.rs"), "fn betaword() {}\n");
+    }
+    let pause = pause_after_first_commit(&cs);
+    let builder = {
+        let cs = cs.clone();
+        std::thread::spawn(move || cs.build_blocking(&[]))
+    };
+    pause.reached.recv_timeout(Duration::from_secs(30)).unwrap();
+    // The build holds the gate and is parked: a search that insisted on
+    // walking would hang here.
+    let during = within(30, "a search during a build", {
+        let cs = cs.clone();
+        move || cs.search_blocking("alphaword", 50).unwrap()
+    });
+    assert_eq!(during.matches.len(), 20);
+    pause.resume.send(()).unwrap();
+    builder.join().unwrap().unwrap();
+    assert_eq!(cs.status().files, 220);
+}
+
+#[test]
+fn a_search_survives_a_root_that_vanished() {
+    let (_d, root) = proj();
+    write(&root, "a.rs", "fn goneword() {}\n");
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    cs.set_resync_after(Duration::ZERO);
+    drop(_d);
+    // The walk cannot run; the search still answers from the index and does
+    // not serve text it cannot read.
+    let res = cs.search_blocking("goneword", 5).unwrap();
+    assert!(res.matches.is_empty(), "{res:?}");
+}
+
+#[test]
+fn the_walk_interval_grows_with_the_cost_of_walking() {
+    use super::engine::resync_interval;
+    assert_eq!(resync_interval(Duration::ZERO), Duration::from_secs(1));
+    assert_eq!(
+        resync_interval(Duration::from_millis(50)),
+        Duration::from_secs(1)
+    );
+    // A tree that takes 1.5 s to walk is not walked again within 6 s.
+    assert_eq!(
+        resync_interval(Duration::from_millis(1500)),
+        Duration::from_secs(6)
+    );
+}
+
+// ── only a build of the whole root completes the index (see above) ───────────
+
+#[test]
+fn a_filesystem_root_is_refused_before_anything_is_walked() {
+    let top = std::env::temp_dir()
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_path_buf();
+    let cs = CodeSearch::new(&top);
+    assert!(matches!(
+        cs.build_blocking(&[]),
+        Err(SearchError::RootTooBroad(_))
+    ));
+    assert!(matches!(
+        cs.search_blocking("anything", 5),
+        Err(SearchError::RootTooBroad(_))
+    ));
+    assert_eq!(cs.status(), IndexStatus::default());
+}
+
+// ── giving up ────────────────────────────────────────────────────────────────
+
+/// A runtime like the CLI's.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn wait_until_idle(cs: &CodeSearch) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while cs.status().building {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the build never ended"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Start `call` on a runtime, park its build after the first committed batch,
+/// drop the future the way the agent's Stop does, and let the build go on.
+/// Returns once the build thread has ended.
+fn drop_the_call_mid_build(
+    cs: &CodeSearch,
+    call: impl FnOnce(CodeSearch) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) {
+    let rt = runtime();
+    let pause = pause_after_first_commit(cs);
+    let task = rt.spawn(call(cs.clone()));
+    pause.reached.recv_timeout(Duration::from_secs(30)).unwrap();
+    task.abort();
+    // The future, and the guard it holds, are gone once the task is cancelled.
+    assert!(rt.block_on(task).unwrap_err().is_cancelled());
+    pause.resume.send(()).unwrap();
+    wait_until_idle(cs);
+    // A runtime that is dropped while a build still ran would wait for it.
+    drop(rt);
+}
+
+fn many_files(root: &Path) {
+    for i in 0..1000 {
+        write(
+            root,
+            &format!("d{}/f{i}.rs", i % 20),
+            &format!("fn cancelword{i}() {{}}\n"),
+        );
+    }
+}
+
+#[test]
+fn dropping_an_async_build_stops_the_build() {
+    let (_d, root) = proj();
+    many_files(&root);
+    let cs = CodeSearch::new(&root);
+    drop_the_call_mid_build(&cs, |cs| {
+        Box::pin(async move {
+            let _ = cs.build(&[]).await;
+        })
+    });
+    let status = cs.status();
+    assert!(
+        !status.built && status.files <= scan::COMMIT_GROUP,
+        "the build ran on after its caller gave up: {status:?}"
+    );
+    cs.with_index(Index::assert_consistent);
+    // What was committed stays, and the next build carries on from there.
+    let st = build(&cs);
+    assert_eq!(st.total_files, 1000, "{st:?}");
+    assert!(st.unchanged > 0, "{st:?}");
+}
+
+#[test]
+fn dropping_an_async_first_search_stops_its_build() {
+    let (_d, root) = proj();
+    many_files(&root);
+    let cs = CodeSearch::new(&root);
+    drop_the_call_mid_build(&cs, |cs| {
+        Box::pin(async move {
+            let _ = cs.search("cancelword7", 5).await;
+        })
+    });
+    let status = cs.status();
+    assert!(
+        !status.built && status.files <= scan::COMMIT_GROUP,
+        "the first search's build ran on after its caller gave up: {status:?}"
+    );
+    // The search that follows indexes the whole root, as for any first search.
+    // (`cancelword7` is also the word `cancelword`, which every file has.)
+    assert_eq!(found(&search(&cs, "cancelword7"), &root)[0], "d7/f7.rs");
+    assert_eq!(cs.status().files, 1000);
+}
+
+#[test]
+fn a_call_that_finishes_is_not_disturbed_by_the_guard_it_leaves_behind() {
+    let (_d, root) = proj();
+    write(&root, "a.rs", "fn finishedword() {}\n");
+    let cs = CodeSearch::new(&root);
+    let rt = runtime();
+    let st = rt.block_on(cs.build(&[])).unwrap();
+    assert_eq!(st.indexed, 1);
+    let res = rt.block_on(cs.search("finishedword", 5)).unwrap();
+    assert_eq!(res.matches.len(), 1);
+    // Calls made after other calls were dropped start with a clean flag.
+    write(&root, "b.rs", "fn secondword() {}\n");
+    assert_eq!(rt.block_on(cs.build(&[])).unwrap().indexed, 1);
+}
+
+#[test]
+fn resetting_the_root_stops_the_walk_that_was_started_for_the_old_one() {
+    let (_d1, old) = proj();
+    let (_d2, new) = proj();
+    for i in 0..300 {
+        write(&old, &format!("d{}/f{i}.rs", i % 10), "fn sigmaword() {}\n");
+    }
+    write(&new, "b.rs", "fn omegaword() {}\n");
+    let cs = CodeSearch::new(&old);
+    // The root is replaced just as the walk is about to enter the old tree.
+    let other = cs.clone();
+    let new2 = new.clone();
+    cs.set_before_walk(move || other.reset_root(&new2));
+    assert!(matches!(
+        cs.build_blocking(&[]),
+        Err(SearchError::RootChanged)
+    ));
+    // Nothing of the old tree was committed, and the gate is free at once.
+    assert_eq!(cs.status(), IndexStatus::default());
+    cs.set_before_walk(|| {});
+    assert_eq!(found(&search(&cs, "omegaword"), &new), ["b.rs"]);
+    assert!(search(&cs, "sigmaword").matches.is_empty());
+}
+
+#[test]
+fn reset_root_frees_the_old_index_off_the_calling_thread() {
+    let (_d1, one) = proj();
+    let (_d2, two) = proj();
+    write(&one, "a.rs", "fn alphamarker() {}\n");
+    let cs = CodeSearch::new(&one);
+    build(&cs);
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    cs.with_index_mut(|index| {
+        index.set_drop_hook(move || {
+            let _ = tx.lock().unwrap().send(std::thread::current().id());
+        })
+    });
+    cs.reset_root(&two);
+    let freed_on = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_ne!(
+        freed_on,
+        std::thread::current().id(),
+        "the caller (the UI thread in the IDE) freed the old index"
+    );
+    assert_eq!(cs.root(), two);
+}
+
+// ── a read that fails says nothing about the file ────────────────────────────
+
+#[test]
+fn a_failed_read_keeps_the_file_that_was_indexed() {
+    let mut idx = Index::new();
+    idx.apply(
+        0,
+        &[],
+        vec![
+            Parsed::File(parsed("/w/a.rs", "fn keepme() {}\n")),
+            Parsed::File(parsed("/w/b.rs", "fn other() {}\n")),
+        ],
+    );
+    let applied = idx.apply(
+        u64::MAX,
+        &[],
+        vec![
+            Parsed::Failed(PathBuf::from("/w/a.rs")),
+            // Never indexed, still unreadable: nothing to keep, nothing to add.
+            Parsed::Failed(PathBuf::from("/w/never.rs")),
+        ],
+    );
+    assert_eq!(
+        (applied.errors, applied.removed, applied.indexed),
+        (2, 0, 0),
+        "{applied:?}"
+    );
+    assert_eq!(idx.file_count(), 2);
+    assert_eq!(ranking(&idx, "keepme").len(), 1);
+    idx.assert_consistent();
+    // A read that worked, or found the file gone, still replaces or drops it.
+    let applied = idx.apply(u64::MAX, &[], vec![Parsed::Gone(PathBuf::from("/w/a.rs"))]);
+    assert_eq!(applied.removed, 1);
+    assert!(ranking(&idx, "keepme").is_empty());
+    idx.assert_consistent();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_stays_indexed_and_is_read_again_once_it_can_be() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, root) = proj();
+    let a = write(&root, "a.rs", "fn firstversion() {}\n");
+    write(&root, "b.rs", "fn untouched() {}\n");
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    fs::write(&a, "fn secondversion() {}\n").unwrap();
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = || fs::set_permissions(&a, fs::Permissions::from_mode(0o644)).unwrap();
+    if fs::File::open(&a).is_ok() {
+        restore();
+        eprintln!("this user can read files without permission; skipping");
+        return;
+    }
+    cs.refresh_file(&a);
+    assert_eq!(cs.status().files, 2, "the file left the index");
+    // It is not served while it cannot be read...
+    assert!(search(&cs, "firstversion").matches.is_empty());
+    // ...and the next search reads it again once it can.
+    restore();
+    cs.set_resync_after(Duration::ZERO);
+    assert_eq!(found(&search(&cs, "secondversion"), &root), ["a.rs"]);
 }

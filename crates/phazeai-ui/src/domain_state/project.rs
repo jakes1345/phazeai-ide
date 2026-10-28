@@ -22,7 +22,7 @@ pub struct ProjectState {
     /// `[search] enabled` at startup. When false nothing is indexed or run.
     pub code_search_enabled: bool,
     /// `[search] auto_index` at startup: index in the background when a
-    /// workspace opens.
+    /// workspace that looks like a project opens.
     pub code_search_auto_index: bool,
     /// One line describing the index ("Indexed 1,204 files · 5,330 chunks").
     pub code_search_status: RwSignal<String>,

@@ -479,7 +479,10 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     let code_results_view = {
         let open_file = state.editor.open_file;
         let goto_line = state.editor.goto_line;
-        let engine = state.project.code_search.clone();
+        // The signal, not the engine: `CodeSearch::root` takes the index lock,
+        // which a commit or a root switch can hold for a while, and this runs
+        // on the UI thread for every hit drawn.
+        let workspace_root = state.project.workspace_root;
         container(
             scroll(
                 dyn_stack(
@@ -495,7 +498,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                     move |hit| {
                         let place = format!(
                             "{}:{}",
-                            display_path(&engine.root(), &hit.file),
+                            display_path(&workspace_root.get_untracked(), &hit.file),
                             hit.start_line
                         );
                         let preview = snippet_preview(&hit.snippet);

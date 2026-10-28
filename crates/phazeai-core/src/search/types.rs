@@ -58,7 +58,8 @@ pub struct BuildStats {
 /// A snapshot of the index; reading it never waits for a build.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct IndexStatus {
-    /// At least one build has completed for the current root.
+    /// A build of the whole root has completed for the current root. A build of
+    /// a few paths does not count: the first search still indexes the rest.
     pub built: bool,
     /// A build is running right now.
     pub building: bool,
@@ -117,6 +118,12 @@ pub enum SearchError {
     InvalidQuery(String),
     #[error("the search root changed while the operation was running")]
     RootChanged,
+    /// The caller gave up (its future was dropped) and the work stopped. Whatever
+    /// was indexed so far stays; the next call carries on from there.
+    #[error("the operation was cancelled")]
+    Cancelled,
+    #[error("{} is a filesystem root, which is too broad to search; open a project folder", .0.display())]
+    RootTooBroad(std::path::PathBuf),
     #[error("search worker failed: {0}")]
     Worker(String),
 }

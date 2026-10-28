@@ -19,10 +19,6 @@
 //! 10. seeded randomized differential tests against a fresh index and an oracle
 //! 11. more adversarial cases (identifier styles, snippets, odd roots, churn, size caps, fuzz)
 //!
-//! Tests whose comment starts with `ENGINE BUG` currently fail because of a
-//! defect in the engine (not in the test); they stay in the suite, un-ignored,
-//! so that the fix can be checked against them.
-//!
 //! `CODE_SEARCH_SPEC_EXTRA_SEEDS=N` makes `differential_soak` replay N more seeds.
 
 use phazeai_core::privacy;
@@ -160,10 +156,14 @@ fn check_hit(root: &Path, h: &SearchHit) {
         .collect::<Vec<_>>()
         .join("\n");
     if h.snippet != expected {
-        // One enormous line is shortened and marked with an ellipsis.
-        let cut = h.snippet.strip_suffix('\u{2026}');
+        // One enormous line is shortened to a window of it (about 600
+        // characters around the match), each cut side marked with an ellipsis.
+        let window = h.snippet.strip_prefix('\u{2026}').unwrap_or(&h.snippet);
+        let window = window.strip_suffix('\u{2026}').unwrap_or(window);
         assert!(
-            h.start_line == h.end_line && cut.is_some_and(|c| expected.starts_with(c)),
+            h.start_line == h.end_line
+                && h.snippet.chars().count() <= 600
+                && expected.contains(window),
             "{}: snippet is not lines {}..={}\n--- snippet ---\n{}\n--- file lines ---\n{}",
             h.file,
             h.start_line,
@@ -1686,7 +1686,7 @@ fn refresh_file_applies_the_same_rules_as_a_build() {
 }
 
 #[test]
-fn remove_file_drops_files_and_whole_directories_until_the_next_build() {
+fn remove_file_drops_files_and_whole_directories_until_the_disk_is_looked_at_again() {
     let repo = Repo::new();
     let files = write_tokens(
         &repo,
@@ -1703,17 +1703,19 @@ fn remove_file_drops_files_and_whole_directories_until_the_next_build() {
     cs.remove_file(&repo.p("e.rs"));
     cs.remove_file(&repo.p("drop"));
     cs.remove_file(&repo.p("never/was/there.rs"));
-    let found = found_set(&cs, &files);
-    // `drop` must not take `dropper` with it (component-wise prefix).
-    assert_eq!(
-        found,
-        BTreeSet::from(["keep/a.rs".to_string(), "dropper/d.rs".to_string()])
-    );
+    // `drop` must not take `dropper` with it (component-wise prefix): what is
+    // left is `keep/a.rs` and `dropper/d.rs`. (Counted, not searched for: a
+    // search looks at the disk too and would bring the files straight back.)
     assert_eq!(cs.status().files, 2);
-    // The disk is the truth: a build brings them back.
+    assert_eq!(cs.status().chunks, 2);
+    // The disk is the truth: a build brings them back...
     let st = sync(&cs, &[]);
     assert_eq!((st.indexed, st.total_files), (3, 5), "{st:?}");
+    // ...and so does the first search after that (no search has looked yet).
+    cs.remove_file(&repo.p("drop"));
+    assert_eq!(cs.status().files, 3);
     assert_eq!(found_set(&cs, &files).len(), 5);
+    assert_eq!(cs.status().files, 5);
 }
 
 #[test]
@@ -2012,12 +2014,12 @@ fn a_same_size_edit_with_a_new_timestamp_is_seen() {
     assert_eq!(find(&cs, "betaswappedwordz"), ["b.rs"]);
 }
 
-// ENGINE BUG: code_search's tool description promises "code_search builds the index on
-// first use and refreshes files it finds out of date, so build_search_index is only
-// needed after many files changed at once". Only files that are already *hits* are
-// re-read, so a word that an edit added to an indexed file is invisible to every search
-// until refresh_file() or a build. An agent that edits a file with the file tools and
-// then searches for the symbol it just wrote gets nothing back.
+// code_search's tool description promises "code_search builds the index on first use
+// and refreshes files it finds out of date, so build_search_index is only needed after
+// many files changed at once". Re-reading the files that are already *hits* is not
+// enough: a word that an edit added to an indexed file is in no posting list yet, so an
+// agent that edits a file with the file tools and then searches for the symbol it just
+// wrote would get nothing back. Searches therefore look at the disk too.
 #[test]
 fn a_word_added_by_an_edit_is_found_by_the_next_search_without_a_manual_refresh() {
     let (repo, cs) = change_repo();
@@ -2033,8 +2035,8 @@ fn a_word_added_by_an_edit_is_found_by_the_next_search_without_a_manual_refresh(
     );
 }
 
-// ENGINE BUG: same root cause as above, for files that did not exist when the index was
-// built (an agent that writes a new file and then searches for what it wrote).
+// Same, for files that did not exist when the index was built (an agent that writes a
+// new file and then searches for what it wrote).
 #[test]
 fn a_new_file_is_found_by_the_next_search_without_a_manual_refresh() {
     let (repo, cs) = change_repo();
@@ -4533,9 +4535,9 @@ fn identifier_splitting_covers_the_common_naming_styles() {
     }
 }
 
-// ENGINE BUG (quality): the snippet of a hit inside one very long line (minified
-// JS, a data file) is the first 599 characters of that line, so it can leave out
-// the matching text completely and tells the reader nothing about the hit.
+// The snippet of a hit inside one very long line (minified JS, a data file) is a window
+// of about 600 characters around the match, not the head of the line, which can leave
+// out the matching text completely and tells the reader nothing about the hit.
 #[test]
 fn the_snippet_of_a_very_long_line_shows_the_match() {
     let repo = Repo::new();
@@ -5104,19 +5106,23 @@ fn partial_builds_only_touch_their_scope_and_quietly_drop_vanished_paths() {
         "{st:?}"
     );
     assert_eq!(cs.status().files, 4, "b/ was not part of the build");
-    assert_eq!(find(&cs, "scopeaz"), ["a/z.rs"]);
     // A path that vanished from disk but is still in the index is dropped without complaint.
     let st = sync(&cs, &[repo.p("b/x.rs")]);
     assert_eq!((st.removed, st.errors, st.indexed), (1, 0, 0), "{st:?}");
     assert!(st.warnings.is_empty(), "{st:?}");
+    assert_eq!(cs.status().files, 3);
+    let st = sync(&cs, &[repo.p("b")]);
+    assert_eq!((st.indexed, st.unchanged), (1, 1), "{st:?}");
+    assert_eq!(cs.status().files, 4);
+    // (Searches only come now: a search looks at the whole disk, so one in
+    // between would have done the partial builds' work for them.)
+    assert_eq!(find(&cs, "scopeaz"), ["a/z.rs"]);
+    assert_eq!(find(&cs, "scopebz"), ["b/z.rs"]);
     assert_eq!(
         find(&cs, "scopebx"),
         Vec::<String>::new(),
         "a vanished file is never served"
     );
-    let st = sync(&cs, &[repo.p("b")]);
-    assert_eq!((st.indexed, st.unchanged), (1, 1), "{st:?}");
-    assert_eq!(cs.status().files, 4);
 }
 
 #[test]
@@ -5168,12 +5174,11 @@ fn equal_chunks_of_one_file_report_the_first() {
     assert!(covers(&res.matches[0], 21), "{:?}", res.matches[0]);
 }
 
-// ENGINE BUG (documented deviation 4 of the engine's report): a partial
-// `build_blocking(paths)` marks the whole index as built, so when the model's
-// first call is `build_search_index {"paths": ["web"]}` (the tool description
-// offers "to index a specific path") every later `code_search` ranks only that
-// folder: the promised "auto-builds the root on first use" never happens and
-// nothing tells the model that most of the workspace is missing.
+// A partial `build_blocking(paths)` does not count as the root being built: when the
+// model's first call is `build_search_index {"paths": ["web"]}` (the tool description
+// offers "to index a specific path") the first `code_search` still auto-builds the root,
+// instead of ranking that folder alone with nothing telling the model that most of the
+// workspace is missing.
 #[test]
 fn a_partial_build_before_the_first_search_does_not_stop_the_search_from_indexing_the_rest() {
     let (repo, cs) = mini_repo();

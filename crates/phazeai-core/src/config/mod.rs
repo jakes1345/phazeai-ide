@@ -6,19 +6,51 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "RawSettings")]
 pub struct Settings {
     pub llm: LlmSettings,
     pub editor: EditorSettings,
     /// Built-in code search. Named `[sidecar]` before the Python subprocess
-    /// was replaced; old config files keep loading through the alias.
-    #[serde(default, alias = "sidecar")]
+    /// was replaced; old config files keep loading (see [`RawSettings`]).
     pub search: SearchSettings,
-    #[serde(default)]
     pub providers: Vec<ProviderEntry>,
-    #[serde(default)]
     pub model_routes: HashMap<TaskType, ModelRoute>,
-    #[serde(default)]
     pub local_ai: crate::local_ai::LocalAiSettings,
+}
+
+/// `config.toml` as it is read. Not a field alias: serde refuses a file that
+/// holds both an alias and the name it stands for (duplicate field), and a
+/// user who adds `[search]` to a config that still has `[sidecar]` would lose
+/// every setting to the defaults on the next save. Both tables are accepted,
+/// and `[search]` wins.
+#[derive(Deserialize)]
+struct RawSettings {
+    llm: LlmSettings,
+    editor: EditorSettings,
+    #[serde(default)]
+    search: Option<SearchSettings>,
+    /// The table `[search]` replaced.
+    #[serde(default)]
+    sidecar: Option<SearchSettings>,
+    #[serde(default)]
+    providers: Vec<ProviderEntry>,
+    #[serde(default)]
+    model_routes: HashMap<TaskType, ModelRoute>,
+    #[serde(default)]
+    local_ai: crate::local_ai::LocalAiSettings,
+}
+
+impl From<RawSettings> for Settings {
+    fn from(raw: RawSettings) -> Self {
+        Self {
+            llm: raw.llm,
+            editor: raw.editor,
+            search: raw.search.or(raw.sidecar).unwrap_or_default(),
+            providers: raw.providers,
+            model_routes: raw.model_routes,
+            local_ai: raw.local_ai,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,8 +151,10 @@ pub struct SearchSettings {
     /// Offer code search in the IDE and to the agent (the `code_search` and
     /// `build_search_index` tools).
     pub enabled: bool,
-    /// Build the index when the IDE opens a workspace instead of on the first
-    /// search. The CLI always indexes on the first search.
+    /// Build the index when the IDE opens a workspace that looks like a
+    /// project (a version-controlled tree or one with a build manifest; never
+    /// `/` or a home directory) instead of on the first search. The CLI always
+    /// indexes on the first search.
     #[serde(alias = "auto_start")]
     pub auto_index: bool,
 }
@@ -367,6 +401,37 @@ auto_start = false
         let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert!(back.search.enabled);
         assert!(!back.search.auto_index);
+    }
+
+    #[test]
+    fn both_tables_at_once_keep_the_whole_config_and_search_wins() {
+        // A hand edit of an old config: [search] added, [sidecar] left behind.
+        let both = format!("{OLD_CONFIG}\n[search]\nenabled = true\nauto_index = true\n");
+        let s: Settings = toml::from_str(&both).expect("both tables parse");
+        assert_eq!(s.llm.model, "qwen2.5-coder:7b");
+        assert_eq!(s.editor.font_size, 15.0);
+        assert!(s.search.enabled && s.search.auto_index, "[search] wins");
+
+        // The other way round, the old table is the one that disagrees.
+        let off = format!("{OLD_CONFIG}\n[search]\nenabled = false\n");
+        let s: Settings = toml::from_str(&off).unwrap();
+        assert!(!s.search.enabled);
+        assert!(
+            s.search.auto_index,
+            "keys missing from [search] are defaults, not the old table's"
+        );
+
+        // And it is written back as the one [search] table.
+        let saved = toml::to_string_pretty(&s).unwrap();
+        let doc: toml::Table = toml::from_str(&saved).unwrap();
+        assert!(!doc.contains_key("sidecar"), "{saved}");
+        assert!(doc.contains_key("search"), "{saved}");
+    }
+
+    #[test]
+    fn a_config_without_the_required_tables_is_still_refused() {
+        assert!(toml::from_str::<Settings>("[sidecar]\nenabled = false\n").is_err());
+        assert!(toml::from_str::<Settings>("[llm]\nprovider = \"ollama\"\n").is_err());
     }
 
     #[test]

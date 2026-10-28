@@ -91,14 +91,50 @@ pub(crate) fn build(lines: &[&str], first_line: usize, terms: &HashMap<&str, usi
         .collect::<Vec<_>>()
         .join("\n");
     if chars(a, b) > MAX_CHARS {
-        // A single enormous line.
-        text = text.chars().take(MAX_CHARS - 1).collect::<String>() + "\u{2026}";
+        // A single enormous line (minified code, a data file).
+        text = excerpt(lines[a].trim_end(), &mut tk, terms);
     }
     Snippet {
         start: first_line + a,
         end: first_line + b - 1,
         text,
     }
+}
+
+/// [`MAX_CHARS`] characters of `line`, which is longer than that, around the
+/// first word that matches a query term, so the reader sees why it matched. A
+/// cut side is marked with an ellipsis. A line that matches only through the
+/// file's path words has no such word and shows its start.
+fn excerpt(line: &str, tk: &mut Tokenizer, terms: &HashMap<&str, usize>) -> String {
+    let total = line.chars().count();
+    let head = (0, MAX_CHARS - 1);
+    let (from, to) = match tk.first_match(line, |t| terms.contains_key(t)) {
+        Some(word) => {
+            let start = line[..word.start].chars().count();
+            let len = line[word].chars().count();
+            // Room for an ellipsis on both sides; the word sits in the middle.
+            let body = MAX_CHARS - 2;
+            let from = start.saturating_sub(body.saturating_sub(len) / 2);
+            if from == 0 {
+                head
+            } else if from + body >= total {
+                (total - (MAX_CHARS - 1), total)
+            } else {
+                (from, from + body)
+            }
+        }
+        None => head,
+    };
+    let byte = |n: usize| line.char_indices().nth(n).map_or(line.len(), |(i, _)| i);
+    let mut out = String::with_capacity(MAX_CHARS * 4);
+    if from > 0 {
+        out.push('\u{2026}');
+    }
+    out.push_str(&line[byte(from)..byte(to)]);
+    if to < total {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -205,6 +241,66 @@ mod tests {
         assert_eq!((s.start, s.end), (7, 7));
         assert_eq!(s.text.chars().count(), MAX_CHARS);
         assert!(s.text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_huge_line_is_cut_around_the_first_match() {
+        let line = format!("{}needle{}", "ab ".repeat(1500), " cd".repeat(1500));
+        let s = snip(&[line.as_str()], 3, &["needle"]);
+        assert_eq!((s.start, s.end), (3, 3));
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.starts_with('\u{2026}') && s.text.ends_with('\u{2026}'));
+        let at = s.text.find("needle").expect("the match is shown");
+        assert!(
+            (200..400).contains(&at),
+            "the match sits near the middle, not at {at}"
+        );
+    }
+
+    #[test]
+    fn a_match_near_the_end_of_a_huge_line_ends_the_excerpt() {
+        let line = format!("{}needle tail", "ab ".repeat(2000));
+        let s = snip(&[line.as_str()], 1, &["needle"]);
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.starts_with('\u{2026}'));
+        assert!(s.text.ends_with("needle tail"), "{}", s.text);
+
+        let line = format!("needle {}", "cd ".repeat(2000));
+        let s = snip(&[line.as_str()], 1, &["needle"]);
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.starts_with("needle ") && s.text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_match_inside_an_identifier_shows_the_whole_identifier() {
+        let line = format!(
+            "{}parseNeedleConfig(x){}",
+            "ab ".repeat(1500),
+            " cd".repeat(1500)
+        );
+        let s = snip(&[line.as_str()], 1, &["needle"]);
+        assert!(s.text.contains("parseNeedleConfig(x)"), "{}", s.text);
+    }
+
+    #[test]
+    fn a_huge_line_without_a_matching_word_shows_its_start() {
+        // The hit came from the file's path words, not from this line.
+        let line = format!("start {}", "ab ".repeat(2000));
+        let s = snip(&[line.as_str()], 1, &["absent"]);
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.starts_with("start ") && s.text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn excerpts_of_multibyte_lines_cut_on_character_boundaries() {
+        let line = format!("{}needle{}", "é ".repeat(2000), " ü".repeat(2000));
+        let s = snip(&[line.as_str()], 1, &["needle"]);
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.contains("needle"));
+        let line = format!("{}needle", "日本語 ".repeat(900));
+        let s = snip(&[line.as_str()], 1, &["needle"]);
+        assert_eq!(s.text.chars().count(), MAX_CHARS);
+        assert!(s.text.ends_with("needle"));
     }
 
     #[test]

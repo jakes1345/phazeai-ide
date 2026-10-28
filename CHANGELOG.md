@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Built-in code search in `phazeai-core` (`search/`): an in-process BM25 keyword index over the workspace, shared by the IDE and the CLI. Identifiers are split (`parseJsonConfig` matches `json config`), the index updates incrementally, and the privacy policy is applied both when files are indexed and when results are returned. It works on every platform, Windows included.
 - The CLI registers `code_search` and `build_search_index` itself, in the TUI and in `-p` one-shot mode, rooted at the working directory. The index is built on the first search, never at startup.
+- `code_search` finds what changed on disk since the last search: a search re-walks the workspace (at most about once a second) before ranking, so a word an edit added or a file created since is found by the next search without `build_search_index`.
 
 ### Changed
-- Config: the `[sidecar]` table is now `[search]`, with `enabled` and `auto_index`. Existing `config.toml` files keep working: `[sidecar]` is read as `[search]`, `auto_start` as `auto_index`, and `python_path` is ignored. The next save writes the new `[search]` table.
+- Config: the `[sidecar]` table is now `[search]`, with `enabled` and `auto_index`. Existing `config.toml` files keep working: `[sidecar]` is read as `[search]`, `auto_start` as `auto_index`, and `python_path` is ignored; a file that has both tables loads, with `[search]` winning. The next save writes the new `[search]` table.
+- The IDE builds the code search index at startup only for a workspace that looks like a project (under version control or with a build manifest). A launcher that starts the IDE in `/` or in the home directory no longer walks the whole disk; open a folder, or search, to index it. A filesystem root is refused by the search engine outright.
 - `code_search` and `build_search_index` count as read-only tools: `phazeai -p` runs them under the default `--allow read` and the TUI no longer asks before each search. Before, they fell under "unknown tool" and needed `--allow all`.
 
 ### Removed

@@ -8,12 +8,20 @@
 //! query for the identifier itself matches only code that spells it that way
 //! more strongly than prose does.
 //!
-//! Dropped: single characters, tokens over [`MAX_TOKEN_CHARS`] (a longer run
-//! is junk as a whole: base64, minified code), long hex and number runs, and a
-//! short list of English stop words.
+//! Dropped: single characters, tokens over [`MAX_TOKEN_CHARS`] (the whole of a
+//! long identifier is not kept, its pieces are: `shouldReturnEmptyList...` is
+//! found by `empty list`), runs over [`MAX_RUN_CHARS`] (junk as a whole: base64,
+//! minified code), long hex and number runs, and a short list of English stop
+//! words.
+
+use std::ops::Range;
 
 /// Longest token, in characters, that is kept.
 pub(crate) const MAX_TOKEN_CHARS: usize = 64;
+/// Longest run of word characters that is looked into. Real identifiers, even
+/// descriptive test names, stay far below it; a longer run is data. The cap
+/// also bounds the work (splitting is quadratic in the number of pieces).
+pub(crate) const MAX_RUN_CHARS: usize = 256;
 /// Most distinct terms one query contributes (the snippet picker keeps a
 /// `u64` bit mask per line, one bit per term).
 pub(crate) const MAX_QUERY_TERMS: usize = 64;
@@ -100,6 +108,22 @@ fn accept(tok: &str) -> bool {
     (2..=MAX_TOKEN_CHARS).contains(&n) && STOPWORDS.binary_search(&tok).is_err() && !is_junk(tok)
 }
 
+/// Byte ranges of the runs of word characters in `text`.
+fn word_runs(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut chars = text.char_indices();
+    let mut start = None;
+    std::iter::from_fn(move || {
+        for (i, c) in chars.by_ref() {
+            if is_word_char(c) {
+                start.get_or_insert(i);
+            } else if let Some(s) = start.take() {
+                return Some((s, i));
+            }
+        }
+        start.take().map(|s| (s, text.len()))
+    })
+}
+
 /// Reusable tokenizer state (scratch buffers); create one per file or query.
 pub(crate) struct Tokenizer {
     /// Candidate tokens of the identifier being processed; `cands[..used]` are live.
@@ -120,22 +144,31 @@ impl Tokenizer {
     /// Call `emit` for every token of `text`, in order of appearance. An
     /// identifier yields its whole lowercased form first, then its pieces.
     pub(crate) fn run<F: FnMut(&str)>(&mut self, text: &str, mut emit: F) {
-        let mut start = None;
-        for (i, c) in text.char_indices() {
-            if is_word_char(c) {
-                start.get_or_insert(i);
-            } else if let Some(s) = start.take() {
-                self.word(&text[s..i], &mut emit);
-            }
-        }
-        if let Some(s) = start {
-            self.word(&text[s..], &mut emit);
+        for (a, b) in word_runs(text) {
+            self.word(&text[a..b], &mut emit);
         }
     }
 
+    /// The byte range of the first run of `text` that yields a token `wanted`
+    /// accepts: where a query term matches, for cutting an excerpt.
+    pub(crate) fn first_match(
+        &mut self,
+        text: &str,
+        wanted: impl Fn(&str) -> bool,
+    ) -> Option<Range<usize>> {
+        for (a, b) in word_runs(text) {
+            let mut found = false;
+            self.word(&text[a..b], &mut |t: &str| found |= wanted(t));
+            if found {
+                return Some(a..b);
+            }
+        }
+        None
+    }
+
     fn word<F: FnMut(&str)>(&mut self, word: &str, emit: &mut F) {
-        // Cheap reject before counting characters: no kept token has more bytes.
-        if word.len() > MAX_TOKEN_CHARS * 4 || word.chars().count() > MAX_TOKEN_CHARS {
+        // Cheap reject before counting characters: no kept run has more bytes.
+        if word.len() > MAX_RUN_CHARS * 4 || word.chars().count() > MAX_RUN_CHARS {
             return;
         }
         // Most tokens are plain lowercase words: no allocation, no splitting.
@@ -303,10 +336,13 @@ mod tests {
 
     #[test]
     fn long_junk_is_dropped() {
+        // One word that is too long to keep has nothing to split into.
         let long = "a".repeat(MAX_TOKEN_CHARS + 1);
         assert!(toks(&long).is_empty());
-        // A long run is junk as a whole, its camelCase pieces are not emitted.
-        let blob = "AbCd".repeat(20);
+        // A run too long to be an identifier is data: neither it nor its
+        // camelCase pieces are emitted.
+        let blob = "AbCd".repeat(MAX_RUN_CHARS / 2);
+        assert!(blob.len() > MAX_RUN_CHARS);
         assert!(toks(&blob).is_empty());
         let max = "z".repeat(MAX_TOKEN_CHARS);
         assert_eq!(toks(&max), std::slice::from_ref(&max));
@@ -314,6 +350,68 @@ mod tests {
         assert!(toks("0xdeadbeef").is_empty());
         assert!(toks("123456789").is_empty());
         assert!(toks("550e8400").is_empty());
+    }
+
+    #[test]
+    fn long_identifiers_are_not_kept_whole_but_their_words_are() {
+        // Descriptive names (test functions, constants) run past 64 characters.
+        let camel = "shouldReturnEmptyListWhenUserHasNoPermissionsAndAccountIsDisabledForTenant";
+        assert!(camel.chars().count() > MAX_TOKEN_CHARS);
+        assert_eq!(
+            toks(camel),
+            [
+                "should",
+                "return",
+                "empty",
+                "list",
+                "user",
+                "has",
+                "no",
+                "permissions",
+                "account",
+                "disabled",
+                "tenant"
+            ]
+        );
+        let snake = "a_partial_build_before_the_first_search_does_not_stop_the_search_from_indexing_the_rest";
+        assert!(snake.chars().count() > MAX_TOKEN_CHARS);
+        assert_eq!(
+            toks(snake),
+            [
+                "partial", "build", "before", "first", "search", "not", "stop", "from", "indexing",
+                "rest"
+            ]
+        );
+        // The longest run that is still looked into.
+        let edge = format!("{}_end", "word_".repeat((MAX_RUN_CHARS - 4) / 5));
+        assert!(edge.chars().count() <= MAX_RUN_CHARS);
+        assert_eq!(toks(&edge), ["word", "end"]);
+        let beyond = format!("{edge}_end");
+        assert!(beyond.chars().count() > MAX_RUN_CHARS);
+        assert!(toks(&beyond).is_empty());
+        // A query spelling the identifier finds the same words.
+        for t in query_terms(snake) {
+            assert!(toks(snake).contains(&t), "{t}");
+        }
+        for t in query_terms("partial build indexing") {
+            assert!(toks(snake).contains(&t), "{t}");
+        }
+    }
+
+    #[test]
+    fn first_match_names_the_run_a_wanted_token_came_from() {
+        let mut tk = Tokenizer::new();
+        let text = "let x = 1; parseJsonConfig(path) // see config";
+        let at = tk.first_match(text, |t| t == "json").unwrap();
+        assert_eq!(&text[at], "parseJsonConfig");
+        let at = tk.first_match(text, |t| t == "config").unwrap();
+        assert_eq!(&text[at], "parseJsonConfig", "the earliest run wins");
+        // A run that ends the text counts too.
+        let at = tk.first_match("tail config", |t| t == "config").unwrap();
+        assert_eq!(&"tail config"[at], "config");
+        assert_eq!(tk.first_match(text, |t| t == "absent"), None);
+        assert_eq!(tk.first_match("", |_| true), None);
+        assert_eq!(tk.first_match("日本語 x", |t| t == "日本語"), Some(0..9));
     }
 
     #[test]

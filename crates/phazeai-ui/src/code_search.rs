@@ -17,7 +17,10 @@ use floem::{
     ext_event::create_ext_action,
     reactive::{create_effect, Scope, SignalGet, SignalUpdate},
 };
-use phazeai_core::search::{BuildStats, IndexStatus, SearchError, SearchLimits, SearchResults};
+use phazeai_core::privacy;
+use phazeai_core::search::{
+    looks_like_project, BuildStats, IndexStatus, SearchError, SearchLimits, SearchResults,
+};
 use phazeai_core::CodeSearch;
 
 use crate::domain_state::ProjectState;
@@ -67,13 +70,18 @@ pub fn initial_status(enabled: bool) -> String {
 }
 
 /// Start code search for a freshly created window: index the workspace in the
-/// background when `auto_index` is on, and follow the workspace when the user
-/// opens another folder.
+/// background when `auto_index` is on and the workspace looks like a project,
+/// and follow the workspace when the user opens another folder.
+///
+/// The workspace is the git root of the working directory, or the working
+/// directory itself, and a launcher starts the IDE in `/` or in the home
+/// directory. Such a folder is left for the first search to index, if the user
+/// ever asks, rather than walked on every launch.
 pub fn init(p: &ProjectState) {
     if !p.code_search_enabled {
         return;
     }
-    if p.code_search_auto_index {
+    if auto_index_wanted(p.code_search_auto_index, &p.workspace_root.get_untracked()) {
         start_build(p);
     }
     let p = p.clone();
@@ -86,20 +94,39 @@ pub fn init(p: &ProjectState) {
     });
 }
 
+/// Whether the index of `root` should be built without a search asking for it:
+/// `[search] auto_index` is on and `root` looks like a project.
+fn auto_index_wanted(setting: bool, root: &Path) -> bool {
+    setting && looks_like_project(root)
+}
+
+/// Point the engine at `root`, with the privacy policy of that project.
+///
+/// The policy follows the workspace in an effect of its own
+/// (`panels::privacy::install`), and Floem runs the subscribers of a signal in
+/// no particular order, so the build that starts next could otherwise read the
+/// old project's policy and index files the new one denies. Setting the project
+/// here, first, is idempotent: the other effect then does it again.
+fn follow_workspace(search: &CodeSearch, root: &Path) {
+    privacy::set_active_project(root);
+    search.reset_root(root);
+}
+
 /// The workspace changed: drop the old index and its results, then index the
 /// new folder if `auto_index` is on.
 ///
-/// `reset_root` runs here on the UI thread. It only swaps the index out under a
-/// lock held for microseconds, which is why it is not worth a thread.
+/// `reset_root` runs here on the UI thread. It waits at most for the commit in
+/// flight and hands the old index to a thread to be freed, so it does not
+/// stall the window however big the old project was.
 fn switch_root(p: &ProjectState, root: PathBuf) {
-    p.code_search.reset_root(root);
+    follow_workspace(&p.code_search, &root);
     p.code_search_seq.update(|n| *n += 1);
     p.code_search_results.set(Vec::new());
     p.code_search_notice.set(None);
     // A build for the old root may still be winding down; it must not stop the
     // new root from being indexed.
     p.code_search_building.set(false);
-    if p.code_search_auto_index {
+    if auto_index_wanted(p.code_search_auto_index, &root) {
         start_build(p);
     } else {
         sync_status(p);
@@ -422,6 +449,55 @@ mod tests {
         let found = engine.search_blocking("after_the_save", 5).unwrap();
         assert_eq!(found.matches.len(), 1, "{found:?}");
         assert!(found.matches[0].file.ends_with("saved.rs"));
+    }
+
+    #[test]
+    fn following_a_workspace_sets_its_privacy_policy_before_anything_is_indexed() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(new.path().join(".phazeai")).unwrap();
+        std::fs::write(
+            new.path().join(".phazeai/privacy.toml"),
+            "deny = [\"finance/**\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(new.path().join("finance")).unwrap();
+        std::fs::write(new.path().join("finance/ledger.md"), "ledgerword\n").unwrap();
+        std::fs::write(new.path().join("main.rs"), "fn mainword() {}\n").unwrap();
+
+        let engine = CodeSearch::new(old.path());
+        privacy::set_active_project(old.path());
+        follow_workspace(&engine, new.path());
+        assert_eq!(engine.root(), new.path());
+        // What the build that follows will read.
+        assert!(privacy::active().is_denied(&new.path().join("finance/ledger.md")));
+        let stats = engine.build_blocking(&[]).unwrap();
+        assert_eq!(stats.total_files, 1, "{stats:?}");
+        assert!(engine
+            .search_blocking("ledgerword", 5)
+            .unwrap()
+            .matches
+            .is_empty());
+        privacy::clear_active_project();
+    }
+
+    #[test]
+    fn only_a_folder_that_looks_like_a_project_is_indexed_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(auto_index_wanted(true, &repo));
+        assert!(!auto_index_wanted(false, &repo), "the setting still rules");
+        assert!(!auto_index_wanted(true, &plain));
+        // What a desktop launcher hands the IDE as its working directory.
+        let top = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        assert!(!auto_index_wanted(true, &top));
     }
 
     #[test]

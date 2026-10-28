@@ -4,14 +4,14 @@ use super::chunk;
 use super::index::{Parsed, ParsedChunk, ParsedFile, Stamp};
 use super::paths::path_starts_with;
 use super::tokenize::Tokenizer;
-use super::types::SearchLimits;
+use super::types::{SearchError, SearchLimits};
 use crate::privacy::PrivacyPolicy;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Directories never indexed (matched by name, at any depth). `.phazeai` is
@@ -101,6 +101,55 @@ fn is_skipped_dir(name: &str) -> bool {
     })
 }
 
+/// Tells a long walk that nobody wants its result any more: the call that
+/// started it was cancelled, or the root it was started for has been replaced
+/// (`CodeSearch::reset_root`). Cheap to poll (two atomic loads), so the walker,
+/// the stat pass and the read workers check it for every entry.
+#[derive(Clone)]
+pub(crate) struct Stop {
+    cancel: Arc<AtomicBool>,
+    /// The engine's current root generation.
+    current: Arc<AtomicU64>,
+    /// The generation the work was started for.
+    generation: u64,
+}
+
+impl Stop {
+    pub(crate) fn new(cancel: Arc<AtomicBool>, current: Arc<AtomicU64>, generation: u64) -> Self {
+        Self {
+            cancel,
+            current,
+            generation,
+        }
+    }
+
+    /// The root generation the work was started for.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// For work nobody can give up on (a single-file refresh).
+    pub(crate) fn never() -> Self {
+        Self::new(Arc::default(), Arc::default(), 0)
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+            || self.current.load(Ordering::Acquire) != self.generation
+    }
+
+    /// Why the work should stop, if it should.
+    pub(crate) fn reason(&self) -> Option<SearchError> {
+        if self.current.load(Ordering::Acquire) != self.generation {
+            Some(SearchError::RootChanged)
+        } else if self.cancel.load(Ordering::Relaxed) {
+            Some(SearchError::Cancelled)
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) struct Discovery {
     /// Absolute paths of indexable regular files inside the scope.
     pub files: Vec<PathBuf>,
@@ -115,8 +164,13 @@ pub(crate) struct Discovery {
 /// `.ignore` (also without a `.git` directory), [`SKIP_DIRS`], hidden files,
 /// the extension allowlist, no symlinks, and the privacy policy for
 /// directories. Directories outside the path from `root` to `scope` are not
-/// entered.
-pub(crate) fn discover(root: &Path, scope: &Path, policy: &Arc<PrivacyPolicy>) -> Discovery {
+/// entered. Once `stop` is set the walk ends early and the list is incomplete.
+pub(crate) fn discover(
+    root: &Path,
+    scope: &Path,
+    policy: &Arc<PrivacyPolicy>,
+    stop: &Stop,
+) -> Discovery {
     let denied = Arc::new(AtomicUsize::new(0));
     let mut builder = WalkBuilder::new(root);
     builder
@@ -132,7 +186,13 @@ pub(crate) fn discover(root: &Path, scope: &Path, policy: &Arc<PrivacyPolicy>) -
         let policy = Arc::clone(policy);
         let denied = Arc::clone(&denied);
         let scope = scope.to_path_buf();
+        let stop = stop.clone();
         builder.filter_entry(move |e| {
+            // Entries the filter rejects never reach the loop below, so a tree
+            // that is mostly ignored files must notice the stop here.
+            if stop.is_set() {
+                return false;
+            }
             if e.depth() == 0 {
                 return true;
             }
@@ -160,6 +220,9 @@ pub(crate) fn discover(root: &Path, scope: &Path, policy: &Arc<PrivacyPolicy>) -
     let mut files = Vec::new();
     let mut errors = 0;
     for entry in builder.build() {
+        if stop.is_set() {
+            break;
+        }
         match entry {
             Ok(e) if e.depth() > 0 && e.file_type().is_some_and(|t| t.is_file()) => {
                 files.push(e.into_path());
@@ -196,8 +259,14 @@ pub(crate) struct Plan {
 }
 
 /// Apply the privacy policy and the size limit to discovered files and read
-/// their (mtime, size). Denied files are never opened.
-pub(crate) fn plan(files: &[PathBuf], policy: &PrivacyPolicy, limits: &SearchLimits) -> Plan {
+/// their (mtime, size). Denied files are never opened. Once `stop` is set the
+/// remaining files are passed over and the plan is incomplete.
+pub(crate) fn plan(
+    files: &[PathBuf],
+    policy: &PrivacyPolicy,
+    limits: &SearchLimits,
+    stop: &Stop,
+) -> Plan {
     enum Outcome {
         Keep(Planned),
         Denied,
@@ -206,6 +275,9 @@ pub(crate) fn plan(files: &[PathBuf], policy: &PrivacyPolicy, limits: &SearchLim
         Gone,
     }
     let outcomes = parallel_map(files, |path| {
+        if stop.is_set() {
+            return Outcome::Gone;
+        }
         if policy.is_denied(path) {
             return Outcome::Denied;
         }
@@ -429,6 +501,7 @@ pub(crate) fn read_checked(path: &Path, expect: Stamp, max_bytes: u64) -> Option
 
 #[cfg(test)]
 mod tests {
+    use super::super::tokenize::MAX_TOKEN_CHARS;
     use super::*;
 
     #[test]
@@ -482,6 +555,76 @@ mod tests {
         assert_eq!(path_terms(Path::new("/w/Makefile"), root), ["makefile"]);
         // Outside the root only the file name counts; one-letter pieces are dropped.
         assert_eq!(path_terms(Path::new("/elsewhere/a_b.rs"), root), ["a_b"]);
+    }
+
+    #[test]
+    fn path_terms_split_names_longer_than_a_token() {
+        let root = Path::new("/w");
+        let dir =
+            "a_very_long_directory_name_that_describes_everything_about_the_quarantined_widget";
+        let file = "pipelineStageForTheNightlyBatchJobRunnerWithRetriesAndExponentialBackoffPolicyOverrides";
+        assert!(dir.len() > MAX_TOKEN_CHARS && file.len() > MAX_TOKEN_CHARS);
+        let path = root.join(dir).join(format!("{file}.rs"));
+        assert_eq!(
+            path_terms(&path, root),
+            [
+                "very",
+                "long",
+                "directory",
+                "name",
+                "describes",
+                "everything",
+                "about",
+                "quarantined",
+                "widget",
+                "pipeline",
+                "stage",
+                "nightly",
+                "batch",
+                "job",
+                "runner",
+                "retries",
+                "exponential",
+                "backoff",
+                "policy",
+                "overrides"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_walk_and_a_plan_end_early_once_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut files = Vec::new();
+        for i in 0..200 {
+            let path = root.join(format!("d{}", i % 20)).join(format!("f{i}.rs"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "fn x() {}\n").unwrap();
+            files.push(path);
+        }
+        let policy = Arc::new(PrivacyPolicy::defaults());
+        let limits = SearchLimits::default();
+        let never = Stop::never();
+        assert_eq!(discover(root, root, &policy, &never).files.len(), 200);
+        assert_eq!(plan(&files, &policy, &limits, &never).files.len(), 200);
+        assert!(never.reason().is_none());
+
+        // The caller gave up.
+        let cancelled = Stop::new(Arc::new(AtomicBool::new(true)), Arc::default(), 0);
+        assert!(discover(root, root, &policy, &cancelled).files.is_empty());
+        assert!(plan(&files, &policy, &limits, &cancelled).files.is_empty());
+        assert!(matches!(cancelled.reason(), Some(SearchError::Cancelled)));
+
+        // The root it was started for was replaced.
+        let current: Arc<AtomicU64> = Arc::default();
+        let replaced = Stop::new(Arc::default(), Arc::clone(&current), 0);
+        assert!(!replaced.is_set());
+        current.fetch_add(1, Ordering::AcqRel);
+        assert!(replaced.is_set());
+        assert!(discover(root, root, &policy, &replaced).files.is_empty());
+        assert!(plan(&files, &policy, &limits, &replaced).files.is_empty());
+        assert!(matches!(replaced.reason(), Some(SearchError::RootChanged)));
     }
 
     #[test]

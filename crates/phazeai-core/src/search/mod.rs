@@ -24,6 +24,14 @@
 //! policy (`crate::privacy`) is consulted before a file is read and again for
 //! every hit at query time, so a policy change takes effect immediately.
 //!
+//! The index follows the disk. The first search builds the root; later
+//! searches walk it again before ranking (at most about once a second, files
+//! are only stat-ed), so a file created, rewritten or deleted since the last
+//! look is found by the next search, and every returned hit is read again,
+//! which repairs a file that changed after that walk. Building or searching a
+//! few paths by hand ([`CodeSearch::build_blocking`] with `paths`) does not
+//! count as the root being built.
+//!
 //! Known limit: change detection compares modification time and size, so an
 //! external same-size edit within the file system's timestamp granularity
 //! goes unnoticed until the next change. Saves from the editor call
@@ -33,6 +41,7 @@ mod chunk;
 mod engine;
 mod index;
 mod paths;
+mod project;
 mod scan;
 mod snippet;
 mod tokenize;
@@ -43,5 +52,6 @@ mod types;
 mod tests;
 
 pub use engine::CodeSearch;
+pub use project::looks_like_project;
 pub use tool::{BuildIndexTool, CodeSearchTool};
 pub use types::{BuildStats, IndexStatus, SearchError, SearchHit, SearchLimits, SearchResults};

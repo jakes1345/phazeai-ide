@@ -6,10 +6,17 @@
 //!   lock held**. The index's write lock is taken only to apply a batch of
 //!   already-parsed files (milliseconds), so a search that arrives mid-build
 //!   ranks against the last committed batch and is never held up for the
-//!   length of the build.
+//!   length of the build. The exception is a compaction (one pass over the
+//!   index, run when as many chunks have died as half the live ones), which
+//!   takes about 0.1 s at 36,000 chunks.
 //! * Builds are serialised by a gate. A second caller waits for the running
 //!   build, then does its own sync, which is cheap because everything is
 //!   unchanged by then; its stats describe the state when *it* finished.
+//! * Builds give up on request. Every call carries a cancel flag (set when the
+//!   future of an async call is dropped) and the root generation it started
+//!   for ([`Stop`]); the walker, the stat pass and the read workers poll both,
+//!   so a cancelled call, or one for a root that was replaced, ends within a
+//!   few files instead of finishing a walk nobody wants while holding the gate.
 //! * Single-file updates ([`CodeSearch::refresh_file`], [`CodeSearch::remove_file`])
 //!   are serialised by a second gate, from reading the file to committing it:
 //!   two of them racing (an editor save and a search repairing a stale hit)
@@ -23,17 +30,17 @@
 
 use super::index::{Applied, Candidate, Index, Parsed};
 use super::paths::{absolutize, path_key, path_starts_with};
-use super::scan::{self, Planned, COMMIT_GROUP};
+use super::scan::{self, Planned, Stop, COMMIT_GROUP};
 use super::snippet;
 use super::tokenize;
 use super::types::{BuildStats, IndexStatus, SearchError, SearchHit, SearchLimits, SearchResults};
 use crate::privacy;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 /// Hardest cap on `top_k`, whatever the caller asks for.
 const MAX_TOP_K: usize = 50;
@@ -41,6 +48,18 @@ const MAX_TOP_K: usize = 50;
 const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// How many times one search re-reads files it found out of date and re-ranks.
 const MAX_FIXUP_ROUNDS: usize = 2;
+/// A search walks the whole root again (files are only stat-ed, so this is
+/// cheap) unless a search did so less than this long ago...
+const RESYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// ...or, on a tree that is slow to walk, less than this many walk times ago,
+/// so walking costs a fifth of the time at most.
+const RESYNC_WALK_FACTOR: u32 = 4;
+
+/// How long after one search's walk of the root the next search may walk again,
+/// given how long that walk took.
+pub(super) fn resync_interval(walk: Duration) -> Duration {
+    RESYNC_INTERVAL.max(walk * RESYNC_WALK_FACTOR)
+}
 
 /// An in-process keyword search index for one workspace.
 ///
@@ -53,6 +72,10 @@ pub struct CodeSearch {
 struct Inner {
     limits: SearchLimits,
     state: RwLock<State>,
+    /// Bumped by `reset_root` while it holds the write lock; work started for
+    /// an older value is abandoned (see [`Stop`]). Lives outside the lock so a
+    /// walk can poll it without taking one.
+    generation: Arc<AtomicU64>,
     /// Held for the whole of a build.
     gate: Mutex<()>,
     /// Held by `refresh_file` and `remove_file` from reading a file to
@@ -64,6 +87,17 @@ struct Inner {
     truncated: AtomicBool,
     files: AtomicUsize,
     chunks: AtomicUsize,
+    /// When a search last walked the whole root (the last build does not
+    /// count: it may be old by the time the first search runs).
+    searched_at: Mutex<Option<Instant>>,
+    /// How long the last walk (finding and stat-ing the files) took.
+    walk_nanos: AtomicU64,
+    /// Test seam: replaces [`resync_interval`].
+    #[cfg(test)]
+    resync_after: Mutex<Option<Duration>>,
+    /// Test seam: runs after a sync took its generation, before it walks.
+    #[cfg(test)]
+    before_walk: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test seam: runs after each committed batch with no lock held.
     #[cfg(test)]
     after_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -74,9 +108,18 @@ struct Inner {
 
 struct State {
     root: PathBuf,
-    /// Bumped by `reset_root`; work started for an older root is abandoned.
-    generation: u64,
     index: Index,
+}
+
+/// Sets a cancel flag when dropped. Held by the async calls, whose futures are
+/// dropped when the caller gives up (the agent's Stop, the CLI quitting): the
+/// blocking thread they started cannot be aborted, but it can be told.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Clears `building` however a build ends.
@@ -115,9 +158,9 @@ impl CodeSearch {
                 limits,
                 state: RwLock::new(State {
                     root: absolutize(&root.into()),
-                    generation: 0,
                     index: Index::new(),
                 }),
+                generation: Arc::default(),
                 gate: Mutex::new(()),
                 edits: Mutex::new(()),
                 built: AtomicBool::new(false),
@@ -125,6 +168,12 @@ impl CodeSearch {
                 truncated: AtomicBool::new(false),
                 files: AtomicUsize::new(0),
                 chunks: AtomicUsize::new(0),
+                searched_at: Mutex::new(None),
+                walk_nanos: AtomicU64::new(0),
+                #[cfg(test)]
+                resync_after: Mutex::new(None),
+                #[cfg(test)]
+                before_walk: Mutex::new(None),
                 #[cfg(test)]
                 after_commit: Mutex::new(None),
                 #[cfg(test)]
@@ -142,21 +191,35 @@ impl CodeSearch {
     }
 
     /// The workspace changed: forget the index and the "built" mark. A build
-    /// still running for the old root stops with [`SearchError::RootChanged`].
+    /// still running for the old root notices within a few files and stops with
+    /// [`SearchError::RootChanged`], releasing the build gate for the new root.
+    ///
+    /// Safe to call from a UI thread: besides the write lock (waiting at most
+    /// for the commit in flight) it only swaps the index out, and the old one
+    /// is freed on a thread of its own.
     pub fn reset_root(&self, root: impl Into<PathBuf>) {
         let root = absolutize(&root.into());
         let old = {
             let mut st = self.write();
             st.root = root;
-            st.generation += 1;
+            self.inner.generation.fetch_add(1, Ordering::AcqRel);
             self.inner.built.store(false, Ordering::Release);
             self.inner.truncated.store(false, Ordering::Release);
             self.inner.files.store(0, Ordering::Release);
             self.inner.chunks.store(0, Ordering::Release);
+            *self
+                .inner
+                .searched_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             std::mem::replace(&mut st.index, Index::new())
         };
-        // Freeing a big index takes a while; do it outside the lock.
-        drop(old);
+        // Freeing a big index (every term, posting list and file record) takes
+        // over 100 ms at 20,000 files. If no thread can be had, the closure
+        // is dropped on the way out, which frees the index right here.
+        let _ = std::thread::Builder::new()
+            .name("code-search-free".into())
+            .spawn(move || drop(old));
     }
 
     /// Bring the index in line with the disk for `paths` (files or directories,
@@ -165,41 +228,62 @@ impl CodeSearch {
     /// that vanished or are no longer eligible are dropped, everything else is
     /// left alone. Callable from any non-async thread.
     pub fn build_blocking(&self, paths: &[PathBuf]) -> Result<BuildStats, SearchError> {
-        let _gate = self.gate();
-        self.sync_locked(paths)
+        self.build_cancellable(paths, &Arc::default())
     }
 
     /// [`build_blocking`](Self::build_blocking) on the blocking thread pool.
+    /// Dropping the future cancels the build (see [`SearchError::Cancelled`]).
     pub async fn build(&self, paths: &[PathBuf]) -> Result<BuildStats, SearchError> {
         let this = self.clone();
         let paths = paths.to_vec();
-        tokio::task::spawn_blocking(move || this.build_blocking(&paths))
+        let cancel = CancelOnDrop(Arc::default());
+        let flag = Arc::clone(&cancel.0);
+        tokio::task::spawn_blocking(move || this.build_cancellable(&paths, &flag))
             .await
             .map_err(|e| SearchError::Worker(e.to_string()))?
+    }
+
+    fn build_cancellable(
+        &self,
+        paths: &[PathBuf],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<BuildStats, SearchError> {
+        let _gate = self.gate();
+        self.sync_locked(paths, cancel)
     }
 
     /// Rank the indexed files for `query` and return the best `top_k` (at most
     /// 50), one hit per file. The first search builds the whole root (or waits
     /// for the build that is already doing so: results from half an index
     /// would silently miss files). Once an index has been built, searches never
-    /// wait for later builds; they rank against what has been committed.
+    /// wait for a build that is running; they rank against what has been
+    /// committed.
+    ///
+    /// A search also picks up what changed on disk since the last look: it
+    /// walks the root again (files are only stat-ed, and at most about once a
+    /// second, less often on a tree that is slow to walk), so a file an editor,
+    /// a tool or a `git checkout` created or rewrote is found by the next
+    /// search, not only by a search that happens to rank it.
     ///
     /// Files the privacy policy denies *now* are dropped even if they were
     /// indexed earlier, files that changed on disk since indexing are re-read
     /// first, and surviving files are noted in the privacy audit scope of the
     /// calling task (see `privacy::audit::note_file`).
     pub fn search_blocking(&self, query: &str, top_k: usize) -> Result<SearchResults, SearchError> {
-        let results = self.search_inner(query, top_k)?;
+        let results = self.search_inner(query, top_k, &Arc::default())?;
         note_files(&results);
         Ok(results)
     }
 
     /// [`search_blocking`](Self::search_blocking) for async callers; the audit
-    /// notes are recorded on the awaiting task.
+    /// notes are recorded on the awaiting task. Dropping the future cancels the
+    /// search, and the first search's build with it.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<SearchResults, SearchError> {
         let this = self.clone();
         let query = query.to_owned();
-        let results = tokio::task::spawn_blocking(move || this.search_inner(&query, top_k))
+        let cancel = CancelOnDrop(Arc::default());
+        let flag = Arc::clone(&cancel.0);
+        let results = tokio::task::spawn_blocking(move || this.search_inner(&query, top_k, &flag))
             .await
             .map_err(|e| SearchError::Worker(e.to_string()))??;
         note_files(&results);
@@ -249,6 +333,24 @@ impl CodeSearch {
         self.inner.gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The build gate if no build holds it.
+    fn try_gate(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.inner.gate.try_lock() {
+            Ok(gate) => Some(gate),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// The root and its generation, taken together so they belong to each other.
+    fn snapshot(&self) -> (PathBuf, u64) {
+        let st = self.read();
+        (
+            st.root.clone(),
+            self.inner.generation.load(Ordering::Acquire),
+        )
+    }
+
     fn edits(&self) -> MutexGuard<'_, ()> {
         self.inner.edits.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -279,6 +381,22 @@ impl CodeSearch {
     fn after_commit_hook(&self) {}
 
     #[cfg(test)]
+    fn before_walk_hook(&self) {
+        let hook = self
+            .inner
+            .before_walk
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn before_walk_hook(&self) {}
+
+    #[cfg(test)]
     fn after_parse_hook(&self) {
         let hook = self
             .inner
@@ -303,7 +421,7 @@ impl CodeSearch {
         items: Vec<Parsed>,
     ) -> Result<Applied, SearchError> {
         let mut st = self.write();
-        if st.generation != generation {
+        if self.inner.generation.load(Ordering::Acquire) != generation {
             return Err(SearchError::RootChanged);
         }
         let applied = st.index.apply(plan_seq, removals, items);
@@ -311,17 +429,30 @@ impl CodeSearch {
         Ok(applied)
     }
 
-    /// One sync pass; the caller holds the gate.
-    fn sync_locked(&self, paths: &[PathBuf]) -> Result<BuildStats, SearchError> {
+    /// One sync pass; the caller holds the gate. Ends early with
+    /// [`SearchError::Cancelled`] once `cancel` is set and with
+    /// [`SearchError::RootChanged`] once the root was reset; what was committed
+    /// by then stays, and is picked up by the next sync.
+    fn sync_locked(
+        &self,
+        paths: &[PathBuf],
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<BuildStats, SearchError> {
         let inner = &*self.inner;
         inner.building.store(true, Ordering::Release);
         let _building = BuildingFlag(&inner.building);
         let started = Instant::now();
-        let (root, generation) = {
-            let st = self.read();
-            (st.root.clone(), st.generation)
-        };
+        let (root, generation) = self.snapshot();
+        let stop = Stop::new(
+            Arc::clone(cancel),
+            Arc::clone(&inner.generation),
+            generation,
+        );
         std::fs::metadata(&root)?;
+        if root.parent().is_none() {
+            return Err(SearchError::RootTooBroad(root));
+        }
+        self.before_walk_hook();
         let policy = privacy::active();
         let mut stats = BuildStats::default();
 
@@ -350,6 +481,7 @@ impl CodeSearch {
                 kept.push(s);
             }
         }
+        let whole_root = kept.iter().any(|s| path_key(s) == path_key(&root));
         let missing: Vec<PathBuf> = kept
             .iter()
             .filter(|s| std::fs::symlink_metadata(s).is_err())
@@ -359,14 +491,20 @@ impl CodeSearch {
         // Everything that is eligible right now.
         let mut found: Vec<PathBuf> = Vec::new();
         for scope in &kept {
-            let d = scan::discover(&root, scope, &policy);
+            let d = scan::discover(&root, scope, &policy, &stop);
             stats.privacy_skipped += d.denied_dirs;
             stats.errors += d.errors;
             found.extend(d.files);
         }
+        if let Some(why) = stop.reason() {
+            return Err(why);
+        }
         found.sort();
         found.dedup();
-        let plan = scan::plan(&found, &policy, &inner.limits);
+        let plan = scan::plan(&found, &policy, &inner.limits, &stop);
+        if let Some(why) = stop.reason() {
+            return Err(why);
+        }
         stats.privacy_skipped += plan.privacy_skipped;
         stats.skipped += plan.skipped;
         stats.errors += plan.errors;
@@ -376,8 +514,8 @@ impl CodeSearch {
         let scope_keys: Vec<PathBuf> = kept.iter().map(|s| path_key(s)).collect();
         let (todo, removals, plan_seq) = {
             let st = self.read();
-            if st.generation != generation {
-                return Err(SearchError::RootChanged);
+            if let Some(why) = stop.reason() {
+                return Err(why);
             }
             let index = &st.index;
             let mut kept_files = index.file_count();
@@ -430,8 +568,15 @@ impl CodeSearch {
             }
         }
 
-        let mut applied = self.commit(generation, plan_seq, &removals, Vec::new())?;
-        self.read_and_commit(todo, &root, generation, plan_seq, &mut applied)?;
+        inner
+            .walk_nanos
+            .store(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let mut applied = if removals.is_empty() {
+            Applied::default()
+        } else {
+            self.commit(generation, plan_seq, &removals, Vec::new())?
+        };
+        self.read_and_commit(todo, &root, plan_seq, &stop, &mut applied)?;
 
         stats.indexed = applied.indexed;
         stats.updated = applied.updated;
@@ -440,14 +585,20 @@ impl CodeSearch {
         stats.errors += applied.errors;
         {
             let st = self.read();
-            if st.generation != generation {
-                return Err(SearchError::RootChanged);
+            if let Some(why) = stop.reason() {
+                return Err(why);
             }
             stats.total_files = st.index.file_count();
             stats.chunks = st.index.chunk_count();
-            inner.built.store(true, Ordering::Release);
+            // Only a sync of the whole root makes the index complete. A hand-made
+            // partial one (`build_search_index {"paths": ["web"]}`) must leave
+            // the first search to index the rest, or every search of the session
+            // would rank that folder alone.
+            if whole_root {
+                inner.built.store(true, Ordering::Release);
+            }
             // A partial sync cannot prove that an earlier truncation is gone.
-            if paths.is_empty() || stats.truncated {
+            if whole_root || stats.truncated {
                 inner.truncated.store(stats.truncated, Ordering::Release);
             }
         }
@@ -484,8 +635,8 @@ impl CodeSearch {
         &self,
         todo: Vec<Planned>,
         root: &Path,
-        generation: u64,
         plan_seq: u64,
+        stop: &Stop,
         applied: &mut Applied,
     ) -> Result<(), SearchError> {
         if todo.is_empty() {
@@ -502,7 +653,7 @@ impl CodeSearch {
                 let tx = tx.clone();
                 let (todo, next, cancel) = (&todo, &next, &cancel);
                 s.spawn(move || {
-                    while !cancel.load(Ordering::Relaxed) {
+                    while !cancel.load(Ordering::Relaxed) && !stop.is_set() {
                         let Some(item) = todo.get(next.fetch_add(1, Ordering::Relaxed)) else {
                             break;
                         };
@@ -518,6 +669,11 @@ impl CodeSearch {
             drop(tx);
             let mut group: Vec<Parsed> = Vec::with_capacity(COMMIT_GROUP);
             while let Ok(first) = rx.recv() {
+                if let Some(why) = stop.reason() {
+                    cancel.store(true, Ordering::Relaxed);
+                    outcome = Err(why);
+                    break;
+                }
                 group.push(first);
                 while group.len() < COMMIT_GROUP {
                     match rx.try_recv() {
@@ -525,7 +681,7 @@ impl CodeSearch {
                         Err(_) => break,
                     }
                 }
-                match self.commit(generation, plan_seq, &[], std::mem::take(&mut group)) {
+                match self.commit(stop.generation(), plan_seq, &[], std::mem::take(&mut group)) {
                     Ok(a) => applied.merge(a),
                     Err(e) => {
                         cancel.store(true, Ordering::Relaxed);
@@ -540,8 +696,8 @@ impl CodeSearch {
         outcome
     }
 
-    /// Build the root if no build has completed yet.
-    fn ensure_built(&self) -> Result<(), SearchError> {
+    /// Build the root if no build of it has completed yet.
+    fn ensure_built(&self, cancel: &Arc<AtomicBool>) -> Result<(), SearchError> {
         for _ in 0..3 {
             if self.inner.built.load(Ordering::Acquire) {
                 return Ok(());
@@ -551,8 +707,12 @@ impl CodeSearch {
             if self.inner.built.load(Ordering::Acquire) {
                 return Ok(());
             }
-            match self.sync_locked(&[]) {
-                Ok(_) => return Ok(()),
+            let started = Instant::now();
+            match self.sync_locked(&[], cancel) {
+                Ok(_) => {
+                    self.note_search_walk(started);
+                    return Ok(());
+                }
                 Err(SearchError::RootChanged) => continue,
                 Err(e) => return Err(e),
             }
@@ -560,12 +720,67 @@ impl CodeSearch {
         Err(SearchError::RootChanged)
     }
 
+    /// Bring the index in line with the disk before ranking, unless a search
+    /// did that moments ago. A search that does not find a changed file among
+    /// its candidates cannot repair it (a word an edit added is in no posting
+    /// list yet; a new file is in none), so the files themselves are compared:
+    /// new ones are read, rewritten ones re-read, vanished ones dropped.
+    ///
+    /// Never waits for a build that is running (it is doing this work already;
+    /// the search ranks what it has committed) and fails the search only when
+    /// the caller gave up: if the walk cannot be done, the index is as good as
+    /// it was.
+    fn resync_if_due(&self, cancel: &Arc<AtomicBool>) -> Result<(), SearchError> {
+        let Some(_gate) = self.try_gate() else {
+            return Ok(());
+        };
+        if !self.resync_due() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        match self.sync_locked(&[], cancel) {
+            Ok(_) => self.note_search_walk(started),
+            Err(SearchError::Cancelled) => return Err(SearchError::Cancelled),
+            Err(e) => tracing::debug!("code search could not refresh the index: {e}"),
+        }
+        Ok(())
+    }
+
+    fn resync_due(&self) -> bool {
+        self.inner
+            .searched_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|at| at.elapsed() >= self.resync_every())
+    }
+
+    fn resync_every(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(every) = *self
+            .inner
+            .resync_after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return every;
+        }
+        resync_interval(Duration::from_nanos(
+            self.inner.walk_nanos.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// A search walked the root, starting at `started`.
+    fn note_search_walk(&self, started: Instant) {
+        *self
+            .inner
+            .searched_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(started);
+    }
+
     fn refresh_inner(&self, path: &Path) -> Result<(), SearchError> {
         let abs = absolutize(path);
-        let (root, generation) = {
-            let st = self.read();
-            (st.root.clone(), st.generation)
-        };
+        let (root, generation) = self.snapshot();
         if abs == root || !path_starts_with(&abs, &root) {
             return Ok(());
         }
@@ -574,7 +789,7 @@ impl CodeSearch {
         let file = if policy.is_denied(&abs) {
             None
         } else {
-            scan::discover(&root, &abs, &policy)
+            scan::discover(&root, &abs, &policy, &Stop::never())
                 .files
                 .into_iter()
                 .find(|f| path_key(f) == key)
@@ -604,7 +819,12 @@ impl CodeSearch {
         Ok(())
     }
 
-    fn search_inner(&self, query: &str, top_k: usize) -> Result<SearchResults, SearchError> {
+    fn search_inner(
+        &self,
+        query: &str,
+        top_k: usize,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<SearchResults, SearchError> {
         if query.len() > MAX_QUERY_BYTES {
             return Err(SearchError::InvalidQuery(format!(
                 "the query is {} bytes long; the limit is {MAX_QUERY_BYTES}",
@@ -616,7 +836,8 @@ impl CodeSearch {
         if terms.is_empty() || k == 0 {
             return Ok(SearchResults::default());
         }
-        self.ensure_built()?;
+        self.ensure_built(cancel)?;
+        self.resync_if_due(cancel)?;
         let policy = privacy::active();
         let lookup: HashMap<&str, usize> = terms
             .iter()
@@ -690,6 +911,24 @@ impl CodeSearch {
             .after_commit
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_walk(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .inner
+            .before_walk
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_resync_after(&self, every: Duration) {
+        *self
+            .inner
+            .resync_after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(every);
     }
 
     #[cfg(test)]
