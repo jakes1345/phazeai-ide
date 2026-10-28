@@ -122,8 +122,8 @@ fn kill_group(child: &mut Child) {
 }
 
 /// A running IDE plus the window manager it needs. Dropping it — including
-/// when an assertion panics — kills both process groups (so helpers such as
-/// the Python sidecar die too) and releases the display for the next test.
+/// when an assertion panics — kills both process groups (so child processes
+/// such as language servers die too) and releases the display for the next test.
 struct Ide {
     wid: u64,
     app: Child,

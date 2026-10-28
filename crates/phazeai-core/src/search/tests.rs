@@ -71,6 +71,15 @@ fn build(cs: &CodeSearch) -> BuildStats {
     cs.build_blocking(&[]).unwrap()
 }
 
+/// A sync that also checks its bookkeeping: files added minus files removed is
+/// the change in the number of indexed files.
+fn sync(cs: &CodeSearch, paths: &[PathBuf]) -> BuildStats {
+    let before = cs.status().files;
+    let st = cs.build_blocking(paths).unwrap();
+    assert_eq!(st.total_files + st.removed, before + st.indexed, "{st:?}");
+    st
+}
+
 /// Serialises tests that change the process-wide active privacy project.
 struct Active {
     _guard: MutexGuard<'static, ()>,
@@ -207,6 +216,24 @@ fn covering_more_query_terms_beats_repeating_one() {
     let files = found(&search(&cs, "alpha beta"), &root);
     assert_eq!(files[0], "src/both.rs");
     assert!(files.contains(&"src/repeat.rs".to_string()));
+}
+
+#[test]
+fn unicode_text_and_paths_with_spaces_are_searchable() {
+    let (_d, root) = proj();
+    with_fillers(&root);
+    write(&root, "src/日本語/ファイル.rs", "fn größe_berechnen() {}\n");
+    write(&root, "docs/user guide/résumé notes.md", "# Café Münster\n");
+    let cs = CodeSearch::new(&root);
+    let first = |q: &str| found(&search(&cs, q), &root);
+    assert_eq!(first("Größe Berechnen"), ["src/日本語/ファイル.rs"]);
+    assert_eq!(first("münster"), ["docs/user guide/résumé notes.md"]);
+    // Words that only occur in a path.
+    assert_eq!(first("résumé"), ["docs/user guide/résumé notes.md"]);
+    assert_eq!(first("日本語"), ["src/日本語/ファイル.rs"]);
+    assert_eq!(first("user guide"), ["docs/user guide/résumé notes.md"]);
+    let hit = &search(&cs, "münster").matches[0];
+    assert!(hit.file.ends_with("résumé notes.md"));
 }
 
 #[test]
@@ -919,6 +946,39 @@ fn denied_files_do_not_use_up_result_slots() {
     assert_eq!(r.privacy_skipped, 6);
 }
 
+/// The sidecar's `search_results_for_denied_files_are_dropped`: a hit in a
+/// secret file is dropped and counted, the other hit is kept. Here the secret
+/// is put into the index by hand, as if it had been indexed before the rule
+/// that denies it existed.
+#[test]
+fn hits_in_denied_files_are_dropped_and_counted() {
+    let (_d, root) = proj();
+    let code = write(&root, "main.rs", "fn main() { needle(); }\n");
+    let secret = write(&root, "prod.pem", "-----BEGIN PRIVATE KEY needle\n");
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    assert_eq!(
+        indexed(&cs),
+        ["main.rs"],
+        "never indexed in the first place"
+    );
+    cs.with_index_mut(|i| {
+        i.apply(
+            u64::MAX,
+            &[],
+            vec![Parsed::File(parsed(&secret.to_string_lossy(), "needle\n"))],
+        )
+    });
+    assert_eq!(indexed(&cs), ["main.rs", "prod.pem"]);
+    let r = search(&cs, "needle");
+    assert_eq!(r.matches.len(), 1);
+    assert_eq!(Path::new(&r.matches[0].file), code);
+    assert_eq!(r.privacy_skipped, 1);
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["privacy_skipped"], 1);
+    assert_eq!(json["matches"].as_array().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn async_search_notes_surviving_files_for_the_audit_scope() {
     let (_d, root) = proj();
@@ -1124,6 +1184,7 @@ fn assert_same_as_fresh(cs: &CodeSearch, root: &Path, step: usize) {
             "step {step}: query {q:?} differs from a fresh build"
         );
     }
+    assert_eq!(stamps(cs), stamps(&fresh), "step {step}: indexed files");
     assert_eq!(
         cs.status().files,
         fresh.status().files,
@@ -1134,37 +1195,39 @@ fn assert_same_as_fresh(cs: &CodeSearch, root: &Path, step: usize) {
         fresh.status().chunks,
         "step {step}: chunk count"
     );
-    assert_eq!(stamps(cs), stamps(&fresh), "step {step}: indexed files");
     cs.with_index(Index::assert_consistent);
 }
 
 #[test]
 fn any_sequence_of_updates_ranks_like_a_fresh_build() {
-    for seed in [1u64, 7, 42] {
+    for seed in [1u64, 7, 42, 1234, 99_991, 5_150_001] {
         let (_d, root) = proj();
         let mut rng = Lcg(seed);
         let cs = CodeSearch::new(&root);
         build(&cs);
         let mut clock = 0u64;
         for step in 0..160 {
-            match rng.below(11) {
+            match rng.below(12) {
                 // Create or modify a file, then tell the index in some way.
                 0..=3 => {
                     let rel = POOL[rng.below(POOL.len())];
                     let path = write(&root, rel, &random_text(&mut rng));
+                    if rng.below(12) == 0 {
+                        // Now binary: out of the index, not an error.
+                        fs::write(&path, b"\0\0not text").unwrap();
+                    }
                     clock += 1;
                     touch(&path, clock);
                     match rng.below(4) {
                         0 => cs.refresh_file(&path),
                         1 => {
-                            build(&cs);
+                            sync(&cs, &[]);
                         }
                         2 => {
-                            cs.build_blocking(&[path.parent().unwrap().to_path_buf()])
-                                .unwrap();
+                            sync(&cs, &[path.parent().unwrap().to_path_buf()]);
                         }
                         _ => {
-                            cs.build_blocking(std::slice::from_ref(&path)).unwrap();
+                            sync(&cs, std::slice::from_ref(&path));
                         }
                     }
                 }
@@ -1176,11 +1239,11 @@ fn any_sequence_of_updates_ranks_like_a_fresh_build() {
                         0 => cs.remove_file(&path),
                         1 => cs.refresh_file(&path),
                         2 => {
-                            cs.build_blocking(&[path]).unwrap();
+                            sync(&cs, &[path]);
                         }
                         _ => {
                             let _ = existed;
-                            build(&cs);
+                            sync(&cs, &[]);
                         }
                     }
                 }
@@ -1191,20 +1254,27 @@ fn any_sequence_of_updates_ranks_like_a_fresh_build() {
                     if rng.below(2) == 0 {
                         cs.remove_file(&dir);
                     } else {
-                        build(&cs);
+                        sync(&cs, &[]);
                     }
                 }
                 // Redundant operations.
                 7 => cs.refresh_file(&root.join(POOL[rng.below(POOL.len())])),
                 8 => {
-                    build(&cs);
-                    build(&cs);
+                    sync(&cs, &[]);
+                    let again = sync(&cs, &[]);
+                    assert_eq!((again.indexed, again.updated, again.removed), (0, 0, 0));
                 }
                 9 => {
                     // remove_file of a file that still exists must be repaired by a refresh.
                     let path = root.join(POOL[rng.below(POOL.len())]);
                     cs.remove_file(&path);
                     cs.refresh_file(&path);
+                }
+                10 => {
+                    // Files become ignored (or stop being ignored): the next sync follows.
+                    let rules = ["", "docs/\n", "*.py\n", "src/lsp/\nweb/util.ts\n"];
+                    write(&root, ".gitignore", rules[rng.below(rules.len())]);
+                    sync(&cs, &[]);
                 }
                 _ => assert_same_as_fresh(&cs, &root, step),
             }
@@ -1496,6 +1566,210 @@ fn concurrent_builds_are_single_flight_and_never_duplicate() {
 }
 
 #[test]
+fn a_build_never_overwrites_files_refreshed_while_it_ran() {
+    let (_d, root) = proj();
+    let names: Vec<String> = (0..140).map(|i| format!("src/f{i:03}.rs")).collect();
+    for n in &names {
+        write(&root, n, "fn oldword() {}\n");
+    }
+    let cs = CodeSearch::new(&root);
+    let pause = pause_after_first_commit(&cs);
+    let builder = {
+        let cs = cs.clone();
+        std::thread::spawn(move || cs.build_blocking(&[]))
+    };
+    pause
+        .reached
+        .recv_timeout(Duration::from_secs(30))
+        .expect("build never committed");
+    // The workers have read the rest of the files by now (old text, waiting to
+    // be committed). The editor saves every file and refreshes it meanwhile.
+    std::thread::sleep(Duration::from_millis(300));
+    for (i, n) in names.iter().enumerate() {
+        let p = write(&root, n, "fn newword() {}\n");
+        touch(&p, 10 + i as u64);
+        cs.refresh_file(&p);
+    }
+    pause.resume.send(()).unwrap();
+    let st = builder.join().unwrap().unwrap();
+    assert_eq!(st.total_files, names.len());
+    // Checked on the index itself: a search would repair stale hits.
+    for n in &names {
+        let p = root.join(n);
+        assert_eq!(
+            cs.stamp_of(&p).unwrap(),
+            Stamp::of(&fs::metadata(&p).unwrap()),
+            "{n} holds an older read than the file"
+        );
+    }
+    cs.with_index(Index::assert_consistent);
+    assert!(search(&cs, "oldword").matches.is_empty());
+}
+
+#[test]
+fn a_slow_refresh_never_overwrites_a_newer_one() {
+    let (_d, root) = proj();
+    let a = write(&root, "a.rs", "fn first_version() {}\n");
+    touch(&a, 1);
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    // A search repairing a stale hit reads the file, then stalls before it commits.
+    fs::write(&a, "fn second_version() {}\n").unwrap();
+    touch(&a, 2);
+    let (reached_tx, reached) = mpsc::channel();
+    let (resume, resume_rx) = mpsc::channel::<()>();
+    let resume_rx = Mutex::new(resume_rx);
+    let first = AtomicBool::new(true);
+    cs.set_after_parse(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            reached_tx.send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+        }
+    });
+    let slow = {
+        let (cs, a) = (cs.clone(), a.clone());
+        std::thread::spawn(move || cs.refresh_file(&a))
+    };
+    reached
+        .recv_timeout(Duration::from_secs(30))
+        .expect("refresh never read the file");
+    // Meanwhile the file is saved again and the editor refreshes it.
+    fs::write(&a, "fn third_version() {}\n").unwrap();
+    touch(&a, 3);
+    let save = {
+        let (cs, a) = (cs.clone(), a.clone());
+        std::thread::spawn(move || cs.refresh_file(&a))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    resume.send(()).unwrap();
+    slow.join().unwrap();
+    save.join().unwrap();
+    // The index holds what the later refresh read, not the stalled older read.
+    assert_eq!(
+        cs.stamp_of(&a).unwrap(),
+        Stamp::of(&fs::metadata(&a).unwrap())
+    );
+    assert_eq!(found(&search(&cs, "third"), &root), ["a.rs"]);
+    assert!(search(&cs, "second").matches.is_empty());
+    cs.with_index(Index::assert_consistent);
+}
+
+#[test]
+fn remove_file_waits_for_a_refresh_in_flight() {
+    let (_d, root) = proj();
+    let a = write(&root, "a.rs", "fn doomed() {}\n");
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    fs::write(&a, "fn doomed_and_changed() {}\n").unwrap();
+    touch(&a, 7);
+    let (reached_tx, reached) = mpsc::channel();
+    let (resume, resume_rx) = mpsc::channel::<()>();
+    let resume_rx = Mutex::new(resume_rx);
+    let first = AtomicBool::new(true);
+    cs.set_after_parse(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            reached_tx.send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+        }
+    });
+    let refresh = {
+        let (cs, a) = (cs.clone(), a.clone());
+        std::thread::spawn(move || cs.refresh_file(&a))
+    };
+    reached.recv_timeout(Duration::from_secs(30)).unwrap();
+    let removal = {
+        let (cs, a) = (cs.clone(), a.clone());
+        std::thread::spawn(move || cs.remove_file(&a))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    resume.send(()).unwrap();
+    refresh.join().unwrap();
+    removal.join().unwrap();
+    // The removal came second, so it wins: the file is not in the index.
+    assert!(indexed(&cs).is_empty());
+    cs.with_index(Index::assert_consistent);
+}
+
+#[test]
+fn handles_can_be_shared_between_threads() {
+    fn shareable<T: Send + Sync + 'static>() {}
+    shareable::<CodeSearch>();
+    shareable::<CodeSearchTool>();
+    shareable::<BuildIndexTool>();
+    shareable::<SearchResults>();
+    shareable::<BuildStats>();
+}
+
+/// Four writers (each owns six files and tells the index after every change),
+/// a thread rebuilding in a loop and two searching: whatever the interleaving,
+/// the index ends up exactly as a fresh build over the final files.
+#[test]
+fn writers_a_builder_and_searchers_leave_the_index_exact() {
+    let (_d, root) = proj();
+    let names: Vec<String> = (0..24).map(|i| format!("src/f{i}.rs")).collect();
+    for n in &names {
+        write(&root, n, "fn base() { alpha(); }\n");
+    }
+    let cs = CodeSearch::new(&root);
+    build(&cs);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut background = Vec::new();
+    for _ in 0..2 {
+        let (cs, stop) = (cs.clone(), Arc::clone(&stop));
+        background.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                for q in QUERIES {
+                    cs.search_blocking(q, 10).unwrap();
+                }
+            }
+        }));
+    }
+    {
+        let (cs, stop) = (cs.clone(), Arc::clone(&stop));
+        background.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                cs.build_blocking(&[]).unwrap();
+            }
+        }));
+    }
+    let writers: Vec<_> = (0..4usize)
+        .map(|w| {
+            let (cs, root, names) = (cs.clone(), root.clone(), names.clone());
+            std::thread::spawn(move || {
+                let mut rng = Lcg(100 + w as u64);
+                for round in 0..40u64 {
+                    let path = root.join(&names[w * 6 + rng.below(6)]);
+                    match rng.below(5) {
+                        0 => {
+                            let _ = fs::remove_file(&path);
+                        }
+                        1 => fs::write(&path, b"\0\0binary").unwrap(),
+                        _ => fs::write(&path, random_text(&mut rng)).unwrap(),
+                    }
+                    if path.exists() {
+                        touch(&path, 1 + w as u64 * 1000 + round);
+                    }
+                    if rng.below(2) == 0 {
+                        cs.refresh_file(&path);
+                    } else {
+                        cs.build_blocking(std::slice::from_ref(&path)).unwrap();
+                    }
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    for b in background {
+        b.join().unwrap();
+    }
+    // No final sync: every change was announced, so none may be missing.
+    assert_same_as_fresh(&cs, &root, 0);
+}
+
+#[test]
 fn many_threads_searching_an_unbuilt_index_trigger_one_build() {
     let (_d, root) = proj();
     for i in 0..40 {
@@ -1613,6 +1887,22 @@ async fn code_search_tool_json_shape() {
         .await
         .unwrap();
     assert_eq!(default["matches"].as_array().unwrap().len(), 5);
+    // Models also send floats and numeric strings; nonsense falls back to the default.
+    for (top_k, want) in [
+        (serde_json::json!(2.0), 2),
+        (serde_json::json!("4"), 4),
+        (serde_json::json!(" 6 "), 6),
+        (serde_json::json!(0), 1),
+        (serde_json::json!(-3), 5),
+        (serde_json::json!("many"), 5),
+        (serde_json::json!(null), 5),
+    ] {
+        let out = tool
+            .execute(serde_json::json!({"query": "commonword", "top_k": top_k}))
+            .await
+            .unwrap();
+        assert_eq!(out["matches"].as_array().unwrap().len(), want, "{top_k}");
+    }
 }
 
 #[tokio::test]
@@ -1717,6 +2007,21 @@ async fn build_index_tool_json_shape() {
         (Some(1), Some(2))
     );
     assert_eq!(out["total_files"], 3);
+
+    // A lone string is one path; an empty list is the whole workspace.
+    let out = tool
+        .execute(serde_json::json!({"paths": "docs"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (out["unchanged"].as_u64(), out["errors"].as_u64()),
+        (Some(1), Some(0))
+    );
+    let out = tool
+        .execute(serde_json::json!({"paths": []}))
+        .await
+        .unwrap();
+    assert_eq!(out["unchanged"], 3);
 
     // Bad paths come back as warnings.
     let out = tool

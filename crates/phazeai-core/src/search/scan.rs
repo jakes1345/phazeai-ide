@@ -376,18 +376,25 @@ pub(crate) fn parse_file(path: &Path, root: &Path, limits: &SearchLimits) -> Par
         return Parsed::Skipped(path.to_path_buf());
     }
     let stamp = Stamp::of(&meta);
+    // One byte past the limit shows that the file grew since the stat.
+    let mut reader = file.by_ref().take(limits.max_file_bytes.saturating_add(1));
     let mut bytes = Vec::with_capacity(meta.len() as usize + 1);
-    if file
+    // A binary file is recognised by its first bytes, before the rest is read.
+    if reader
         .by_ref()
-        .take(limits.max_file_bytes + 1)
+        .take(BINARY_PROBE as u64)
         .read_to_end(&mut bytes)
         .is_err()
     {
         return Parsed::Failed(path.to_path_buf());
     }
-    if bytes.len() as u64 > limits.max_file_bytes
-        || bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
-    {
+    if bytes.contains(&0) {
+        return Parsed::Skipped(path.to_path_buf());
+    }
+    if reader.read_to_end(&mut bytes).is_err() {
+        return Parsed::Failed(path.to_path_buf());
+    }
+    if bytes.len() as u64 > limits.max_file_bytes {
         return Parsed::Skipped(path.to_path_buf());
     }
     let Ok(text) = String::from_utf8(bytes) else {
@@ -411,7 +418,7 @@ pub(crate) fn read_checked(path: &Path, expect: Stamp, max_bytes: u64) -> Option
     }
     let mut text = String::with_capacity(meta.len() as usize);
     file.by_ref()
-        .take(max_bytes + 1)
+        .take(max_bytes.saturating_add(1))
         .read_to_string(&mut text)
         .ok()?;
     if text.len() as u64 > max_bytes || Stamp::of(&file.metadata().ok()?) != expect {
@@ -495,6 +502,76 @@ mod tests {
             // parse, json, config, path; +1 for the path word.
             assert!(c.len > lines * 6);
         }
+    }
+
+    fn parse(dir: &Path, name: &str, bytes: &[u8], limits: &SearchLimits) -> Parsed {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        parse_file(&path, dir, limits)
+    }
+
+    #[test]
+    fn parse_file_accepts_text_and_refuses_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = SearchLimits {
+            max_file_bytes: 20_000,
+            ..SearchLimits::default()
+        };
+        let d = dir.path();
+        match parse(d, "ok.rs", b"fn main() {}\n", &limits) {
+            Parsed::File(f) => {
+                assert_eq!(f.stamp.size, 13);
+                assert_eq!(f.chunks.len(), 1);
+            }
+            _ => panic!("a text file is parsed"),
+        }
+        assert!(
+            matches!(parse(d, "empty.rs", b"", &limits), Parsed::File(f) if f.chunks.is_empty())
+        );
+        assert!(matches!(
+            parse(d, "nul.rs", b"fn a\0b", &limits),
+            Parsed::Skipped(_)
+        ));
+        // A binary file is refused from its first bytes, wherever its size is.
+        let mut blob = vec![0u8; 1];
+        blob.extend(std::iter::repeat_n(b'x', 19_000));
+        assert!(matches!(
+            parse(d, "blob.rs", &blob, &limits),
+            Parsed::Skipped(_)
+        ));
+        assert!(matches!(
+            parse(d, "latin1.rs", b"caf\xe9", &limits),
+            Parsed::Skipped(_)
+        ));
+        let big = vec![b'x'; 20_001];
+        assert!(matches!(
+            parse(d, "big.rs", &big, &limits),
+            Parsed::Skipped(_)
+        ));
+        let exact = vec![b'x'; 20_000];
+        assert!(matches!(
+            parse(d, "exact.rs", &exact, &limits),
+            Parsed::File(_)
+        ));
+        assert!(matches!(
+            parse_file(&d.join("missing.rs"), d, &limits),
+            Parsed::Gone(_)
+        ));
+        // The limit may be anything, including "no limit".
+        let unlimited = SearchLimits {
+            max_file_bytes: u64::MAX,
+            ..SearchLimits::default()
+        };
+        assert!(matches!(
+            parse(d, "any.rs", b"fn x() {}", &unlimited),
+            Parsed::File(_)
+        ));
+        assert!(read_checked(
+            &d.join("any.rs"),
+            Stamp::of(&std::fs::metadata(d.join("any.rs")).unwrap()),
+            u64::MAX
+        )
+        .is_some());
     }
 
     #[test]

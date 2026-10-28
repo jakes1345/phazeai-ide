@@ -10,11 +10,10 @@ use floem::{
     IntoView,
 };
 use phazeai_core::{
-    discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn,
-    ConversationHistory, ConversationMetadata, ConversationStore, DiffHookFn, SavedConversation,
-    SavedMessage, Settings, Skill,
+    discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
+    CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata, ConversationStore,
+    DiffHookFn, SavedConversation, SavedMessage, Settings, Skill,
 };
-use phazeai_sidecar::SidecarClient;
 
 use crate::{
     components::icon::{icons, phaze_icon},
@@ -354,7 +353,8 @@ struct SendToAiJob {
     skills_menu: String,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
-    sidecar_client: Option<Arc<SidecarClient>>,
+    /// Code search for the agent's `code_search` tools; `None` when it is turned off.
+    code_search: Option<CodeSearch>,
     /// Files whose contents are in `user_message` (for the privacy audit log).
     attached_files: Vec<std::path::PathBuf>,
 }
@@ -371,7 +371,7 @@ fn send_to_ai(job: SendToAiJob) {
         skills_menu,
         update_tx,
         cancel_token,
-        sidecar_client,
+        code_search,
         attached_files,
     } = job;
 
@@ -498,10 +498,10 @@ fn send_to_ai(job: SendToAiJob) {
                 .with_diff_hook(diff_hook)
                 .with_approval(approval_fn);
 
-            // Register semantic search tools if sidecar is running.
-            if let Some(sc) = sidecar_client {
-                agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(sc.clone())));
-                agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(sc)));
+            // Let the agent search the workspace's code.
+            if let Some(search) = code_search {
+                agent.register_tool(Box::new(CodeSearchTool::new(search.clone())));
+                agent.register_tool(Box::new(BuildIndexTool::new(search)));
             }
 
             // Connect to MCP servers
@@ -748,7 +748,7 @@ pub fn chat_panel(
     ai_thinking: RwSignal<bool>,
     chat_inject: RwSignal<Option<String>>,
     workspace_root: RwSignal<std::path::PathBuf>,
-    sidecar_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
+    code_search: Option<CodeSearch>,
     status_toast: RwSignal<Option<String>>,
     token_usage_input: RwSignal<u64>,
     token_usage_output: RwSignal<u64>,
@@ -1084,7 +1084,7 @@ pub fn chat_panel(
 
     let do_send: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
-        let sidecar_client = sidecar_client.clone();
+        let code_search = code_search.clone();
         move || {
             let text = input_text.get();
             let trimmed = text.trim().to_string();
@@ -1178,7 +1178,6 @@ pub fn chat_panel(
             // settings panel take effect immediately (no restart needed).
             let live_settings = Settings::load();
             let hint = mode.get_untracked().system_hint();
-            let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
             // #region agent log
             phazeai_core::debug_ndjson::log(
                 "0179af",
@@ -1190,7 +1189,7 @@ pub fn chat_panel(
                     "promptLen": prompt.len(),
                     "priorMessages": prior_messages.len(),
                     "modeHintEmpty": hint.is_empty(),
-                    "hasSidecar": sc_snapshot.is_some(),
+                    "hasCodeSearch": code_search.is_some(),
                 }),
             );
             // #endregion
@@ -1205,7 +1204,7 @@ pub fn chat_panel(
                 skills_menu: skills_menu_str,
                 update_tx: (*update_tx).clone(),
                 cancel_token: token,
-                sidecar_client: sc_snapshot,
+                code_search: code_search.clone(),
                 attached_files,
             });
         }
@@ -1563,7 +1562,7 @@ pub fn chat_panel(
 
     let do_retry: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
-        let sidecar_client = sidecar_client.clone();
+        let code_search = code_search.clone();
         move || {
             if is_loading.get() {
                 // #region agent log
@@ -1618,7 +1617,6 @@ pub fn chat_panel(
                 let attached_files = expanded.attached;
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
-                let sc_snapshot = sidecar_client.lock().ok().and_then(|g| g.as_ref().cloned());
                 // #region agent log
                 phazeai_core::debug_ndjson::log(
                     "0179af",
@@ -1631,7 +1629,7 @@ pub fn chat_panel(
                         "sourceMessages": msgs.len(),
                         "priorMessages": prior_messages.len(),
                         "modeHintEmpty": hint.is_empty(),
-                        "hasSidecar": sc_snapshot.is_some(),
+                        "hasCodeSearch": code_search.is_some(),
                     }),
                 );
                 // #endregion
@@ -1647,7 +1645,7 @@ pub fn chat_panel(
                     skills_menu: retry_skills_menu,
                     update_tx: (*update_tx).clone(),
                     cancel_token: token,
-                    sidecar_client: sc_snapshot,
+                    code_search: code_search.clone(),
                     attached_files,
                 });
             } else {

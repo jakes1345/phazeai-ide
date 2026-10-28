@@ -6,7 +6,7 @@ The brain of PhazeAI IDE — a shared Rust engine providing agentic AI capabilit
 
 - **Agent Loop**: Streaming agentic execution with tool calling, approval callbacks, and real-time event emission
 - **LLM Provider System**: 8 supported providers — Anthropic Claude, OpenAI, Groq, Together.ai, OpenRouter, Google Gemini, Ollama (local), LM Studio (local)
-- **Tool Registry**: Built-in tools for file operations, bash execution, git, grep, glob, semantic search, and more
+- **Tool Registry**: Built-in tools for file operations, bash execution, git, grep, glob, in-process code search, and more
 - **LSP Client**: Language Server Protocol integration with completions, diagnostics, symbol navigation, rename, definition lookup
 - **MCP Bridge**: Model Context Protocol support for extended tool capabilities
 - **Multi-Agent Orchestrator**: Planner → Coder → Reviewer pipeline with role-based model routing

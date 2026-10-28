@@ -2,7 +2,7 @@
 //!
 //! The desktop IDE is a GUI-subsystem program on Windows, so it has no console
 //! of its own. Without `CREATE_NO_WINDOW`, every console program it starts
-//! (git, ripgrep, language servers, the Python sidecar) would pop up a new,
+//! (git, ripgrep, language servers, debug adapters) would pop up a new,
 //! empty console window for as long as it runs. On other platforms these are
 //! plain `Command::new` calls.
 

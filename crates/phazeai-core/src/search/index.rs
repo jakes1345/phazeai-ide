@@ -246,11 +246,20 @@ impl Index {
             if let Some(id) = existing {
                 dead.push(id);
             }
+            // `removed` counts every file that leaves the index, so
+            // `indexed - removed` is always the change in file count.
+            let left = usize::from(existing.is_some());
             match item {
                 Parsed::File(pf) => adds.push((pf, existing.is_some())),
-                Parsed::Skipped(_) => applied.skipped += 1,
-                Parsed::Failed(_) => applied.errors += 1,
-                Parsed::Gone(_) => applied.removed += usize::from(existing.is_some()),
+                Parsed::Skipped(_) => {
+                    applied.skipped += 1;
+                    applied.removed += left;
+                }
+                Parsed::Failed(_) => {
+                    applied.errors += 1;
+                    applied.removed += left;
+                }
+                Parsed::Gone(_) => applied.removed += left,
             }
         }
         dead.sort_unstable();
@@ -259,6 +268,7 @@ impl Index {
         for (pf, was_update) in adds {
             if !self.insert(pf) {
                 applied.skipped += 1;
+                applied.removed += usize::from(was_update);
             } else if was_update {
                 applied.updated += 1;
             } else {

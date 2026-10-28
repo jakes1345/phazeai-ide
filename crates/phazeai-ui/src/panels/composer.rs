@@ -315,6 +315,8 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         let approval_tx = approval_tx.clone();
         let approval_rx_arc = approval_rx_arc.clone();
         let workspace = state.project.workspace_root;
+        // The shared code search (unless the settings turn it off) for the agent's tools.
+        let code_search = state.project.code_search_if_enabled();
         move || {
             let task = task_input.get();
             let trimmed = task.trim().to_string();
@@ -340,13 +342,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             let tx = (*update_tx).clone();
             let ws = workspace.get_untracked();
             let mode = approval_mode.get_untracked();
-            // Snapshot the shared sidecar client (if ready) for semantic search tools.
-            let sidecar_client_snapshot = state
-                .project
-                .sidecar_client
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().cloned());
+            let code_search = code_search.clone();
             // Clone the sync_channel sender for the approval callback.
             let _approval_tx_cb = (*approval_tx).clone();
             // Clone the approval_rx end — we move it into the thread.
@@ -389,12 +385,12 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         .with_context_budget(settings.context_budget())
                         .with_cancel_token(token);
 
-                    // Register semantic search tools if sidecar is running.
-                    if let Some(sc) = sidecar_client_snapshot {
-                        agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
-                            sc.clone(),
+                    // Let the agent search the workspace's code.
+                    if let Some(search) = code_search {
+                        agent.register_tool(Box::new(phazeai_core::CodeSearchTool::new(
+                            search.clone(),
                         )));
-                        agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(sc)));
+                        agent.register_tool(Box::new(phazeai_core::BuildIndexTool::new(search)));
                     }
 
                     // Connect MCP servers

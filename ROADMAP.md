@@ -45,9 +45,9 @@ This is the honest version. Every item is grounded in the current codebase. Noth
 **Files:** `app.rs`, new `session.rs`
 
 ### 1.6 First-run readiness checks
-**Why it matters:** right now the IDE launches silently even when no provider is configured, rust-analyzer isn't installed, or the sidecar Python env is broken.
+**Why it matters:** right now the IDE launches silently even when no provider is configured or rust-analyzer isn't installed.
 
-**Fix:** on first launch (no `settings.toml`), show a setup checklist: provider configured?, LSP binary found for workspace language?, sidecar enabled + Python found?. Non-blocking — user can skip — but actionable.
+**Fix:** on first launch (no `settings.toml`), show a setup checklist: provider configured?, LSP binary found for workspace language?, code search enabled (`[search] enabled`)? Non-blocking — user can skip — but actionable.
 
 **Files:** `app.rs`, `panels/settings.rs`
 
@@ -76,15 +76,11 @@ The biggest missing feature vs VS Code. `portable-pty` already gives us a termin
 **Files:** `panels/chat.rs`, new `phazeai-core/src/context/persistence.rs`
 
 ### 2.3 Real semantic search
-**Why it's weak now:** sidecar uses TF-IDF keyword matching but is named "semantic search / embeddings" throughout the Rust code. That's a lie and it affects result quality.
+**Where it stands:** the Python sidecar (TF-IDF matching, mis-named "semantic search / embeddings") is gone. `phazeai-core/src/search/` is an in-process BM25 keyword search, named for what it is (`code_search`): identifier splitting, incremental index, privacy-aware, no external runtime. It matches words, not meaning — a query for "authentication" will not find code that only says "login".
 
-**Two options:**
-- **Option A (fast):** fix the naming — call it keyword search, remove embedding references, update `sidecar/README.md`. Done in a day.
-- **Option B (real):** replace TF-IDF with a local embedding model (`fastembed-rs` or ONNX Runtime + `all-MiniLM-L6-v2`). Persist embeddings to disk. True semantic similarity. 2-3 weeks.
+**Still open (Option B, plan for 1.1):** add a local embedding model (`fastembed-rs` or ONNX Runtime + `all-MiniLM-L6-v2`) next to the BM25 index, persist the embeddings to disk, and merge the two rankings. True semantic similarity. 2-3 weeks.
 
-**Recommended:** ship Option A for 1.0, plan Option B for 1.1.
-
-**Files:** `phazeai-core/src/context/repo_map.rs`, `phazeai-sidecar/src/tool.rs`, `sidecar/server.py`
+**Files:** `phazeai-core/src/search/` (ranking in `index.rs`), `phazeai-core/src/context/repo_map.rs`
 
 ### 2.4 Multi-line find / find in selection
 Currently find/replace is single-line regex only. Multi-line patterns and "find in selection" are table stakes.
@@ -179,7 +175,7 @@ The hardest item on this list. True multiplayer editing requires:
 This is a 3-6 month full-time project. Don't start it until Phases 1-3 are solid.
 
 ### 4.2 AI that knows your whole codebase
-Beyond per-file context and sidecar keyword search:
+Beyond per-file context and the built-in BM25 keyword search (`phazeai-core/src/search/`):
 - Incremental AST-level index (tree-sitter for 40+ languages)
 - True vector embeddings persisted to disk (HNSW index, `usearch` crate)
 - Agent can query "find all callers of this function across the workspace" instantly
@@ -203,7 +199,7 @@ These are open architectural decisions that should be resolved before building t
 | Decision | Options | Blocking |
 |---|---|---|
 | Cloud backend | Cloudflare/D1 vs Supabase vs self-hosted Postgres | Phase 3.1 |
-| Semantic search | Fix naming (ship fast) vs real embeddings (ship right) | Phase 2.3 |
+| Semantic search | Keyword search shipped (BM25, in-process); add local embeddings next to it or not | Phase 2.3 |
 | CRDT library | Automerge-rs vs Diamond Types vs Yrs | Phase 4.1 |
 | Plugin sandbox | WASM (safe, portable) vs cdylib (current, fast) | Phase 3.3 |
 | Collab transport | WebSocket relay vs WebRTC P2P | Phase 4.1 |
@@ -232,7 +228,6 @@ Week 3     Phase 1.3  Single AI surface (delete ai_panel)
 Week 4     Phase 1.4  Composer safety
 Week 4-5   Phase 1.5  Session persistence — one model
 Week 5     Phase 1.6  First-run readiness checks
-Week 6     Phase 2.3A Fix semantic search naming (1 day)
 Week 6-8   Phase 2.4  Multi-line find
 Week 8-9   Phase 2.5  Terminal split
 Week 9-10  Phase 2.7  Distribution packages + release CI

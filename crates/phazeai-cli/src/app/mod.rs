@@ -19,7 +19,7 @@ use phazeai_core::{
     collect_git_info,
     context::{ConversationMetadata, ConversationStore, SavedConversation, SavedMessage},
     tools::{ToolApprovalManager, ToolApprovalMode},
-    Agent, AgentEvent, Settings, SystemPromptBuilder,
+    Agent, AgentEvent, BuildIndexTool, CodeSearch, CodeSearchTool, Settings, SystemPromptBuilder,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
@@ -68,12 +68,8 @@ pub async fn run_single_prompt(
             can_ask,
             refusals.clone(),
         ));
-    if let Some(client) = try_start_sidecar().await {
-        let client = Arc::new(client);
-        agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
-            client.clone(),
-        )));
-        agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));
+    if let Some(search) = code_search(settings) {
+        register_code_search(&mut agent, &search);
     }
 
     let styled = color.has_color() && io::stderr().is_terminal();
@@ -761,6 +757,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             policy,
             cancel,
             context_budget: state.context_budget,
+            code_search: code_search(&state.settings),
         },
         worker_rx,
         ui_tx,
@@ -882,36 +879,22 @@ fn build_system_prompt(extra_instructions: Option<&str>) -> String {
     builder.build()
 }
 
-/// Attempt to start the Python sidecar for semantic search.
-/// Returns None if Python is unavailable or the sidecar script doesn't exist.
-pub(crate) async fn try_start_sidecar() -> Option<phazeai_sidecar::SidecarClient> {
-    let python = if phazeai_sidecar::SidecarManager::check_python("python3").await {
-        "python3"
-    } else if phazeai_sidecar::SidecarManager::check_python("python").await {
-        "python"
-    } else {
-        return None;
-    };
-
-    // Look for the sidecar script: project-local first, then config directory
-    let cwd = std::env::current_dir().ok()?;
-    let local_path = cwd.join("sidecar").join("server.py");
-    let config_path =
-        dirs::config_dir().map(|d| d.join("phazeai").join("sidecar").join("server.py"));
-
-    let script_path = if local_path.exists() {
-        local_path
-    } else {
-        config_path.filter(|p| p.exists())?
-    };
-
-    let mut manager = phazeai_sidecar::SidecarManager::new(python, &script_path);
-    if manager.start().await.is_err() {
+/// The code search for this session, rooted at the working directory, or
+/// `None` when `[search] enabled` is off. Nothing is read until the model
+/// first searches or calls `build_search_index`, so a CLI started in a large
+/// directory it never searches costs nothing (`auto_index` is an IDE setting).
+pub(crate) fn code_search(settings: &Settings) -> Option<CodeSearch> {
+    if !settings.search.enabled {
         return None;
     }
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Some(CodeSearch::new(root))
+}
 
-    let process = manager.take_process()?;
-    phazeai_sidecar::SidecarClient::from_process(process).ok()
+/// Give the agent the `code_search` and `build_search_index` tools.
+pub(crate) fn register_code_search(agent: &mut Agent, search: &CodeSearch) {
+    agent.register_tool(Box::new(CodeSearchTool::new(search.clone())));
+    agent.register_tool(Box::new(BuildIndexTool::new(search.clone())));
 }
 
 #[cfg(test)]
@@ -923,6 +906,14 @@ mod tests {
         assert_eq!(apply_mode_prefix("chat", "hi"), "hi");
         assert!(apply_mode_prefix("plan", "hi").starts_with("[PLANNING MODE]"));
         assert!(apply_mode_prefix("ask", "hi").ends_with("hi"));
+    }
+
+    #[test]
+    fn code_search_follows_the_setting() {
+        let mut settings = Settings::default();
+        assert!(code_search(&settings).is_some());
+        settings.search.enabled = false;
+        assert!(code_search(&settings).is_none());
     }
 
     // ── Queue handling ──────────────────────────────────────────────────────

@@ -10,10 +10,16 @@
 //! * Builds are serialised by a gate. A second caller waits for the running
 //!   build, then does its own sync, which is cheap because everything is
 //!   unchanged by then; its stats describe the state when *it* finished.
+//! * Single-file updates ([`CodeSearch::refresh_file`], [`CodeSearch::remove_file`])
+//!   are serialised by a second gate, from reading the file to committing it:
+//!   two of them racing (an editor save and a search repairing a stale hit)
+//!   cannot leave the older read in the index. They do not wait for builds,
+//!   and a build never commits over a file a single-file update wrote after
+//!   the build looked at the index.
 //! * [`CodeSearch::status`] reads atomics only.
-//! * Locks are never nested: the gate is taken before the state lock, never
-//!   the other way round, and no thread holds the state lock while waiting
-//!   for it again.
+//! * Locks are never nested: a gate is taken before the state lock, never
+//!   the other way round, the two gates are never held together, and no
+//!   thread holds the state lock while waiting for it again.
 
 use super::index::{Applied, Candidate, Index, Parsed};
 use super::paths::{absolutize, path_key, path_starts_with};
@@ -49,6 +55,10 @@ struct Inner {
     state: RwLock<State>,
     /// Held for the whole of a build.
     gate: Mutex<()>,
+    /// Held by `refresh_file` and `remove_file` from reading a file to
+    /// committing the result, so a slow refresh (a search fixing a stale hit)
+    /// can never land after, and so overwrite, a newer one (an editor save).
+    edits: Mutex<()>,
     built: AtomicBool,
     building: AtomicBool,
     truncated: AtomicBool,
@@ -57,6 +67,9 @@ struct Inner {
     /// Test seam: runs after each committed batch with no lock held.
     #[cfg(test)]
     after_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test seam: runs after `refresh_file` read a file, before it commits.
+    #[cfg(test)]
+    after_parse: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 struct State {
@@ -106,6 +119,7 @@ impl CodeSearch {
                     index: Index::new(),
                 }),
                 gate: Mutex::new(()),
+                edits: Mutex::new(()),
                 built: AtomicBool::new(false),
                 building: AtomicBool::new(false),
                 truncated: AtomicBool::new(false),
@@ -113,6 +127,8 @@ impl CodeSearch {
                 chunks: AtomicUsize::new(0),
                 #[cfg(test)]
                 after_commit: Mutex::new(None),
+                #[cfg(test)]
+                after_parse: Mutex::new(None),
             }),
         }
     }
@@ -163,7 +179,10 @@ impl CodeSearch {
     }
 
     /// Rank the indexed files for `query` and return the best `top_k` (at most
-    /// 50), one hit per file. The first search builds the whole root.
+    /// 50), one hit per file. The first search builds the whole root (or waits
+    /// for the build that is already doing so: results from half an index
+    /// would silently miss files). Once an index has been built, searches never
+    /// wait for later builds; they rank against what has been committed.
     ///
     /// Files the privacy policy denies *now* are dropped even if they were
     /// indexed earlier, files that changed on disk since indexing are re-read
@@ -191,6 +210,7 @@ impl CodeSearch {
     /// outside the root or not indexable; a file that became ineligible, was
     /// deleted or replaced by something else leaves the index.
     pub fn refresh_file(&self, path: &Path) {
+        let _edit = self.edits();
         if let Err(e) = self.refresh_inner(path) {
             tracing::debug!("code search refresh of {} failed: {e}", path.display());
         }
@@ -199,6 +219,7 @@ impl CodeSearch {
     /// Drop a file (or, for a directory, every file below it) from the index.
     pub fn remove_file(&self, path: &Path) {
         let key = path_key(&absolutize(path));
+        let _edit = self.edits();
         let mut st = self.write();
         if st.index.remove_under(&key) > 0 {
             self.publish(&st.index);
@@ -228,6 +249,10 @@ impl CodeSearch {
         self.inner.gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn edits(&self) -> MutexGuard<'_, ()> {
+        self.inner.edits.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn publish(&self, index: &Index) {
         self.inner
             .files
@@ -252,6 +277,22 @@ impl CodeSearch {
 
     #[cfg(not(test))]
     fn after_commit_hook(&self) {}
+
+    #[cfg(test)]
+    fn after_parse_hook(&self) {
+        let hook = self
+            .inner
+            .after_parse
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn after_parse_hook(&self) {}
 
     /// Apply one batch under the write lock.
     fn commit(
@@ -558,6 +599,7 @@ impl CodeSearch {
             }
         }
         let parsed = scan::parse_file(&file, &root, &self.inner.limits);
+        self.after_parse_hook();
         self.commit(generation, u64::MAX, &[], vec![parsed])?;
         Ok(())
     }
@@ -651,8 +693,25 @@ impl CodeSearch {
     }
 
     #[cfg(test)]
+    pub(super) fn set_after_parse(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .inner
+            .after_parse
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
     pub(super) fn with_index<R>(&self, f: impl FnOnce(&Index) -> R) -> R {
         f(&self.read().index)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_index_mut<R>(&self, f: impl FnOnce(&mut Index) -> R) -> R {
+        let mut st = self.write();
+        let out = f(&mut st.index);
+        self.publish(&st.index);
+        out
     }
 
     #[cfg(test)]

@@ -227,7 +227,15 @@ pub async fn download_verified(
             file.flush().await?;
             return Err(LocalAiError::Cancelled);
         }
-        let chunk = chunk?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // A dropped connection: land what arrived so the retry resumes
+                // from it (tokio's File finishes buffered writes in the background).
+                file.flush().await?;
+                return Err(e.into());
+            }
+        };
         if have + chunk.len() as u64 > expected_size {
             drop(file);
             let _ = tokio::fs::remove_file(&part).await;

@@ -155,8 +155,12 @@ impl ToolApprovalManager {
     /// Classify a tool's permission level based on name and parameters
     pub fn classify_tool(&self, tool_name: &str, params: &Value) -> ToolPermission {
         match tool_name {
-            // Read-only tools
-            "read_file" | "grep" | "glob" | "list_files" => ToolPermission::ReadOnly,
+            // Read-only tools. The code-search pair only reads workspace
+            // files the privacy policy allows into an in-memory index, and
+            // refuses paths outside the workspace root.
+            "read_file" | "grep" | "glob" | "list_files" | "code_search" | "build_search_index" => {
+                ToolPermission::ReadOnly
+            }
 
             // File-level write operations. These are the tools `-p --allow edit`
             // may run unasked; all of them resolve their paths inside the
@@ -878,6 +882,14 @@ mod tests {
             manager.classify_tool("list_files", &json!({})),
             ToolPermission::ReadOnly
         );
+        assert_eq!(
+            manager.classify_tool("code_search", &json!({"query": "parse"})),
+            ToolPermission::ReadOnly
+        );
+        assert_eq!(
+            manager.classify_tool("build_search_index", &json!({})),
+            ToolPermission::ReadOnly
+        );
     }
 
     #[test]
@@ -958,6 +970,8 @@ mod tests {
         // Read-only should not need approval
         assert!(!manager.needs_approval("read_file", &json!({})));
         assert!(!manager.needs_approval("grep", &json!({})));
+        assert!(!manager.needs_approval("code_search", &json!({"query": "parse"})));
+        assert!(!manager.needs_approval("build_search_index", &json!({})));
 
         // Write and execute should need approval
         assert!(manager.needs_approval("write_file", &json!({})));

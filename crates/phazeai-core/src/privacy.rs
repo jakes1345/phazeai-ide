@@ -53,7 +53,7 @@
 //! - IDE / CLI features that attach file contents leave denied files out:
 //!   @mentions, editor AI actions, inline edit, inline completion, the Design
 //!   panel's style sources and design system, the commit-message diff, project
-//!   instruction files, the repo map, skills, semantic-search results, `/add`.
+//!   instruction files, the repo map, skills, code-search results, `/add`.
 //! - Every LLM client built through [`crate::llm::ProviderRegistry`] is a
 //!   [`GuardedClient`]: it checks `local_only` before *each* request and
 //!   records the request in [`audit`].

@@ -13,6 +13,31 @@ fn tool_error(tool: &str, e: SearchError) -> PhazeError {
     PhazeError::tool(tool, e.to_string())
 }
 
+/// `top_k` as models send it: an integer, sometimes a float or a numeric string.
+fn top_k_param(params: &Value) -> usize {
+    let n = match params.get("top_k") {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    };
+    n.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K) as usize
+}
+
+/// `paths` as an array of strings; a lone string counts as one path. Nothing
+/// usable means the whole workspace.
+fn paths_param(params: &Value) -> Vec<PathBuf> {
+    match params.get("paths") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(PathBuf::from))
+            .collect(),
+        Some(Value::String(s)) if !s.trim().is_empty() => vec![PathBuf::from(s)],
+        _ => Vec::new(),
+    }
+}
+
 /// Keyword search over the workspace's code, ranked with BM25.
 pub struct CodeSearchTool {
     search: CodeSearch,
@@ -61,15 +86,9 @@ impl Tool for CodeSearchTool {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| PhazeError::tool("code_search", "Missing required parameter: query"))?;
-        let top_k = params
-            .get("top_k")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_TOP_K)
-            .clamp(1, MAX_TOP_K) as usize;
-
         let results = self
             .search
-            .search(query, top_k)
+            .search(query, top_k_param(&params))
             .await
             .map_err(|e| tool_error("code_search", e))?;
         let mut out = serde_json::to_value(&results)?;
@@ -125,18 +144,9 @@ impl Tool for BuildIndexTool {
     }
 
     async fn execute(&self, params: Value) -> ToolResult {
-        let paths: Vec<PathBuf> = params
-            .get("paths")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(PathBuf::from))
-                    .collect()
-            })
-            .unwrap_or_default();
         let stats = self
             .search
-            .build(&paths)
+            .build(&paths_param(&params))
             .await
             .map_err(|e| tool_error("build_search_index", e))?;
         let mut out = serde_json::to_value(&stats)?;

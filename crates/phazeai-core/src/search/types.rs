@@ -33,7 +33,9 @@ pub struct BuildStats {
     pub updated: usize,
     /// Files whose (mtime, size) matched the index; not read again.
     pub unchanged: usize,
-    /// Files dropped from the index: deleted, newly ignored, newly denied or over a limit.
+    /// Files dropped from the index: deleted, newly ignored or denied, no
+    /// longer indexable (too large, binary, not UTF-8) or over a limit. Always
+    /// `total_files` after = before + `indexed` - `removed`.
     pub removed: usize,
     /// Candidate files that could not be indexed: too large, binary or not UTF-8.
     pub skipped: usize,

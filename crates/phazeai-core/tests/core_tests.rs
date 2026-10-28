@@ -23,10 +23,9 @@ fn test_settings_default_values() {
     assert!(settings.editor.show_line_numbers);
     assert!(settings.editor.auto_save);
 
-    // Check sidecar defaults
-    assert!(settings.sidecar.enabled);
-    assert_eq!(settings.sidecar.python_path, "python3");
-    assert!(settings.sidecar.auto_start);
+    // Check code search defaults
+    assert!(settings.search.enabled);
+    assert!(settings.search.auto_index);
 
     // Check providers list is empty by default
     assert!(settings.providers.is_empty());

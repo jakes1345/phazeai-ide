@@ -23,9 +23,6 @@ pub enum PhazeError {
     #[error("Agent exceeded maximum iterations ({0})")]
     MaxIterations(usize),
 
-    #[error("Sidecar error: {0}")]
-    Sidecar(String),
-
     #[error("{0}")]
     Other(String),
 
