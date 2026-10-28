@@ -392,6 +392,42 @@ fn screenshot(wid: u64, name: &str) -> DynamicImage {
     capture(wid, &dir.join(format!("{name}.png")))
 }
 
+/// Screenshot once `ok` accepts the frame and the window has stopped changing,
+/// polling for up to 30 s.
+///
+/// The IDE paints in software here and a frame can trail the keys that caused
+/// it by seconds, so one capture after a fixed sleep sometimes shows the state
+/// from before the change, or a half-typed one. A frame counts only when `ok`
+/// accepts it and the next capture matches it, so a single transient frame can
+/// neither satisfy a wait nor decide an assertion. Each capture already costs a
+/// couple of seconds, so polling needs no extra sleep. The last frame is
+/// returned when the time is up, which leaves the caller's assertion to fail
+/// with what the window really showed.
+fn screenshot_until(wid: u64, name: &str, ok: impl Fn(&DynamicImage) -> bool) -> DynamicImage {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut accepted: Option<DynamicImage> = None;
+    loop {
+        let shot = screenshot(wid, name);
+        if ok(&shot) {
+            if accepted
+                .as_ref()
+                .is_some_and(|prev| diff_percent(prev, &shot) < 0.05)
+            {
+                return shot;
+            }
+            accepted = Some(shot.clone());
+        } else {
+            accepted = None;
+            harness_log(format!(
+                "{name}: the expected change is not on screen yet, capturing again"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return shot;
+        }
+    }
+}
+
 fn capture(wid: u64, path: &std::path::Path) -> DynamicImage {
     // Delete existing file so scrot doesn't append _001, _002, etc.
     std::fs::remove_file(path).ok();
@@ -435,6 +471,70 @@ fn diff_percent(a: &DynamicImage, b: &DynamicImage) -> f64 {
         }
     }
     (diff as f64 / total) * 100.0
+}
+
+/// Percentage of pixels that differ inside a band of the frame, comparing `a`
+/// at `(x, y)` with `b` at `(x + dx, y + dy)`. The band is given as columns
+/// `x0..x1` (fractions of the width) and rows `y0..y1` (pixels).
+fn band_diff_percent(
+    a: &DynamicImage,
+    b: &DynamicImage,
+    (x0, x1, y0, y1): (f64, f64, u32, u32),
+    (dx, dy): (i32, i32),
+) -> f64 {
+    let (aw, ah) = a.dimensions();
+    if (aw, ah) != b.dimensions() {
+        return 100.0;
+    }
+    let (xa, xb) = ((aw as f64 * x0) as u32, (aw as f64 * x1) as u32);
+    let (ya, yb) = (y0.min(ah), y1.min(ah));
+    let total = (xb.saturating_sub(xa) * yb.saturating_sub(ya)).max(1) as f64;
+    let mut diff = 0u64;
+    for y in ya..yb {
+        for x in xa..xb {
+            let (bx, by) = (x as i32 + dx, y as i32 + dy);
+            if bx < 0 || by < 0 || bx >= aw as i32 || by >= ah as i32 {
+                diff += 1;
+                continue;
+            }
+            let Rgba([r1, g1, b1, _]) = a.get_pixel(x, y);
+            let Rgba([r2, g2, b2, _]) = b.get_pixel(bx as u32, by as u32);
+            if (r1 as i32 - r2 as i32).unsigned_abs() > 10
+                || (g1 as i32 - g2 as i32).unsigned_abs() > 10
+                || (b1 as i32 - b2 as i32).unsigned_abs() > 10
+            {
+                diff += 1;
+            }
+        }
+    }
+    diff as f64 / total * 100.0
+}
+
+/// The best match of a band over shifts of up to two pixels either way.
+///
+/// The harness flushes a repaint by resizing the window by a pixel and back,
+/// which can leave the whole UI offset by a pixel in the next capture. The same
+/// text shifted by one pixel differs at every glyph edge, so a plain comparison
+/// calls identical rows different; a different file name stays different at
+/// every shift.
+fn band_diff_percent_tolerant(
+    a: &DynamicImage,
+    b: &DynamicImage,
+    band: (f64, f64, u32, u32),
+) -> f64 {
+    let mut best = 100.0f64;
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            best = best.min(band_diff_percent(a, b, band, (dx, dy)));
+        }
+    }
+    best
+}
+
+/// How much the first row of the open file picker differs between two frames.
+/// The row sits right under the search box, whatever the window's width.
+fn picker_first_row_diff(a: &DynamicImage, b: &DynamicImage) -> f64 {
+    band_diff_percent_tolerant(a, b, (0.25, 0.55, 168, 194))
 }
 
 fn diff_stats(a: &DynamicImage, b: &DynamicImage) -> (f64, Option<(u32, u32, u32, u32)>) {
@@ -516,21 +616,40 @@ fn looks_painted(img: &DynamicImage) -> bool {
 fn wait_until_rendered(wid: u64) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut previous: Option<DynamicImage> = None;
+    // Why the last frame was not accepted, for the failure message.
+    let mut last_why = String::from("no frame captured");
+    let settle_png = std::env::temp_dir().join("phazeai-tier2-settle.png");
     while Instant::now() < deadline {
-        let shot = capture(wid, &std::env::temp_dir().join("phazeai-tier2-settle.png"));
+        let shot = capture(wid, &settle_png);
         if looks_painted(&shot) {
             if let Some(prev) = &previous {
-                if diff_percent(prev, &shot) < 0.5 {
+                let change = diff_percent(prev, &shot);
+                if change < 0.5 {
                     return;
                 }
+                last_why =
+                    format!("painted but still changing ({change:.2}% since the last frame)");
+            } else {
+                last_why = String::from("painted, waiting for a second matching frame");
             }
             previous = Some(shot);
         } else {
+            last_why = format!(
+                "not a painted IDE: blank={}, top colour {:.1}%, top two {:.1}%",
+                is_blank(&shot),
+                dominant_fraction(&shot) * 100.0,
+                top_colors_fraction(&shot, 2) * 100.0
+            );
             previous = None;
         }
         thread::sleep(Duration::from_millis(1000));
     }
-    panic!("IDE window never finished rendering within 60s");
+    let kept = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/settle_timeout.png");
+    std::fs::copy(&settle_png, &kept).ok();
+    panic!(
+        "IDE window never finished rendering within 60s; last frame: {last_why} (saved as {})",
+        kept.display()
+    );
 }
 
 fn is_blank(img: &DynamicImage) -> bool {
@@ -595,6 +714,38 @@ fn an_ide_shaped_frame_counts_as_painted() {
     assert!(looks_painted(&ide));
 }
 
+/// A frame with a "row of text" (a few solid glyph-like blocks) at `x`.
+fn row_frame(blocks: &[u32], shift: u32) -> DynamicImage {
+    DynamicImage::ImageRgba8(image::RgbaImage::from_fn(1280, 1024, |x, y| {
+        let in_row = (172..188).contains(&y);
+        let on_glyph = blocks
+            .iter()
+            .any(|b| (x >= b + shift && x < b + shift + 6) && in_row);
+        if on_glyph {
+            Rgba([230, 230, 240, 255])
+        } else {
+            Rgba([20, 16, 52, 255])
+        }
+    }))
+}
+
+#[test]
+fn the_same_row_shifted_a_pixel_still_counts_as_the_same_row() {
+    let old = row_frame(&[330, 345, 360, 380, 395, 410], 0);
+    let shifted = row_frame(&[330, 345, 360, 380, 395, 410], 1);
+    // Compared pixel by pixel, a one-pixel shift looks like a different row.
+    assert!(band_diff_percent(&old, &shifted, (0.25, 0.55, 168, 194), (0, 0)) > 1.0);
+    assert!(picker_first_row_diff(&old, &shifted) < 1.0);
+}
+
+#[test]
+fn a_different_row_is_different_at_every_shift() {
+    let agents = row_frame(&[330, 345, 360, 380, 395, 410], 0);
+    let cargo = row_frame(&[330, 338, 352, 366, 372, 400], 0);
+    assert!(picker_first_row_diff(&agents, &cargo) > 1.0);
+    assert!(picker_first_row_diff(&agents, &row_frame(&[330, 345, 360, 380, 395, 410], 2)) < 1.0);
+}
+
 #[test]
 fn blank_and_flat_frames_are_not_painted() {
     let black = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -626,7 +777,9 @@ fn scenario_toggle_terminal() {
     );
 
     send_keys(wid, "ctrl+j");
-    let open = screenshot(wid, "s1_terminal_open");
+    let open = screenshot_until(wid, "s1_terminal_open", |f| {
+        diff_percent(&baseline, f) > 3.0
+    });
     let diff_open = diff_percent(&baseline, &open);
     assert!(
         diff_open > 3.0,
@@ -634,7 +787,9 @@ fn scenario_toggle_terminal() {
     );
 
     send_keys(wid, "ctrl+j");
-    let closed = screenshot(wid, "s1_terminal_closed");
+    let closed = screenshot_until(wid, "s1_terminal_closed", |f| {
+        diff_percent(&baseline, f) < 8.0
+    });
     let diff_close = diff_percent(&baseline, &closed);
     assert!(
         diff_close < 8.0,
@@ -654,7 +809,7 @@ fn scenario_command_palette_open_and_close() {
     assert!(!is_blank(&baseline), "App rendered blank screen");
 
     send_keys(wid, "ctrl+p");
-    let open = screenshot(wid, "s2_palette_open");
+    let open = screenshot_until(wid, "s2_palette_open", |f| diff_percent(&baseline, f) > 5.0);
     let diff_open = diff_percent(&baseline, &open);
     assert!(
         diff_open > 5.0,
@@ -662,7 +817,9 @@ fn scenario_command_palette_open_and_close() {
     );
 
     send_keys(wid, "escape");
-    let closed = screenshot(wid, "s2_palette_closed");
+    let closed = screenshot_until(wid, "s2_palette_closed", |f| {
+        diff_percent(&baseline, f) < 8.0
+    });
     let diff_close = diff_percent(&baseline, &closed);
     assert!(
         diff_close < 8.0,
@@ -682,7 +839,7 @@ fn scenario_toggle_explorer() {
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+b");
-    let closed = screenshot(wid, "s3_explorer_closed");
+    let closed = screenshot_until(wid, "s3_explorer_closed", |f| diff_percent(&open, f) > 3.0);
     let diff = diff_percent(&open, &closed);
     assert!(
         diff > 3.0,
@@ -690,7 +847,9 @@ fn scenario_toggle_explorer() {
     );
 
     send_keys(wid, "ctrl+b");
-    let reopened = screenshot(wid, "s3_explorer_reopened");
+    let reopened = screenshot_until(wid, "s3_explorer_reopened", |f| {
+        diff_percent(&open, f) < 10.0
+    });
     let diff2 = diff_percent(&open, &reopened);
     assert!(
         diff2 < 10.0,
@@ -710,7 +869,7 @@ fn scenario_toggle_chat_panel() {
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+backslash");
-    let closed = screenshot(wid, "s4_chat_closed");
+    let closed = screenshot_until(wid, "s4_chat_closed", |f| diff_percent(&open, f) > 1.0);
     let diff = diff_percent(&open, &closed);
     assert!(diff > 1.0, "Chat close: expected >1% diff, got {diff:.2}%");
 }
@@ -728,23 +887,38 @@ fn scenario_command_palette_type_filter() {
 
     // Ctrl+P must put the keyboard in the search box: no click in between.
     send_keys(wid, "ctrl+p");
-    let empty = screenshot(wid, "s5_palette_empty");
+    let empty = screenshot_until(wid, "s5_palette_empty", |f| {
+        diff_percent(&baseline, f) > 5.0
+    });
     assert!(
         diff_percent(&baseline, &empty) > 5.0,
         "the file picker did not open"
     );
 
     type_text(wid, "cargo.toml");
-    let filtered = screenshot(wid, "s5_palette_filtered");
+    // Wait for the typing to arrive and the list to settle; the first-row check
+    // below must judge that settled frame, not decide when to stop waiting.
+    let filtered = screenshot_until(wid, "s5_palette_filtered", |f| {
+        diff_percent(&empty, f) > 0.5
+    });
     let diff = diff_percent(&empty, &filtered);
     assert!(
         diff > 0.5,
         "typing in the picker had no effect (list unchanged), diff was {diff:.2}%"
     );
+    // The query changes which file is first (AGENTS.md -> Cargo.toml). Rows
+    // that keep their old names while the list shrinks are a bug of their own.
+    let first_row = picker_first_row_diff(&empty, &filtered);
+    assert!(
+        first_row > 1.0,
+        "the picker's first row still shows the unfiltered file (stale rows), row diff was {first_row:.2}%"
+    );
 
     // Enter opens the top match: the picker closes and a file tab appears.
     send_keys(wid, "Return");
-    let opened = screenshot(wid, "s5_palette_opened");
+    let opened = screenshot_until(wid, "s5_palette_opened", |f| {
+        diff_percent(&filtered, f) > 5.0 && diff_percent(&baseline, f) > 1.0
+    });
     let closed_diff = diff_percent(&filtered, &opened);
     assert!(
         closed_diff > 5.0,
@@ -770,7 +944,9 @@ fn scenario_panel_stability_sequence() {
 
     send_keys(wid, "ctrl+j"); // open terminal
     send_keys(wid, "ctrl+j"); // close terminal
-    let after_terminal_pair = screenshot(wid, "s6_after_terminal_pair");
+    let after_terminal_pair = screenshot_until(wid, "s6_after_terminal_pair", |f| {
+        diff_percent(&initial, f) < 10.0
+    });
     let (after_terminal_diff, after_terminal_bbox) = diff_stats(&initial, &after_terminal_pair);
     // #region agent log
     debug_log(
@@ -783,7 +959,9 @@ fn scenario_panel_stability_sequence() {
 
     send_keys(wid, "ctrl+b"); // close explorer
     send_keys(wid, "ctrl+b"); // reopen explorer
-    let after_explorer_pair = screenshot(wid, "s6_after_explorer_pair");
+    let after_explorer_pair = screenshot_until(wid, "s6_after_explorer_pair", |f| {
+        diff_percent(&initial, f) < 10.0
+    });
     let (after_explorer_diff, after_explorer_bbox) = diff_stats(&initial, &after_explorer_pair);
     // #region agent log
     debug_log(
@@ -797,7 +975,7 @@ fn scenario_panel_stability_sequence() {
     send_keys(wid, "ctrl+p"); // open palette
     send_keys(wid, "escape"); // close palette
 
-    let final_state = screenshot(wid, "s6_final");
+    let final_state = screenshot_until(wid, "s6_final", |f| diff_percent(&initial, f) < 10.0);
     let (diff, bbox) = diff_stats(&initial, &final_state);
     // #region agent log
     debug_log(
