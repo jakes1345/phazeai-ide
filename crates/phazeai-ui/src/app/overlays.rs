@@ -117,6 +117,17 @@ mod picker_walk_tests {
 
 // ── File picker overlay (Ctrl+P) ──────────────────────────────────────────────
 
+/// Identity of a file-picker row.
+///
+/// A row bakes in its file name when its view is created, and the stack only
+/// creates views for keys it has not seen. The position alone is therefore not
+/// enough: typing a filter keeps positions 0..n alive while the files at them
+/// change, which left the old names on screen (and a click opening them) next
+/// to a query that matched other files.
+fn picker_row_key(row: &(usize, std::path::PathBuf)) -> (usize, std::path::PathBuf) {
+    (row.0, row.1.clone())
+}
+
 pub(crate) fn file_picker(state: IdeState) -> impl IntoView {
     let query = state.workbench.file_picker_query;
     let all_files = state.workbench.file_picker_files;
@@ -195,7 +206,7 @@ pub(crate) fn file_picker(state: IdeState) -> impl IntoView {
         });
 
     let items_view = scroll(
-        dyn_stack(filtered, |(idx, _)| *idx, {
+        dyn_stack(filtered, picker_row_key, {
             let state = state.clone();
             move |(idx, path)| {
                 let path_clone = path.clone();
@@ -1915,6 +1926,34 @@ pub(crate) fn peek_def_overlay(state: IdeState) -> impl IntoView {
                 .apply_if(!shown, |s| s.display(floem::style::Display::None))
         })
         .on_click_stop(move |_| open.set(false))
+}
+
+#[cfg(test)]
+mod picker_row_tests {
+    use super::picker_row_key;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_row_gets_a_new_key_when_the_file_at_its_position_changes() {
+        // Unfiltered, position 0 is AGENTS.md; after typing "cargo.toml" it is
+        // Cargo.toml. Position-only keys made these the same row, so the stack
+        // kept the old view and the old name on screen.
+        let before = (0, PathBuf::from("AGENTS.md"));
+        let after = (0, PathBuf::from("Cargo.toml"));
+        assert_ne!(picker_row_key(&before), picker_row_key(&after));
+    }
+
+    #[test]
+    fn an_unchanged_row_keeps_its_key() {
+        let row = (3, PathBuf::from("crates/app/Cargo.toml"));
+        assert_eq!(picker_row_key(&row), picker_row_key(&row.clone()));
+        // The same file at another position is another row: the hover state
+        // each row captures is its position.
+        assert_ne!(
+            picker_row_key(&row),
+            picker_row_key(&(4, PathBuf::from("crates/app/Cargo.toml")))
+        );
+    }
 }
 
 #[cfg(test)]
