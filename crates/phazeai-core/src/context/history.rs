@@ -245,7 +245,8 @@ impl ConversationHistory {
     ///    says how many bytes were cut.
     ///
     /// So the result fits whenever the system prompt, the summary, the
-    /// question and the newest tool round (its outputs cut to markers) do.
+    /// question (with that note, if steps had to go) and the newest tool round
+    /// (its outputs cut to markers) do.
     /// A tool call is never separated from its results, and what is left
     /// still opens with a user turn.
     pub fn trim_to_token_budget(&mut self, max_tokens: usize) {
@@ -430,7 +431,11 @@ fn cut_output(output: &str, keep: usize) -> String {
             // A short tail leaves its share to the head.
             let head = truncate_bytes(old_head, head_keep.max(keep.saturating_sub(old_tail.len())));
             let tail = tail_bytes(old_tail, keep - head.len());
-            let cut = old_cut + (old_head.len() - head.len()) + (old_tail.len() - tail.len());
+            // Saturating: the "earlier marker" may be text the tool printed,
+            // with any number in it.
+            let cut = old_cut
+                .saturating_add(old_head.len() - head.len())
+                .saturating_add(old_tail.len() - tail.len());
             (head, tail, cut)
         }
         None => {
@@ -755,5 +760,21 @@ mod tests {
         assert!(t.contains("[Tool result]\n"));
         assert!(t.contains("…[1000 more bytes]"));
         assert!(t.len() < 5000);
+    }
+
+    #[test]
+    fn an_output_that_prints_a_cut_marker_is_cut_without_overflowing() {
+        // Tool output is arbitrary text: this one quotes a marker carrying the
+        // largest count there is, so it reads as an earlier cut.
+        let quoted = format!(
+            "start\n{CUT_PREFIX}{}{CUT_SUFFIX}\n{}",
+            usize::MAX,
+            "x".repeat(5000)
+        );
+        let cut = cut_output(&quoted, 100);
+        assert!(cut.len() <= 100 + CUT_MARKER_MAX, "{} bytes", cut.len());
+        let (head, count, tail) = split_cut(&cut).expect("a marker");
+        assert_eq!((head, count), ("start", usize::MAX));
+        assert_eq!(tail, "x".repeat(95));
     }
 }

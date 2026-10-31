@@ -680,10 +680,10 @@ async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, 
 }
 
 /// Append an explicit "[truncated N chars]" marker
-/// when truncation occurs, so the UI tells the user (and downstream LLM if the
-/// summary ever gets routed back to a model) exactly how much output was
-/// hidden. The full result is still written to the conversation history;
-/// this is purely a UI summary transformer.
+/// when truncation occurs, so the UI tells the user exactly how much output
+/// was hidden. This only shortens the UI summary: what the model gets is the
+/// result as `ConversationHistory::add_tool_result` stores it (capped there)
+/// and as trimming later cuts it to fit the context budget.
 fn truncate_str_annotated(s: &str, max_len: usize) -> String {
     let total = s.chars().count();
     if total <= max_len {
@@ -691,7 +691,7 @@ fn truncate_str_annotated(s: &str, max_len: usize) -> String {
     }
     let kept: String = s.chars().take(max_len).collect();
     let elided = total - max_len;
-    format!("{kept}\n... [truncated, {elided} more chars in tool output sent to model]")
+    format!("{kept}\n... [truncated, {elided} more chars not shown here]")
 }
 
 #[cfg(test)]
