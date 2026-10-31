@@ -12,7 +12,7 @@ use floem::{
     IntoView,
 };
 use phazeai_core::constants::ui as ui_const;
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::Settings;
 
 use crate::components::FocusWhenOpen;
 use crate::domain_state::IdeState;
@@ -878,33 +878,13 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                             return;
                         }
                     };
-                    let agent = Agent::new(client);
-                    let (agent_tx, mut agent_rx) =
-                        tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                    let run_fut = phazeai_core::privacy::audit::scope(
-                        attached,
-                        agent.run_with_events(&prompt, agent_tx),
-                    );
-                    let drain_fut = async {
-                        let mut accumulated = String::new();
-                        while let Some(event) = agent_rx.recv().await {
-                            match event {
-                                AgentEvent::TextDelta(text) => {
-                                    accumulated.push_str(&text);
-                                }
-                                AgentEvent::Complete { .. } => {
-                                    let _ = tx.send(InlineEditUpdate::Done(accumulated.clone()));
-                                    break;
-                                }
-                                AgentEvent::Error(e) => {
-                                    let _ = tx.send(InlineEditUpdate::Err(e));
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    };
-                    let _ = tokio::join!(run_fut, drain_fut);
+                    let update =
+                        match crate::ai_helpers::inline_edit_reply(client, &prompt, attached).await
+                        {
+                            Ok(text) => InlineEditUpdate::Done(text),
+                            Err(e) => InlineEditUpdate::Err(e),
+                        };
+                    let _ = tx.send(update);
                 });
             });
         });
