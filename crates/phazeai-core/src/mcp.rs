@@ -26,7 +26,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct McpToolDef {
     pub name: String,
     pub description: String,
-    #[serde(default)]
+    #[serde(default, rename = "inputSchema")]
     pub input_schema: serde_json::Value,
 }
 
@@ -203,9 +203,11 @@ impl McpClient {
             "initialize",
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "roots": { "listChanged": true }
-                },
+                // None: this client answers no server-to-client requests, so it
+                // must not offer `roots`. A server offered roots asks for them
+                // with `roots/list`, and the official filesystem server holds
+                // every tool call until that is answered or times out.
+                "capabilities": {},
                 "clientInfo": {
                     "name": "PhazeAI",
                     "version": env!("CARGO_PKG_VERSION")
@@ -220,10 +222,19 @@ impl McpClient {
         // Send initialized notification
         self.send_notification("notifications/initialized", serde_json::json!({}))?;
 
-        // Discover capabilities
-        self.refresh_tools()?;
-        self.refresh_resources()?;
-        self.refresh_prompts()?;
+        // Discover only what the server declared. A server without, say,
+        // resources answers `resources/list` with "Method not found", which
+        // must not fail the whole connection.
+        let capabilities = result.get("capabilities").cloned().unwrap_or_default();
+        if capabilities.get("tools").is_some() {
+            self.refresh_tools()?;
+        }
+        if capabilities.get("resources").is_some() {
+            self.refresh_resources()?;
+        }
+        if capabilities.get("prompts").is_some() {
+            self.refresh_prompts()?;
+        }
 
         tracing::info!(
             "MCP server '{}' initialized: {} tools, {} resources, {} prompts",
@@ -421,20 +432,21 @@ impl McpClient {
         self.send_raw(&notification)
     }
 
+    /// MCP's stdio transport frames each message as one line of JSON with no
+    /// embedded newlines (`serde_json::to_string` escapes them). It is not
+    /// LSP's Content-Length framing: a server reads up to `\n`, so a header
+    /// is a parse error and an unterminated body is never read at all.
     fn send_raw(&self, message: &serde_json::Value) -> Result<(), String> {
-        let body = serde_json::to_string(message)
+        let mut line = serde_json::to_string(message)
             .map_err(|e| format!("Failed to serialize message: {e}"))?;
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        line.push('\n');
 
         let mut stdin = self
             .stdin
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
         stdin
-            .write_all(header.as_bytes())
-            .map_err(|e| format!("Failed to write to MCP server: {e}"))?;
-        stdin
-            .write_all(body.as_bytes())
+            .write_all(line.as_bytes())
             .map_err(|e| format!("Failed to write to MCP server: {e}"))?;
         stdin
             .flush()
@@ -443,20 +455,25 @@ impl McpClient {
         Ok(())
     }
 
+    /// Reads one JSON-RPC message per line (see `send_raw`) until EOF.
     fn read_loop(
         stdout: impl std::io::Read + Send + 'static,
         pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
     ) {
         let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
 
-        while let Ok(content_length) = Self::read_content_length(&mut reader) {
-            // Read the body
-            let mut body = vec![0u8; content_length];
-            if reader.read_exact(&mut body).is_err() {
-                break;
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
             }
 
-            let response: serde_json::Value = match serde_json::from_slice(&body) {
+            let response: serde_json::Value = match serde_json::from_slice(&line) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!("Failed to parse MCP response: {e}");
@@ -480,37 +497,6 @@ impl McpClient {
             // Notifications from server (no id) — log them
             else if let Some(method) = response.get("method").and_then(|m| m.as_str()) {
                 tracing::debug!("MCP notification: {method}");
-            }
-        }
-    }
-
-    fn read_content_length(reader: &mut impl BufRead) -> Result<usize, String> {
-        let mut header_line = String::new();
-        loop {
-            header_line.clear();
-            let bytes_read = reader
-                .read_line(&mut header_line)
-                .map_err(|e| format!("Read error: {e}"))?;
-            if bytes_read == 0 {
-                return Err("EOF".into());
-            }
-
-            let trimmed = header_line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
-                let len: usize = len_str
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("Invalid Content-Length: {e}"))?;
-
-                // Read the blank line after headers
-                let mut blank = String::new();
-                let _ = reader.read_line(&mut blank);
-
-                return Ok(len);
             }
         }
     }
@@ -738,8 +724,6 @@ impl Default for McpManager {
     }
 }
 
-use std::io::Read;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +745,28 @@ mod tests {
         }
         assert!(!m.allow_restart("a"));
         assert!(m.allow_restart("b"));
+    }
+
+    #[test]
+    fn read_loop_takes_one_json_message_per_line() {
+        // What a stdio server writes, with a blank line, a stray log line and
+        // a notification around the answer. The `\n` inside the result is
+        // JSON-escaped, so it does not end the line.
+        let stdout = [
+            "",
+            "not JSON: a log line on the wrong stream",
+            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+            r#"{"jsonrpc":"2.0","id":7,"result":{"text":"two\nlines"}}"#,
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat();
+        let (tx, rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(HashMap::from([(7, tx)])));
+
+        McpClient::read_loop(std::io::Cursor::new(stdout.into_bytes()), pending.clone());
+
+        let response = rx.try_recv().expect("the answer to request 7");
+        assert_eq!(response["result"]["text"], "two\nlines");
+        assert!(pending.lock().unwrap().is_empty());
     }
 }
