@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/phazeai-core",
-    "crates/phazeai-sidecar",
     "crates/phazeai-cli",
     "crates/phazeai-ui",
     "crates/ollama-rs",

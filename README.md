@@ -39,6 +39,7 @@ First launch creates `~/.config/phazeai/config.toml`. Open the Settings panel (C
 - Inline AI edit (Ctrl+K) — describe a change, AI rewrites the selection in place
 - Composer — multi-file agent loop with three approval modes (auto / approve-destructive / approve-all), tool diffs, cancel token, MCP server integration
 - Multi-agent pipeline (planner → coder → reviewer) with per-stage provider config
+- Code search for the agent (`code_search`): in-process BM25 keyword search over the workspace, identifier-aware (`parseJsonConfig` matches `json config`), kept current as files change, and bound by the privacy policy. No Python or other runtime to install
 
 **Tools & Infra**
 - Real PTY terminal (portable-pty + VTE), 256-color, multi-tab
@@ -133,7 +134,6 @@ crates/
 ├── phazeai-ui/            desktop GUI (Floem + GPU)  ← PRIMARY
 ├── phazeai-cli/           terminal UI (ratatui)
 ├── phazeai-cloud/         cloud-tier client skeleton (in development)
-├── phazeai-sidecar/       Python semantic-search subprocess
 ├── phazeai-plugin-api/    plugin ABI for native cdylib plugins
 ├── phazeai-plugin-canary/ smoke-test plugin used by tests
 └── ollama-rs/             local fork with streaming + chat history

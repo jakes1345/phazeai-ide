@@ -48,7 +48,7 @@ models/fine_tuned/
 # Data
 /data/
 
-# Sidecar index
+# Per-project PhazeAI data (privacy policy, designs, skills)
 .phazeai/
 
 # Distribution

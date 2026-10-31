@@ -29,11 +29,10 @@ Thank you for your interest in contributing to PhazeAI IDE! We welcome contribut
 
 PhazeAI is a multi-crate Rust workspace:
 
-- **`crates/phazeai-core`**: The engine. Contains the agent loop, LLM client implementations, tool definitions, and LSP integration.
+- **`crates/phazeai-core`**: The engine. Contains the agent loop, LLM client implementations, tool definitions, LSP integration, and the in-process code-search index (`src/search/`).
 - **`crates/phazeai-ui`**: The primary desktop IDE built with [Floem](https://github.com/lapce/floem).
 - **`crates/phazeai-cli`**: The terminal-based UI built with `ratatui`.
 - **`crates/phazeai-cloud`**: Client for PhazeAI cloud services (auth, hosted models).
-- **`crates/phazeai-sidecar`**: Python-based semantic search subprocess.
 - **`crates/phazeai-plugin-api`**: API for WASM-based extensions.
 - **`crates/ollama-rs`**: A local fork of `ollama-rs` with custom streaming and history features.
 

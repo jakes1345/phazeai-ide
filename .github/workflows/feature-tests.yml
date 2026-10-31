@@ -35,7 +35,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3 ripgrep
+          sudo apt-get install -y --no-install-recommends ripgrep
       - name: Test all tool implementations
         run: |
           cargo test -p phazeai-core -- \
@@ -70,10 +70,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-mcp-full-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3
       - name: Install MCP filesystem server (test target)
         run: npm install -g @modelcontextprotocol/server-filesystem 2>/dev/null || true
       - name: Run MCP bridge tests
@@ -99,8 +95,6 @@ jobs:
           key: ${{ runner.os }}-lsp-${{ hashFiles('**/Cargo.lock') }}
       - name: Install system deps
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3
           # Install rust-analyzer for real LSP testing
           rustup component add rust-src
           curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
@@ -132,7 +126,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3 ripgrep
+          sudo apt-get install -y --no-install-recommends ripgrep
       - name: Test context system
         run: |
           cargo test -p phazeai-core -- \
@@ -161,10 +155,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-providers-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3
       - name: Test provider system (no API keys needed)
         env:
           ANTHROPIC_API_KEY: ""
@@ -194,10 +184,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-eval-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3
       - name: Build eval binary
         run: cargo build -p phazeai-cli
       - name: Verify eval subcommand exists
@@ -227,7 +213,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
-            libudev-dev libinput-dev libdbus-1-dev python3
+            libudev-dev libinput-dev libdbus-1-dev
       - name: Test settings + session persistence
         run: |
           cargo test -p phazeai-ui -- \
@@ -255,9 +241,5 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-stress-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends python3
       - name: Run stress tests
         run: cargo test -p phazeai-core --test stress_test -- --nocapture

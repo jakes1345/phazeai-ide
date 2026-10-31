@@ -6,16 +6,51 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "RawSettings")]
 pub struct Settings {
     pub llm: LlmSettings,
     pub editor: EditorSettings,
-    pub sidecar: SidecarSettings,
-    #[serde(default)]
+    /// Built-in code search. Named `[sidecar]` before the Python subprocess
+    /// was replaced; old config files keep loading (see [`RawSettings`]).
+    pub search: SearchSettings,
     pub providers: Vec<ProviderEntry>,
-    #[serde(default)]
     pub model_routes: HashMap<TaskType, ModelRoute>,
-    #[serde(default)]
     pub local_ai: crate::local_ai::LocalAiSettings,
+}
+
+/// `config.toml` as it is read. Not a field alias: serde refuses a file that
+/// holds both an alias and the name it stands for (duplicate field), and a
+/// user who adds `[search]` to a config that still has `[sidecar]` would lose
+/// every setting to the defaults on the next save. Both tables are accepted,
+/// and `[search]` wins.
+#[derive(Deserialize)]
+struct RawSettings {
+    llm: LlmSettings,
+    editor: EditorSettings,
+    #[serde(default)]
+    search: Option<SearchSettings>,
+    /// The table `[search]` replaced.
+    #[serde(default)]
+    sidecar: Option<SearchSettings>,
+    #[serde(default)]
+    providers: Vec<ProviderEntry>,
+    #[serde(default)]
+    model_routes: HashMap<TaskType, ModelRoute>,
+    #[serde(default)]
+    local_ai: crate::local_ai::LocalAiSettings,
+}
+
+impl From<RawSettings> for Settings {
+    fn from(raw: RawSettings) -> Self {
+        Self {
+            llm: raw.llm,
+            editor: raw.editor,
+            search: raw.search.or(raw.sidecar).unwrap_or_default(),
+            providers: raw.providers,
+            model_routes: raw.model_routes,
+            local_ai: raw.local_ai,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,11 +141,31 @@ impl Default for EditorSettings {
     }
 }
 
+/// The `[search]` table: the in-process code search (`crate::search`).
+///
+/// Unknown keys are ignored, so the `python_path` of an old `[sidecar]` table
+/// is dropped on load and not written back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SidecarSettings {
+#[serde(default)]
+pub struct SearchSettings {
+    /// Offer code search in the IDE and to the agent (the `code_search` and
+    /// `build_search_index` tools).
     pub enabled: bool,
-    pub python_path: String,
-    pub auto_start: bool,
+    /// Build the index when the IDE opens a workspace that looks like a
+    /// project (a version-controlled tree or one with a build manifest; never
+    /// `/` or a home directory) instead of on the first search. The CLI always
+    /// indexes on the first search.
+    #[serde(alias = "auto_start")]
+    pub auto_index: bool,
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_index: true,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -125,11 +180,7 @@ impl Default for Settings {
                 context_tokens: None,
             },
             editor: EditorSettings::default(),
-            sidecar: SidecarSettings {
-                enabled: true,
-                python_path: defaults::PYTHON_PATH.to_string(),
-                auto_start: true,
-            },
+            search: SearchSettings::default(),
             providers: Vec::new(),
             model_routes: HashMap::new(),
             local_ai: Default::default(),
@@ -263,5 +314,136 @@ impl Settings {
             let router = ModelRouter::new(&self.model_routes, &registry, default_client);
             Ok(Box::new(router))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config.toml as the Python-sidecar releases wrote it.
+    const OLD_CONFIG: &str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5-coder:7b"
+api_key_env = ""
+max_tokens = 4096
+
+[editor]
+theme = "Midnight Blue"
+font_size = 15.0
+
+[sidecar]
+enabled = false
+python_path = "/opt/python/bin/python3.12"
+auto_start = false
+"#;
+
+    #[test]
+    fn defaults_enable_search_and_indexing() {
+        let s = Settings::default();
+        assert!(s.search.enabled);
+        assert!(s.search.auto_index);
+    }
+
+    #[test]
+    fn old_sidecar_table_loads_with_values_preserved() {
+        let s: Settings = toml::from_str(OLD_CONFIG).unwrap();
+        assert!(!s.search.enabled);
+        assert!(!s.search.auto_index);
+        assert_eq!(s.llm.model, "qwen2.5-coder:7b");
+        assert_eq!(s.llm.max_tokens, 4096);
+        assert_eq!(s.editor.font_size, 15.0);
+    }
+
+    #[test]
+    fn old_sidecar_keys_map_one_to_one() {
+        // Each old key must land on its own new key, not just "both false".
+        let enabled_only = OLD_CONFIG.replace("enabled = false", "enabled = true");
+        let s: Settings = toml::from_str(&enabled_only).unwrap();
+        assert!(s.search.enabled);
+        assert!(!s.search.auto_index);
+
+        let auto_only = OLD_CONFIG.replace("auto_start = false", "auto_start = true");
+        let s: Settings = toml::from_str(&auto_only).unwrap();
+        assert!(!s.search.enabled);
+        assert!(s.search.auto_index);
+    }
+
+    #[test]
+    fn old_config_is_rewritten_as_a_search_table() {
+        let s: Settings = toml::from_str(OLD_CONFIG).unwrap();
+        let saved = toml::to_string_pretty(&s).unwrap();
+        let doc: toml::Table = toml::from_str(&saved).unwrap();
+        assert!(!doc.contains_key("sidecar"), "{saved}");
+        let search = doc["search"].as_table().expect("[search] table");
+        let mut keys: Vec<_> = search.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["auto_index", "enabled"], "{saved}");
+        assert!(!saved.contains("python"), "{saved}");
+
+        let again: Settings = toml::from_str(&saved).unwrap();
+        assert!(!again.search.enabled);
+        assert!(!again.search.auto_index);
+    }
+
+    #[test]
+    fn search_table_round_trips() {
+        let mut s = Settings::default();
+        s.search.enabled = false;
+        s.search.auto_index = true;
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(!back.search.enabled);
+        assert!(back.search.auto_index);
+
+        s.search.enabled = true;
+        s.search.auto_index = false;
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(back.search.enabled);
+        assert!(!back.search.auto_index);
+    }
+
+    #[test]
+    fn both_tables_at_once_keep_the_whole_config_and_search_wins() {
+        // A hand edit of an old config: [search] added, [sidecar] left behind.
+        let both = format!("{OLD_CONFIG}\n[search]\nenabled = true\nauto_index = true\n");
+        let s: Settings = toml::from_str(&both).expect("both tables parse");
+        assert_eq!(s.llm.model, "qwen2.5-coder:7b");
+        assert_eq!(s.editor.font_size, 15.0);
+        assert!(s.search.enabled && s.search.auto_index, "[search] wins");
+
+        // The other way round, the old table is the one that disagrees.
+        let off = format!("{OLD_CONFIG}\n[search]\nenabled = false\n");
+        let s: Settings = toml::from_str(&off).unwrap();
+        assert!(!s.search.enabled);
+        assert!(
+            s.search.auto_index,
+            "keys missing from [search] are defaults, not the old table's"
+        );
+
+        // And it is written back as the one [search] table.
+        let saved = toml::to_string_pretty(&s).unwrap();
+        let doc: toml::Table = toml::from_str(&saved).unwrap();
+        assert!(!doc.contains_key("sidecar"), "{saved}");
+        assert!(doc.contains_key("search"), "{saved}");
+    }
+
+    #[test]
+    fn a_config_without_the_required_tables_is_still_refused() {
+        assert!(toml::from_str::<Settings>("[sidecar]\nenabled = false\n").is_err());
+        assert!(toml::from_str::<Settings>("[llm]\nprovider = \"ollama\"\n").is_err());
+    }
+
+    #[test]
+    fn missing_or_partial_search_table_falls_back_to_defaults() {
+        let without = OLD_CONFIG.split("[sidecar]").next().unwrap();
+        let s: Settings = toml::from_str(without).unwrap();
+        assert!(s.search.enabled);
+        assert!(s.search.auto_index);
+
+        let partial = format!("{without}[search]\nauto_index = false\n");
+        let s: Settings = toml::from_str(&partial).unwrap();
+        assert!(s.search.enabled);
+        assert!(!s.search.auto_index);
     }
 }

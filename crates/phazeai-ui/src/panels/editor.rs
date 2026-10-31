@@ -1119,6 +1119,8 @@ pub fn editor_panel(
     // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
     fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
     selected_text: RwSignal<String>,
+    // Re-indexed after every save; `None` when code search is turned off.
+    code_search: Option<phazeai_core::CodeSearch>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1395,6 +1397,7 @@ pub fn editor_panel(
 
     // Ctrl+S save handler
     let lsp_cmd_for_save = lsp_cmd.clone();
+    let code_search_for_save = code_search.clone();
     let save_fn = Rc::new(move || {
         let Some(idx) = active_idx.get() else { return };
         let tab_list = tabs.get();
@@ -1429,6 +1432,7 @@ pub fn editor_panel(
             }
             // Run formatter in background — file is already saved to disk
             let path = tab.path.clone();
+            let code_search = code_search_for_save.clone();
             std::thread::spawn(move || {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let formatter: Option<(&str, Vec<String>)> = match ext {
@@ -1442,6 +1446,10 @@ pub fn editor_panel(
                 };
                 if let Some((cmd, args)) = formatter {
                     let _ = phazeai_core::process::std_command(cmd).args(&args).status();
+                }
+                // Index the file as it ended up on disk, after any formatting.
+                if let Some(search) = &code_search {
+                    crate::code_search::refresh_saved_file(search, &path);
                 }
             });
         }
@@ -3921,6 +3929,7 @@ pub fn editor_panel(
                 let tab_path_snf = tab.path.clone();
                 let tab_dirty_snf = tab.dirty;
                 let lsp_cmd_snf = lsp_cmd.clone();
+                let code_search_snf = code_search.clone();
                 let last_snf = create_rw_signal(0u64);
                 create_effect(move |_| {
                     let n = save_no_format_nonce.get();
@@ -3944,6 +3953,12 @@ pub fn editor_panel(
                         let _ = lsp_cmd_snf.send(crate::lsp_bridge::LspCommand::SaveFile {
                             path: tab_path_snf.clone(),
                         });
+                        if let Some(search) = code_search_snf.clone() {
+                            let path = tab_path_snf.clone();
+                            std::thread::spawn(move || {
+                                crate::code_search::refresh_saved_file(&search, &path);
+                            });
+                        }
                     }
                 });
             }

@@ -731,35 +731,32 @@ mod tests {
         assert!(!pf.exists());
     }
 
-    /// A tiny HTTP server answering /health proves the readiness wait.
+    /// A server answering /health proves the readiness wait. The stand-in is
+    /// this test binary run again (see `fake_llama_server_process`) behind a
+    /// shell wrapper, so no other program has to be installed.
     #[cfg(unix)]
     #[tokio::test]
     async fn health_ok_is_detected() {
         use std::os::unix::fs::PermissionsExt;
-        // python3 is present on CI and dev machines; skip quietly otherwise.
-        if crate::process::std_command("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("llama-server");
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe
+            .to_str()
+            .expect("the test binary path is UTF-8")
+            .replace('\'', r"'\''");
+        // llama-server is started with `--port N`; hand N on to the helper.
         std::fs::write(
             &script,
-            r#"#!/usr/bin/env python3
-import sys, http.server
-port = int(sys.argv[sys.argv.index("--port") + 1])
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        ok = self.path == "/health"
-        self.send_response(200 if ok else 404)
-        self.end_headers()
-        self.wfile.write(b'{"status":"ok"}' if ok else b"")
-    def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
-"#,
+            format!(
+                "#!/bin/sh\n\
+                 while [ $# -gt 0 ]; do\n\
+                 [ \"$1\" = --port ] && PHAZEAI_FAKE_LLAMA_PORT=$2\n\
+                 shift\n\
+                 done\n\
+                 export PHAZEAI_FAKE_LLAMA_PORT\n\
+                 exec '{exe}' --ignored --nocapture fake_llama_server_process\n"
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -767,6 +764,56 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
         s.wait_healthy(Duration::from_secs(20)).await.unwrap();
         assert!(s.exited().is_none());
         drop(s); // Drop kills it.
+    }
+
+    /// The process behind `health_ok_is_detected`, not a test: it serves
+    /// `GET /health` on `PHAZEAI_FAKE_LLAMA_PORT` until it is killed, and does
+    /// nothing when that variable is unset (`cargo test -- --ignored`).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "helper process of health_ok_is_detected"]
+    fn fake_llama_server_process() {
+        use std::io::{Read, Write};
+        let Some(port) = std::env::var("PHAZEAI_FAKE_LLAMA_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+        else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // A test run killed before it could clean up must not leave this behind.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    conn.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 512];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match conn.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let (status, body) = if request.starts_with(b"GET /health ") {
+                        ("200 OK", r#"{"status":"ok"}"#)
+                    } else {
+                        ("404 Not Found", "")
+                    };
+                    let _ = write!(
+                        conn,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     #[test]

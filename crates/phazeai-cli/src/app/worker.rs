@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use phazeai_core::tools::{ToolApprovalManager, ToolPermission};
-use phazeai_core::{Agent, AgentEvent, ConversationHistory, LlmClient};
+use phazeai_core::{Agent, AgentEvent, CodeSearch, ConversationHistory, LlmClient};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::tool_view::{approval_preview, unanswered_tool_calls, ApprovalPolicy, PreviewLine};
@@ -59,6 +59,8 @@ pub struct WorkerConfig {
     pub cancel: Arc<AtomicBool>,
     /// Conversation tokens the agent may send before compacting.
     pub context_budget: usize,
+    /// Shared by every agent the worker builds; `None` when search is off.
+    pub code_search: Option<CodeSearch>,
 }
 
 fn build_approval_fn(
@@ -111,7 +113,7 @@ fn build_approval_fn(
     })
 }
 
-async fn build_agent(
+fn build_agent(
     llm: Box<dyn LlmClient>,
     cfg: &WorkerConfig,
     conversation: Arc<tokio::sync::Mutex<ConversationHistory>>,
@@ -137,12 +139,8 @@ async fn build_agent(
         agent.register_mcp_tools(Arc::new(Mutex::new(mcp)));
     }
 
-    if let Some(client) = super::try_start_sidecar().await {
-        let client = Arc::new(client);
-        agent.register_tool(Box::new(phazeai_sidecar::CodeSearchTool::new(
-            client.clone(),
-        )));
-        agent.register_tool(Box::new(phazeai_sidecar::BuildIndexTool::new(client)));
+    if let Some(search) = &cfg.code_search {
+        super::register_code_search(&mut agent, search);
     }
     agent
 }
@@ -179,10 +177,10 @@ pub fn spawn(
             }
         }
 
-        let mut agent = match cfg.llm.take() {
-            Some(llm) => Some(build_agent(llm, &cfg, conversation.clone(), &approval_tx).await),
-            None => None,
-        };
+        let mut agent = cfg
+            .llm
+            .take()
+            .map(|llm| build_agent(llm, &cfg, conversation.clone(), &approval_tx));
 
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -207,8 +205,7 @@ pub fn spawn(
                         a.set_context_budget(context_budget);
                     }
                     None => {
-                        let mut built =
-                            build_agent(llm, &cfg, conversation.clone(), &approval_tx).await;
+                        let mut built = build_agent(llm, &cfg, conversation.clone(), &approval_tx);
                         built.set_context_budget(context_budget);
                         agent = Some(built);
                     }

@@ -30,9 +30,8 @@ cargo fmt --all
 Cargo workspace:
 
 - **`phazeai-ui`** — PRIMARY desktop IDE, GPU-accelerated via Floem (Vello/wgpu renderer)
-- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, DAP, config, privacy policy, built-in local AI
+- **`phazeai-core`** — shared engine: agent loop, LLM clients, tools, LSP, DAP, config, privacy policy, code search, built-in local AI
 - **`phazeai-cli`** — terminal UI (`ratatui`)
-- **`phazeai-sidecar`** — Python semantic search subprocess
 - **`phazeai-plugin-api`** / **`phazeai-plugin-canary`** — native plugin ABI + test plugin
 - **`ollama-rs`** — local fork with custom streaming/chat-history features
 
@@ -158,6 +157,42 @@ model-written summary kept in the system prompt. The budget comes from
 `Settings::context_budget()` (`llm/context_budget.rs`: model window minus
 reply/schema reserve; `[llm] context_tokens` overrides). The IDE chat carries
 the summary across sends (`CompactionState` in `panels/chat.rs`).
+
+### Code search (`phazeai-core/src/search/`)
+
+In-process keyword search: no external process, no Python, no embedding model.
+`CodeSearch` (cheap `Clone`, one per workspace) is created by the UI and the
+CLI and shared with the agent's `code_search` / `build_search_index` tools
+(`CodeSearchTool`, `BuildIndexTool`); `[search] enabled` turns it off and
+`auto_index` makes the IDE build the index when a workspace that looks like a
+project (`looks_like_project`: under version control or holding a manifest,
+never `/` or a bare home directory) opens instead of on the first search (the
+CLI always builds on first use); an old `[sidecar]` table still loads, and
+`[search]` wins when both are present. Files are cut into ~40-line
+chunks and ranked with BM25 over an inverted index; identifiers are split
+(`parseJsonConfig` also indexes `parse`, `json`, `config`) and a file's path
+words count toward each of its chunks. One walker (`scan.rs`) decides what is
+indexable — `.gitignore`/`.ignore`, no symlinks, build/vendor/hidden dirs,
+source extensions, size caps, no binary or non-UTF-8 — so new rules go there,
+with a test. `build` is an incremental sync on (mtime, size); editor saves call
+`refresh_file`/`remove_file`, which always re-read (call them off the UI
+thread). A search also re-walks the root first (throttled to about once a
+second; unchanged files are only stat-ed), so files created or edited since are
+found by the next search; only a build of the *whole* root marks the index
+`built`, a partial `build_search_index {"paths"}` does not. Chunk text is not
+kept: hits are re-read from disk, which doubles as a freshness check (a stale
+hit is re-indexed and the query re-ranked). A failed read keeps the old entry
+(its stamp no longer matches, so it is retried). Removing a file only kills its
+chunks; postings of dead chunks are skipped by ranking and dropped by
+`Index::compact`. Async calls (`build`, `search`) cancel their blocking work
+when the future is dropped, and `reset_root` abandons a walk started for the
+old root (`scan::Stop`); `reset_root` is cheap enough for the UI thread (the
+old index is freed on its own thread). The
+privacy policy is consulted before a file is read at index time and again for
+every hit at query time, so a policy change applies at once, and returned files
+are noted in the audit scope. Searches wait only for the *first* build; after
+that they rank the last committed state, and `status()` reads atomics so the UI
+can show "indexing" without blocking.
 
 ### Built-in local AI (`phazeai-core/src/local_ai/`)
 

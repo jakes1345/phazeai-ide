@@ -26,7 +26,6 @@ use floem::{
 use phazeai_core::config::LlmProvider;
 use phazeai_core::constants::ui as ui_const;
 use phazeai_core::Settings;
-use phazeai_sidecar::{SidecarClient, SidecarManager};
 
 use crate::lsp_bridge::{
     start_lsp_bridge, DiagEntry, DiagSeverity, LspCommand, ReferenceEntry, SymbolEntry,
@@ -339,7 +338,7 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
-/// This preserves all other settings (LLM, sidecar, providers, etc.).
+/// This preserves all other settings (LLM, search, providers, etc.).
 pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::EditorSettings)) {
     let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
     let mut settings = Settings::load();
@@ -436,116 +435,12 @@ fn provider_problem(settings: &Settings) -> Option<String> {
     }
 }
 
-fn check_python_ready(settings: &Settings) -> bool {
-    let bins = [settings.sidecar.python_path.as_str(), "python3", "python"];
-    bins.iter().any(|bin| {
-        phazeai_core::process::std_command(bin)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
 fn check_lsp_ready() -> bool {
     phazeai_core::process::std_command("rust-analyzer")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_sidecar_start(
-    python_path: String,
-    script: PathBuf,
-    workspace_root: PathBuf,
-    shared_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>>,
-    ready_tx: std::sync::mpsc::SyncSender<bool>,
-    status_tx: std::sync::mpsc::SyncSender<String>,
-    build_tx: std::sync::mpsc::SyncSender<bool>,
-    build_after_start: bool,
-) {
-    std::thread::spawn(move || {
-        let client_guard = match shared_client.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock shared client");
-                let _ = ready_tx.send(false);
-                return;
-            }
-        };
-
-        if client_guard.clone().is_some() {
-            let _ = ready_tx.send(true);
-            if build_after_start {
-                let _ = build_tx.send(true);
-            }
-            return;
-        }
-        drop(client_guard);
-
-        let _ = status_tx.send(format!(
-            "Starting semantic search sidecar with {}...",
-            python_path
-        ));
-
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = status_tx.send(format!("Semantic search runtime error: {e}"));
-                let _ = ready_tx.send(false);
-                return;
-            }
-        };
-
-        rt.block_on(async move {
-            let mut mgr = SidecarManager::new(python_path.clone(), script.clone());
-            match mgr.start().await {
-                Ok(()) => {
-                    if let Some(process) = mgr.into_process() {
-                        match SidecarClient::from_process(process) {
-                            Ok(client) => {
-                                if client.health_check().await {
-                                    let client = Arc::new(client);
-                                    if let Ok(mut slot) = shared_client.lock() {
-                                        *slot = Some(client);
-                                    }
-                                    let _ = ready_tx.send(true);
-                                    let _ = status_tx.send(format!(
-                                        "Semantic search ready for {}",
-                                        workspace_root.display()
-                                    ));
-                                    if build_after_start {
-                                        let _ = build_tx.send(true);
-                                    }
-                                } else {
-                                    let _ = ready_tx.send(false);
-                                    let _ = status_tx
-                                        .send("Semantic search sidecar failed health check".into());
-                                }
-                            }
-                            Err(e) => {
-                                let _ = ready_tx.send(false);
-                                let _ = status_tx
-                                    .send(format!("Semantic search connection error: {e}"));
-                            }
-                        }
-                    } else {
-                        let _ = ready_tx.send(false);
-                        let _ = status_tx.send("Semantic search process handle missing".into());
-                    }
-                }
-                Err(e) => {
-                    let _ = ready_tx.send(false);
-                    let _ = status_tx.send(format!("Semantic search failed to start: {e}"));
-                }
-            }
-        });
-    });
 }
 
 impl IdeState {
@@ -798,297 +693,11 @@ impl IdeState {
             });
         });
 
-        // ── Sidecar startup ────────────────────────────────────────────────────
-        // Locate server.py: first try <exe_dir>/sidecar/server.py, then
-        // the repo-relative path, then ~/.config/phazeai/sidecar/server.py.
-        let sidecar_ready_sig = create_rw_signal(false);
-        let sidecar_status_sig = create_rw_signal(if !settings.sidecar.enabled {
-            "Code search disabled in settings.".to_string()
-        } else {
-            "Code search not started.".to_string()
-        });
-        let sidecar_building_sig = create_rw_signal(false);
-        let sidecar_results_sig: RwSignal<Vec<(String, String)>> = create_rw_signal(Vec::new());
-        let sidecar_build_nonce_sig = create_rw_signal(0u64);
-        let sidecar_search_nonce_sig = create_rw_signal(0u64);
-        let sidecar_query_sig = create_rw_signal(String::new());
-
-        let script_candidates: Vec<PathBuf> = {
-            let exe_dir = std::env::current_exe()
-                .map(|p| p.parent().map(|d| d.to_path_buf()))
-                .unwrap_or(None);
-            let mut candidates = vec![
-                PathBuf::from("sidecar/server.py"),
-                PathBuf::from("../sidecar/server.py"),
-            ];
-            if let Some(dir) = &exe_dir {
-                // Binary-adjacent: <exe>/sidecar/server.py and siblings
-                candidates.push(dir.join("sidecar/server.py"));
-                candidates.push(dir.join("../sidecar/server.py"));
-                candidates.push(dir.join("../../sidecar/server.py"));
-                // Installed alongside binary: <exe>/../share/phazeai/sidecar/server.py
-                candidates.push(dir.join("../share/phazeai/sidecar/server.py"));
-                candidates.push(dir.join("../lib/phazeai/sidecar/server.py"));
-            }
-            // XDG data dir: ~/.local/share/phazeai/sidecar/server.py
-            if let Ok(home_str) = std::env::var("HOME") {
-                let home = PathBuf::from(home_str);
-                candidates.push(home.join(".local/share/phazeai/sidecar/server.py"));
-            }
-            // XDG_DATA_HOME override
-            if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-                candidates.push(PathBuf::from(xdg).join("phazeai/sidecar/server.py"));
-            }
-            // Config dir fallback: ~/.config/phazeai/sidecar/server.py
-            if let Some(cfg) = dirs_next_config() {
-                candidates.push(cfg.join("sidecar/server.py"));
-            }
-            candidates
-        };
-        let sidecar_script = script_candidates.into_iter().find(|p| p.exists());
-
-        // Shared sidecar client — always created so IdeState can reference it
-        // for clean shutdown. Will be None when sidecar is disabled or unavailable.
-        let shared_client: Arc<std::sync::Mutex<Option<Arc<SidecarClient>>>> =
-            Arc::new(std::sync::Mutex::new(None));
-
-        if !settings.sidecar.enabled {
-            sidecar_ready_sig.set(false);
-        } else if let Some(script) = sidecar_script {
-            let sidecar_ready2 = sidecar_ready_sig;
-            let sidecar_status2 = sidecar_status_sig;
-            let sidecar_building2 = sidecar_building_sig;
-            let sidecar_results2 = sidecar_results_sig;
-            let sidecar_build_nonce = sidecar_build_nonce_sig;
-            let sidecar_nonce = sidecar_search_nonce_sig;
-            let sidecar_query2 = sidecar_query_sig;
-            let (sc_tx, sc_rx) = std::sync::mpsc::sync_channel::<Vec<(String, String)>>(4);
-            let sc_signal = create_signal_from_channel(sc_rx);
-            create_effect(move |_| {
-                if let Some(results) = sc_signal.get() {
-                    sidecar_results2.set(results);
-                }
-            });
-            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
-            let ready_signal = create_signal_from_channel(ready_rx);
-            create_effect(move |_| {
-                if let Some(ok) = ready_signal.get() {
-                    sidecar_ready2.set(ok);
-                }
-            });
-            let (status_tx, status_rx) = std::sync::mpsc::sync_channel::<String>(8);
-            let status_signal = create_signal_from_channel(status_rx);
-            create_effect(move |_| {
-                if let Some(status) = status_signal.get() {
-                    sidecar_status2.set(status);
-                }
-            });
-            let (building_tx, building_rx) = std::sync::mpsc::sync_channel::<bool>(8);
-            let building_signal = create_signal_from_channel(building_rx);
-            create_effect(move |_| {
-                if let Some(is_building) = building_signal.get() {
-                    sidecar_building2.set(is_building);
-                }
-            });
-            let (build_tx, build_rx) = std::sync::mpsc::sync_channel::<bool>(8);
-            let build_signal = create_signal_from_channel(build_rx);
-            let workspace_root = workspace.clone();
-            let python_path = settings.sidecar.python_path.clone();
-            let script_for_build = script.clone();
-            let shared_client_for_build = shared_client.clone();
-            let ready_tx_for_build = ready_tx.clone();
-            let status_tx_for_build = status_tx.clone();
-            let build_tx_for_build = build_tx.clone();
-            create_effect(move |_| {
-                if build_signal.get().is_none() {
-                    return;
-                }
-
-                let root = workspace_root.clone();
-                let client_guard = match shared_client_for_build.lock() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock shared client");
-                        return;
-                    }
-                };
-
-                let Some(client) = client_guard.clone() else {
-                    drop(client_guard);
-                    let _ = building_tx.send(true);
-                    spawn_sidecar_start(
-                        python_path.clone(),
-                        script_for_build.clone(),
-                        root,
-                        shared_client_for_build.clone(),
-                        ready_tx_for_build.clone(),
-                        status_tx_for_build.clone(),
-                        build_tx_for_build.clone(),
-                        true,
-                    );
-                    return;
-                };
-                let tx = status_tx_for_build.clone();
-                let building_tx2 = building_tx.clone();
-                let root_str = root.display().to_string();
-                std::thread::spawn(move || {
-                    let _ = building_tx2.send(true);
-                    let _ = tx.send(format!("Building semantic index for {root_str}..."));
-                    let rt = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            let _ = tx.send(format!("Semantic index runtime error: {e}"));
-                            let _ = building_tx2.send(false);
-                            return;
-                        }
-                    };
-
-                    let result = rt.block_on(async move {
-                        client
-                            .build_index(std::slice::from_ref(&root_str))
-                            .await
-                            .map(|value| {
-                                let indexed =
-                                    value.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let total = value
-                                    .get("total_files")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(indexed);
-                                format!(
-                                    "Semantic index ready: {indexed} files indexed ({total} total)"
-                                )
-                            })
-                            .unwrap_or_else(|e| format!("Semantic index build failed: {e}"))
-                    });
-
-                    let _ = tx.send(result);
-                    let _ = building_tx2.send(false);
-                });
-            });
-            // Watch nonce: when incremented, send search request to sidecar
-            let sc_tx2 = sc_tx.clone();
-            let shared_client_for_search = shared_client.clone();
-            let status_tx_for_search = status_tx.clone();
-            create_effect(move |_| {
-                let _nonce = sidecar_nonce.get();
-                let query = sidecar_query2.get();
-                if !query.is_empty() {
-                    let tx = sc_tx2.clone();
-                    let client_cell = shared_client_for_search.clone();
-                    let status_tx3 = status_tx_for_search.clone();
-                    std::thread::spawn(move || {
-                        let client_guard = match client_cell.lock() {
-                            Ok(g) => g,
-                            Err(e) => {
-                                tracing::error!(target: "phazeai_ui", error = %e, "Failed to lock client for search");
-                                let _ = status_tx3
-                                    .send("Internal error: failed to access client".to_string());
-                                let _ = tx.send(vec![(
-                                    "error".to_string(),
-                                    "internal error".to_string(),
-                                )]);
-                                return;
-                            }
-                        };
-                        let client = client_guard.clone();
-                        drop(client_guard);
-
-                        let Some(client) = client else {
-                            let _ = status_tx3.send(
-                                "Code search unavailable. Build the index to start the sidecar."
-                                    .to_string(),
-                            );
-                            let _ = tx.send(vec![(
-                                "sidecar unavailable".to_string(),
-                                "code search is not connected".to_string(),
-                            )]);
-                            return;
-                        };
-
-                        let rt = match tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            Ok(rt) => rt,
-                            Err(e) => {
-                                let _ = tx.send(vec![(
-                                    "sidecar error".to_string(),
-                                    format!("failed to create runtime: {e}"),
-                                )]);
-                                return;
-                            }
-                        };
-
-                        let results = rt.block_on(async move {
-                            match client.search_code(&query, 8).await {
-                                Ok(value) => value
-                                    .get("matches")
-                                    .and_then(|v| v.as_array())
-                                    .map(|matches| {
-                                        matches
-                                            .iter()
-                                            .map(|m| {
-                                                let file = m
-                                                    .get("file")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("unknown")
-                                                    .to_string();
-                                                let snippet = m
-                                                    .get("snippet")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                (file, snippet)
-                                            })
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default(),
-                                Err(e) => vec![(
-                                    "sidecar error".to_string(),
-                                    if e.contains("Index not built") {
-                                        "code index not built yet — click Reindex".to_string()
-                                    } else {
-                                        format!("code search failed: {e}")
-                                    },
-                                )],
-                            }
-                        });
-
-                        let _ = tx.send(results);
-                    });
-                }
-            });
-            let build_tx_for_nonce = build_tx.clone();
-            create_effect(move |_| {
-                let nonce = sidecar_build_nonce.get();
-                if nonce == 0 {
-                    return;
-                }
-                let _ = build_tx_for_nonce.send(true);
-            });
-
-            if settings.sidecar.auto_start {
-                sidecar_status_sig.set("Starting code search...".to_string());
-                spawn_sidecar_start(
-                    settings.sidecar.python_path.clone(),
-                    script,
-                    workspace.clone(),
-                    shared_client.clone(),
-                    ready_tx.clone(),
-                    status_tx.clone(),
-                    build_tx.clone(),
-                    true,
-                );
-            } else {
-                sidecar_status_sig
-                    .set("Code search idle. Click Reindex to start and build the index.".into());
-            }
-        } else {
-            sidecar_status_sig.set("Code search sidecar script not found.".to_string());
-        }
+        // ── Code search ────────────────────────────────────────────────────────
+        // In-process index over the workspace; the Search panel, the editor and
+        // the AI tools all share this one handle. Indexing starts below, once
+        // the project state exists (see `code_search::init`).
+        let code_search = phazeai_core::CodeSearch::new(workspace.clone());
 
         // AI provider / model signals — initialized from current settings file.
         let ai_provider_sig =
@@ -1341,14 +950,16 @@ impl IdeState {
         let project = ProjectState {
             workspace_root: create_rw_signal(workspace),
             git_branch,
-            sidecar_client: shared_client,
-            sidecar_ready: sidecar_ready_sig,
-            sidecar_status: sidecar_status_sig,
-            sidecar_building: sidecar_building_sig,
-            sidecar_results: sidecar_results_sig,
-            sidecar_query: sidecar_query_sig,
-            sidecar_build_nonce: create_rw_signal(0),
-            sidecar_search_nonce: create_rw_signal(0),
+            code_search,
+            code_search_enabled: settings.search.enabled,
+            code_search_auto_index: settings.search.auto_index,
+            code_search_status: create_rw_signal(crate::code_search::initial_status(
+                settings.search.enabled,
+            )),
+            code_search_building: create_rw_signal(false),
+            code_search_results: create_rw_signal(Vec::new()),
+            code_search_notice: create_rw_signal(None),
+            code_search_seq: create_rw_signal(0),
             branch_picker_open: create_rw_signal(false),
             branch_list: create_rw_signal(Vec::new()),
             lsp_progress,
@@ -1372,6 +983,9 @@ impl IdeState {
             ai,
             project,
         };
+
+        // Index the workspace in the background and follow folder switches.
+        crate::code_search::init(&state.project);
 
         // Auto-open completion popup when the LSP returns results from an
         // auto-trigger (typing `.` / `(` / `,` / `::`). Ctrl+Space sets the
@@ -3942,6 +3556,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
         state.editor.selected_text,
+        state.project.code_search_if_enabled(),
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -4004,6 +3619,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
         create_rw_signal(String::new()), // split: dedicated selected_text (unused)
+        state.project.code_search_if_enabled(),
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4195,7 +3811,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.ai.thinking,
         state.ai.pending_chat_inject,
         state.project.workspace_root,
-        state.project.sidecar_client.clone(),
+        state.project.code_search_if_enabled(),
         state.workbench.status_toast,
         state.ai.token_usage_input,
         state.ai.token_usage_output,
@@ -4324,6 +3940,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
         create_rw_signal(String::new()), // split-down: dedicated selected_text (unused)
+        state.project.code_search_if_enabled(),
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4460,11 +4077,6 @@ pub fn launch_phaze_ide() {
                 "AI provider ready",
                 ai_problem.is_none(),
                 ai_problem.unwrap_or_default(),
-            ),
-            (
-                "Python available",
-                check_python_ready(&settings),
-                "Install Python 3 or set sidecar.python_path in config.toml".to_string(),
             ),
             (
                 "rust-analyzer found",
@@ -5731,19 +5343,6 @@ pub fn launch_phaze_ide() {
                     move |_| {
                         // Stop the built-in llama.cpp server (if any).
                         phazeai_core::local_ai::LOCAL_AI.stop();
-                        // Kill sidecar process cleanly on IDE exit.
-                        if let Ok(guard) = state.project.sidecar_client.lock() {
-                            if let Some(client) = guard.as_ref() {
-                                // Build a small runtime just for the shutdown call.
-                                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                {
-                                    let client = client.clone();
-                                    let _ = rt.block_on(client.shutdown());
-                                }
-                            }
-                        }
                         // Synchronous save on close — bypasses the debounce so the
                         // final state is never lost.
                         SessionState::from_ide_state_untracked(&state).save();

@@ -4261,7 +4261,6 @@ dependencies = [
  "globset",
  "ignore",
  "phazeai-core",
- "phazeai-sidecar",
  "pulldown-cmark",
  "ratatui",
  "serde",
@@ -4348,24 +4347,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phazeai-sidecar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "lsp-types",
- "phazeai-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tree-sitter",
- "uuid",
-]
-
-[[package]]
 name = "phazeai-ui"
 version = "0.1.0"
 dependencies = [
@@ -4381,7 +4362,6 @@ dependencies = [
  "notify",
  "open",
  "phazeai-core",
- "phazeai-sidecar",
  "portable-pty",
  "regex",
  "rfd",

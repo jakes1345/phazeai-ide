@@ -35,7 +35,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
-            libudev-dev libinput-dev libdbus-1-dev python3
+            libudev-dev libinput-dev libdbus-1-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test -p phazeai-core -p phazeai-cli
@@ -102,7 +102,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
-            libudev-dev libinput-dev libdbus-1-dev python3
+            libudev-dev libinput-dev libdbus-1-dev
 
       - name: Install cross-compilation deps (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -111,7 +111,7 @@ jobs:
           sudo dpkg --add-architecture arm64
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu python3 \
+            gcc-aarch64-linux-gnu \
             libxkbcommon-dev:arm64 libwayland-dev:arm64 \
             libxcb-xfixes0-dev:arm64 libxcb-shape0-dev:arm64 \
             libxcb-render0-dev:arm64 libxkbcommon-x11-dev:arm64 \
@@ -181,16 +181,9 @@ jobs:
           if [ -f assets/icons/phazeai-256.png ]; then
             cp assets/icons/phazeai-256.png AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png
           else
-            python3 - <<'PY'
-          import struct, zlib
-          def tiny_png():
-              ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
-              idat_data = zlib.compress(b'\x00\x88\x88\x88')
-              def chunk(tag, data):
-                  return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag+data)&0xFFFFFFFF)
-              return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr_data) + chunk(b'IDAT', idat_data) + chunk(b'IEND', b'')
-          open('AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png','wb').write(tiny_png())
-          PY
+            # A valid 1x1 PNG, so appimagetool has an icon to embed.
+            echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPo6OgAAAM0AZnBrMCxAAAAAElFTkSuQmCC' \
+              | base64 -d > AppDir/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png
           fi
 
           # AppRun launcher

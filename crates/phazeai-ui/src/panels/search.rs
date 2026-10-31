@@ -2,22 +2,34 @@ use crate::domain_state::IdeState;
 use floem::{
     ext_event::create_ext_action,
     reactive::{create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate},
-    views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
+    views::{
+        container, dyn_stack, label, scroll, stack, text_input, v_stack_from_iter, Decorators,
+    },
     IntoView,
 };
+use phazeai_core::CodeSearch;
+use std::rc::Rc;
 
+use crate::code_search::{display_path, snippet_preview};
 use crate::domain_state::SearchResult;
+use crate::theme::PhazeTheme;
+use crate::tokens::{font, radius, space, stroke};
 use crate::util::{safe_get, safe_get_memo};
+
+/// Tallest the code search hits grow before they scroll, so a page of snippets
+/// cannot push the exact-match results out of the panel.
+const CODE_RESULTS_MAX_HEIGHT: f64 = 260.0;
 
 /// The search panel — workspace search + multi-file replace.
 pub fn search_panel(state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
     let query = state.workbench.search_query;
     let results = state.workbench.search_results;
-    let sidecar_ready = state.project.sidecar_ready;
-    let sidecar_status = state.project.sidecar_status;
-    let sidecar_building = state.project.sidecar_building;
-    let sidecar_results = state.project.sidecar_results;
+    let code_enabled = state.project.code_search_enabled;
+    let code_status = state.project.code_search_status;
+    let code_building = state.project.code_search_building;
+    let code_results = state.project.code_search_results;
+    let code_notice = state.project.code_search_notice;
     let is_searching = create_rw_signal(false);
     let replace_text = create_rw_signal(String::new());
     let replace_open = create_rw_signal(false);
@@ -235,8 +247,36 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     };
 
     // ── Search input ──────────────────────────────────────────────────────────
-    let search_bar = {
+    // Enter: exact-match search through the workspace, plus code search.
+    let submit: Rc<dyn Fn()> = Rc::new({
         let state2 = state.clone();
+        move || {
+            let q = query.get_untracked();
+            if !q.trim().is_empty() {
+                // Push to history (deduplicate head, cap 50)
+                search_history.update(|h| {
+                    h.retain(|s| s != &q);
+                    h.insert(0, q.clone());
+                    h.truncate(50);
+                });
+                history_idx.set(None);
+            }
+            let root = state2.project.workspace_root.get_untracked();
+            perform_search(
+                state2.clone(),
+                is_searching,
+                root,
+                use_regex,
+                case_sensitive,
+                whole_word,
+                open_editors_only,
+                include_glob,
+                exclude_glob,
+            );
+            crate::code_search::run_search(&state2.project, &q);
+        }
+    });
+    let search_bar = {
         container(
             stack((
                 text_input(query)
@@ -254,38 +294,16 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             .padding_vert(6.0)
                             .font_size(13.0)
                     })
+                    // Enter goes through `on_enter`: the text input consumes the
+                    // key itself, so a KeyDown listener on it never sees Enter.
+                    .on_enter({
+                        let submit = submit.clone();
+                        move || submit()
+                    })
                     .on_event_stop(floem::event::EventListener::KeyDown, move |event| {
                         if let floem::event::Event::KeyDown(ke) = event {
                             use floem::keyboard::{Key, NamedKey};
                             match &ke.key.logical_key {
-                                Key::Named(NamedKey::Enter) => {
-                                    let q = query.get_untracked();
-                                    if !q.trim().is_empty() {
-                                        // Push to history (deduplicate head, cap 50)
-                                        search_history.update(|h| {
-                                            h.retain(|s| s != &q);
-                                            h.insert(0, q.clone());
-                                            h.truncate(50);
-                                        });
-                                        history_idx.set(None);
-                                    }
-                                    let root = state2.project.workspace_root.get();
-                                    perform_search(
-                                        state2.clone(),
-                                        is_searching,
-                                        root,
-                                        use_regex,
-                                        case_sensitive,
-                                        whole_word,
-                                        open_editors_only,
-                                        include_glob,
-                                        exclude_glob,
-                                    );
-                                    if !q.trim().is_empty() {
-                                        state2.project.sidecar_query.set(q.trim().to_string());
-                                        state2.project.sidecar_search_nonce.update(|n| *n += 1);
-                                    }
-                                }
                                 Key::Named(NamedKey::ArrowUp) => {
                                     let hist = search_history.get_untracked();
                                     if hist.is_empty() {
@@ -369,159 +387,187 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
     )
     .style(|s| s.padding_horiz(8.0).padding_bottom(4.0).width_full());
 
-    // ── Semantic search controls ─────────────────────────────────────────────
-    let semantic_bar = {
-        let semantic_state = state.clone();
-        let semantic_state2 = state.clone();
+    // ── Code search controls ─────────────────────────────────────────────────
+    // The title and its buttons share one row; the status text gets a row of
+    // its own. It used to sit in that row too, as the only item allowed to
+    // shrink to zero width (`min_width(0)` + `flex_grow`). Floem labels wrap by
+    // default and size their text box to the full text, so the title and both
+    // buttons took what they needed first and a long status was left with
+    // whatever remained of a narrow sidebar: nothing, and a label with no width
+    // wraps one character per line. On its own row it is as wide as the panel.
+    let code_search_bar = {
+        let search_state = state.clone();
+        let reindex_state = state.clone();
         container(
             stack((
-                label(|| "Semantic").style(move |s| {
+                stack((
+                    label(|| "Code search").style(move |s| {
+                        let p = theme.get().palette;
+                        s.flex_grow(1.0)
+                            .min_width(0.0)
+                            .font_size(font::CAPTION)
+                            .color(p.accent)
+                            .font_weight(floem::text::Weight::BOLD)
+                    }),
+                    code_search_button(
+                        theme,
+                        code_enabled,
+                        true,
+                        || "Search".to_string(),
+                        || false,
+                        move || {
+                            crate::code_search::run_search(
+                                &search_state.project,
+                                &query.get_untracked(),
+                            );
+                        },
+                    ),
+                    code_search_button(
+                        theme,
+                        code_enabled,
+                        false,
+                        move || {
+                            if code_building.get() {
+                                "Reindexing…".to_string()
+                            } else {
+                                "Reindex".to_string()
+                            }
+                        },
+                        move || code_building.get(),
+                        move || crate::code_search::start_build(&reindex_state.project),
+                    ),
+                ))
+                .style(|s| s.flex_row().items_center().gap(space::SM).width_full()),
+                label(move || code_status.get()).style(move |s| {
                     let p = theme.get().palette;
-                    s.font_size(11.0)
-                        .color(p.accent)
-                        .font_weight(floem::text::Weight::BOLD)
-                        .padding_right(8.0)
-                }),
-                label(move || sidecar_status.get()).style(move |s| {
-                    let p = theme.get().palette;
-                    s.flex_grow(1.0).min_width(0.0).font_size(11.0).color(
-                        if sidecar_building.get() {
+                    s.width_full()
+                        .min_width(0.0)
+                        .font_size(font::CAPTION)
+                        .color(if code_building.get() {
                             p.warning
-                        } else if sidecar_ready.get() {
+                        } else if code_enabled {
                             p.text_secondary
                         } else {
                             p.text_muted
-                        },
-                    )
+                        })
                 }),
-                container(label(|| "Search Semantically"))
-                    .style(move |s| {
+                label(move || code_notice.get().map(|n| n.text).unwrap_or_default()).style(
+                    move |s| {
                         let p = theme.get().palette;
-                        s.padding_horiz(8.0)
-                            .padding_vert(4.0)
-                            .border_radius(4.0)
-                            .font_size(11.0)
-                            .cursor(floem::style::CursorStyle::Pointer)
-                            .color(p.bg_base)
-                            .background(p.accent)
-                            .apply_if(sidecar_building.get(), |s| s.background(p.bg_elevated))
-                    })
-                    .on_click_stop(move |_| {
-                        let q = query.get();
-                        if q.trim().is_empty() {
-                            return;
-                        }
-                        semantic_state
-                            .project
-                            .sidecar_query
-                            .set(q.trim().to_string());
-                        semantic_state
-                            .project
-                            .sidecar_search_nonce
-                            .update(|n| *n += 1);
-                    }),
-                container(label(move || {
-                    if sidecar_building.get() {
-                        "Reindexing..."
-                    } else {
-                        "Reindex"
-                    }
-                }))
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.padding_horiz(8.0)
-                        .padding_vert(4.0)
-                        .border_radius(4.0)
-                        .font_size(11.0)
-                        .cursor(floem::style::CursorStyle::Pointer)
-                        .color(p.text_primary)
-                        .background(p.bg_elevated)
-                        .border(1.0)
-                        .border_color(p.border)
-                })
-                .on_click_stop(move |_| {
-                    semantic_state2
-                        .project
-                        .sidecar_build_nonce
-                        .update(|n| *n += 1);
-                }),
+                        let notice = code_notice.get();
+                        s.width_full()
+                            .min_width(0.0)
+                            .font_size(font::CAPTION)
+                            .color(if notice.as_ref().is_some_and(|n| n.is_error) {
+                                p.error
+                            } else {
+                                p.text_muted
+                            })
+                            .apply_if(notice.is_none(), |s| s.display(floem::style::Display::None))
+                    },
+                ),
             ))
-            .style(|s| s.flex_row().items_center().gap(6.0).width_full()),
+            .style(|s| s.flex_col().width_full().gap(space::XS)),
         )
-        .style(|s| s.padding_horiz(8.0).padding_bottom(4.0).width_full())
+        .style(|s| {
+            s.padding_horiz(space::MD)
+                .padding_bottom(space::XS)
+                .width_full()
+        })
     };
 
-    let semantic_results_view = {
-        let semantic_state = state.clone();
+    let code_results_view = {
+        let open_file = state.editor.open_file;
+        let goto_line = state.editor.goto_line;
+        // The signal, not the engine: `CodeSearch::root` takes the index lock,
+        // which a commit or a root switch can hold for a while, and this runs
+        // on the UI thread for every hit drawn.
+        let workspace_root = state.project.workspace_root;
         container(
-            dyn_stack(
-                move || {
-                    safe_get(sidecar_results, Vec::new())
-                        .into_iter()
-                        .enumerate()
-                        .collect::<Vec<_>>()
-                },
-                |(i, _)| *i,
-                move |(_, (file, snippet))| {
-                    let file_path = std::path::PathBuf::from(file.clone());
-                    let file_label = file_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| file.clone());
-                    let hovered = create_rw_signal(false);
-                    let semantic_state2 = semantic_state.clone();
-                    container(
-                        stack((
-                            label(move || file_label.clone()).style(move |s| {
-                                let p = theme.get().palette;
-                                s.font_size(10.0).color(p.accent).padding_right(6.0)
-                            }),
-                            label(move || snippet.clone()).style(move |s| {
-                                let p = theme.get().palette;
-                                s.font_size(11.0).color(p.text_primary).flex_grow(1.0)
-                            }),
-                        ))
-                        .style(|s| s.flex_row().items_center().width_full()),
-                    )
-                    .style(move |s| {
-                        let p = theme.get().palette;
-                        s.padding_horiz(8.0)
-                            .padding_vert(4.0)
-                            .width_full()
-                            .cursor(floem::style::CursorStyle::Pointer)
-                            .background(if hovered.get() {
-                                p.bg_elevated
-                            } else {
-                                floem::peniko::Color::TRANSPARENT
-                            })
-                    })
-                    .on_click_stop(move |_| {
-                        semantic_state2
-                            .editor
-                            .open_file
-                            .set(Some(file_path.clone()));
-                        semantic_state2.editor.goto_line.set(1);
-                    })
-                    .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-                        hovered.set(true);
-                    })
-                    .on_event_stop(
-                        floem::event::EventListener::PointerLeave,
-                        move |_| {
-                            hovered.set(false);
-                        },
-                    )
-                },
+            scroll(
+                dyn_stack(
+                    move || safe_get(code_results, Vec::new()),
+                    |hit| {
+                        (
+                            hit.file.clone(),
+                            hit.start_line,
+                            hit.end_line,
+                            hit.snippet.clone(),
+                        )
+                    },
+                    move |hit| {
+                        let place = format!(
+                            "{}:{}",
+                            display_path(&workspace_root.get_untracked(), &hit.file),
+                            hit.start_line
+                        );
+                        let preview = snippet_preview(&hit.snippet);
+                        let path = std::path::PathBuf::from(&hit.file);
+                        let line = hit.start_line as u32;
+                        let hovered = create_rw_signal(false);
+                        container(
+                            stack((
+                                label(move || place.clone()).style(move |s| {
+                                    s.width_full()
+                                        .min_width(0.0)
+                                        .font_size(font::CAPTION)
+                                        .color(theme.get().palette.accent)
+                                        .text_ellipsis()
+                                }),
+                                v_stack_from_iter(preview.into_iter().map(|text| {
+                                    label(move || text.clone()).style(move |s| {
+                                        s.width_full()
+                                            .min_width(0.0)
+                                            .font_size(font::CAPTION)
+                                            .font_family(
+                                                "JetBrains Mono, Fira Code, monospace".to_string(),
+                                            )
+                                            .color(theme.get().palette.text_secondary)
+                                            .text_ellipsis()
+                                    })
+                                }))
+                                .style(|s| s.width_full()),
+                            ))
+                            .style(|s| s.flex_col().width_full().gap(space::XXS)),
+                        )
+                        .style(move |s| {
+                            let p = theme.get().palette;
+                            s.padding_horiz(space::MD)
+                                .padding_vert(space::XS)
+                                .width_full()
+                                .cursor(floem::style::CursorStyle::Pointer)
+                                .background(if hovered.get() {
+                                    p.bg_elevated
+                                } else {
+                                    floem::peniko::Color::TRANSPARENT
+                                })
+                        })
+                        .on_click_stop(move |_| {
+                            open_file.set(Some(path.clone()));
+                            goto_line.set(line);
+                        })
+                        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+                            hovered.set(true);
+                        })
+                        .on_event_stop(
+                            floem::event::EventListener::PointerLeave,
+                            move |_| {
+                                hovered.set(false);
+                            },
+                        )
+                    },
+                )
+                .style(|s| s.flex_col().width_full()),
             )
-            .style(|s| s.flex_col().width_full()),
+            .style(|s| s.width_full().max_height(CODE_RESULTS_MAX_HEIGHT)),
         )
         .style(move |s| {
             let p = theme.get().palette;
             s.width_full()
-                .padding_bottom(4.0)
-                .border_bottom(1.0)
+                .padding_bottom(space::XS)
+                .border_bottom(stroke::HAIRLINE)
                 .border_color(p.border.with_alpha(0.25))
-                .apply_if(sidecar_results.get().is_empty(), |s| {
+                .apply_if(code_results.get().is_empty(), |s| {
                     s.display(floem::style::Display::None)
                 })
         })
@@ -567,6 +613,7 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
                             replace_status,
                             use_regex.get(),
                             case_sensitive.get(),
+                            state3.project.code_search_if_enabled(),
                         );
                     }),
             ))
@@ -859,8 +906,8 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
         count_label,
         search_bar,
         glob_bar,
-        semantic_bar,
-        semantic_results_view,
+        code_search_bar,
+        code_results_view,
         replace_bar,
         status_label,
         results_area,
@@ -872,6 +919,35 @@ pub fn search_panel(state: IdeState) -> impl IntoView {
             .height_full()
             .background(p.bg_panel)
     })
+}
+
+/// A small button for the code search row. Hidden when code search is turned
+/// off; `busy` dims it (the click is still delivered, the action decides).
+fn code_search_button(
+    theme: RwSignal<PhazeTheme>,
+    enabled: bool,
+    primary: bool,
+    text: impl Fn() -> String + 'static,
+    busy: impl Fn() -> bool + 'static,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    container(label(text))
+        .style(move |s| {
+            let p = theme.get().palette;
+            let filled = primary && !busy();
+            s.padding_horiz(space::MD)
+                .padding_vert(space::XS)
+                .border_radius(radius::SM)
+                .font_size(font::CAPTION)
+                .flex_shrink(0.0)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .color(if filled { p.bg_base } else { p.text_primary })
+                .background(if filled { p.accent } else { p.bg_elevated })
+                .border(stroke::HAIRLINE)
+                .border_color(if filled { p.accent } else { p.border })
+                .apply_if(!enabled, |s| s.display(floem::style::Display::None))
+        })
+        .on_click_stop(move |_| on_click())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1028,6 +1104,7 @@ fn perform_replace_all(
     status: RwSignal<String>,
     use_regex: bool,
     case_sensitive: bool,
+    code_search: Option<CodeSearch>,
 ) {
     if find.is_empty() {
         return;
@@ -1091,6 +1168,9 @@ fn perform_replace_all(
 
             if new_content != content && std::fs::write(&path, new_content).is_ok() {
                 replaced_files += 1;
+                if let Some(search) = &code_search {
+                    crate::code_search::refresh_saved_file(search, &path);
+                }
             }
         }
 

@@ -99,7 +99,6 @@ pub mod defaults {
     pub const TAB_SIZE: u32 = 4;
     pub const MAX_TOKENS: u32 = 8192;
     pub const CONTEXT_WINDOW: u32 = 8192;
-    pub const PYTHON_PATH: &str = "python3";
     /// Safer out-of-the-box default than custom phaze-* models.
     /// `llama3.2:3b` is a public Ollama model users can pull directly.
     pub const DEFAULT_MODEL: &str = super::models::BASE_PLANNER;
