@@ -68,10 +68,11 @@ Who it is for is **not written down in the repo**. The roadmap's Phase 1 goal is
 ## Rules for automated runs
 
 **Branches and PRs**
-- Never push to `main`, never force-push, never merge, never touch someone else's branch. (`main` is not branch-protected; the owner should turn that on.)
+- Never push to `main` directly, never force-push, never touch someone else's branch, never merge someone else's PR. Merge **your own** PR only under "Merging your own PR" below. Name each branch for what it does (for example `fix/vim-ex-save`), with no `claude/` prefix, one theme per branch. (`main` is not branch-protected; the owner should turn that on.)
 - Base: branch from `main`, and open the draft PR against `main`. CI only runs for PRs that target `main`.
-- One open draft PR per run. Take only items that do not depend on another run's unmerged PR. One theme per PR.
+- Open each PR as a draft, and take only items that do not depend on another run's unmerged PR. One theme per PR.
 - `gh pr list`, `gh pr create` and `gh pr checks` use GraphQL, which is blocked in Claude Code sessions. Use REST: `gh api 'repos/jakes1345/phazeai-ide/pulls?state=open'`; create with `gh api repos/jakes1345/phazeai-ide/pulls -f title=… -f head=<branch> -f base=main -F draft=true -f body=…`; read CI with `gh api repos/jakes1345/phazeai-ide/commits/<sha>/check-runs`.
+- Mark a draft ready with `POST /repos/jakes1345/phazeai-ide/pulls/<n>/ccr/ready_for_review` (the GraphQL route is blocked), and merge with `PUT /repos/jakes1345/phazeai-ide/pulls/<n>/merge`.
 - Stage files by name, never `git add -A`, and read `git status` before every commit (the GUI suite leaves stray files in a tracked directory).
 
 **Safety on the developer's machine**
@@ -89,6 +90,25 @@ Who it is for is **not written down in the repo**. The roadmap's Phase 1 goal is
 **Behaviour**
 - Do not retry a flaky test until it passes. Find the cause, or report it.
 - Budgets (iterations, time, tokens) are set by the owner when the run starts. With none given, do one item per run. One run at a time per machine: runs share `~/.config/phazeai`, the keyring and the X display.
+
+## Owner decisions
+
+Recorded in the owner's words. The owner can change any of these by saying so.
+
+- **2026-10-31, delegation.** The owner said: *"I am going to leave the rest of this project up to you remember this aims to be the cursor AI killer."* Read as: day-to-day engineering is delegated. Choose work from `STATUS.md`, open PRs, verify, and report. The ambition is in "The bet" above.
+- **2026-10-31, branches.** Asked whether runs may push extra branches so several PRs can be open at once, the owner answered: *"don't name them claude branch name em real ones i'm tired of claude name in everything"*. Read as: yes to extra branches, named for what they do, never with a `claude/` prefix.
+- **2026-10-31, merging.** Asked whether runs may merge their own PRs under the policy below, the owner chose: **"Yes, under the strict policy"**.
+- **Still open, owner-only (not answered yet):** whether embeddings (a model download and native runtime) are allowed; whether the update check gets a setting or the claims change; branch protection on `main`; the Supabase telemetry policy and key; whether to schedule unattended runs. Until answered, do none of them.
+
+### Merging your own PR
+
+Merge only when **all** of these hold. If any fails, leave the PR for the owner and say which one.
+
+1. CI is green on the exact head of the PR.
+2. The PR body lists what was **not** verified.
+3. Every new test was proven to fail without the fix.
+4. The change does not loosen privacy, approval or sandbox rules, add a dependency or runtime, delete a feature, or edit a workflow.
+5. The merge is guarded by the head SHA (`-f sha=<head>`). Afterwards, read CI on `main`; if it is red, revert at once and say so.
 
 ## Start of every run
 
