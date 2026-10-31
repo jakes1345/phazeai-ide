@@ -1,3 +1,4 @@
+use crate::app::Tab;
 use crate::domain_state::IdeState;
 use crate::util::safe_get;
 use floem::{
@@ -6,6 +7,7 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators},
     IntoView,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // ─── Data Structures ────────────────────────────────────────────────────────
@@ -276,39 +278,57 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
         });
     }
 
-    // ── Initial fetch ──
+    // Whether the panel is on screen. The panel is built at start even while
+    // hidden, so nothing here contacts GitHub until it is first shown, and the
+    // refresh below skips its turn while it is hidden.
+    let shown = Arc::new(AtomicBool::new(false));
+
+    // ── Initial fetch: the first time the panel is shown ──
     {
-        loading.set(true);
+        let shown = Arc::clone(&shown);
         let tx = fetch_tx.clone();
-        std::thread::spawn(move || {
-            let token = get_gh_token();
-            let pair = parse_owner_repo();
-            let label;
-            let result = match pair {
-                None => {
-                    label = "No GitHub remote".to_string();
-                    Err("Could not parse owner/repo from git remote".to_string())
-                }
-                Some((owner, repo)) => {
-                    label = format!("{}/{}", owner, repo);
-                    if let Ok(mut guard) = owner_repo_fetch.lock() {
-                        *guard = Some((owner.clone(), repo.clone()));
+        let show_left_panel = state.workbench.show_left_panel;
+        let left_panel_tab = state.workbench.left_panel_tab;
+        create_effect(move |fetched: Option<bool>| {
+            let visible = show_left_panel.get() && left_panel_tab.get() == Tab::GitHub;
+            shown.store(visible, Ordering::Relaxed);
+            if !visible || fetched == Some(true) {
+                return fetched.unwrap_or(false);
+            }
+            loading.set(true);
+            let tx = tx.clone();
+            let owner_repo_fetch = Arc::clone(&owner_repo_fetch);
+            std::thread::spawn(move || {
+                let token = get_gh_token();
+                let pair = parse_owner_repo();
+                let label;
+                let result = match pair {
+                    None => {
+                        label = "No GitHub remote".to_string();
+                        Err("Could not parse owner/repo from git remote".to_string())
                     }
-                    let url = format!(
-                        "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
-                        owner, repo
-                    );
-                    match fetch_json(&url, token.as_deref()) {
-                        Ok(v) => Ok(parse_runs(&v)),
-                        Err(e) => Err(e),
+                    Some((owner, repo)) => {
+                        label = format!("{}/{}", owner, repo);
+                        if let Ok(mut guard) = owner_repo_fetch.lock() {
+                            *guard = Some((owner.clone(), repo.clone()));
+                        }
+                        let url = format!(
+                            "https://api.github.com/repos/{}/{}/actions/runs?per_page=15",
+                            owner, repo
+                        );
+                        match fetch_json(&url, token.as_deref()) {
+                            Ok(v) => Ok(parse_runs(&v)),
+                            Err(e) => Err(e),
+                        }
                     }
-                }
-            };
-            let _ = tx.send((label, result));
+                };
+                let _ = tx.send((label, result));
+            });
+            true
         });
     }
 
-    // ── Auto-refresh every 30s when any run is in_progress ──
+    // ── Auto-refresh every 30s while the panel is shown ──
     // Use a standalone timer thread (NOT create_effect subscribing to runs_sig),
     // which would create a reactive loop: runs changes → effect fires → spawns thread
     // → thread updates runs → effect fires again → infinite loop freezing the UI.
@@ -317,10 +337,14 @@ pub fn github_actions_panel(state: IdeState) -> impl IntoView {
     {
         let owner_repo_timer = Arc::clone(&owner_repo);
         let tx = fetch_tx.clone();
+        let shown = Arc::clone(&shown);
         std::thread::spawn(move || loop {
             // Sleep in 1s intervals so we can detect channel disconnect quickly
             for _ in 0..30 {
                 std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            if !shown.load(Ordering::Relaxed) {
+                continue;
             }
             let pair = owner_repo_timer.lock().ok().and_then(|g| g.clone());
             let Some((owner, repo)) = pair else { continue };

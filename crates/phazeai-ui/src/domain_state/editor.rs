@@ -43,48 +43,94 @@ impl EditorPrefs {
         }
     }
 
-    /// The current values, as an edit of the `[editor]` table. The reads are
-    /// tracked, so an effect that calls this re-runs on every change.
-    fn edit(&self) -> impl FnOnce(&mut EditorSettings) + Send + 'static {
-        let font_size = self.font_size.get();
-        let tab_size = self.tab_size.get();
-        let auto_save = self.auto_save.get();
-        let word_wrap = self.word_wrap.get();
-        let relative_line_numbers = self.relative_line_numbers.get();
-        let inlay_hints = self.inlay_hints.get();
-        let code_lens = self.code_lens.get();
-        let organize_imports_on_save = self.organize_imports_on_save.get();
-        let ai_completions = self.ai_completions.get();
-        move |e| {
-            e.font_size = font_size as f32;
-            e.tab_size = tab_size;
-            e.auto_save = auto_save;
-            e.word_wrap = word_wrap;
-            e.relative_line_numbers = relative_line_numbers;
-            e.inlay_hints = inlay_hints;
-            e.code_lens = code_lens;
-            e.organize_imports_on_save = organize_imports_on_save;
-            e.ai_completions = ai_completions;
+    /// The current values. The reads are tracked, so an effect that calls
+    /// this re-runs on every change.
+    fn values(&self, theme: RwSignal<PhazeTheme>) -> PrefValues {
+        PrefValues {
+            theme: theme.get().display_name().to_string(),
+            font_size: self.font_size.get(),
+            tab_size: self.tab_size.get(),
+            auto_save: self.auto_save.get(),
+            word_wrap: self.word_wrap.get(),
+            relative_line_numbers: self.relative_line_numbers.get(),
+            inlay_hints: self.inlay_hints.get(),
+            code_lens: self.code_lens.get(),
+            organize_imports_on_save: self.organize_imports_on_save.get(),
+            ai_completions: self.ai_completions.get(),
         }
     }
 
-    /// Hand `save` an edit of the `[editor]` table now and after every change
-    /// to these settings or to `theme`. Each edit sets every value the IDE
-    /// holds and nothing else, so `save` applies it to the file as loaded
-    /// (load-modify-save) and the rest of `config.toml` is kept.
+    /// After every change to these settings or to `theme`, hand `save` an
+    /// edit of the `[editor]` table that writes only the values that changed.
+    /// `save` applies it to the file as loaded (load-modify-save), so every
+    /// other key keeps the value the file has, even one changed there since
+    /// start (by hand, or by another PhazeAI window): a value this window
+    /// still holds from start is never written back over it. Nothing is
+    /// saved at start, when the values have just been read.
     pub fn persist(
         self,
         theme: RwSignal<PhazeTheme>,
         save: impl Fn(Box<dyn FnOnce(&mut EditorSettings) + Send>) + 'static,
     ) {
-        create_effect(move |_| {
-            let theme_name = theme.get().display_name().to_string();
-            let edit = self.edit();
-            save(Box::new(move |e| {
-                e.theme = theme_name;
-                edit(e);
-            }));
+        create_effect(move |before: Option<PrefValues>| {
+            let now = self.values(theme);
+            if let Some(before) = before.filter(|before| *before != now) {
+                let after = now.clone();
+                save(Box::new(move |e| after.write_changes(&before, e)));
+            }
+            now
         });
+    }
+}
+
+/// The values [`EditorPrefs::persist`] saves, as they were at one moment.
+#[derive(Clone, PartialEq)]
+struct PrefValues {
+    theme: String,
+    font_size: u32,
+    tab_size: u32,
+    auto_save: bool,
+    word_wrap: bool,
+    relative_line_numbers: bool,
+    inlay_hints: bool,
+    code_lens: bool,
+    organize_imports_on_save: bool,
+    ai_completions: bool,
+}
+
+impl PrefValues {
+    /// Write to `e` the values that differ from `before`, and nothing else.
+    fn write_changes(&self, before: &Self, e: &mut EditorSettings) {
+        if self.theme != before.theme {
+            e.theme = self.theme.clone();
+        }
+        if self.font_size != before.font_size {
+            e.font_size = self.font_size as f32;
+        }
+        if self.tab_size != before.tab_size {
+            e.tab_size = self.tab_size;
+        }
+        if self.auto_save != before.auto_save {
+            e.auto_save = self.auto_save;
+        }
+        if self.word_wrap != before.word_wrap {
+            e.word_wrap = self.word_wrap;
+        }
+        if self.relative_line_numbers != before.relative_line_numbers {
+            e.relative_line_numbers = self.relative_line_numbers;
+        }
+        if self.inlay_hints != before.inlay_hints {
+            e.inlay_hints = self.inlay_hints;
+        }
+        if self.code_lens != before.code_lens {
+            e.code_lens = self.code_lens;
+        }
+        if self.organize_imports_on_save != before.organize_imports_on_save {
+            e.organize_imports_on_save = self.organize_imports_on_save;
+        }
+        if self.ai_completions != before.ai_completions {
+            e.ai_completions = self.ai_completions;
+        }
     }
 }
 
@@ -401,32 +447,66 @@ mod tests {
         on_disk.show_line_numbers = false; // a key the IDE doesn't hold
         let (prefs, editor) = editor_from(&on_disk);
 
-        // Stand-in for save_editor_settings: apply each edit to the file.
         let file = Rc::new(RefCell::new(on_disk));
         let saves = Rc::new(Cell::new(0));
         let theme = create_rw_signal(PhazeTheme::from_variant(ThemeVariant::Dracula));
-        prefs.persist(theme, {
-            let (file, saves) = (file.clone(), saves.clone());
-            move |edit| {
-                edit(&mut file.borrow_mut());
-                saves.set(saves.get() + 1);
-            }
-        });
-        assert_eq!(saves.get(), 1, "saved once at start");
+        persist_to(prefs, theme, &file, &saves);
+        assert_eq!(saves.get(), 0, "nothing is saved at start");
 
         // Toggle the way the command palette, the shortcuts and Settings do.
         editor.organize_imports_on_save.update(|v| *v = !*v);
         editor.inlay_hints_toggle.update(|v| *v = !*v);
         editor.code_lens_visible.update(|v| *v = !*v);
         editor.ai_completions.update(|v| *v = !*v);
+        theme.set(PhazeTheme::from_variant(ThemeVariant::NordDark));
 
-        assert_eq!(saves.get(), 5, "each toggle is saved");
+        assert_eq!(saves.get(), 5, "each change is saved");
         let saved = file.borrow();
         assert!(saved.organize_imports_on_save);
         assert!(saved.inlay_hints);
         assert!(saved.code_lens);
         assert!(!saved.ai_completions);
-        assert_eq!(saved.theme, "Dracula");
+        assert_eq!(saved.theme, "Nord Dark");
         assert!(!saved.show_line_numbers, "other keys are left as they were");
+    }
+
+    #[test]
+    fn a_change_here_keeps_settings_changed_elsewhere_since_start() {
+        let on_disk = toggles(false, true, true, true);
+        let (prefs, editor) = editor_from(&on_disk);
+        let file = Rc::new(RefCell::new(on_disk));
+        let theme = create_rw_signal(PhazeTheme::from_variant(ThemeVariant::Dracula));
+        persist_to(prefs, theme, &file, &Rc::new(Cell::new(0)));
+
+        // Since start, another PhazeAI window (or a hand edit) turned AI
+        // completions off and organize imports on. This window still holds
+        // the values it started with.
+        file.borrow_mut().ai_completions = false;
+        file.borrow_mut().organize_imports_on_save = true;
+        assert!(editor.ai_completions.get_untracked());
+
+        // An unrelated change here saves that change only.
+        let size = editor.font_size.get_untracked();
+        editor.font_size.update(|v| *v += 1);
+
+        let saved = file.borrow();
+        assert_eq!(saved.font_size, (size + 1) as f32, "the change is saved");
+        assert!(!saved.ai_completions, "AI completions stay off");
+        assert!(saved.organize_imports_on_save, "organize imports stays on");
+    }
+
+    /// Run [`EditorPrefs::persist`] with a stand-in for `save_editor_settings`
+    /// that applies each edit to `file` and counts it in `saves`.
+    fn persist_to(
+        prefs: EditorPrefs,
+        theme: RwSignal<PhazeTheme>,
+        file: &Rc<RefCell<EditorSettings>>,
+        saves: &Rc<Cell<u32>>,
+    ) {
+        let (file, saves) = (file.clone(), saves.clone());
+        prefs.persist(theme, move |edit| {
+            edit(&mut file.borrow_mut());
+            saves.set(saves.get() + 1);
+        });
     }
 }

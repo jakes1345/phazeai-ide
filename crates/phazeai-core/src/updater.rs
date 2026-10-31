@@ -85,8 +85,10 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Whether the IDE may ask GitHub for a newer release when it starts: the
 /// check is on (`[updates] check_at_start`) and `policy` is not local-only (a
-/// broken `privacy.toml` counts as local-only). When this is false, call
-/// nothing: [`check_for_update`] always contacts GitHub.
+/// broken `privacy.toml` counts as local-only). The IDE passes the policy of
+/// the folder it starts in, once, at start; a project opened later is not
+/// consulted. When this is false, call nothing: [`check_for_update`] always
+/// contacts GitHub.
 pub fn should_check_for_updates(settings: &Settings, policy: &PrivacyPolicy) -> bool {
     settings.updates.check_at_start && !policy.local_only()
 }

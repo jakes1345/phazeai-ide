@@ -1113,8 +1113,9 @@ fn about_section(state: IdeState) -> impl IntoView {
     let update_check = toggle_row(
         "Check for Updates at Start",
         Some(
-            "Contacts GitHub when PhazeAI opens; never for a local-only project. \
-             A change applies at the next start.",
+            "Asks GitHub's releases API for a newer version when PhazeAI starts. \
+             Skipped when the folder PhazeAI starts in is local-only. A change \
+             applies at the next start.",
         ),
         state.workbench.check_updates_at_start,
         theme,

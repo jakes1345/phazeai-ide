@@ -679,8 +679,9 @@ impl IdeState {
 
         // Background update check: one request to GitHub's releases API at
         // start, unless it is turned off ([updates] check_at_start) or the
-        // project is local-only. The result is written via create_ext_action
-        // so the signal write stays on the UI thread.
+        // folder the IDE starts in is local-only. A project opened later is
+        // not consulted: by then the request has gone. The result is written
+        // via create_ext_action so the signal write stays on the UI thread.
         if phazeai_core::updater::should_check_for_updates(
             settings,
             &phazeai_core::privacy::active(),

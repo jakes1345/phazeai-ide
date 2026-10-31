@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::config::Settings;
-use crate::llm::Message;
+use crate::llm::{LlmClient, Message};
 use crate::privacy::PrivacyPolicy;
 
 /// Whether a background completion may be requested for `path`: AI
@@ -40,28 +40,50 @@ pub async fn fim_complete(
     language: &str,
 ) -> Result<String, String> {
     let settings = Settings::load();
-    // Silent skip: this runs on every typing pause, so it isn't logged as a block.
-    if !should_request_fim(
+    let policy = crate::privacy::active();
+    let client = || settings.build_llm_client().map_err(|e| e.to_string());
+    fim_complete_with(
         settings.editor.ai_completions,
-        &crate::privacy::active(),
+        &policy,
+        client,
         path,
-    ) {
+        prefix,
+        suffix,
+        language,
+    )
+    .await
+}
+
+/// [`fim_complete`] with the setting, the policy and the provider passed in.
+/// `client` is only called, and the request only sent, when
+/// [`should_request_fim`] allows it.
+async fn fim_complete_with(
+    ai_completions: bool,
+    policy: &PrivacyPolicy,
+    client: impl FnOnce() -> Result<Box<dyn LlmClient>, String>,
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+    language: &str,
+) -> Result<String, String> {
+    // Silent skip: this runs on every typing pause, so it isn't logged as a block.
+    if !should_request_fim(ai_completions, policy, path) {
         return Ok(String::new());
     }
     crate::privacy::audit::scope(
         vec![path.to_path_buf()],
-        fim_request(&settings, prefix, suffix, language),
+        fim_request(client, prefix, suffix, language),
     )
     .await
 }
 
 async fn fim_request(
-    settings: &Settings,
+    client: impl FnOnce() -> Result<Box<dyn LlmClient>, String>,
     prefix: &str,
     suffix: &str,
     language: &str,
 ) -> Result<String, String> {
-    let client = settings.build_llm_client().map_err(|e| e.to_string())?;
+    let client = client()?;
 
     // Trim prefix to last ~40 lines and suffix to next ~20 lines so we
     // don't blow the context window on large files.
@@ -134,6 +156,11 @@ fn first_n_lines(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::PhazeError;
+    use crate::llm::{LlmResponse, StreamEvent};
+    use crate::tools::ToolDefinition;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn nothing_is_requested_while_ai_completions_are_off() {
@@ -170,5 +197,71 @@ mod tests {
             &root.join("secret/key.rs")
         ));
         assert!(should_request_fim(true, &policy, &root.join("src/main.rs")));
+    }
+
+    /// Stands in for the provider: counts the requests that reach it.
+    struct CountingProvider(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl LlmClient for CountingProvider {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse, PhazeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(LlmResponse {
+                message: Message::assistant("+ 1;"),
+                usage: None,
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<futures::channel::mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(PhazeError::Other("not used by completions".into()))
+        }
+    }
+
+    /// One completion through the path `fim_complete` takes, with
+    /// `[editor] ai_completions = on`. Returns the result and how many
+    /// requests reached the provider.
+    async fn complete(
+        on: bool,
+        policy: &PrivacyPolicy,
+        path: &str,
+    ) -> (Result<String, String>, usize) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let provider = {
+            let requests = Arc::clone(&requests);
+            move || Ok(Box::new(CountingProvider(requests)) as Box<dyn LlmClient>)
+        };
+        let path = Path::new(path);
+        let result =
+            fim_complete_with(on, policy, provider, path, "let total = 1", ";\n", "rust").await;
+        (result, requests.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn no_request_reaches_the_provider_while_ai_completions_are_off() {
+        let policy = PrivacyPolicy::defaults();
+        let (result, requests) = complete(false, &policy, "/p/src/main.rs").await;
+        assert_eq!(requests, 0, "nothing is sent while AI completions are off");
+        assert_eq!(result, Ok(String::new()));
+
+        // The same completion with the switch on does reach the provider, so
+        // the zero above comes from the switch.
+        let (result, requests) = complete(true, &policy, "/p/src/main.rs").await;
+        assert_eq!(requests, 1);
+        assert_eq!(result, Ok("+ 1;".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_request_reaches_the_provider_for_a_denied_file() {
+        let (result, requests) = complete(true, &PrivacyPolicy::defaults(), "/p/.env").await;
+        assert_eq!(requests, 0, "a file the policy denies is never sent");
+        assert_eq!(result, Ok(String::new()));
     }
 }

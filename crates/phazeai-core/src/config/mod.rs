@@ -155,8 +155,9 @@ impl Default for EditorSettings {
 #[serde(default)]
 pub struct UpdateSettings {
     /// Ask GitHub's releases API for a newer version when the IDE starts.
-    /// Never done for a `local_only` project (see
-    /// `crate::updater::should_check_for_updates`).
+    /// Skipped when the folder the IDE starts in is `local_only`; a project
+    /// opened after start is not consulted, because the request has already
+    /// gone (see `crate::updater::should_check_for_updates`).
     pub check_at_start: bool,
 }
 
