@@ -8,9 +8,7 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, text_input, v_stack, Decorators},
     IntoView,
 };
-use phazeai_core::tools::{
-    BashTool, ToolApprovalManager, ToolApprovalMode, ToolPermission, ToolRegistry,
-};
+use phazeai_core::tools::{BashTool, ToolApprovalManager, ToolPermission, ToolRegistry};
 use phazeai_core::{Agent, AgentEvent, Settings};
 use serde_json::Value;
 
@@ -50,26 +48,15 @@ impl ComposerApprovalMode {
 
     /// Decide whether a tool+params pair requires user approval under this mode.
     fn needs_approval(self, tool_name: &str, params: &Value) -> bool {
-        let mgr = ToolApprovalManager::new(match self {
-            Self::AutoAll => ToolApprovalMode::AutoApprove,
-            // For ApproveDestructive we use AlwaysAsk but then only block on
-            // non-read-only tools — the ToolApprovalManager::needs_approval
-            // logic already does this for AlwaysAsk.
-            Self::ApproveDestructive => ToolApprovalMode::AlwaysAsk,
-            Self::ApproveAll => ToolApprovalMode::AlwaysAsk,
-        });
-
         match self {
             Self::AutoAll => false,
             Self::ApproveDestructive => {
                 // Only block Write, Execute, or Destructive — not ReadOnly.
-                let perm = mgr.classify_tool(tool_name, params);
+                let perm = ToolApprovalManager::default().classify_tool(tool_name, params);
                 perm != ToolPermission::ReadOnly
             }
-            Self::ApproveAll => {
-                // Block everything except genuinely read-only tools.
-                mgr.needs_approval(tool_name, params)
-            }
+            // Every call, read-only ones (read_file, code_search, `ls`) included.
+            Self::ApproveAll => true,
         }
     }
 }
@@ -1151,4 +1138,48 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
     }
 
     cards
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ComposerApprovalMode::{ApproveAll, ApproveDestructive, AutoAll};
+    use serde_json::json;
+
+    #[test]
+    fn each_approval_mode_asks_for_what_its_label_says() {
+        let read = ("read_file", json!({"path": "src/main.rs"}));
+        let search = ("code_search", json!({"query": "parse config"}));
+        let list = ("bash", json!({"command": "ls"}));
+        let write = ("write_file", json!({"path": "src/main.rs", "content": "x"}));
+        let remove = ("bash", json!({"command": "rm -rf target"}));
+        let mcp = ("mcp__files__read_text_file", json!({"path": "notes.md"}));
+        let calls = [&read, &search, &list, &write, &remove, &mcp];
+
+        // "Approve all": every call, read-only ones included.
+        for (tool, params) in calls {
+            assert!(
+                ApproveAll.needs_approval(tool, params),
+                "Approve all ran {tool} {params} unasked"
+            );
+        }
+
+        // "Approve destructive": read-only calls run unasked, the rest wait.
+        for (tool, params) in [&read, &search, &list] {
+            assert!(
+                !ApproveDestructive.needs_approval(tool, params),
+                "{tool} {params}"
+            );
+        }
+        for (tool, params) in [&write, &remove, &mcp] {
+            assert!(
+                ApproveDestructive.needs_approval(tool, params),
+                "{tool} {params}"
+            );
+        }
+
+        // "Auto-approve all": never asks.
+        for (tool, params) in calls {
+            assert!(!AutoAll.needs_approval(tool, params), "{tool} {params}");
+        }
+    }
 }

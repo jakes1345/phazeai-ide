@@ -13,7 +13,7 @@ use floem::{
     IntoView,
 };
 use phazeai_core::privacy::PrivacyPolicy;
-use phazeai_core::{constants::ui as ui_const, Agent, AgentEvent, Settings};
+use phazeai_core::{constants::ui as ui_const, Settings};
 
 use crate::domain_state::IdeState;
 use crate::{
@@ -2420,21 +2420,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     Ok(c) => c,
                     Err(e) => return Err(format!("AI commit message: {e}")),
                 };
-                let agent = Agent::new(client);
-                let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                let mut accumulated = String::new();
-                let run_fut = agent.run_with_events(&prompt, atx);
-                let drain_fut = async {
-                    while let Some(ev) = rx.recv().await {
-                        match ev {
-                            AgentEvent::TextDelta(t) => accumulated.push_str(&t),
-                            AgentEvent::Complete { .. } | AgentEvent::Error(_) => break,
-                            _ => {}
-                        }
-                    }
-                };
-                let _ = tokio::join!(run_fut, drain_fut);
-                Ok(accumulated.trim().to_string())
+                Ok(crate::ai_helpers::commit_message_reply(client, &prompt).await)
             });
 
             let _ = tx.send(result);

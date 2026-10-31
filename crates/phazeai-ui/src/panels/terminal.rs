@@ -2121,28 +2121,13 @@ pub fn terminal_panel(
                                     Err(e) => { let _ = tx.send(Err(format!("Runtime: {e}"))); return; }
                                 };
                                 rt.block_on(async move {
-                                    use phazeai_core::{Agent, AgentEvent};
-                                    let agent = Agent::new(client);
                                     let prompt = format!(
                                         "Generate a single bash/shell command that does the following: {desc}\n\
                                          Rules: respond with ONLY the command, no explanation, no markdown, no backticks."
                                     );
-                                    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                                    let run_fut = agent.run_with_events(&prompt, agent_tx);
-                                    let collect_fut = async move {
-                                        let mut s = String::new();
-                                        while let Some(ev) = agent_rx.recv().await {
-                                            if let AgentEvent::TextDelta(d) = ev { s.push_str(&d); }
-                                        }
-                                        s
-                                    };
-                                    let (_, collected) = tokio::join!(run_fut, collect_fut);
-                                    let cmd = collected.trim().trim_matches('`').to_string();
-                                    let _ = tx.send(if cmd.is_empty() {
-                                        Err("AI returned empty command".into())
-                                    } else {
-                                        Ok(cmd)
-                                    });
+                                    let _ = tx.send(
+                                        crate::ai_helpers::terminal_command_reply(client, &prompt).await,
+                                    );
                                 });
                             });
                         }
