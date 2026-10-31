@@ -1,3 +1,4 @@
+pub mod ex_command;
 mod menu;
 mod overlays;
 use menu::menu_bar;
@@ -840,6 +841,7 @@ impl IdeState {
             editor_snapshot: editor_snapshot.clone(),
             new_terminal_nonce: create_rw_signal(0u64),
             local_ai_focus_nonce: create_rw_signal(0u64),
+            quit_nonce: create_rw_signal(0u64),
         };
 
         let editor = EditorState {
@@ -930,6 +932,7 @@ impl IdeState {
             split_down_cursor: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             close_active_tab_nonce: create_rw_signal(0u64),
+            panes: create_rw_signal(Vec::new()),
             selected_text: create_rw_signal(String::new()),
             hover_anchor_x: create_rw_signal(0.0_f64),
             hover_anchor_y: create_rw_signal(0.0_f64),
@@ -3557,6 +3560,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         fim_req_tx.clone(),
         state.editor.selected_text,
         state.project.code_search_if_enabled(),
+        state.editor.panes,
+        true,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3620,6 +3625,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         fim_req_tx.clone(),
         create_rw_signal(String::new()), // split: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),
+        state.editor.panes,
+        false,
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3941,6 +3948,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         fim_req_tx.clone(),
         create_rw_signal(String::new()), // split-down: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),
+        state.editor.panes,
+        false,
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4055,6 +4064,36 @@ fn ide_root(state: IdeState) -> impl IntoView {
     })
 }
 
+/// Ask the IDE to quit (File > Exit, the Vim ex bar's `:q` and friends). `install_quit_handler`
+/// acts on it.
+pub(crate) fn request_quit(quit_nonce: RwSignal<u64>) {
+    quit_nonce.update(|n| *n += 1);
+}
+
+/// Quit the IDE when `request_quit` is called, the same way the window's close button does.
+/// `close_window` ends in the `WindowClosed` handler, which stops the built-in local-model
+/// server and saves the session; `process::exit` would skip both. `quit_app` queues behind it,
+/// so on macOS (which keeps running with no windows) the process still ends once the window is
+/// gone.
+fn install_quit_handler(quit_nonce: RwSignal<u64>, window_id: floem::window::WindowId) {
+    on_quit_requested(quit_nonce, move || {
+        floem::close_window(window_id);
+        floem::quit_app();
+    });
+}
+
+/// Run `quit` each time `request_quit` is called on `quit_nonce`. Not at startup.
+fn on_quit_requested(quit_nonce: RwSignal<u64>, quit: impl Fn() + 'static) {
+    create_effect(move |prev: Option<u64>| {
+        let n = quit_nonce.get();
+        // The first run only records the starting value; nothing asked to quit yet.
+        if prev.is_some_and(|p| p != n) {
+            quit();
+        }
+        n
+    });
+}
+
 /// Launch the PhazeAI IDE.
 pub fn launch_phaze_ide() {
     // Anonymous telemetry — single fire-and-forget ping, no personal data
@@ -4090,8 +4129,9 @@ pub fn launch_phaze_ide() {
 
     Application::new()
         .window(
-            move |_| {
+            move |window_id| {
                 let state = IdeState::new(&settings);
+                install_quit_handler(state.workbench.quit_nonce, window_id);
 
                 // Crash recovery: surface any unsaved content from a prior crash.
                 {
@@ -5356,6 +5396,53 @@ pub fn launch_phaze_ide() {
             ),
         )
         .run();
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::{on_quit_requested, request_quit};
+    use floem::reactive::{create_rw_signal, SignalGet};
+    use std::{cell::Cell, rc::Rc};
+
+    fn counting(nonce: floem::reactive::RwSignal<u64>) -> Rc<Cell<u32>> {
+        let quits = Rc::new(Cell::new(0));
+        let seen = quits.clone();
+        on_quit_requested(nonce, move || seen.set(seen.get() + 1));
+        quits
+    }
+
+    #[test]
+    fn nothing_quits_at_startup() {
+        let nonce = create_rw_signal(0u64);
+        let quits = counting(nonce);
+        assert_eq!(quits.get(), 0, "installing the handler must not quit");
+        // A signal that starts above zero (never the case today) must not quit either.
+        let late = create_rw_signal(5u64);
+        assert_eq!(counting(late).get(), 0);
+    }
+
+    #[test]
+    fn each_request_quits_once() {
+        let nonce = create_rw_signal(0u64);
+        let quits = counting(nonce);
+
+        request_quit(nonce);
+        assert_eq!(quits.get(), 1);
+        assert_eq!(nonce.get(), 1);
+        request_quit(nonce);
+        assert_eq!(quits.get(), 2);
+    }
+
+    #[test]
+    fn other_signals_do_not_quit() {
+        let nonce = create_rw_signal(0u64);
+        let other = create_rw_signal(0u64);
+        let quits = counting(nonce);
+
+        request_quit(other);
+
+        assert_eq!(quits.get(), 0);
+    }
 }
 
 #[cfg(test)]

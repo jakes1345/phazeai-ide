@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 const HEADER_PREFIX: &str = "// PHAZEAI-RECOVERY: ";
 
 pub fn recovery_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_support::dir_override() {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
     let dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("phazeai")
@@ -68,4 +73,61 @@ pub fn list_pending() -> Vec<PathBuf> {
         }
     }
     pending
+}
+
+/// Lets a test keep recovery files in its own directory instead of the real config dir.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn dir_override() -> Option<PathBuf> {
+        DIR.with(|d| d.borrow().clone())
+    }
+
+    /// Restores the real directory for this thread when dropped.
+    pub(crate) struct DirGuard;
+
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            DIR.with(|d| *d.borrow_mut() = None);
+        }
+    }
+
+    /// For the rest of this test (on this thread), recovery files go in `dir`.
+    pub(crate) fn use_dir(dir: &Path) -> DirGuard {
+        DIR.with(|d| *d.borrow_mut() = Some(dir.to_path_buf()));
+        DirGuard
+    }
+
+    /// Does the recovery shadow of `original` exist?
+    pub(crate) fn shadow_exists(original: &Path) -> bool {
+        super::recovery_path_for(original).exists()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_is_written_listed_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = test_support::use_dir(&dir.path().join("recovery"));
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "on disk\n").unwrap();
+
+        assert!(!test_support::shadow_exists(&file));
+        write_recovery(&file, "unsaved edit");
+        assert!(test_support::shadow_exists(&file));
+        assert_eq!(list_pending(), vec![file.clone()]);
+
+        clear_recovery(&file);
+        assert!(!test_support::shadow_exists(&file));
+        assert!(list_pending().is_empty());
+    }
 }
