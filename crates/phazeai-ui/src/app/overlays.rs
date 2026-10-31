@@ -19,7 +19,8 @@ use crate::domain_state::IdeState;
 use crate::lsp_bridge::{CodeAction, CompletionEntry, LspCommand};
 use crate::util::safe_get;
 
-use super::{all_commands, show_toast, Tab};
+use super::ex_command::{run_ex_command, EditorPaneHandle};
+use super::{all_commands, request_quit, show_toast, Tab};
 
 /// Most files the picker keeps; beyond this the list is cut, shallowest first.
 const FILE_PICKER_LIMIT: usize = 2000;
@@ -1635,6 +1636,41 @@ pub(crate) fn branch_picker_overlay(state: IdeState) -> impl IntoView {
 
 // ── Vim ex command bar (:w, :q, :wq, :wqa, :e <file>, etc.) ─────────────────
 
+/// Carry out one command typed into the ex bar. `:w :wq :x :q :q! :qa :wqa ...` save through
+/// the editor's own save path and quit through the window-close path (`request_quit`); `:e` and
+/// `:cd` are handled here; anything else is reported as unknown. Messages go to `notify`.
+fn submit_ex_command(
+    cmd: &str,
+    panes: &[EditorPaneHandle],
+    workspace: &std::path::Path,
+    open_file: RwSignal<Option<std::path::PathBuf>>,
+    quit_nonce: RwSignal<u64>,
+    notify: impl Fn(String),
+) {
+    let cmd = cmd.trim();
+    if let Some(run) = run_ex_command(cmd, panes) {
+        if let Some(msg) = run.toast {
+            notify(msg);
+        }
+        if run.quit {
+            request_quit(quit_nonce);
+        }
+    } else if let Some(rest) = cmd.strip_prefix("e ") {
+        let path = rest.trim();
+        let full = workspace.join(path);
+        if full.exists() {
+            open_file.set(Some(full));
+        } else {
+            notify(format!("No such file: {path}"));
+        }
+    } else if let Some(rest) = cmd.strip_prefix("cd ") {
+        let dir = rest.trim();
+        let _ = std::env::set_current_dir(dir);
+    } else if !cmd.is_empty() {
+        notify(format!("Unknown command: {cmd}"));
+    }
+}
+
 pub(crate) fn vim_ex_overlay(state: IdeState) -> impl IntoView {
     let open = state.editor.vim_ex_open;
     let input_sig = state.editor.vim_ex_input;
@@ -1642,6 +1678,8 @@ pub(crate) fn vim_ex_overlay(state: IdeState) -> impl IntoView {
     let open_file = state.editor.open_file;
     let toast = state.workbench.status_toast;
     let workspace = state.project.workspace_root;
+    let panes = state.editor.panes;
+    let quit_nonce = state.workbench.quit_nonce;
 
     let input_view = text_input(input_sig)
         .style(move |s| {
@@ -1653,56 +1691,29 @@ pub(crate) fn vim_ex_overlay(state: IdeState) -> impl IntoView {
                 .border(0.0)
                 .padding_horiz(4.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |e| {
-            if let Event::KeyDown(ke) = e {
-                match &ke.key.logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        open.set(false);
-                        input_sig.set(String::new());
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        let cmd = input_sig.get_untracked();
-                        let cmd = cmd.trim().to_string();
-                        open.set(false);
-                        input_sig.set(String::new());
-                        match cmd.as_str() {
-                            "w" | "write" => {
-                                show_toast(toast, "Saved".to_string());
-                            }
-                            "q" | "quit" => {
-                                std::process::exit(0);
-                            }
-                            "wq" | "x" => {
-                                show_toast(toast, "Saved".to_string());
-                                std::process::exit(0);
-                            }
-                            "wqa" | "qa" => {
-                                std::process::exit(0);
-                            }
-                            _ if cmd.starts_with("e ") => {
-                                let path = cmd[2..].trim();
-                                let full = workspace.get_untracked().join(path);
-                                if full.exists() {
-                                    open_file.set(Some(full));
-                                } else {
-                                    show_toast(toast, format!("No such file: {path}"));
-                                }
-                            }
-                            _ if cmd.starts_with("cd ") => {
-                                let dir = cmd[3..].trim();
-                                let _ = std::env::set_current_dir(dir);
-                            }
-                            _ => {
-                                if !cmd.is_empty() {
-                                    show_toast(toast, format!("Unknown command: {cmd}"));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+        // The text input consumes Enter itself, so it never reaches a KeyDown listener.
+        .on_enter(move || {
+            let cmd = input_sig.get_untracked();
+            open.set(false);
+            input_sig.set(String::new());
+            submit_ex_command(
+                &cmd,
+                &panes.get_untracked(),
+                &workspace.get_untracked(),
+                open_file,
+                quit_nonce,
+                |msg| show_toast(toast, msg),
+            );
+        })
+        // Escape makes the text input drop focus (it consumes the key too); that cancels the bar.
+        .on_event_stop(EventListener::FocusLost, move |_| {
+            if open.get_untracked() {
+                open.set(false);
+                input_sig.set(String::new());
             }
-        });
+        })
+        // Without focus the typed command went to the editor's Vim keys instead of the bar.
+        .focus_when_open(move || open.get());
 
     let bar = stack((
         label(|| ":").style(move |s| {
@@ -1984,5 +1995,224 @@ mod inline_edit_tests {
         assert!(ctx.len() <= INLINE_EDIT_CONTEXT_CHARS);
         assert!(ctx.chars().all(|c| c == 'é'));
         assert!(!ctx.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ex_bar_tests {
+    use super::submit_ex_command;
+    use crate::app::ex_command::{EditorPaneHandle, SaveOutcome, TabInfo};
+    use floem::reactive::{create_rw_signal, RwSignal, SignalGet};
+    use std::{cell::RefCell, io, path::PathBuf, rc::Rc};
+
+    /// One main pane with the given `(name, dirty, active)` tabs. `saves` records every tab
+    /// written; the write fails when `fail` is set.
+    fn pane(
+        tabs: &[(&str, bool, bool)],
+        saves: Rc<RefCell<Vec<usize>>>,
+        fail: bool,
+    ) -> EditorPaneHandle {
+        let tabs: Vec<TabInfo> = tabs
+            .iter()
+            .map(|&(name, dirty, active)| TabInfo {
+                name: name.to_string(),
+                dirty,
+                active,
+            })
+            .collect();
+        EditorPaneHandle {
+            primary: true,
+            tabs: Rc::new(move || tabs.clone()),
+            save_tab: Rc::new(move |i| {
+                saves.borrow_mut().push(i);
+                if fail {
+                    SaveOutcome::Failed(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Permission denied",
+                    ))
+                } else {
+                    SaveOutcome::Saved
+                }
+            }),
+            discard_tab: Rc::new(|_| {}),
+        }
+    }
+
+    struct Bar {
+        toasts: Rc<RefCell<Vec<String>>>,
+        open_file: RwSignal<Option<PathBuf>>,
+        quit_nonce: RwSignal<u64>,
+        workspace: PathBuf,
+    }
+
+    impl Bar {
+        fn new(workspace: PathBuf) -> Self {
+            Bar {
+                toasts: Rc::default(),
+                open_file: create_rw_signal(None),
+                quit_nonce: create_rw_signal(0u64),
+                workspace,
+            }
+        }
+
+        fn submit(&self, cmd: &str, panes: &[EditorPaneHandle]) {
+            let toasts = self.toasts.clone();
+            submit_ex_command(
+                cmd,
+                panes,
+                &self.workspace,
+                self.open_file,
+                self.quit_nonce,
+                move |msg| toasts.borrow_mut().push(msg),
+            );
+        }
+
+        fn quit_requests(&self) -> u64 {
+            self.quit_nonce.get()
+        }
+    }
+
+    #[test]
+    fn w_writes_the_active_tab_and_reports_it_without_quitting() {
+        let bar = Bar::new(PathBuf::new());
+        let saves = Rc::default();
+        let panes = [pane(
+            &[("a.rs", true, false), ("b.rs", true, true)],
+            Rc::clone(&saves),
+            false,
+        )];
+
+        bar.submit("w", &panes);
+
+        assert_eq!(*saves.borrow(), vec![1]);
+        assert_eq!(*bar.toasts.borrow(), vec!["Saved b.rs".to_string()]);
+        assert_eq!(bar.quit_requests(), 0);
+    }
+
+    #[test]
+    fn a_failed_w_shows_the_reason_and_not_saved() {
+        let bar = Bar::new(PathBuf::new());
+        let panes = [pane(&[("a.rs", true, true)], Rc::default(), true)];
+
+        bar.submit("w", &panes);
+
+        let toasts = bar.toasts.borrow();
+        assert_eq!(toasts.len(), 1);
+        assert!(toasts[0].contains("Permission denied"), "{}", toasts[0]);
+        assert!(!toasts[0].contains("Saved"), "{}", toasts[0]);
+        assert_eq!(bar.quit_requests(), 0);
+    }
+
+    #[test]
+    fn wq_saves_then_asks_to_quit_exactly_once_and_stays_silent() {
+        let bar = Bar::new(PathBuf::new());
+        let saves = Rc::default();
+        let panes = [pane(&[("a.rs", true, true)], Rc::clone(&saves), false)];
+
+        bar.submit("wq", &panes);
+
+        assert_eq!(*saves.borrow(), vec![0]);
+        assert_eq!(bar.quit_requests(), 1);
+        assert!(bar.toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_wq_does_not_ask_to_quit() {
+        let bar = Bar::new(PathBuf::new());
+        let panes = [pane(&[("a.rs", true, true)], Rc::default(), true)];
+
+        bar.submit("wq", &panes);
+
+        assert_eq!(bar.quit_requests(), 0);
+        assert!(bar.toasts.borrow()[0].contains("Permission denied"));
+    }
+
+    #[test]
+    fn q_over_unsaved_work_refuses_with_a_message_and_does_not_quit() {
+        let bar = Bar::new(PathBuf::new());
+        let saves = Rc::default();
+        let panes = [pane(&[("a.rs", true, true)], Rc::clone(&saves), false)];
+
+        bar.submit("q", &panes);
+
+        assert_eq!(bar.quit_requests(), 0);
+        assert!(saves.borrow().is_empty(), ":q never writes");
+        assert!(bar.toasts.borrow()[0].contains("No write since last change"));
+    }
+
+    #[test]
+    fn q_and_q_bang_ask_to_quit_when_they_may() {
+        let bar = Bar::new(PathBuf::new());
+        bar.submit("q", &[pane(&[("a.rs", false, true)], Rc::default(), false)]);
+        assert_eq!(bar.quit_requests(), 1, "clean :q");
+        bar.submit("q!", &[pane(&[("a.rs", true, true)], Rc::default(), false)]);
+        assert_eq!(bar.quit_requests(), 2, ":q! over unsaved work");
+        assert!(bar.toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_command_is_trimmed_before_it_is_run() {
+        let bar = Bar::new(PathBuf::new());
+        bar.submit(
+            "  wq \n",
+            &[pane(&[("a.rs", true, true)], Rc::default(), false)],
+        );
+        assert_eq!(bar.quit_requests(), 1);
+    }
+
+    #[test]
+    fn e_opens_an_existing_file_relative_to_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        let bar = Bar::new(dir.path().to_path_buf());
+
+        bar.submit("e  a.rs ", &[]);
+
+        assert_eq!(bar.open_file.get(), Some(dir.path().join("a.rs")));
+        assert!(bar.toasts.borrow().is_empty());
+        assert_eq!(bar.quit_requests(), 0);
+    }
+
+    #[test]
+    fn e_of_a_missing_file_says_so_and_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let bar = Bar::new(dir.path().to_path_buf());
+
+        bar.submit("e nope.rs", &[]);
+
+        assert_eq!(bar.open_file.get(), None);
+        assert_eq!(
+            *bar.toasts.borrow(),
+            vec!["No such file: nope.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_commands_are_reported_and_empty_ones_ignored() {
+        let bar = Bar::new(PathBuf::new());
+        let panes = [pane(&[("a.rs", true, true)], Rc::default(), false)];
+
+        bar.submit("frobnicate", &panes);
+        bar.submit("", &panes);
+        bar.submit("   ", &panes);
+
+        assert_eq!(
+            *bar.toasts.borrow(),
+            vec!["Unknown command: frobnicate".to_string()]
+        );
+        assert_eq!(bar.quit_requests(), 0);
+        assert_eq!(bar.open_file.get(), None);
+    }
+
+    #[test]
+    fn cd_is_handled_without_a_message() {
+        // Change to the directory we are already in: `:cd` moves the whole process.
+        let here = std::env::current_dir().unwrap();
+        let bar = Bar::new(PathBuf::new());
+
+        bar.submit(&format!("cd {}", here.display()), &[]);
+
+        assert!(bar.toasts.borrow().is_empty());
+        assert_eq!(std::env::current_dir().unwrap(), here);
     }
 }
