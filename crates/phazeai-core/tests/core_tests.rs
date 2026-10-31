@@ -31,20 +31,14 @@ fn test_settings_default_values() {
     assert!(settings.providers.is_empty());
 }
 
-#[test]
-fn test_settings_load_returns_default_when_no_file() {
-    // Loading from a non-existent config should return defaults
-    // Note: This may load from actual config if it exists, but the function
-    // is designed to gracefully return defaults when file doesn't exist
-    let settings = Settings::load();
-
-    // Just verify it doesn't panic and has some expected structure
-    assert!(!settings.llm.model.is_empty());
-}
+// Settings::save and Settings::load themselves, on a real config directory,
+// are tested in tests/settings_persistence.rs: they need the process
+// environment to themselves.
 
 #[test]
-fn test_settings_save_and_reload_roundtrip() {
-    // Create a temporary directory for testing
+fn test_settings_toml_file_round_trip() {
+    // The TOML that save() writes and load() parses, at a path of our own;
+    // this does not call save() or load().
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("config.toml");
 
@@ -54,12 +48,12 @@ fn test_settings_save_and_reload_roundtrip() {
     settings.llm.max_tokens = 4096;
     settings.editor.font_size = 16.0;
 
-    // Temporarily override config path by writing directly
+    // Write it the way save() does
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let content = toml::to_string_pretty(&settings).unwrap();
     std::fs::write(&config_path, content).unwrap();
 
-    // Load back and verify
+    // Read it back the way load() does
     let loaded_content = std::fs::read_to_string(&config_path).unwrap();
     let loaded: Settings = toml::from_str(&loaded_content).unwrap();
 
