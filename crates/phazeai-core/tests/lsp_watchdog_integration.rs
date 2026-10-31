@@ -1,7 +1,8 @@
 //! End-to-end watchdog test using a real spawned child that exits on demand.
 //!
-//! Uses `/bin/sh -c 'sleep 60'` as a stand-in language server: the process is
-//! real, has stdin/stdout/stderr pipes, and can be killed externally. We
+//! Uses `/bin/true` and `/bin/sleep` as stand-in language servers: the
+//! processes are real, have stdin/stdout/stderr pipes, and exit (or are
+//! killed when the client drops) like a crashed or running server. We
 //! bypass `LspClient::initialize` (which requires a real LSP handshake) and
 //! drive only the process-liveness side of the contract: spawn → kill →
 //! observe `is_alive()` flip false within a bounded time.
