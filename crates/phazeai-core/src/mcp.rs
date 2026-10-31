@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -21,6 +21,10 @@ const MAX_RESTARTS_PER_WINDOW: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `serverInfo.name` of the official `@modelcontextprotocol/server-filesystem`,
+/// whose listing output the privacy filter understands.
+pub const FS_SERVER_NAME: &str = "secure-filesystem-server";
+
 /// An MCP tool definition received from a server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {
@@ -28,6 +32,31 @@ pub struct McpToolDef {
     pub description: String,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: serde_json::Value,
+    /// The server's behaviour hints. Only `read_only_hint` is read, to decide
+    /// whether a call may touch `.phazeai/` (privacy); it is a hint from an
+    /// untrusted server, so it is used only to *tighten*, never to approve.
+    #[serde(default)]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+/// MCP tool annotations (a server's behaviour hints).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpToolAnnotations {
+    #[serde(default, rename = "readOnlyHint")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, rename = "destructiveHint")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, rename = "openWorldHint")]
+    pub open_world_hint: Option<bool>,
+}
+
+impl McpToolDef {
+    /// Whether the server marks this tool `readOnlyHint: true`. A tool with no
+    /// annotation counts as mutating (the MCP default), so the privacy checker
+    /// protects `.phazeai/` from it.
+    pub fn read_only(&self) -> bool {
+        self.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true)
+    }
 }
 
 /// An MCP resource exposed by a server
@@ -101,6 +130,67 @@ pub struct McpServerConfig {
     /// Environment variables to set
     #[serde(default)]
     pub env: HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// How this server resolves the paths in its arguments, for the privacy
+    /// checker. PhazeAI does not set the server's working directory, so it
+    /// runs in PhazeAI's own cwd; relative paths resolve against that and
+    /// against the existing directories named on the command line (the
+    /// filesystem server's allowed directories). `~` is the server's `HOME`
+    /// (its `env` entry if set, else this process's home).
+    pub fn privacy_paths(&self) -> crate::privacy::mcp::McpServerPaths {
+        let home = self
+            .env
+            .get("HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir);
+        let cwd = std::env::current_dir().ok();
+        let mut bases: Vec<PathBuf> = Vec::new();
+        if let Some(cwd) = &cwd {
+            bases.push(cwd.clone());
+        }
+        for arg in &self.args {
+            let expanded = if arg == "~" {
+                home.clone()
+            } else if let Some(rest) = arg.strip_prefix("~/") {
+                home.as_ref().map(|h| h.join(rest))
+            } else {
+                Some(PathBuf::from(arg))
+            };
+            let Some(expanded) = expanded else { continue };
+            let abs = if expanded.is_absolute() {
+                expanded
+            } else if let Some(cwd) = &cwd {
+                cwd.join(expanded)
+            } else {
+                expanded
+            };
+            // Only existing directories are allowed-dirs the server resolves
+            // against; canonicalize so a symlinked path matches the root.
+            if abs.is_dir() {
+                let abs = abs.canonicalize().unwrap_or(abs);
+                if !bases.contains(&abs) {
+                    bases.push(abs);
+                }
+            }
+        }
+        crate::privacy::mcp::McpServerPaths {
+            bases,
+            home,
+            tree_dirs: false,
+        }
+    }
+}
+
+/// Everything the bridge needs to wrap one MCP tool: its server, definition,
+/// how that server resolves paths, and whether it is the official filesystem
+/// server (whose listings can be filtered).
+pub struct McpBridgeSpec {
+    pub server_name: String,
+    pub tool: McpToolDef,
+    pub paths: crate::privacy::mcp::McpServerPaths,
+    pub fs_listings: bool,
 }
 
 /// An active connection to a single MCP server over stdio.
@@ -663,6 +753,35 @@ impl McpManager {
             }
         }
         tools
+    }
+
+    /// One [`McpBridgeSpec`] per tool of every connected server, carrying the
+    /// server's path-resolution context so the bridge can enforce the privacy
+    /// policy on calls and results.
+    pub fn bridge_specs(&self) -> Vec<McpBridgeSpec> {
+        let mut specs = Vec::new();
+        for (server_name, arc) in &self.clients {
+            let Ok(client) = arc.lock() else {
+                continue;
+            };
+            let paths = self
+                .configs
+                .get(server_name)
+                .map(|c| c.privacy_paths())
+                .unwrap_or_default();
+            let fs_listings = client
+                .server_info()
+                .is_some_and(|i| i.name == FS_SERVER_NAME);
+            for tool in client.tools() {
+                specs.push(McpBridgeSpec {
+                    server_name: server_name.clone(),
+                    tool: tool.clone(),
+                    paths: paths.clone(),
+                    fs_listings,
+                });
+            }
+        }
+        specs
     }
 
     /// Call a tool on a specific server

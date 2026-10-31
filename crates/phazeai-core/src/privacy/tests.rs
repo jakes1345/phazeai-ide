@@ -1154,3 +1154,559 @@ async fn bash_refuses_commands_naming_denied_files() {
         .unwrap();
     assert!(out["stdout"].as_str().unwrap().contains("fine"));
 }
+
+// ── MCP tool calls ──────────────────────────────────────────────────────────
+
+use super::mcp::{check_call, McpChecked, McpDenial, McpRefusal, McpServerPaths, Role};
+
+/// A server whose relative paths resolve against `bases` and whose `~` is `home`.
+fn server(bases: Vec<PathBuf>, home: Option<PathBuf>) -> McpServerPaths {
+    McpServerPaths {
+        bases,
+        home,
+        tree_dirs: false,
+    }
+}
+
+fn mcp_denials(
+    policy: &PrivacyPolicy,
+    tool: &str,
+    read_only: bool,
+    args: serde_json::Value,
+    srv: &McpServerPaths,
+) -> Vec<McpDenial> {
+    match check_call(policy, tool, read_only, &args, srv) {
+        Err(McpRefusal::Denied(d)) => d,
+        other => panic!("expected a denial, got {other:?}"),
+    }
+}
+
+fn mcp_passes(
+    policy: &PrivacyPolicy,
+    tool: &str,
+    read_only: bool,
+    args: serde_json::Value,
+    srv: &McpServerPaths,
+) -> McpChecked {
+    match check_call(policy, tool, read_only, &args, srv) {
+        Ok(c) => c,
+        other => panic!("expected the call to pass, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_path_args_take_every_string_but_free_text_and_urls() {
+    use super::mcp::path_args;
+    let args = serde_json::json!({
+        "path": "a.txt",
+        "paths": ["b.txt", "c.txt"],
+        "files": [{ "path": "nested.txt" }],
+        "source": "s",
+        "destination": "d",
+        "command": "cat x",
+        "args": ["--flag", "y"],
+        "content": "free prose",
+        "newText": "/abs/in/free",
+    });
+    let pargs = path_args(&args).unwrap();
+    let role = |k: &str, raw: &str| {
+        pargs
+            .iter()
+            .find(|p| p.key == k && p.raw == raw)
+            .map(|p| p.role)
+    };
+    assert_eq!(role("path", "a.txt"), Some(Role::Plain));
+    assert_eq!(role("paths", "b.txt"), Some(Role::Plain));
+    assert_eq!(role("paths", "c.txt"), Some(Role::Plain));
+    // An array element inherits its array's key, and nested objects recurse.
+    assert_eq!(role("path", "nested.txt"), Some(Role::Plain));
+    assert_eq!(role("source", "s"), Some(Role::Source));
+    assert_eq!(role("destination", "d"), Some(Role::Destination));
+    assert_eq!(role("command", "cat x"), Some(Role::Command));
+    assert_eq!(role("args", "--flag"), Some(Role::Command));
+    assert_eq!(role("content", "free prose"), Some(Role::FreeText));
+    assert_eq!(role("newText", "/abs/in/free"), Some(Role::FreeText));
+
+    // More than MAX_STRINGS strings → refused rather than checked in part.
+    let many: Vec<serde_json::Value> = (0..10_001)
+        .map(|i| serde_json::json!(format!("f{i}")))
+        .collect();
+    assert!(path_args(&serde_json::json!({ "paths": many })).is_err());
+}
+
+#[test]
+fn mcp_call_naming_a_denied_path_is_refused() {
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, ".env", "API_KEY=supersecret");
+    write(&root, "private/plan.md", "confidential");
+    write(&root, "notes.txt", "ok");
+    let home = tempfile::tempdir().unwrap();
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], Some(home.path().to_path_buf()));
+
+    let one = |args: serde_json::Value| mcp_denials(&p, "read_text_file", true, args, &srv);
+
+    // Relative, absolute, and `..`-laundered spellings of a built-in secret.
+    let d = one(serde_json::json!({ "path": ".env" }));
+    assert_eq!(d[0].denial.source, DenySource::BuiltIn);
+    assert_eq!(d[0].denial.pattern, ".env");
+    assert!(!one(serde_json::json!({ "path": s(&root.join(".env")) })).is_empty());
+    assert!(!one(serde_json::json!({ "path": "src/../.env" })).is_empty());
+
+    // A file:// URI.
+    let uri = format!("file://{}", root.join(".env").display());
+    assert!(!one(serde_json::json!({ "path": uri })).is_empty());
+
+    // A project-denied path under an unusual key, and inside an array.
+    let d = one(serde_json::json!({ "input": s(&root.join("private/plan.md")) }));
+    assert_eq!(d[0].denial.source, DenySource::Project);
+    assert_eq!(d[0].denial.pattern, "private/**");
+    assert!(!one(serde_json::json!({ "paths": ["notes.txt", "private/plan.md"] })).is_empty());
+
+    // `~` expands to the server's home, where the built-in list still applies.
+    assert!(!one(serde_json::json!({ "path": "~/.ssh/id_rsa" })).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_symlink_to_a_denied_file_is_refused() {
+    let (_d, root) = project(None);
+    write(&root, ".env", "A=1");
+    std::os::unix::fs::symlink(root.join(".env"), root.join("notes-link.txt")).unwrap();
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "notes-link.txt" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.source, DenySource::BuiltIn);
+}
+
+#[test]
+fn mcp_relative_paths_are_checked_against_every_base() {
+    // The server would resolve `config/...` against its allowed directory
+    // `<root>/src`, not the project root. Checking only the root would miss it.
+    let (_d, root) = project(Some(r#"deny = ["src/config/**"]"#));
+    write(&root, "src/config/secret.yaml", "k: v");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.join("src")], None);
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "config/secret.yaml" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "src/config/**");
+}
+
+#[test]
+fn mcp_directory_whose_contents_are_denied_is_refused() {
+    let (_d, root) = project(Some(r#"deny = ["secrets/**"]"#));
+    write(&root, "secrets/token.txt", "tok");
+    write(&root, "src/main.rs", "fn main() {}");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // `secrets/**` denies the contents, so listing the directory is refused…
+    let d = mcp_denials(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "secrets" }),
+        &srv,
+    );
+    assert!(
+        d[0].shown.contains("everything inside it"),
+        "{}",
+        d[0].shown
+    );
+    // …but the project root and an ordinary directory are fine.
+    mcp_passes(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "." }),
+        &srv,
+    );
+    mcp_passes(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "src" }),
+        &srv,
+    );
+}
+
+#[test]
+fn mcp_source_directory_holding_a_denied_file_is_refused() {
+    // `mixed` is not wholesale-denied (only the .pem inside it is), so it is
+    // refused by the whole-tree check, not the directory-contents check.
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, "mixed/ok.txt", "ok");
+    write(&root, "mixed/key.pem", "secret"); // built-in
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // A move/copy source directory is checked as a whole tree.
+    let d = mcp_denials(
+        &p,
+        "move_file",
+        false,
+        serde_json::json!({ "source": "mixed", "destination": "pub" }),
+        &srv,
+    );
+    assert!(
+        d[0].shown.contains("contains mixed/key.pem"),
+        "{}",
+        d[0].shown
+    );
+
+    // A plain directory argument is not checked as a tree, unless the server
+    // opts into tree_dirs.
+    mcp_passes(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "mixed" }),
+        &srv,
+    );
+    let tree_srv = McpServerPaths {
+        tree_dirs: true,
+        ..server(vec![root.clone()], None)
+    };
+    let d = mcp_denials(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "mixed" }),
+        &tree_srv,
+    );
+    assert!(
+        d[0].shown.contains("contains mixed/key.pem"),
+        "{}",
+        d[0].shown
+    );
+}
+
+#[test]
+fn mcp_settings_dir_is_protected_from_tools_not_marked_read_only() {
+    let (_d, root) = project(Some("deny = []\n"));
+    write(&root, "tmp/privacy.toml", "deny = []\n");
+    write(&root, "evil/.phazeai/privacy.toml", "deny = []\n");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // A mutating tool may not name the policy file, the .phazeai directory, or
+    // anything else inside it (the MCP server list lives there too).
+    for path in [".phazeai/privacy.toml", ".phazeai", ".phazeai/mcp.json"] {
+        let d = mcp_denials(
+            &p,
+            "write_file",
+            false,
+            serde_json::json!({ "path": path }),
+            &srv,
+        );
+        assert_eq!(d[0].denial.source, DenySource::Protected, "{path}");
+    }
+
+    // Moving the project root (which contains the policy) is protected.
+    let d = mcp_denials(
+        &p,
+        "move_file",
+        false,
+        serde_json::json!({ "source": ".", "destination": "backup" }),
+        &srv,
+    );
+    assert!(d[0].shown.contains("privacy.toml"), "{}", d[0].shown);
+
+    // Copying a tree onto the root so its privacy.toml lands in place.
+    let d = mcp_denials(
+        &p,
+        "copy_file",
+        false,
+        serde_json::json!({ "source": "evil", "destination": "." }),
+        &srv,
+    );
+    assert!(d[0].shown.contains("would replace"), "{}", d[0].shown);
+
+    // A read-only tool may still read the policy.
+    mcp_passes(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": ".phazeai/privacy.toml" }),
+        &srv,
+    );
+}
+
+#[test]
+fn mcp_command_arguments_are_checked_word_by_word() {
+    let (_d, root) = project(None);
+    write(&root, ".env", "A=1");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    assert_eq!(
+        mcp_denials(
+            &p,
+            "run",
+            false,
+            serde_json::json!({ "command": "cat .env" }),
+            &srv
+        )[0]
+        .shown,
+        ".env"
+    );
+    assert_eq!(
+        mcp_denials(
+            &p,
+            "run",
+            false,
+            serde_json::json!({ "args": ["--config=.env.local"] }),
+            &srv
+        )[0]
+        .shown,
+        ".env.local"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_unicode_spellings_of_denied_names_are_refused() {
+    let (_d, root) = project(Some("deny = [\"Client Files/\", \"priv\u{e9}/\"]\n"));
+    write(&root, "Client Files/contract.txt", "confidential");
+    write(&root, "priv\u{e9}/plan.txt", "confidential"); // NFC é
+    write(&root, "notes.txt", "ok");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let one = |path: &str| {
+        mcp_denials(
+            &p,
+            "write_file",
+            false,
+            serde_json::json!({ "path": path }),
+            &srv,
+        )
+    };
+
+    // No-break space where the directory has a normal space.
+    assert!(!one("Client\u{a0}Files/contract.txt").is_empty());
+    // NFD spelling of an NFC directory name.
+    assert!(!one("prive\u{301}/plan.txt").is_empty());
+    // A new file under the no-break-space spelling of a denied directory.
+    let d = one("Client\u{a0}Files/new.txt");
+    assert!(
+        d[0].shown.contains("the server would open"),
+        "{}",
+        d[0].shown
+    );
+
+    // A new ASCII name with no denied equivalent still passes.
+    mcp_passes(
+        &p,
+        "write_file",
+        false,
+        serde_json::json!({ "path": "newnotes.txt" }),
+        &srv,
+    );
+}
+
+#[test]
+fn mcp_free_text_remote_urls_and_allowed_paths_pass_untouched() {
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, "private/plan.md", "x");
+    write(&root, ".env.example", "A=");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let ok = |args: serde_json::Value| mcp_passes(&p, "do", false, args, &srv);
+
+    // Free text that merely mentions a denied relative path is not a path.
+    ok(serde_json::json!({ "content": "see private/plan.md for the key" }));
+    ok(serde_json::json!({ "title": "Rotate the .env secret" }));
+    // A remote URL is skipped.
+    ok(serde_json::json!({ "url": "https://example.com/private/plan.md" }));
+    // Non-path arguments a GitHub-style server takes.
+    ok(serde_json::json!({ "owner": "x", "repo": "y", "ref": "main" }));
+    // An allowed template that the built-in list exempts.
+    ok(serde_json::json!({ "path": ".env.example" }));
+}
+
+#[test]
+fn mcp_successful_reads_are_noted_for_the_audit_log() {
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, "notes.txt", "ok");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let checked = mcp_passes(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "notes.txt" }),
+        &srv,
+    );
+    assert_eq!(checked.files, vec![root.join("notes.txt")]);
+    // A free-text or command argument is never noted as a read file.
+    let checked = mcp_passes(
+        &p,
+        "do",
+        false,
+        serde_json::json!({ "content": "notes.txt", "command": "ls notes.txt" }),
+        &srv,
+    );
+    assert!(checked.files.is_empty());
+}
+
+#[test]
+fn mcp_text_results_lose_denied_paths_and_diff_sections() {
+    use super::mcp::filter_text;
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let bases = vec![root.clone()];
+
+    // A path listing (search_files / list_allowed_directories shape).
+    let listing = format!(
+        "{}\n{}\n{}\n",
+        root.join(".env").display(),
+        root.join("notes.txt").display(),
+        root.join("private/plan.md").display()
+    );
+    let (out, hidden) = filter_text(&p, &bases, None, &listing);
+    assert!(out.contains("notes.txt"));
+    assert!(!out.contains(".env") && !out.contains("plan.md"), "{out}");
+    assert_eq!(hidden, 2);
+
+    // A diff loses only the denied file's section, keeping its preamble.
+    let diff = "On branch main\n\
+                diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-a\n+b\n\
+                diff --git a/.env b/.env\n--- a/.env\n+++ b/.env\n@@ -1 +1 @@\n-K=1\n+K=2\n";
+    let (out, hidden) = filter_text(&p, &bases, None, diff);
+    assert!(out.contains("On branch main") && out.contains("src/main.rs"));
+    assert!(!out.contains("K=2"), "{out}");
+    assert_eq!(hidden, 1);
+
+    // Plain text that happens to contain a `--- .env` line but no `diff --git`
+    // is never parsed as a diff.
+    let prose = "readme\n--- .env\nnot a diff\n";
+    let (out, hidden) = filter_text(&p, &bases, None, prose);
+    assert_eq!(out, prose);
+    assert_eq!(hidden, 0);
+}
+
+#[test]
+fn mcp_filesystem_listings_hide_denied_entries() {
+    use super::mcp::filter_fs_listing;
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, ".env", "A=1");
+    write(&root, ".env.example", "A=");
+    write(&root, "notes.txt", "ok");
+    write(&root, "private/plan.md", "x");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let args = serde_json::json!({ "path": s(&root) });
+
+    // list_directory: the denied entries are dropped, the allowed ones kept.
+    let text = "[FILE] .env\n[FILE] .env.example\n[FILE] notes.txt\n[DIR] private\n[DIR] src";
+    let (out, hidden) = filter_fs_listing(&p, &srv, "list_directory", &args, text)
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("[FILE] .env.example") && out.contains("[FILE] notes.txt"));
+    assert!(out.contains("[DIR] private")); // the directory entry itself isn't denied
+    assert!(!out.contains("[FILE] .env\n") && !out.lines().any(|l| l == "[FILE] .env"));
+    assert_eq!(hidden, 1);
+
+    // list_directory_with_sizes: entry columns can't be split on whitespace,
+    // so denied names come from the directory itself.
+    let sized = "[FILE] .env                                 20 B\n\
+                 [FILE] notes.txt                            14 B\n\
+                 [DIR] private                       \n\
+                 \n\
+                 Total: 2 files, 1 directories\n\
+                 Combined size: 34 B";
+    let (out, hidden) = filter_fs_listing(&p, &srv, "list_directory_with_sizes", &args, sized)
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("notes.txt") && out.contains("Total: 2 files"));
+    assert!(!out.contains(".env"), "{out}");
+    assert_eq!(hidden, 1);
+
+    // directory_tree: denied nodes are pruned, nesting preserved.
+    let tree = "[\n  {\n    \"name\": \".env\",\n    \"type\": \"file\"\n  },\n  \
+                {\n    \"name\": \"notes.txt\",\n    \"type\": \"file\"\n  },\n  \
+                {\n    \"name\": \"private\",\n    \"type\": \"directory\",\n    \"children\": [\n      \
+                {\n        \"name\": \"plan.md\",\n        \"type\": \"file\"\n      }\n    ]\n  }\n]";
+    let (out, hidden) = filter_fs_listing(&p, &srv, "directory_tree", &args, tree)
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("notes.txt"));
+    assert!(!out.contains(".env") && !out.contains("plan.md"), "{out}");
+    assert_eq!(hidden, 2); // .env and private/plan.md
+
+    // A non-listing tool is not handled here.
+    assert!(filter_fs_listing(&p, &srv, "read_text_file", &args, "x").is_none());
+}
+
+#[test]
+fn mcp_filesystem_listing_in_an_unknown_format_is_refused() {
+    use super::mcp::filter_fs_listing;
+    let (_d, root) = project(None);
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let args = serde_json::json!({ "path": s(&root) });
+
+    // A line that is neither an entry nor a known summary line.
+    let bad = "[FILE] ok.txt\nsomething unexpected";
+    assert!(filter_fs_listing(&p, &srv, "list_directory", &args, bad)
+        .unwrap()
+        .is_err());
+    // Not valid JSON for a tree.
+    assert!(
+        filter_fs_listing(&p, &srv, "directory_tree", &args, "not json")
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn mcp_bridge_refuses_before_contacting_the_server() {
+    use crate::tools::mcp_bridge::McpToolBridge;
+    let (_d, root) = project(Some("deny = []\n"));
+    write(&root, ".env", "API_KEY=supersecret");
+    let _g = activate(&root);
+
+    // An empty manager: there is no server called "fs". The privacy check must
+    // refuse the call before the bridge ever tries to reach one.
+    let manager = Arc::new(Mutex::new(crate::mcp::McpManager::new()));
+    let bridge = McpToolBridge::new(
+        "fs".to_string(),
+        "read_text_file".to_string(),
+        "read a file".to_string(),
+        serde_json::json!({ "type": "object" }),
+        manager,
+        None,
+        true, // read-only, yet a denied path is still refused
+        Arc::new(server(vec![root.clone()], None)),
+        false,
+    );
+    let err = bridge
+        .execute(serde_json::json!({ "path": ".env" }))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("REFUSED") && err.contains("mcp__fs__read_text_file"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("No MCP server connected"),
+        "reached the server: {err}"
+    );
+    assert!(!err.contains("supersecret"), "leaked the file: {err}");
+    assert!(audit::recent(audit::CAPACITY).iter().any(|e| matches!(
+        &e.kind,
+        audit::AuditKind::BlockedFile { path, via, .. }
+            if path == ".env" && via == "mcp__fs__read_text_file"
+    )));
+}

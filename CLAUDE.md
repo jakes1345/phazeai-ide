@@ -148,6 +148,16 @@ policy file itself is protected from mutating tools. New code that sends
 project content to a model must go through `PrivacyPolicy::check` and note
 attached files in the audit scope.
 
+MCP tool calls are checked in `privacy/mcp.rs` (the bridge in
+`tools/mcp_bridge.rs` calls it): every argument that can name a local file is
+resolved the way the server would (project root, the server's working
+directory and command-line directories, `~`, `file://`, Unicode-equivalent
+directory entries) and run through `PrivacyPolicy::check`; a tool the server
+doesn't mark `readOnlyHint: true` may not touch `.phazeai/`; and results lose
+`git diff` sections, whole-line denied paths, and (for the official filesystem
+server) denied listing entries. This is best-effort — it can't see files a
+server opens on its own, reaches by another name, or sends over the network.
+
 ### Context compaction & budgets (`phazeai-core/src/context/`)
 
 `Agent::run_with_events` calls `compaction::maybe_compact` before each model
