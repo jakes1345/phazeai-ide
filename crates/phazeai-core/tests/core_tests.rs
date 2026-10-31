@@ -31,20 +31,14 @@ fn test_settings_default_values() {
     assert!(settings.providers.is_empty());
 }
 
-#[test]
-fn test_settings_load_returns_default_when_no_file() {
-    // Loading from a non-existent config should return defaults
-    // Note: This may load from actual config if it exists, but the function
-    // is designed to gracefully return defaults when file doesn't exist
-    let settings = Settings::load();
-
-    // Just verify it doesn't panic and has some expected structure
-    assert!(!settings.llm.model.is_empty());
-}
+// Settings::save and Settings::load themselves, on a real config directory,
+// are tested in tests/settings_persistence.rs: they need the process
+// environment to themselves.
 
 #[test]
-fn test_settings_save_and_reload_roundtrip() {
-    // Create a temporary directory for testing
+fn test_settings_toml_file_round_trip() {
+    // The TOML that save() writes and load() parses, at a path of our own;
+    // this does not call save() or load().
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("config.toml");
 
@@ -54,12 +48,12 @@ fn test_settings_save_and_reload_roundtrip() {
     settings.llm.max_tokens = 4096;
     settings.editor.font_size = 16.0;
 
-    // Temporarily override config path by writing directly
+    // Write it the way save() does
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     let content = toml::to_string_pretty(&settings).unwrap();
     std::fs::write(&config_path, content).unwrap();
 
-    // Load back and verify
+    // Read it back the way load() does
     let loaded_content = std::fs::read_to_string(&config_path).unwrap();
     let loaded: Settings = toml::from_str(&loaded_content).unwrap();
 
@@ -816,14 +810,17 @@ fn test_trim_to_token_budget_noop_when_under_budget() {
 }
 
 #[test]
-fn test_trim_to_token_budget_clears_all_when_single_message_exceeds_budget() {
+fn test_trim_to_token_budget_keeps_the_question_even_when_it_alone_exceeds_budget() {
     let mut history = ConversationHistory::new();
-    let giant = "x".repeat(4000); // 1000 tokens
+    let giant = "x".repeat(4000); // ~1334 tokens
     history.add_user_message(&giant);
 
-    // Budget smaller than a single message → drains completely
+    // Budget smaller than the question itself: trimming used to drain the
+    // history and send the model no question at all. The question is never
+    // dropped now; whether it fits is the provider's call.
     history.trim_to_token_budget(10);
-    assert_eq!(history.len(), 0);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get_conversation_messages()[0].content, giant);
 }
 
 #[test]

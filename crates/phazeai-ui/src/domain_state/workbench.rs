@@ -55,4 +55,6 @@ pub struct WorkbenchState {
     pub new_terminal_nonce: RwSignal<u64>,
     /// Bumped to scroll Settings to the Local AI section (first-run "Set up AI →").
     pub local_ai_focus_nonce: RwSignal<u64>,
+    /// Bumped to quit the IDE through the normal window-close path (File > Exit, `:q`).
+    pub quit_nonce: RwSignal<u64>,
 }

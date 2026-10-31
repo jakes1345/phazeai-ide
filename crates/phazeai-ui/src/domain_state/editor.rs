@@ -239,6 +239,10 @@ pub struct EditorState {
     // Bumped to request closing the currently active tab (Ctrl+W).
     pub close_active_tab_nonce: RwSignal<u64>,
 
+    // Every editor pane (main + splits), registered as it is built; the Vim ex bar reads tabs
+    // and saves through these.
+    pub panes: RwSignal<Vec<crate::app::ex_command::EditorPaneHandle>>,
+
     // Text currently selected in the active editor ("" when no selection).
     pub selected_text: RwSignal<String>,
 
@@ -354,6 +358,7 @@ impl EditorState {
             split_down_cursor: create_rw_signal(None),
             split_down_tabs: create_rw_signal(Vec::new()),
             close_active_tab_nonce: create_rw_signal(0u64),
+            panes: create_rw_signal(Vec::new()),
             selected_text: create_rw_signal(String::new()),
             hover_anchor_x: create_rw_signal(0.0_f64),
             hover_anchor_y: create_rw_signal(0.0_f64),

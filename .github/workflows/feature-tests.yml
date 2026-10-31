@@ -8,6 +8,7 @@ on:
   schedule:
     # Run nightly at 2am UTC
     - cron: '0 2 * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,19 +36,12 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ripgrep
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Test all tool implementations
         run: |
-          cargo test -p phazeai-core -- \
-            read_file \
-            write_file \
-            edit_file \
-            bash_tool \
-            grep_tool \
-            glob_tool \
-            list_dir \
-            approval \
-            --test-threads=4
+          cargo test -p phazeai-core --test tool_tests
+          cargo test -p phazeai-core --test bash_cancel
+          cargo test -p phazeai-core --lib -- tools::
 
   # ─────────────────────────────────────────────
   # MCP SERVER: connect, list tools, call tools
@@ -62,7 +56,7 @@ jobs:
           toolchain: '1.93'
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - uses: actions/cache@v4
         with:
           path: |
@@ -70,13 +64,30 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-mcp-full-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Install MCP filesystem server (test target)
-        run: npm install -g @modelcontextprotocol/server-filesystem 2>/dev/null || true
-      - name: Run MCP bridge tests
-        run: cargo test -p phazeai-core -- mcp --test-threads=1 -- --nocapture
+        # Pinned: 1.0.0 was published 2026-10-11; --before resolves its dependencies as of 2026-10-17
+        run: |
+          npm install --prefix "$RUNNER_TEMP/mcp-fs" --no-save --no-audit --no-fund \
+            --ignore-scripts --before=2026-10-17 @modelcontextprotocol/server-filesystem@1.0.0
+          test -x "$RUNNER_TEMP/mcp-fs/node_modules/.bin/mcp-server-filesystem"
+      - name: Run MCP bridge tests against the real server
+        env:
+          PHAZEAI_MCP_FS_SERVER: ${{ runner.temp }}/mcp-fs/node_modules/.bin/mcp-server-filesystem
+        run: |
+          cargo test -p phazeai-core --lib -- mcp
+          # No name filter: every test in the target runs, so a new one cannot be left out.
+          # The count only catches a target that no longer holds its two real-server tests.
+          test "$(cargo test -p phazeai-core --test mcp_server_integration -- \
+            --include-ignored --list | grep -c ': test$')" -ge 2
+          # --include-ignored, not --ignored: still runs a test if its #[ignore] is ever removed
+          cargo test -p phazeai-core --test mcp_server_integration -- --include-ignored
 
   # ─────────────────────────────────────────────
-  # LSP: parse responses, diagnostics, completions
+  # LSP: manager, watchdog, real rust-analyzer
   # ─────────────────────────────────────────────
   test-lsp:
     name: LSP Integration
@@ -95,18 +106,22 @@ jobs:
           key: ${{ runner.os }}-lsp-${{ hashFiles('**/Cargo.lock') }}
       - name: Install system deps
         run: |
-          # Install rust-analyzer for real LSP testing
-          rustup component add rust-src
-          curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
-            | gunzip -c > /usr/local/bin/rust-analyzer 2>/dev/null || true
-          chmod +x /usr/local/bin/rust-analyzer 2>/dev/null || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - name: Install rust-analyzer
+        # The component for the toolchain rust-toolchain.toml pins; --version fails if it cannot run
+        run: |
+          rustup component add rust-analyzer --toolchain 1.93
+          rust-analyzer --version
       - name: Run LSP tests
         run: |
-          cargo test -p phazeai-ui -- lsp_bridge --test-threads=1
-          cargo test -p phazeai-core -- lsp --test-threads=1
+          cargo test -p phazeai-core --lib -- lsp::
+          cargo test -p phazeai-core --test lsp_watchdog_integration
+          # --include-ignored, not --ignored: still runs the test if its #[ignore] is ever removed
+          cargo test -p phazeai-core --test lsp_real_server_cycle -- --include-ignored
 
   # ─────────────────────────────────────────────
-  # CONTEXT ENGINE: repo map, workspace scan
+  # CONTEXT ENGINE: history, compaction, repo map
   # ─────────────────────────────────────────────
   test-context:
     name: Context Engine
@@ -126,16 +141,12 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ripgrep
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Test context system
         run: |
-          cargo test -p phazeai-core -- \
-            repo_map \
-            context \
-            workspace \
-            persistence \
-            outline \
-            --test-threads=4
+          cargo test -p phazeai-core --lib -- context:: project::workspace
+          # Only these editor_tests call phazeai_core; the rest test local copies of editor logic
+          cargo test -p phazeai-core --test editor_tests -- outline_ repo_map_
 
   # ─────────────────────────────────────────────
   # PROVIDER REGISTRY: config, routing, defaults
@@ -155,39 +166,20 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-providers-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Test provider system (no API keys needed)
         env:
           ANTHROPIC_API_KEY: ""
           OPENAI_API_KEY: ""
         run: |
-          cargo test -p phazeai-core -- \
-            provider \
-            model_router \
-            discovery \
-            --test-threads=4
+          cargo test -p phazeai-core --lib -- llm::
+          cargo test -p phazeai-core --test core_tests -- provider
+          cargo test -p phazeai-core --test sprint3_verification -- model_router task_classification
 
-  # ─────────────────────────────────────────────
-  # EVAL HARNESS: run built-in eval suite
-  # ─────────────────────────────────────────────
-  test-eval:
-    name: Eval Harness (dry run)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: '1.93'
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-eval-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build eval binary
-        run: cargo build -p phazeai-cli
-      - name: Verify eval subcommand exists
-        run: ./target/debug/phazeai eval --help || echo "eval subcommand present"
+  # Eval Harness (dry run) was removed: there is no eval feature, so it could only ever pass.
 
   # ─────────────────────────────────────────────
   # SETTINGS PERSISTENCE: read/write config files
@@ -213,14 +205,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxcb-xfixes0-dev \
             libxcb-shape0-dev libxcb-render0-dev libxkbcommon-x11-dev \
-            libudev-dev libinput-dev libdbus-1-dev
-      - name: Test settings + session persistence
+            libudev-dev libinput-dev libdbus-1-dev pkg-config
+      - name: Test settings persistence (config.toml, theme files)
+        # session.toml (SessionState in app.rs) has no test that calls the production code yet
         run: |
-          cargo test -p phazeai-ui -- \
-            settings \
-            session \
-            persistence \
-            --test-threads=1
+          # Settings::save and Settings::load on a config directory in a temp dir
+          cargo test -p phazeai-core --test settings_persistence
+          cargo test -p phazeai-core --lib -- config::
+          cargo test -p phazeai-core --test core_tests -- test_settings_
+          cargo test -p phazeai-ui --lib -- panels::settings:: custom_theme::
 
   # ─────────────────────────────────────────────
   # STRESS TEST: agent loop, context pressure
@@ -228,7 +221,6 @@ jobs:
   test-stress:
     name: Stress Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -241,5 +233,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-stress-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Run stress tests
         run: cargo test -p phazeai-core --test stress_test -- --nocapture
