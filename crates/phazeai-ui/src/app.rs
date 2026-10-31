@@ -34,7 +34,7 @@ use crate::lsp_bridge::{
 use crate::{
     commands::{execute_command, match_global_shortcut},
     components::icon::{icons, phaze_icon},
-    domain_state::{AiState, EditorState, IdeState, ProjectState, WorkbenchState},
+    domain_state::{AiState, EditorPrefs, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
         chat::chat_panel, containers::containers_panel, editor::editor_panel,
         explorer::explorer_panel, extensions::extensions_panel, git::git_panel,
@@ -337,13 +337,20 @@ fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
 /// threads; without this lock concurrent writers clobber each other's fields.
 pub static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Change settings by loading the full Settings, mutating, and writing back
+/// (under [`SETTINGS_WRITE_LOCK`]). Everything `mutate` leaves alone is
+/// written back as it was loaded.
+pub fn save_settings(mutate: impl FnOnce(&mut Settings)) {
+    let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
+    let mut settings = Settings::load();
+    mutate(&mut settings);
+    let _ = settings.save();
+}
+
 /// Save a single editor setting by loading the full Settings, mutating, and writing back.
 /// This preserves all other settings (LLM, search, providers, etc.).
 pub fn save_editor_settings(mutate: impl FnOnce(&mut phazeai_core::config::EditorSettings)) {
-    let _guard = SETTINGS_WRITE_LOCK.lock().unwrap();
-    let mut settings = Settings::load();
-    mutate(&mut settings.editor);
-    let _ = settings.save();
+    save_settings(|settings| mutate(&mut settings.editor));
 }
 
 /// Show a toast notification that auto-dismisses after 3 seconds.
@@ -525,21 +532,11 @@ impl IdeState {
         // Start LSP bridge — background tokio thread running LspManager.
         // Must be called in a Floem reactive scope (we're inside the window callback).
         let lsp = start_lsp_bridge(workspace.clone());
-        let lsp_cmd = lsp.cmd_tx;
-        let diagnostics = lsp.diagnostics;
-        let completions = lsp.completions;
+        let lsp_cmd = lsp.cmd_tx.clone();
         let goto_definition = lsp.goto_definition;
-        let hover_text = lsp.hover_text;
-        let references = lsp.references;
-        let code_actions = lsp.code_actions;
-        let sig_help_lsp = lsp.sig_help;
-        let doc_symbols = lsp.doc_symbols;
         let _workspace_symbols = lsp.workspace_symbols;
         let lsp_progress = lsp.lsp_progress;
         let peek_def_lines = lsp.peek_def_lines;
-        let code_lens = lsp.code_lens;
-        let folding_ranges = lsp.folding_ranges;
-        let inlay_hints_lsp = lsp.inlay_hints;
 
         // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
         let peek_def_open_sig: RwSignal<bool> = create_rw_signal(false);
@@ -657,40 +654,13 @@ impl IdeState {
 
         // Create persistent settings signals before Self so we can wire save effects.
         let theme_signal = create_rw_signal(PhazeTheme::from_name(&session.theme));
-        let font_size_signal = create_rw_signal(editor_cfg.font_size as u32);
-        let tab_size_signal = create_rw_signal(editor_cfg.tab_size);
-        let auto_save_signal = create_rw_signal(editor_cfg.auto_save);
-        let word_wrap_signal = create_rw_signal(editor_cfg.word_wrap);
-        let relative_line_numbers_signal = create_rw_signal(editor_cfg.relative_line_numbers);
-        let inlay_hints_toggle_signal = create_rw_signal(editor_cfg.inlay_hints);
-        let code_lens_visible_signal = create_rw_signal(editor_cfg.code_lens);
-        let organize_imports_signal = create_rw_signal(editor_cfg.organize_imports_on_save);
-
-        // Whenever theme, font_size, or tab_size changes, persist to config.toml.
-        // Done in a background thread to avoid blocking the UI.
-        create_effect(move |_| {
-            let theme_name = theme_signal.get().display_name().to_string();
-            let fs = font_size_signal.get();
-            let ts = tab_size_signal.get();
-            let auto_save = auto_save_signal.get();
-            let word_wrap = word_wrap_signal.get();
-            let rel_nums = relative_line_numbers_signal.get();
-            let inlay = inlay_hints_toggle_signal.get();
-            let code_lens = code_lens_visible_signal.get();
-            let organize = organize_imports_signal.get();
-            std::thread::spawn(move || {
-                save_editor_settings(|e| {
-                    e.theme = theme_name;
-                    e.font_size = fs as f32;
-                    e.tab_size = ts;
-                    e.auto_save = auto_save;
-                    e.word_wrap = word_wrap;
-                    e.relative_line_numbers = rel_nums;
-                    e.inlay_hints = inlay;
-                    e.code_lens = code_lens;
-                    e.organize_imports_on_save = organize;
-                });
-            });
+        // The [editor] settings of config.toml. The editor state holds these
+        // same signals (`EditorState::new` below), so the file's values apply
+        // at start and a change made anywhere is saved back: load-modify-save
+        // in a background thread, which keeps every other setting.
+        let prefs = EditorPrefs::new(&editor_cfg);
+        prefs.persist(theme_signal, |edit| {
+            std::thread::spawn(move || save_editor_settings(edit));
         });
 
         // ── Code search ────────────────────────────────────────────────────────
@@ -707,9 +677,14 @@ impl IdeState {
         let status_toast_sig = create_rw_signal(None);
         let update_available_sig = create_rw_signal(None::<String>);
 
-        // Background update check — fires once on startup, result written via
-        // create_ext_action so the signal write stays on the UI thread.
-        {
+        // Background update check: one request to GitHub's releases API at
+        // start, unless it is turned off ([updates] check_at_start) or the
+        // project is local-only. The result is written via create_ext_action
+        // so the signal write stays on the UI thread.
+        if phazeai_core::updater::should_check_for_updates(
+            settings,
+            &phazeai_core::privacy::active(),
+        ) {
             let send = floem::ext_event::create_ext_action(
                 floem::reactive::Scope::current(),
                 move |info: Option<phazeai_core::updater::ReleaseInfo>| {
@@ -727,6 +702,17 @@ impl IdeState {
                 send(result);
             });
         }
+
+        // The update check's switch in Settings. It was read above; a change
+        // is saved to config.toml (load-modify-save) for the next start.
+        let check_updates_sig = create_rw_signal(settings.updates.check_at_start);
+        create_effect(move |prev: Option<()>| {
+            let on = check_updates_sig.get();
+            // The first run only subscribes: the value just came from the file.
+            if prev.is_some() {
+                std::thread::spawn(move || save_settings(|s| s.updates.check_at_start = on));
+            }
+        });
 
         // Extension Manager — native plugin system
         let ext_manager = Arc::new(std::sync::Mutex::new(
@@ -825,6 +811,7 @@ impl IdeState {
             command_palette_query: create_rw_signal(String::new()),
             status_toast: status_toast_sig,
             update_available: update_available_sig,
+            check_updates_at_start: check_updates_sig,
             file_picker_open: create_rw_signal(false),
             file_picker_query: create_rw_signal(String::new()),
             file_picker_files: create_rw_signal(Vec::new()),
@@ -842,98 +829,16 @@ impl IdeState {
             local_ai_focus_nonce: create_rw_signal(0u64),
         };
 
-        let editor = EditorState {
+        let editor = EditorState::new(
+            prefs,
+            &lsp,
             open_file,
-            open_tabs: open_tabs_sig,
-            active_cursor: create_rw_signal(None),
-            vim_mode: vim_mode_sig,
-            vim_normal_mode: create_rw_signal(false),
-            vim_pending_key: create_rw_signal(None),
-            vim_motion: create_rw_signal(None),
-            vim_visual_mode: create_rw_signal(false),
-            vim_visual_line: create_rw_signal(false),
-            vim_marks: create_rw_signal(std::collections::HashMap::new()),
-            vim_last_motion: create_rw_signal(None),
-            vim_ex_open: create_rw_signal(false),
-            vim_ex_input: create_rw_signal(String::new()),
-            font_size: font_size_signal,
-            tab_size: tab_size_signal,
-            auto_save: auto_save_signal,
-            word_wrap: word_wrap_signal,
-            relative_line_numbers: relative_line_numbers_signal,
-            line_ending: line_ending_sig,
-            active_readonly: active_readonly_sig,
-            diagnostics,
-            completions,
-            completion_open: create_rw_signal(false),
-            completion_selected: create_rw_signal(0),
-            completion_filter_text: create_rw_signal(String::new()),
-            hover_text,
-            goto_line: goto_line_sig,
-            goto_definition,
-            references,
-            references_visible: create_rw_signal(false),
-            code_actions,
-            code_actions_open: create_rw_signal(false),
-            doc_symbols,
-            inlay_hints: inlay_hints_lsp,
-            code_lens,
-            folding_ranges,
-            comment_toggle_nonce: create_rw_signal(0),
-            ctrl_d_nonce: create_rw_signal(0),
-            fold_nonce: create_rw_signal(0),
-            unfold_nonce: create_rw_signal(0),
-            fold_all_nonce: create_rw_signal(0),
-            unfold_all_nonce: create_rw_signal(0),
-            move_line_up_nonce: create_rw_signal(0),
-            move_line_down_nonce: create_rw_signal(0),
-            duplicate_line_nonce: create_rw_signal(0),
-            delete_line_nonce: create_rw_signal(0),
-            transform_upper_nonce: create_rw_signal(0),
-            transform_lower_nonce: create_rw_signal(0),
-            transform_title_nonce: create_rw_signal(0),
-            join_line_nonce: create_rw_signal(0),
-            sort_lines_nonce: create_rw_signal(0),
-            format_selection_nonce: create_rw_signal(0),
-            split_editor: create_rw_signal(false),
-            active_blame: create_rw_signal(String::new()),
-            pending_completion: create_rw_signal(None),
-            yank_ring: create_rw_signal(Vec::new()),
-            yank_ring_idx: create_rw_signal(0),
-            split_editor_down: create_rw_signal(false),
-            rename_open: create_rw_signal(false),
-            rename_query: create_rw_signal(String::new()),
-            rename_target: create_rw_signal(String::new()),
-            sig_help: sig_help_lsp,
-            ws_syms_open: create_rw_signal(false),
-            ws_syms_query: create_rw_signal(String::new()),
-            workspace_symbols: create_rw_signal(Vec::new()),
-            goto_overlay_open: create_rw_signal(false),
-            goto_overlay_input: create_rw_signal(String::new()),
-            peek_def_open: create_rw_signal(false),
-            peek_def_lines: create_rw_signal(Vec::new()),
-            col_cursor_up_nonce: create_rw_signal(0),
-            col_cursor_down_nonce: create_rw_signal(0),
-            sticky_lines: create_rw_signal(Vec::new()),
-            expand_selection_nonce: create_rw_signal(0),
-            shrink_selection_nonce: create_rw_signal(0),
-            save_no_format_nonce: create_rw_signal(0),
-            code_lens_visible: create_rw_signal(true),
-            organize_imports_on_save: create_rw_signal(true),
-            inlay_hints_sig: create_rw_signal(Vec::new()),
-            inlay_hints_toggle: create_rw_signal(true),
-            minimap_visible: create_rw_signal(true),
-            split_open_file: create_rw_signal(None),
-            split_active_cursor: create_rw_signal(None),
-            split_open_tabs: create_rw_signal(Vec::new()),
-            split_down_file: create_rw_signal(None),
-            split_down_cursor: create_rw_signal(None),
-            split_down_tabs: create_rw_signal(Vec::new()),
-            close_active_tab_nonce: create_rw_signal(0u64),
-            selected_text: create_rw_signal(String::new()),
-            hover_anchor_x: create_rw_signal(0.0_f64),
-            hover_anchor_y: create_rw_signal(0.0_f64),
-        };
+            open_tabs_sig,
+            vim_mode_sig,
+            goto_line_sig,
+            line_ending_sig,
+            active_readonly_sig,
+        );
 
         let ai = AiState {
             provider: ai_provider_sig,
@@ -1426,6 +1331,18 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
         PaletteCommand {
             label: "Toggle Inlay Hints",
             action: |s| s.editor.inlay_hints_toggle.update(|v| *v = !*v),
+        },
+        PaletteCommand {
+            label: "Toggle AI Completions",
+            action: |s| {
+                s.editor.ai_completions.update(|v| *v = !*v);
+                let msg = if s.editor.ai_completions.get_untracked() {
+                    "AI completions: on"
+                } else {
+                    "AI completions: off (no code is sent as you edit)"
+                };
+                show_toast(s.workbench.status_toast, msg);
+            },
         },
         PaletteCommand {
             label: "Toggle Minimap",
@@ -3465,16 +3382,25 @@ fn ide_root(state: IdeState) -> impl IntoView {
     // ── FIM inline completion worker ─────────────────────────────────────────
     // Editors send (path, prefix, suffix, lang) after a 600ms debounce; this
     // thread calls the LLM and writes completions back through a signal channel.
-    // `fim_complete` skips files the privacy policy denies.
+    // `fim_complete` sends nothing when AI completions are off in config.toml
+    // or the privacy policy denies the file.
     let (fim_req_tx, fim_req_rx) =
         std::sync::mpsc::sync_channel::<(PathBuf, String, String, String)>(4);
     {
         let ghost_text = state.ai.ghost_text;
+        let ai_completions = state.editor.ai_completions;
+        // Turning AI completions off also drops a suggestion already shown.
+        create_effect(move |_| {
+            if !ai_completions.get() {
+                ghost_text.set(None);
+            }
+        });
         let (fim_result_tx, fim_result_rx) = std::sync::mpsc::sync_channel::<String>(4);
         let fim_result_sig = floem::ext_event::create_signal_from_channel(fim_result_rx);
         create_effect(move |_| {
             if let Some(suggestion) = fim_result_sig.get() {
-                if !suggestion.is_empty() {
+                // A reply that lands after AI completions were turned off is dropped.
+                if !suggestion.is_empty() && ai_completions.get_untracked() {
                     ghost_text.set(Some(suggestion));
                 }
             }
@@ -3555,6 +3481,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        state.editor.ai_completions,
         state.editor.selected_text,
         state.project.code_search_if_enabled(),
     );
@@ -3609,15 +3536,18 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),                     // fold_all_nonce
         create_rw_signal(0u64),                     // unfold_all_nonce
         create_rw_signal(vec![]),                   // code_lens_sig
-        create_rw_signal(true),                     // code_lens_visible
-        create_rw_signal(false),                    // organize_imports_on_save
-        create_rw_signal(vec![]),                   // inlay_hints_sig
-        create_rw_signal(false),                    // inlay_hints_toggle
+        // The editor settings are the same signals as the main pane's, so
+        // one setting governs every pane.
+        state.editor.code_lens_visible,
+        state.editor.organize_imports_on_save,
+        create_rw_signal(vec![]), // inlay_hints_sig
+        state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        state.editor.ai_completions,
         create_rw_signal(String::new()), // split: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),
     );
@@ -3930,15 +3860,17 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64),                     // fold_all_nonce
         create_rw_signal(0u64),                     // unfold_all_nonce
         create_rw_signal(vec![]),                   // code_lens_sig
-        create_rw_signal(true),                     // code_lens_visible
-        create_rw_signal(false),                    // organize_imports_on_save
-        create_rw_signal(vec![]),                   // inlay_hints_sig
-        create_rw_signal(false),                    // inlay_hints_toggle
+        // Shared with the main pane, like the split pane's.
+        state.editor.code_lens_visible,
+        state.editor.organize_imports_on_save,
+        create_rw_signal(vec![]), // inlay_hints_sig
+        state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
         fim_req_tx.clone(),
+        state.editor.ai_completions,
         create_rw_signal(String::new()), // split-down: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),
     );

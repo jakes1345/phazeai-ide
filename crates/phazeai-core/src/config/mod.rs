@@ -16,6 +16,7 @@ pub struct Settings {
     pub providers: Vec<ProviderEntry>,
     pub model_routes: HashMap<TaskType, ModelRoute>,
     pub local_ai: crate::local_ai::LocalAiSettings,
+    pub updates: UpdateSettings,
 }
 
 /// `config.toml` as it is read. Not a field alias: serde refuses a file that
@@ -38,6 +39,8 @@ struct RawSettings {
     model_routes: HashMap<TaskType, ModelRoute>,
     #[serde(default)]
     local_ai: crate::local_ai::LocalAiSettings,
+    #[serde(default)]
+    updates: UpdateSettings,
 }
 
 impl From<RawSettings> for Settings {
@@ -49,6 +52,7 @@ impl From<RawSettings> for Settings {
             providers: raw.providers,
             model_routes: raw.model_routes,
             local_ai: raw.local_ai,
+            updates: raw.updates,
         }
     }
 }
@@ -122,6 +126,10 @@ pub struct EditorSettings {
     pub inlay_hints: bool,
     pub code_lens: bool,
     pub organize_imports_on_save: bool,
+    /// Ask the active AI provider for inline completions while you edit
+    /// (`crate::fim`). Each request sends the code around the cursor; the
+    /// privacy deny rules and `local_only` still apply. Off: nothing is sent.
+    pub ai_completions: bool,
 }
 
 impl Default for EditorSettings {
@@ -137,6 +145,25 @@ impl Default for EditorSettings {
             inlay_hints: true,
             code_lens: true,
             organize_imports_on_save: false,
+            ai_completions: true,
+        }
+    }
+}
+
+/// The `[updates]` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Ask GitHub's releases API for a newer version when the IDE starts.
+    /// Never done for a `local_only` project (see
+    /// `crate::updater::should_check_for_updates`).
+    pub check_at_start: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_at_start: true,
         }
     }
 }
@@ -184,6 +211,7 @@ impl Default for Settings {
             providers: Vec::new(),
             model_routes: HashMap::new(),
             local_ai: Default::default(),
+            updates: UpdateSettings::default(),
         }
     }
 }
@@ -445,5 +473,53 @@ auto_start = false
         let s: Settings = toml::from_str(&partial).unwrap();
         assert!(s.search.enabled);
         assert!(!s.search.auto_index);
+    }
+
+    #[test]
+    fn old_config_without_the_new_keys_loads_with_their_defaults() {
+        // OLD_CONFIG predates `[editor] ai_completions` and `[updates]`: both
+        // stay on, as they were before there was a setting.
+        let s: Settings = toml::from_str(OLD_CONFIG).expect("an old config still loads");
+        assert!(s.editor.ai_completions);
+        assert!(s.updates.check_at_start);
+        assert_eq!(s.editor.theme, "Midnight Blue", "the keys it has are kept");
+        // The editor keys it leaves out get their own defaults.
+        assert!(!s.editor.organize_imports_on_save);
+        assert!(s.editor.inlay_hints);
+        assert!(s.editor.code_lens);
+
+        // An `[updates]` table without the key is the default too.
+        let s: Settings = toml::from_str(&format!("{OLD_CONFIG}\n[updates]\n")).unwrap();
+        assert!(s.updates.check_at_start);
+    }
+
+    #[test]
+    fn ai_completions_and_the_update_check_stay_off_once_turned_off() {
+        let mut s = Settings::default();
+        assert!(s.editor.ai_completions, "on by default");
+        assert!(s.updates.check_at_start, "on by default");
+
+        s.editor.ai_completions = false;
+        s.updates.check_at_start = false;
+        let saved = toml::to_string_pretty(&s).unwrap();
+        let doc: toml::Table = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            doc["editor"]["ai_completions"].as_bool(),
+            Some(false),
+            "{saved}"
+        );
+        assert_eq!(
+            doc["updates"]["check_at_start"].as_bool(),
+            Some(false),
+            "{saved}"
+        );
+
+        let back: Settings = toml::from_str(&saved).unwrap();
+        assert!(!back.editor.ai_completions);
+        assert!(!back.updates.check_at_start);
+        assert_eq!(
+            back.llm.model, s.llm.model,
+            "the rest of the file round-trips"
+        );
     }
 }

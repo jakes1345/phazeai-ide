@@ -1118,6 +1118,8 @@ pub fn editor_panel(
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
     // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
     fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
+    // `[editor] ai_completions`: while false, no completion request is made.
+    ai_completions: RwSignal<bool>,
     selected_text: RwSignal<String>,
     // Re-indexed after every save; `None` when code search is turned off.
     code_search: Option<phazeai_core::CodeSearch>,
@@ -1173,10 +1175,12 @@ pub fn editor_panel(
     // wires the receiver into Floem's reactive system.
     let (fim_tx, fim_rx) = std::sync::mpsc::sync_channel::<String>(4);
     let fim_signal = create_signal_from_channel(fim_rx);
-    // Forward channel values to the shared ghost_text signal.
+    // Forward channel values to the shared ghost_text signal. A reply that
+    // lands after AI completions were turned off is dropped.
     create_effect(move |_| {
         if let Some(text) = fim_signal.get() {
-            ghost_text.set(if text.is_empty() { None } else { Some(text) });
+            let show = !text.is_empty() && ai_completions.get_untracked();
+            ghost_text.set(show.then_some(text));
         }
     });
     // Vim yank register — shared across all tabs (yy copies here, p/P paste from here).
@@ -4004,8 +4008,12 @@ pub fn editor_panel(
                         return;
                     }
                     let offset = cursor_sig.get().offset();
-                    // Denied files never get ghost-text completions (nothing is sent).
-                    if phazeai_core::privacy::active().is_denied(&fim_file) {
+                    // Nothing is sent while AI completions are off or for a denied file.
+                    if !phazeai_core::fim::should_request_fim(
+                        ai_completions.get_untracked(),
+                        &phazeai_core::privacy::active(),
+                        &fim_file,
+                    ) {
                         return;
                     }
                     let fim_file = fim_file.clone();
@@ -4045,6 +4053,15 @@ pub fn editor_panel(
                         }
 
                         let settings = Settings::load();
+                        // Checked again as the request leaves: AI completions
+                        // may have been turned off during the wait.
+                        if !phazeai_core::fim::should_request_fim(
+                            settings.editor.ai_completions,
+                            &phazeai_core::privacy::active(),
+                            &fim_file,
+                        ) {
+                            return;
+                        }
                         let rt = match tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()
@@ -4365,8 +4382,14 @@ pub fn editor_panel(
                                 }
                             }
                         }
-                        // FIM inline completion: debounce 600ms — send prefix/suffix to worker.
-                        {
+                        // FIM inline completion: debounce 600ms — send prefix/suffix to the
+                        // worker, which checks again right before sending. Nothing is queued
+                        // while AI completions are off or for a denied file.
+                        if phazeai_core::fim::should_request_fim(
+                            ai_completions.get_untracked(),
+                            &phazeai_core::privacy::active(),
+                            &fim_path,
+                        ) {
                             let gen = fim_gen.fetch_add(1, Ordering::Relaxed) + 1;
                             let gen_ref = Arc::clone(&fim_gen);
                             let tx = fim_tx_tab.clone();
@@ -4385,10 +4408,6 @@ pub fn editor_panel(
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("text")
                                     .to_string();
-                                // Denied files never get completions (nothing is sent).
-                                if phazeai_core::privacy::active().is_denied(&path2) {
-                                    return;
-                                }
                                 let _ = tx.try_send((path2, prefix, suffix, lang));
                             });
                         }

@@ -27,6 +27,9 @@ pub struct WorkbenchState {
     pub status_toast: RwSignal<Option<String>>,
     /// Set to "v0.X.Y" when a newer release is available. Drives the update banner.
     pub update_available: RwSignal<Option<String>>,
+    /// `[updates] check_at_start`: whether the IDE asks GitHub for a newer
+    /// release when it starts. A change is saved and applies at the next start.
+    pub check_updates_at_start: RwSignal<bool>,
     pub file_picker_open: RwSignal<bool>,
     pub file_picker_query: RwSignal<String>,
     pub file_picker_files: RwSignal<Vec<std::path::PathBuf>>,

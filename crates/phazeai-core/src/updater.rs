@@ -1,5 +1,8 @@
 use serde::Deserialize;
 
+use crate::config::Settings;
+use crate::privacy::PrivacyPolicy;
+
 /// Info about a release fetched from the GitHub releases API.
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
@@ -80,6 +83,14 @@ struct GhAsset {
 const GITHUB_REPO: &str = "jakes1345/phazeai-ide";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Whether the IDE may ask GitHub for a newer release when it starts: the
+/// check is on (`[updates] check_at_start`) and `policy` is not local-only (a
+/// broken `privacy.toml` counts as local-only). When this is false, call
+/// nothing: [`check_for_update`] always contacts GitHub.
+pub fn should_check_for_updates(settings: &Settings, policy: &PrivacyPolicy) -> bool {
+    settings.updates.check_at_start && !policy.local_only()
+}
+
 /// Fetch the latest stable release from GitHub.
 /// Returns `None` if the current version is already up-to-date or if the
 /// fetch fails (network error, rate limit, etc.).
@@ -148,7 +159,42 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{is_newer, should_check_for_updates};
+    use crate::config::Settings;
+    use crate::privacy::{policy_for, PrivacyPolicy, POLICY_FILE};
+
+    #[test]
+    fn checks_at_start_by_default() {
+        assert!(should_check_for_updates(
+            &Settings::default(),
+            &PrivacyPolicy::defaults()
+        ));
+    }
+
+    #[test]
+    fn no_check_when_the_setting_is_off() {
+        let mut settings = Settings::default();
+        settings.updates.check_at_start = false;
+        assert!(!should_check_for_updates(
+            &settings,
+            &PrivacyPolicy::defaults()
+        ));
+    }
+
+    #[test]
+    fn no_check_in_a_local_only_project_even_when_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = PrivacyPolicy::parse(dir.path(), "local_only = true\n").unwrap();
+        assert!(!should_check_for_updates(&Settings::default(), &local));
+
+        // A privacy.toml that doesn't parse fails closed to local-only.
+        let file = dir.path().join(POLICY_FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "local_only = [\n").unwrap();
+        let broken = policy_for(dir.path());
+        assert!(broken.load_error().is_some());
+        assert!(!should_check_for_updates(&Settings::default(), &broken));
+    }
 
     #[test]
     fn version_compare() {
