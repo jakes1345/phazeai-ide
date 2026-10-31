@@ -1523,6 +1523,7 @@ pub fn terminal_panel(
     // AI command bar: when AI returns a command, write it to the active PTY (no newline).
     {
         let writer = active_pty_writer;
+        let status_toast = state.workbench.status_toast;
         create_effect(move |_| {
             let Some(res) = ai_cmd_result.get() else {
                 return;
@@ -1544,6 +1545,7 @@ pub fn terminal_panel(
                 }
                 Err(e) => {
                     tracing::warn!(target: "phazeai_ui", "AI cmd error: {e}");
+                    crate::app::show_toast(status_toast, format!("AI command: {e}"));
                     ai_cmd_open.set(false);
                 }
             }

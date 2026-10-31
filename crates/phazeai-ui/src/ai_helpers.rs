@@ -40,19 +40,41 @@ pub async fn commit_message_reply(client: Box<dyn LlmClient>, prompt: &str) -> S
         .to_string()
 }
 
-/// Terminal command bar: the command without surrounding whitespace or
-/// backticks. Like the commit message, a failed call gives the text that
-/// arrived before the failure; with none, the bar reports an empty command.
+/// Terminal command bar: the command, without surrounding whitespace,
+/// backticks or a Markdown code fence, for the bar to type at the prompt
+/// without pressing Enter. A reply of more than one line is refused (see
+/// [`one_line_command`]). Like the commit message, a failed call gives the
+/// text that arrived before the failure; with none, the bar reports an empty
+/// command.
 pub async fn terminal_command_reply(
     client: Box<dyn LlmClient>,
     prompt: &str,
 ) -> Result<String, String> {
     let reply = text_only_reply(client.as_ref(), prompt).await;
-    let cmd = reply.text.trim().trim_matches('`').to_string();
+    one_line_command(&reply.text)
+}
+
+/// The command in a terminal-bar reply. The bar types it into the shell as
+/// keystrokes, so it must be one line with no control characters: a newline
+/// or carriage return would make the shell run every line before the last
+/// one before the user has seen it, and other control keys edit or accept
+/// the line. Such a reply is refused rather than typed.
+fn one_line_command(reply: &str) -> Result<String, String> {
+    let mut cmd = reply.trim();
+    // ```lang\n<command>\n```: drop the opening fence line and the closing fence.
+    if let Some((_lang, body)) = cmd
+        .strip_prefix("```")
+        .and_then(|rest| rest.split_once('\n'))
+    {
+        cmd = body.trim_end().strip_suffix("```").unwrap_or(body);
+    }
+    let cmd = cmd.trim().trim_matches('`').trim();
     if cmd.is_empty() {
         Err("AI returned empty command".into())
+    } else if cmd.chars().any(char::is_control) {
+        Err("AI returned more than one line or a control character; nothing was typed".into())
     } else {
-        Ok(cmd)
+        Ok(cmd.to_string())
     }
 }
 
@@ -310,5 +332,64 @@ mod tests {
         assert_eq!(terminal_command_reply(client, prompt).await, none);
         let (client, _) = scripted_model("scripted-terminal-refused", Err(400)).await;
         assert_eq!(terminal_command_reply(client, prompt).await, none);
+
+        // A fenced command is typed without its fence; two commands are not
+        // typed at all (the shell would run the first one as it arrived).
+        let fenced = vec![text("```bash\n"), text("ls -la\n```\n")];
+        let (client, _) = scripted_model("scripted-terminal-fenced", Ok(fenced)).await;
+        assert_eq!(
+            terminal_command_reply(client, prompt).await,
+            Ok("ls -la".to_string())
+        );
+        let two = vec![text("cd /tmp\n"), text("rm -rf build\n")];
+        let (client, _) = scripted_model("scripted-terminal-two-lines", Ok(two)).await;
+        let err = terminal_command_reply(client, prompt).await.unwrap_err();
+        assert!(err.contains("more than one line"), "{err}");
+    }
+
+    #[test]
+    fn terminal_command_is_one_line_with_no_control_characters() {
+        let typed = [
+            ("ls -la", "ls -la"),
+            ("  `ls -la`\r\n", "ls -la"),
+            ("```bash\nls -la\n```", "ls -la"),
+            ("```\nls -la\n```\n", "ls -la"),
+            ("```sh\r\nls -la\r\n```", "ls -la"),
+            ("```ls -la```", "ls -la"),
+            ("```bash\n  git status  \n", "git status"),
+        ];
+        for (reply, command) in typed {
+            assert_eq!(
+                one_line_command(reply),
+                Ok(command.to_string()),
+                "{reply:?}"
+            );
+        }
+
+        // Typed as keystrokes, each of these would run or edit something
+        // before the user pressed Enter: refuse them instead.
+        let refused = [
+            "cd /tmp\nrm -rf build",
+            "```\ncargo clean\ncargo build\n```",
+            "```bash\nls\n```\nThis lists the files.",
+            "Here is the command:\n```bash\nls\n```",
+            "echo hi\rrm x",
+            "ls\u{1b}[201~ rm -rf build",
+            "ls\u{0f}",
+            "echo a\tb",
+            "ls\u{85}rm x",
+        ];
+        for reply in refused {
+            let err = one_line_command(reply).unwrap_err();
+            assert!(err.contains("more than one line"), "{reply:?}: {err}");
+        }
+
+        for reply in ["", " \n ", "``", "```bash\n```", "``` ```"] {
+            assert_eq!(
+                one_line_command(reply),
+                Err("AI returned empty command".to_string()),
+                "{reply:?}"
+            );
+        }
     }
 }

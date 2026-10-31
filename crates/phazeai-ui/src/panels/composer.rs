@@ -1,6 +1,8 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
+use std::time::Duration;
 
 use floem::{
     ext_event::create_signal_from_channel,
@@ -9,7 +11,7 @@ use floem::{
     IntoView,
 };
 use phazeai_core::tools::{BashTool, ToolApprovalManager, ToolPermission, ToolRegistry};
-use phazeai_core::{Agent, AgentEvent, Settings};
+use phazeai_core::{Agent, AgentEvent, ApprovalFn, Settings};
 use serde_json::Value;
 
 use crate::components::button::{phaze_button, ButtonVariant};
@@ -77,8 +79,13 @@ enum ComposerUpdate {
         success: bool,
         summary: String,
     },
-    /// Agent requesting approval for a tool.
-    ToolApprovalRequest { name: String, params: Value },
+    /// A tool call waiting for the user's answer, which goes back on `reply`
+    /// (that call's own channel).
+    ToolApprovalRequest {
+        name: String,
+        params: Value,
+        reply: SyncSender<ApprovalResponse>,
+    },
     /// Agent run completed.
     Done { iterations: usize },
     /// Error occurred.
@@ -125,6 +132,17 @@ enum EventKind {
 struct PendingApproval {
     tool_name: String,
     params: Value,
+    /// The waiting call's own answer channel.
+    reply: SyncSender<ApprovalResponse>,
+}
+
+impl PendingApproval {
+    /// Answer the call this prompt shows, and only that call. Never blocks:
+    /// the call takes one answer, and once it has stopped waiting (answered,
+    /// timed out) the answer goes nowhere.
+    fn answer(&self, response: ApprovalResponse) {
+        let _ = self.reply.try_send(response);
+    }
 }
 
 // Channel message used to deliver approval decision back to the agent thread.
@@ -132,6 +150,40 @@ struct PendingApproval {
 enum ApprovalResponse {
     Approved,
     Denied,
+}
+
+/// How long a tool call waits for the user's answer before it counts as denied.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The approval function the agent gets in `mode` (in Auto-approve all it
+/// gets none). A call that needs an answer sends a `ToolApprovalRequest` with
+/// a reply channel of its own and waits on that channel alone, so a click can
+/// only answer the call its prompt shows. A call that needs none opens no
+/// prompt.
+fn approval_fn(mode: ComposerApprovalMode, updates: SyncSender<ComposerUpdate>) -> ApprovalFn {
+    Box::new(move |tool_name: String, params: Value| {
+        let updates = updates.clone();
+        Box::pin(async move {
+            if !mode.needs_approval(&tool_name, &params) {
+                return true;
+            }
+            let (reply, answer) = std::sync::mpsc::sync_channel(1);
+            let _ = updates.send(ComposerUpdate::ToolApprovalRequest {
+                name: tool_name,
+                params,
+                reply,
+            });
+            // Wait off the runtime's thread; no answer in time counts as Deny.
+            let answer = tokio::task::spawn_blocking(move || {
+                answer
+                    .recv_timeout(APPROVAL_TIMEOUT)
+                    .unwrap_or(ApprovalResponse::Denied)
+            })
+            .await
+            .unwrap_or(ApprovalResponse::Denied);
+            matches!(answer, ApprovalResponse::Approved)
+        })
+    })
 }
 
 // ── Composer Panel ───────────────────────────────────────────────────────────
@@ -177,11 +229,6 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
     // Single channel pair for all agent updates — created once.
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<ComposerUpdate>(512);
     let update_signal = create_signal_from_channel(update_rx);
-
-    // Approval response channel — the UI sends back decisions here.
-    let (approval_tx, approval_rx) = std::sync::mpsc::sync_channel::<ApprovalResponse>(4);
-    let approval_tx = Arc::new(approval_tx);
-    let approval_rx_arc = Arc::new(std::sync::Mutex::new(approval_rx));
 
     // Process incoming updates from the agent thread.
     create_effect(move |_| {
@@ -229,9 +276,27 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         });
                     });
                 }
-                ComposerUpdate::ToolApprovalRequest { name, params } => {
-                    let path = extract_path_from_params(&name, &params);
-                    let display = format_tool_display(&name, &params);
+                ComposerUpdate::ToolApprovalRequest {
+                    name,
+                    params,
+                    reply,
+                } => {
+                    let pending = PendingApproval {
+                        tool_name: name,
+                        params,
+                        reply,
+                    };
+                    // Stop was clicked while this request was on its way: deny
+                    // it rather than ask, so the run still stops.
+                    if cancel_token
+                        .get_untracked()
+                        .is_some_and(|token| token.load(Ordering::Relaxed))
+                    {
+                        pending.answer(ApprovalResponse::Denied);
+                        return;
+                    }
+                    let path = extract_path_from_params(&pending.tool_name, &pending.params);
+                    let display = format_tool_display(&pending.tool_name, &pending.params);
                     event_log.update(|log| {
                         log.push(EventLogEntry {
                             kind: EventKind::ApprovalPending,
@@ -239,10 +304,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                             path: path.clone(),
                         });
                     });
-                    pending_approval.set(Some(PendingApproval {
-                        tool_name: name,
-                        params,
-                    }));
+                    pending_approval.set(Some(pending));
                 }
                 ComposerUpdate::Done { iterations } => {
                     pending_approval.set(None);
@@ -299,8 +361,6 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
     let run_action: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
-        let approval_tx = approval_tx.clone();
-        let approval_rx_arc = approval_rx_arc.clone();
         let workspace = state.project.workspace_root;
         // The shared code search (unless the settings turn it off) for the agent's tools.
         let code_search = state.project.code_search_if_enabled();
@@ -330,16 +390,6 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             let ws = workspace.get_untracked();
             let mode = approval_mode.get_untracked();
             let code_search = code_search.clone();
-            // Clone the sync_channel sender for the approval callback.
-            let _approval_tx_cb = (*approval_tx).clone();
-            // Clone the approval_rx end — we move it into the thread.
-            let approval_rx_arc = approval_rx_arc.clone();
-
-            // Drain any stale responses in the approval channel before starting.
-            // (Best-effort — ignore errors.)
-            if let Ok(lock) = approval_rx_arc.lock() {
-                while lock.try_recv().is_ok() {}
-            }
 
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -390,40 +440,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
                     // Wire approval function when mode is not AutoAll.
                     if mode != ComposerApprovalMode::AutoAll {
-                        let tx_appr = tx.clone();
-                        let rx_arc = approval_rx_arc.clone();
-                        agent = agent.with_approval(Box::new(
-                            move |tool_name: String, params: Value| {
-                                let tx_inner = tx_appr.clone();
-                                let rx_inner = rx_arc.clone();
-                                Box::pin(async move {
-                                    if !mode.needs_approval(&tool_name, &params) {
-                                        // Read-only or safe — auto-approve silently.
-                                        return true;
-                                    }
-                                    // Send approval request to UI.
-                                    let _ = tx_inner.send(ComposerUpdate::ToolApprovalRequest {
-                                        name: tool_name.clone(),
-                                        params: params.clone(),
-                                    });
-                                    // Block this async task on the sync response channel.
-                                    // Use spawn_blocking so we don't starve the runtime.
-                                    let result: ApprovalResponse =
-                                        tokio::task::spawn_blocking(move || {
-                                            let Ok(lock) = rx_inner.lock() else {
-                                                return ApprovalResponse::Denied;
-                                            };
-                                            // Wait up to 5 minutes for user response.
-                                            lock.recv_timeout(std::time::Duration::from_secs(300))
-                                                .unwrap_or(ApprovalResponse::Denied)
-                                        })
-                                        .await
-                                        .unwrap_or(ApprovalResponse::Denied);
-
-                                    matches!(result, ApprovalResponse::Approved)
-                                })
-                            },
-                        ));
+                        agent = agent.with_approval(approval_fn(mode, tx.clone()));
                     }
 
                     let (agent_tx, mut agent_rx) =
@@ -461,10 +478,11 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                         summary,
                                     });
                                 }
-                                AgentEvent::ToolApprovalRequest { name, params } => {
-                                    let _ = tx2
-                                        .send(ComposerUpdate::ToolApprovalRequest { name, params });
-                                }
+                                // Sent for every call put to the approval
+                                // function, including those it lets through
+                                // unasked; it opens the prompt itself when it
+                                // needs an answer, so this one shows nothing.
+                                AgentEvent::ToolApprovalRequest { .. } => {}
                                 AgentEvent::McpReconnected { servers } => {
                                     let msg = if servers.len() == 1 {
                                         format!("MCP server '{}' reconnected", servers[0])
@@ -518,16 +536,20 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
         }
     });
 
-    let stop_action = {
-        let approval_tx = approval_tx.clone();
-        move || {
-            if let Some(token) = cancel_token.get_untracked() {
-                token.store(true, Ordering::Relaxed);
-            }
-            // Unblock any pending approval so the agent thread can exit.
-            let _ = approval_tx.send(ApprovalResponse::Denied);
-            pending_approval.set(None);
+    // Answer the call the prompt shows (if one is showing) and hide the prompt.
+    let answer_pending = move |response: ApprovalResponse| {
+        if let Some(pending) = pending_approval.get_untracked() {
+            pending.answer(response);
         }
+        pending_approval.set(None);
+    };
+
+    let stop_action = move || {
+        if let Some(token) = cancel_token.get_untracked() {
+            token.store(true, Ordering::Relaxed);
+        }
+        // Deny the call waiting for approval, if any, so the agent thread can exit.
+        answer_pending(ApprovalResponse::Denied);
     };
 
     // ── UI ───────────────────────────────────────────────────────────────────
@@ -758,9 +780,6 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
     // ── Pending approval widget ───────────────────────────────────────────────
     // This block is visible only while the agent waits for an approval decision.
-    let approval_tx_approve = approval_tx.clone();
-    let approval_tx_deny = approval_tx.clone();
-
     let approval_widget = container(
         v_stack((
             // Description
@@ -787,12 +806,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             // Allow / Deny buttons
             h_stack((
                 phaze_button("Allow", ButtonVariant::Primary, theme, move || {
-                    let _ = approval_tx_approve.send(ApprovalResponse::Approved);
-                    pending_approval.set(None);
+                    answer_pending(ApprovalResponse::Approved)
                 }),
                 phaze_button("Deny", ButtonVariant::Danger, theme, move || {
-                    let _ = approval_tx_deny.send(ApprovalResponse::Denied);
-                    pending_approval.set(None);
+                    answer_pending(ApprovalResponse::Denied)
                 }),
             ))
             .style(|s| s.gap(8.0)),
@@ -1143,7 +1160,70 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
 #[cfg(test)]
 mod tests {
     use super::ComposerApprovalMode::{ApproveAll, ApproveDestructive, AutoAll};
+    use super::{approval_fn, ApprovalResponse, ComposerUpdate, PendingApproval};
     use serde_json::json;
+    use std::sync::mpsc::{sync_channel, Receiver};
+    use std::time::Duration;
+
+    /// The next prompt the panel would show, as its update effect builds it.
+    #[track_caller]
+    fn next_prompt(shown: &Receiver<ComposerUpdate>) -> PendingApproval {
+        match shown.recv_timeout(Duration::from_secs(10)) {
+            Ok(ComposerUpdate::ToolApprovalRequest {
+                name,
+                params,
+                reply,
+            }) => PendingApproval {
+                tool_name: name,
+                params,
+                reply,
+            },
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_click_answers_only_the_call_its_prompt_shows() {
+        let (updates, shown) = sync_channel(16);
+        let approve = approval_fn(ApproveDestructive, updates);
+
+        // A read-only call runs unasked and shows no prompt to click.
+        assert!(approve("read_file".into(), json!({"path": "src/main.rs"})).await);
+        assert!(
+            shown.try_recv().is_err(),
+            "prompt shown for a call that ran"
+        );
+
+        // A write waits for the answer to its own prompt.
+        let write = json!({"path": "src/main.rs", "content": "x"});
+        let write = tokio::spawn(approve("write_file".into(), write));
+        let write_prompt = next_prompt(&shown);
+        assert_eq!(write_prompt.tool_name, "write_file");
+        write_prompt.answer(ApprovalResponse::Denied);
+        assert!(!write.await.unwrap(), "Deny let the write run");
+
+        // Allow clicked on that prompt afterwards (still on screen, or clicked
+        // twice) must not answer the next call: that one waits for its own.
+        write_prompt.answer(ApprovalResponse::Approved);
+        let remove = json!({"command": "rm -rf target"});
+        let remove = tokio::spawn(approve("bash".into(), remove));
+        let remove_prompt = next_prompt(&shown);
+        assert_eq!(remove_prompt.tool_name, "bash");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !remove.is_finished(),
+            "a click on the write_file prompt answered the rm call"
+        );
+        remove_prompt.answer(ApprovalResponse::Approved);
+        assert!(remove.await.unwrap());
+
+        // "Approve all" puts the read-only call to the user as well.
+        let (updates, shown) = sync_channel(16);
+        let approve = approval_fn(ApproveAll, updates);
+        let read = tokio::spawn(approve("read_file".into(), json!({"path": "src/main.rs"})));
+        next_prompt(&shown).answer(ApprovalResponse::Approved);
+        assert!(read.await.unwrap());
+    }
 
     #[test]
     fn each_approval_mode_asks_for_what_its_label_says() {
