@@ -2420,7 +2420,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
                     Ok(c) => c,
                     Err(e) => return Err(format!("AI commit message: {e}")),
                 };
-                Ok(crate::ai_helpers::commit_message_reply(client, &prompt).await)
+                crate::ai_helpers::commit_message_reply(client, &prompt).await
             });
 
             let _ = tx.send(result);
