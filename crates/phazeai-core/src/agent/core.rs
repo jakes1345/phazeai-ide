@@ -83,7 +83,13 @@ impl Agent {
     }
 
     /// Attach a cancellation token. Set the `AtomicBool` to `true` from any
-    /// thread to abort the agent loop after the current LLM/tool step.
+    /// thread to stop the run within about 0.1 s, whatever it is waiting on:
+    /// the provider (even one that sends nothing), a summary, a tool, or an
+    /// approval or diff review. The run then returns
+    /// [`PhazeError::Cancelled`], and every tool call the model asked for has
+    /// a result in the conversation (an interrupted one says so, one that
+    /// never started says it did not run), so a shared conversation stays
+    /// valid to send.
     pub fn with_cancel_token(mut self, token: Arc<AtomicBool>) -> Self {
         self.cancel_token = Some(token);
         self
@@ -100,6 +106,45 @@ impl Agent {
             .as_ref()
             .map(|t| t.load(Ordering::Relaxed))
             .unwrap_or(false)
+    }
+
+    /// Resolves once the run is cancelled; never, without a cancel token.
+    async fn stopped(&self) {
+        match &self.cancel_token {
+            Some(token) => cancelled(token).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// `work`'s output, or `None` if the run is cancelled first. The token is
+    /// read before `work` is first polled and then every 50 ms; once it is
+    /// seen set, `work` is dropped, which stops what it started. (So `work`
+    /// can still finish in the moments after Stop: callers that must not act
+    /// on such a result check [`Self::is_cancelled`] again.)
+    async fn unless_cancelled<F: Future>(&self, work: F) -> Option<F::Output> {
+        tokio::select! {
+            biased;
+            _ = self.stopped() => None,
+            out = work => Some(out),
+        }
+    }
+
+    /// End a run stopped during a tool round. The calls in `not_run` get a
+    /// result saying so first: providers reject a conversation with a tool
+    /// call that has no result, and a shared conversation is sent again by
+    /// the next run.
+    async fn stop_round(
+        &self,
+        not_run: &[ToolCall],
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
+        {
+            let mut conversation = self.conversation.lock().await;
+            for call in not_run {
+                conversation.add_tool_result(&call.id, NOT_RUN);
+            }
+        }
+        cancelled_run(event_tx)
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -219,8 +264,7 @@ impl Agent {
         loop {
             // Check cancellation at the start of every iteration.
             if self.is_cancelled() {
-                let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
-                return Err(PhazeError::Cancelled);
+                return cancelled_run(&event_tx);
             }
 
             if iterations >= self.max_iterations {
@@ -257,43 +301,55 @@ impl Agent {
                 }
                 Ok(None) => {}
                 Err(e) if e == crate::context::compaction::CANCELLED => {
-                    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
-                    return Err(PhazeError::Cancelled);
+                    return cancelled_run(&event_tx);
                 }
                 Err(e) => tracing::warn!("context compaction failed, trimming instead: {e}"),
             }
             if self.is_cancelled() {
-                let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
-                return Err(PhazeError::Cancelled);
+                return cancelled_run(&event_tx);
             }
 
             let messages = {
                 let mut conversation = self.conversation.lock().await;
-                // Hard limit: evict the oldest messages if still over budget.
+                // Hard limit: if still over budget, drop earlier turns, then
+                // shrink this one (never its question; see the method).
                 conversation.trim_to_token_budget(self.max_context_tokens);
                 conversation.get_messages()
             };
 
             let tool_definitions: Vec<ToolDefinition> = self.tools.definitions();
 
-            // Use streaming API to get real-time token deltas
-            let mut stream = self
-                .llm
-                .chat_stream(&messages, &tool_definitions)
-                .await
-                .inspect_err(|e| {
-                    let _ = event_tx.send(AgentEvent::Error(e.to_string()));
-                })?;
+            // Use streaming API to get real-time token deltas. Stop has to
+            // work while the provider sends nothing, too: one watcher ends
+            // the wait for the response to start and for each of its events.
+            let stop = self.stopped();
+            tokio::pin!(stop);
+            let mut stream = tokio::select! {
+                biased;
+                _ = &mut stop => return cancelled_run(&event_tx),
+                stream = self.llm.chat_stream(&messages, &tool_definitions) => {
+                    stream.inspect_err(|e| {
+                        let _ = event_tx.send(AgentEvent::Error(e.to_string()));
+                    })?
+                }
+            };
 
             // Accumulate response content and tool calls from stream
             let mut content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, arguments)
 
-            while let Some(event) = stream.next().await {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = &mut stop => return cancelled_run(&event_tx),
+                    event = stream.next() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 if self.is_cancelled() {
-                    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
-                    return Err(PhazeError::Cancelled);
+                    return cancelled_run(&event_tx);
                 }
                 match event {
                     StreamEvent::TextDelta(delta) => {
@@ -345,11 +401,11 @@ impl Agent {
                     ));
                 }
 
-                // Execute each tool call
-                for tool_call in &tool_calls {
+                // Execute each tool call. A Stop from here on answers the
+                // calls that did not run before the run ends (`stop_round`).
+                for (i, tool_call) in tool_calls.iter().enumerate() {
                     if self.is_cancelled() {
-                        let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
-                        return Err(PhazeError::Cancelled);
+                        return self.stop_round(&tool_calls[i..], &event_tx).await;
                     }
                     let tool_name = &tool_call.function.name;
 
@@ -363,7 +419,15 @@ impl Agent {
                             params: params.clone(),
                         });
 
-                        let approved = (approval_fn)(tool_name.clone(), params.clone()).await;
+                        // Stop ends the wait for an answer, and an answer
+                        // given after Stop (a prompt that Stop closed reads as
+                        // "no") does not run the tool either.
+                        let answer = self
+                            .unless_cancelled((approval_fn)(tool_name.clone(), params.clone()))
+                            .await;
+                        let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+                            return self.stop_round(&tool_calls[i..], &event_tx).await;
+                        };
                         if !approved {
                             let _ = event_tx.send(AgentEvent::ToolResult {
                                 name: tool_name.clone(),
@@ -400,7 +464,11 @@ impl Agent {
                                 before: before.clone(),
                                 after: after.clone(),
                             });
-                            let approved = (hook)(fp, before, after).await;
+                            // As with approval: Stop ends the review.
+                            let answer = self.unless_cancelled((hook)(fp, before, after)).await;
+                            let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+                                return self.stop_round(&tool_calls[i..], &event_tx).await;
+                            };
                             if !approved {
                                 let _ = event_tx.send(AgentEvent::ToolResult {
                                     name: tool_name.clone(),
@@ -425,15 +493,24 @@ impl Agent {
                         }
                     }
 
+                    // A tool must not start after Stop (it could finish in
+                    // its first poll, e.g. a file write).
+                    if self.is_cancelled() {
+                        return self.stop_round(&tool_calls[i..], &event_tx).await;
+                    }
+
                     let _ = event_tx.send(AgentEvent::ToolStart {
                         name: tool_name.clone(),
                     });
 
+                    // If Stop interrupts the tool, the result says so and the
+                    // check at the top of the next pass answers the rest.
                     let (success, result_str) = self.execute_tool(tool_call).await;
 
                     // Tool result summary sent to the UI/CLI event stream. The
-                    // full untruncated result is still appended to the
-                    // conversation history below so the LLM sees everything.
+                    // full result goes to the conversation history below
+                    // (where very long output is cut, with a marker saying
+                    // so, to fit the context budget).
                     // Cap at 4 KiB and tell the user how much was elided —
                     // 200 chars (the previous limit) silently hid most output.
                     const SUMMARY_LIMIT: usize = 4096;
@@ -499,29 +576,18 @@ impl Agent {
         };
 
         if let Some(tool) = self.tools.get(tool_name) {
-            let run = tool.execute(params);
             // Stop awaiting the tool as soon as the run is cancelled. Dropping
             // its future stops what it started: a `bash` child is killed along
             // with its process group (see `BashTool`), so Stop / Esc / Ctrl+C
             // end a running `cargo build` instead of leaving it behind.
-            let outcome = match &self.cancel_token {
-                Some(token) => tokio::select! {
-                    result = run => Some(result),
-                    _ = cancelled(token) => None,
-                },
-                None => Some(run.await),
-            };
-            match outcome {
+            match self.unless_cancelled(tool.execute(params)).await {
                 Some(Ok(value)) => {
                     let result_str =
                         serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                     (true, result_str)
                 }
                 Some(Err(e)) => (false, format!("Error: {e}")),
-                None => (
-                    false,
-                    "Interrupted by the user before the tool finished.".to_string(),
-                ),
+                None => (false, INTERRUPTED.to_string()),
             }
         } else {
             (false, format!("Tool '{}' not found", tool_name))
@@ -562,6 +628,20 @@ async fn cancelled(token: &AtomicBool) {
     while !token.load(Ordering::Relaxed) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// The result recorded for a tool call that Stop kept from starting.
+const NOT_RUN: &str = "Cancelled by the user before this tool started; it did not run.";
+/// The result recorded for a tool call that Stop interrupted.
+const INTERRUPTED: &str = "Interrupted by the user before the tool finished.";
+
+/// End a cancelled run the way every Stop path does: an `Error("Cancelled")`
+/// event (which the UIs treat as a normal stop) and `PhazeError::Cancelled`.
+fn cancelled_run<T>(
+    event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+) -> Result<T, PhazeError> {
+    let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
+    Err(PhazeError::Cancelled)
 }
 
 /// Compute (path, before, after) for write_file and edit_file tools so the UI

@@ -1049,6 +1049,15 @@ pub fn chat_panel(
                     token_usage_output.update(|v| *v += output);
                 }
                 ChatUpdate::Cancelled(partial) => {
+                    // Stop also ends a wait for approval or diff review, so a
+                    // prompt still on screen can no longer be answered.
+                    approval_tool.set(String::new());
+                    approval_params.set(String::new());
+                    approval_slot.set(None);
+                    diff_path.set(String::new());
+                    diff_before.set(String::new());
+                    diff_after.set(String::new());
+                    diff_slot.set(None);
                     messages.update(|list| {
                         // Finalise the loading assistant message (may be empty or partial).
                         if let Some(last) = list.last_mut() {

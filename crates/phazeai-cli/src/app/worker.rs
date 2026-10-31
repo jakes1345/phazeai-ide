@@ -2,8 +2,9 @@
 //!
 //! The UI talks to it through [`WorkerCommand`]s and receives [`UiEvent`]s.
 //! Interruption is immediate: the running agent future is dropped as soon as
-//! the cancel flag is raised (the core's own cancel checks only fire between
-//! stream chunks, which can be seconds apart while a request is in flight).
+//! the cancel flag is raised, without waiting the up to 0.1 s the core takes
+//! to notice the flag itself (see `repair_after_interrupt` for what a run
+//! dropped mid-round leaves behind).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

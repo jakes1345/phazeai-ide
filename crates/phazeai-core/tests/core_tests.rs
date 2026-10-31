@@ -816,14 +816,17 @@ fn test_trim_to_token_budget_noop_when_under_budget() {
 }
 
 #[test]
-fn test_trim_to_token_budget_clears_all_when_single_message_exceeds_budget() {
+fn test_trim_to_token_budget_keeps_the_question_even_when_it_alone_exceeds_budget() {
     let mut history = ConversationHistory::new();
-    let giant = "x".repeat(4000); // 1000 tokens
+    let giant = "x".repeat(4000); // ~1334 tokens
     history.add_user_message(&giant);
 
-    // Budget smaller than a single message → drains completely
+    // Budget smaller than the question itself: trimming used to drain the
+    // history and send the model no question at all. The question is never
+    // dropped now; whether it fits is the provider's call.
     history.trim_to_token_budget(10);
-    assert_eq!(history.len(), 0);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get_conversation_messages()[0].content, giant);
 }
 
 #[test]

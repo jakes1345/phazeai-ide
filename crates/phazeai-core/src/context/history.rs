@@ -219,42 +219,147 @@ impl ConversationHistory {
     }
 
     fn trim_if_needed(&mut self) {
-        // Keep message count within limits
-        while self.messages.len() > self.max_messages {
+        // Keep the message count within limits by dropping whole earlier
+        // turns. The last turn (the question being worked on and its tool
+        // rounds) is never cut here, however many messages a long run gives
+        // it: dropping its question mid-run leaves the model without its task,
+        // and the results still to come would have no call. The token budget
+        // bounds it instead (see `trim_to_token_budget`).
+        while self.messages.len() > self.max_messages && self.has_earlier_turn() {
             self.drop_oldest_message_group();
         }
     }
 
-    /// Trim conversation to stay within a token budget while preserving the system prompt and recent context.
+    /// Fit the conversation, with the system prompt and summary, into
+    /// `max_tokens` (as [`Self::estimate_tokens`] counts them).
+    ///
+    /// Earlier turns go first, a whole turn at a time, oldest first. The last
+    /// turn (the question being worked on) is never dropped. If it alone is
+    /// too big it is shrunk instead:
+    /// 1. while it would not fit even with every tool output cut to a bare
+    ///    marker, its oldest step (an assistant reply, or a tool call message
+    ///    with its results) is removed, never the newest tool round, and a
+    ///    note on the question tells the model that steps were removed;
+    /// 2. its tool outputs are cut, the longest first, to one common length
+    ///    that just fits, each keeping its start and end around a marker that
+    ///    says how many bytes were cut.
+    ///
+    /// So the result fits whenever the system prompt, the summary, the
+    /// question and the newest tool round (its outputs cut to markers) do.
+    /// A tool call is never separated from its results, and what is left
+    /// still opens with a user turn.
     pub fn trim_to_token_budget(&mut self, max_tokens: usize) {
-        while self.estimate_tokens() > max_tokens && !self.messages.is_empty() {
+        while self.estimate_tokens() > max_tokens && self.has_earlier_turn() {
             self.drop_oldest_message_group();
+        }
+        if self.estimate_tokens() > max_tokens {
+            self.shrink_last_turn(max_tokens);
         }
     }
 
-    /// Drop the oldest turn: the front message, the results of any tool calls
-    /// it made, and everything else before the next plain user message, so
-    /// what remains still opens with a user turn (providers reject a
-    /// conversation that starts with an assistant turn or a tool result).
-    fn drop_oldest_message_group(&mut self) {
-        let Some(front) = self.messages.pop_front() else {
+    /// Where the last turn starts: the last plain user message.
+    fn last_turn_start(&self) -> Option<usize> {
+        (0..self.messages.len())
+            .rev()
+            .find(|&i| self.starts_turn(i))
+    }
+
+    /// Whether anything comes before the last turn. A history without a
+    /// plain user message has no turn to keep, so all of it counts.
+    fn has_earlier_turn(&self) -> bool {
+        match self.last_turn_start() {
+            Some(start) => start > 0,
+            None => !self.messages.is_empty(),
+        }
+    }
+
+    /// Step 1 and 2 of [`Self::trim_to_token_budget`] for the last turn.
+    fn shrink_last_turn(&mut self, max_tokens: usize) {
+        let Some(start) = self.last_turn_start() else {
             return;
         };
-
-        // Keep tool-call sequences valid by evicting both sides together.
-        // If we drop an assistant tool-call message but keep its tool results,
-        // some providers reject the resulting malformed conversation.
-        if let Some(tool_calls) = front.tool_calls {
-            let evicted_ids: std::collections::HashSet<String> =
-                tool_calls.into_iter().map(|tc| tc.id).collect();
-            self.messages.retain(|msg| {
-                msg.tool_call_id
-                    .as_ref()
-                    .map(|id| !evicted_ids.contains(id))
-                    .unwrap_or(true)
-            });
+        while self.tokens_with_outputs_cut_to(start, 0) > max_tokens
+            && self.remove_oldest_step(start)
+        {
+            let question = &mut self.messages[start].content;
+            if !question.ends_with(STEPS_REMOVED_NOTE) {
+                question.push_str(STEPS_REMOVED_NOTE);
+            }
         }
+        // The longest cut that fits, or 0 if none does: the total only grows
+        // as the cut gets longer.
+        let longest = self
+            .outputs(start)
+            .map(|m| m.content.len())
+            .max()
+            .unwrap_or(0);
+        let (mut keep, mut too_long) = (0, longest);
+        while keep < too_long {
+            let mid = keep + (too_long - keep).div_ceil(2);
+            if self.tokens_with_outputs_cut_to(start, mid) <= max_tokens {
+                keep = mid;
+            } else {
+                too_long = mid - 1;
+            }
+        }
+        let limit = keep + CUT_MARKER_MAX;
+        for m in self.messages.iter_mut().skip(start + 1) {
+            if m.tool_call_id.is_some() && m.content.len() > limit {
+                m.content = cut_output(&m.content, keep);
+            }
+        }
+    }
 
+    /// The tool results of the last turn, which starts at `start`.
+    fn outputs(&self, start: usize) -> impl Iterator<Item = &Message> {
+        self.messages
+            .iter()
+            .skip(start + 1)
+            .filter(|m| m.tool_call_id.is_some())
+    }
+
+    /// Estimated tokens if every tool output of the last turn (which starts
+    /// at `start`) that is longer than `keep` bytes plus a marker were cut to
+    /// that. An upper bound: a real marker can be shorter.
+    fn tokens_with_outputs_cut_to(&self, start: usize, keep: usize) -> usize {
+        let limit = keep + CUT_MARKER_MAX;
+        let saved: usize = self
+            .outputs(start)
+            .filter(|m| m.content.len() > limit)
+            .map(|m| message_tokens(m) - limit.div_ceil(3))
+            .sum();
+        self.estimate_tokens() - saved
+    }
+
+    /// Remove the oldest step of the last turn (which starts at `start`): an
+    /// assistant reply, or an assistant tool call message together with the
+    /// results that follow it. The newest tool round is never removed.
+    /// Returns false when there is nothing left to remove.
+    fn remove_oldest_step(&mut self, start: usize) -> bool {
+        let len = self.messages.len();
+        let is_step = |i: usize| self.messages[i].role == Role::Assistant;
+        let newest_round = (start + 1..len)
+            .rev()
+            .find(|&i| self.messages[i].tool_calls.is_some());
+        let Some(first) = (start + 1..len).find(|&i| is_step(i) && Some(i) != newest_round) else {
+            return false;
+        };
+        let end = (first + 1..len).find(|&i| is_step(i)).unwrap_or(len);
+        self.messages.drain(first..end);
+        true
+    }
+
+    /// Drop the oldest turn: the front message and everything after it up to
+    /// the next plain user message, so what remains still opens with a user
+    /// turn (providers reject a conversation that starts with an assistant
+    /// turn or a tool result). The results of the turn's tool calls go with
+    /// it: they come before the next user message. They are not looked up by
+    /// id, because ids repeat across replies with some providers (Ollama
+    /// numbers them per reply), which would take later turns' results too.
+    fn drop_oldest_message_group(&mut self) {
+        if self.messages.pop_front().is_none() {
+            return;
+        }
         while !self.messages.is_empty() && !self.starts_turn(0) {
             self.messages.pop_front();
         }
@@ -298,6 +403,63 @@ fn message_tokens(m: &Message) -> usize {
         .map(|c| c.function.name.len() + c.function.arguments.len())
         .sum();
     (m.content.len() + calls).div_ceil(3)
+}
+
+/// Appended to the question when trimming removes steps of its turn, so the
+/// model knows that work it did is no longer shown.
+const STEPS_REMOVED_NOTE: &str = "\n\n[Earlier tool calls and replies made for this request \
+     were removed to fit the context budget; their output is no longer shown.]";
+
+/// The marker left in a tool output cut to fit the context budget is
+/// `CUT_PREFIX`, the number of bytes cut, then `CUT_SUFFIX`.
+const CUT_PREFIX: &str = "[... ";
+const CUT_SUFFIX: &str = " bytes of this tool output were cut to fit the context budget ...]";
+/// The longest a marker and the line breaks around it can be.
+const CUT_MARKER_MAX: usize = CUT_PREFIX.len() + 20 + CUT_SUFFIX.len() + 2;
+
+/// `output` cut down to at most `keep` bytes of its text around a marker:
+/// about two thirds from the start (what was asked for) and the rest from the
+/// end (where errors and totals usually are). An output that was cut before
+/// is cut again from what is left of it, and its marker counts every byte cut
+/// so far.
+fn cut_output(output: &str, keep: usize) -> String {
+    use crate::text::{tail_bytes, truncate_bytes};
+    let head_keep = keep * 2 / 3;
+    let (head, tail, cut) = match split_cut(output) {
+        Some((old_head, old_cut, old_tail)) => {
+            // A short tail leaves its share to the head.
+            let head = truncate_bytes(old_head, head_keep.max(keep.saturating_sub(old_tail.len())));
+            let tail = tail_bytes(old_tail, keep - head.len());
+            let cut = old_cut + (old_head.len() - head.len()) + (old_tail.len() - tail.len());
+            (head, tail, cut)
+        }
+        None => {
+            let head = truncate_bytes(output, head_keep);
+            let rest = &output[head.len()..];
+            let tail = tail_bytes(rest, keep - head.len());
+            (head, tail, rest.len() - tail.len())
+        }
+    };
+    let marker = format!("{CUT_PREFIX}{cut}{CUT_SUFFIX}");
+    [head, marker.as_str(), tail]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An output cut by [`cut_output`] as (head, bytes cut, tail).
+fn split_cut(output: &str) -> Option<(&str, usize, &str)> {
+    let end = output.find(CUT_SUFFIX)?;
+    let start = output[..end].rfind(CUT_PREFIX)?;
+    let cut = output[start + CUT_PREFIX.len()..end].parse().ok()?;
+    let head = &output[..start];
+    let tail = &output[end + CUT_SUFFIX.len()..];
+    Some((
+        head.strip_suffix('\n').unwrap_or(head),
+        cut,
+        tail.strip_prefix('\n').unwrap_or(tail),
+    ))
 }
 
 impl Default for ConversationHistory {
@@ -468,14 +630,19 @@ mod tests {
         assert_eq!(h.len(), 2);
         assert!(first_is_plain_user(&h));
 
-        // Over budget with every message after the first being a tool
-        // exchange: nothing valid can be kept, so nothing is.
+        // Over budget in the last turn alone: the question and the tool call
+        // stay, and the tool output is cut to fit. (This used to drop all
+        // three, sending the model no question at all.)
         let mut h = ConversationHistory::new();
         h.add_message(msg(true, 0));
         h.add_message(Message::assistant_with_tools("", vec![call("c2")]));
         h.add_tool_result("c2", "r".repeat(300));
         h.trim_to_token_budget(50);
-        assert!(h.is_empty());
+        assert_eq!(h.len(), 3);
+        assert!(first_is_plain_user(&h));
+        assert!(h.estimate_tokens() <= 50, "{}", h.estimate_tokens());
+        let output = &h.get_conversation_messages()[2].content;
+        assert!(output.contains(CUT_SUFFIX), "{output}");
     }
 
     #[test]
