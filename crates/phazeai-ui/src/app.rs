@@ -388,7 +388,7 @@ fn load_editor_settings() -> phazeai_core::config::EditorSettings {
 /// "doesn't need a key" - otherwise the first-run checklist ticks AI as configured for
 /// exactly the person who has nothing set up.
 fn provider_problem(settings: &Settings) -> Option<String> {
-    use phazeai_core::llm::{discovery::LocalDiscovery, provider::keyring_get};
+    use phazeai_core::llm::discovery::LocalDiscovery;
     let id = settings.llm.provider.to_provider_id();
     match settings.llm.provider {
         LlmProvider::BuiltIn => phazeai_core::local_ai::readiness_problem(&settings.local_ai),
@@ -426,11 +426,17 @@ fn provider_problem(settings: &Settings) -> Option<String> {
             })
         }
         _ => {
-            // A key saved through Settings lives in the OS keyring, not the environment.
-            let env = &settings.llm.api_key_env;
-            let has_key = !env.is_empty()
-                && (keyring_get(env).is_some_and(|k| !k.is_empty())
-                    || std::env::var(env).map(|v| !v.is_empty()).unwrap_or(false));
+            // Looked up exactly as the client looks it up when it is built
+            // (`ProviderConfig::api_key`: the OS keyring, where Settings → AI
+            // saves it, then the environment), under the provider's own
+            // variable name. `[llm] api_key_env` is not it: a fresh config
+            // leaves it empty and choosing a provider never sets it, so
+            // checking it reported every saved key as missing.
+            let has_key = settings
+                .build_provider_registry()
+                .get_config(&id)
+                .and_then(|config| config.api_key())
+                .is_some_and(|key| !key.is_empty());
             (!has_key).then(|| {
                 format!(
                     "No {} key found. Add one in Settings → AI (some providers have a free tier).",
@@ -5432,6 +5438,7 @@ mod ai_prompt_tests {
 #[cfg(test)]
 mod provider_problem_tests {
     use super::provider_problem;
+    use phazeai_core::llm::ProviderId;
     use phazeai_core::{config::LlmProvider, Settings};
 
     fn settings(provider: LlmProvider, env: &str, base_url: Option<&str>) -> Settings {
@@ -5442,23 +5449,43 @@ mod provider_problem_tests {
         s
     }
 
+    // Each test below owns one provider's key variable, so they can run in
+    // parallel. (A key saved in this machine's OS keyring for that provider
+    // would take precedence, as it does for the client.)
+
     #[test]
-    fn missing_key_is_reported_with_the_provider_name() {
-        let s = settings(LlmProvider::Groq, "PHAZEAI_TEST_NO_SUCH_KEY_VAR", None);
-        let msg = provider_problem(&s).expect("no key should be a problem");
-        assert!(msg.contains("Groq") && msg.contains("Settings"), "{msg}");
+    fn an_empty_key_is_reported_with_the_provider_name() {
+        let var = ProviderId::OpenRouter.default_api_key_env();
+        std::env::set_var(var, "");
+        let s = settings(LlmProvider::OpenRouter, "", None);
+        let msg = provider_problem(&s).expect("an empty key should be a problem");
+        assert!(
+            msg.contains("OpenRouter") && msg.contains("Settings"),
+            "{msg}"
+        );
     }
 
     #[test]
-    fn a_key_in_the_environment_counts_as_ready() {
-        // PATH is set (and non-empty) in every environment the tests run in.
-        let s = settings(LlmProvider::Groq, "PATH", None);
+    fn the_key_the_client_uses_counts_although_llm_api_key_env_is_empty() {
+        // A fresh config has `api_key_env = ""`, and choosing a provider in
+        // the IDE never fills it in; the key lives under the provider's own
+        // name, which is where Settings → AI saves it and the client reads it.
+        let var = ProviderId::Together.default_api_key_env();
+        std::env::set_var(var, "test-key");
+        let s = settings(LlmProvider::Together, "", None);
+        let registry = s.build_provider_registry();
+        let config = registry.get_config(&ProviderId::Together).unwrap();
+        assert_eq!(config.api_key().as_deref(), Some("test-key"));
         assert_eq!(provider_problem(&s), None);
     }
 
     #[test]
-    fn an_empty_key_variable_name_is_not_ready() {
-        let s = settings(LlmProvider::Claude, "", None);
+    fn a_variable_named_in_llm_api_key_env_is_not_the_clients_key() {
+        // PATH is set in every environment; the client never reads it as the
+        // Gemini key, so the IDE must not call Gemini ready because of it.
+        let var = ProviderId::Gemini.default_api_key_env();
+        std::env::set_var(var, "");
+        let s = settings(LlmProvider::Gemini, "PATH", None);
         assert!(provider_problem(&s).is_some());
     }
 
