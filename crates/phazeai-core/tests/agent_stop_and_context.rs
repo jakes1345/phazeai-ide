@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use phazeai_core::llm::{FunctionCall, ToolCall};
+use phazeai_core::tools::WriteFileTool;
 use phazeai_core::{
     Agent, AgentEvent, AgentResponse, ApprovalFn, ConversationHistory, DiffHookFn, LlmClient,
     LlmResponse, Message, PhazeError, Role, StreamEvent, Tool, ToolDefinition, ToolRegistry,
@@ -560,12 +561,15 @@ async fn stop_while_waiting_for_diff_review_ends_the_run_and_answers_every_call(
     let runs = Arc::new(AtomicUsize::new(0));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("notes.txt");
-    // Nobody ever answers the diff review.
+    // Nobody ever answers the diff review. (The agent reviews what the
+    // registered write_file would write, so it is registered, as in the IDE.)
     let hook: DiffHookFn = Box::new(|_, _, _| Box::pin(std::future::pending()));
+    let mut tools = echo_tools(&runs);
+    tools.register(Box::new(WriteFileTool));
     let agent = Agent::new(Box::new(ScriptedLlm::new(vec![Reply::Stream(
         three_calls(("write_file", json!({"path": path, "content": "new text"}))),
     )])))
-    .with_tools(echo_tools(&runs))
+    .with_tools(tools)
     .with_diff_hook(hook)
     .with_cancel_token(cancel.clone())
     .with_shared_conversation(conv.clone());

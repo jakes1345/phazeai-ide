@@ -57,15 +57,23 @@
 //! - Every LLM client built through [`crate::llm::ProviderRegistry`] is a
 //!   [`GuardedClient`]: it checks `local_only` before *each* request and
 //!   records the request in [`audit`].
+//! - MCP tool calls ([`mcp`]): every argument that can name a local file is
+//!   resolved the way the server would resolve it and checked before the call
+//!   is sent; a tool the server doesn't mark read-only may not touch
+//!   `.phazeai/`. Results lose `git diff` sections and whole-line paths of
+//!   denied files, and the official filesystem server's listings lose denied
+//!   entries.
 //!
 //! **Best-effort only:** the `bash` tool check inspects the words of the
 //! command line (see [`command_denial`]); a command can still read a denied
-//! file indirectly (`grep -r`, scripts, variables). MCP servers run outside
-//! this process and are not restricted. Approve `bash` and MCP calls with that
-//! in mind.
+//! file indirectly (`grep -r`, scripts, variables). An MCP server is checked
+//! only by the paths its arguments name: it can still open files on its own
+//! (indexers, git history) or reach one by another name (a hard link, a URL).
+//! Approve `bash` and MCP calls with that in mind.
 
 pub mod audit;
 mod guard;
+pub mod mcp;
 
 pub use guard::GuardedClient;
 
@@ -83,6 +91,12 @@ pub const POLICY_FILE: &str = ".phazeai/privacy.toml";
 /// Why a mutating tool refuses to touch the policy file (see [`Denial::reason`]).
 pub const PROTECTED_REASON: &str =
     "the project's privacy policy, which can only be edited by you, in the IDE (Settings › Privacy) or an editor";
+
+/// Why an MCP tool the server doesn't mark read-only may not touch
+/// `.phazeai/` (see [`mcp`]): the policy and the list of MCP servers, which
+/// PhazeAI starts as you, live there.
+pub const SETTINGS_REASON: &str =
+    "protected: .phazeai/ holds the project's privacy policy and MCP server list, which only you can change";
 
 /// `git` options that stop it from quoting non-ASCII path names in `diff` and
 /// `status` output (`"caf\303\251.txt"`), so the paths can be compared with
@@ -152,7 +166,8 @@ pub enum DenySource {
     BuiltIn,
     Project,
     /// Not a deny-list hit: the path is the policy file itself (or the
-    /// directory holding it), which the model may read but never change.
+    /// directory holding it), which the model may read but never change; for
+    /// MCP tools, anything in `.phazeai/` (pattern [`mcp::SETTINGS_DIR`]).
     Protected,
 }
 
@@ -172,6 +187,9 @@ impl Denial {
                 format!("blocked by the built-in secrets list (`{}`)", self.pattern)
             }
             DenySource::Project => format!("blocked by {POLICY_FILE} (`{}`)", self.pattern),
+            DenySource::Protected if self.pattern == mcp::SETTINGS_DIR => {
+                SETTINGS_REASON.to_string()
+            }
             DenySource::Protected => PROTECTED_REASON.to_string(),
         }
     }
@@ -180,6 +198,14 @@ impl Denial {
         Self {
             source: DenySource::Protected,
             pattern: POLICY_FILE.to_string(),
+        }
+    }
+
+    /// `.phazeai/`, for an MCP tool that may write (see [`SETTINGS_REASON`]).
+    fn settings() -> Self {
+        Self {
+            source: DenySource::Protected,
+            pattern: mcp::SETTINGS_DIR.to_string(),
         }
     }
 }
@@ -464,6 +490,18 @@ impl PrivacyPolicy {
             .any(|p| *p == policy || Some(p.as_path()) == dir)
     }
 
+    /// Whether `path` is inside this project's `.phazeai/` directory, which
+    /// holds the privacy policy and the MCP server list. An MCP tool the
+    /// server does not mark read-only may not name anything in there (see
+    /// [`mcp`] and [`SETTINGS_REASON`]); reading is fine.
+    pub(crate) fn is_under_settings_dir(&self, path: &Path) -> bool {
+        let Some(root) = &self.root else {
+            return false;
+        };
+        let dir = root.join(mcp::SETTINGS_DIR);
+        self.forms(path).iter().any(|p| p.starts_with(&dir))
+    }
+
     /// Whether `path` is the policy file or any directory containing it (up
     /// to and including the project root), so deleting or moving `path` would
     /// remove the policy.
@@ -729,6 +767,12 @@ pub fn refusal(path: &str, reason: &str) -> String {
         return format!(
             "REFUSED: '{path}' is {reason}. The AI may read the policy but must not change, replace, \
              move or delete it; don't try another way."
+        );
+    }
+    if reason == SETTINGS_REASON {
+        return format!(
+            "REFUSED: '{path}' is {reason}. MCP tools may read those files but must not change, \
+             replace, move or delete them; don't try another way."
         );
     }
     format!(
@@ -1083,6 +1127,14 @@ fn set_local_only_in_text(text: &str, value: bool) -> String {
 /// list as `<unparsed diff header: …>`. Run git with [`GIT_NO_QUOTE_PATH`] so
 /// the common non-ASCII case needs no decoding at all.
 pub fn filter_unified_diff(diff: &str, policy: &PrivacyPolicy) -> (String, Vec<String>) {
+    filter_unified_diff_by(diff, &|p| policy.is_denied(Path::new(p)))
+}
+
+/// [`filter_unified_diff`] with `denied` deciding which header paths to drop.
+pub(crate) fn filter_unified_diff_by(
+    diff: &str,
+    denied: &dyn Fn(&str) -> bool,
+) -> (String, Vec<String>) {
     let mut out = String::new();
     let mut omitted = Vec::new();
     let mut chunk = String::new();
@@ -1092,7 +1144,7 @@ pub fn filter_unified_diff(diff: &str, policy: &PrivacyPolicy) -> (String, Vec<S
         }
         match diff_chunk_paths(chunk) {
             Ok(paths) => {
-                if let Some(p) = paths.iter().find(|p| policy.is_denied(Path::new(p))) {
+                if let Some(p) = paths.iter().find(|p| denied(p)) {
                     omitted.push(p.clone());
                 } else {
                     out.push_str(chunk);
@@ -1351,6 +1403,16 @@ pub fn command_denial(
     command: &str,
     cwd: &Path,
 ) -> Option<(String, Denial)> {
+    command_denial_in(policy, command, cwd, dirs::home_dir().as_deref())
+}
+
+/// [`command_denial`] for a program whose `~/` is `home`.
+pub(crate) fn command_denial_in(
+    policy: &PrivacyPolicy,
+    command: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<(String, Denial)> {
     let word_denial = |p: &Path| {
         policy
             .check(p)
@@ -1358,7 +1420,7 @@ pub fn command_denial(
     };
     for word in shell_words(command) {
         let expanded = if let Some(rest) = word.strip_prefix("~/") {
-            match dirs::home_dir() {
+            match home {
                 Some(h) => h.join(rest),
                 None => PathBuf::from(&word),
             }

@@ -139,6 +139,14 @@ writing/executing flags — extend the allowlists there, with a test, never by
 substring matching. CLI `-p` mode uses `--allow read|edit|all` (`oneshot.rs`):
 `edit` permits file tools only; any bash call above read-only needs `all`.
 
+The IDE chat waves `write_file` / `edit_file` through its approval callback and
+gates them with a diff hook (`Agent::with_diff_hook`) instead. The diff is the
+tool's own plan (`Tool::plan_write` → `tools::FileWrite`), and the agent then
+commits that same plan, which writes only if the file still holds the diff's
+"before"; a call the tool would refuse shows no diff. Any preview of an edit
+(the CLI's approval prompt too) uses `tools::apply_edit`: never re-implement
+the edit in a preview.
+
 ### Privacy (`phazeai-core/src/privacy.rs`)
 
 `.phazeai/privacy.toml` (`deny` globs + `local_only`) plus a built-in secrets
@@ -150,6 +158,16 @@ and records the audit log (`privacy::audit`, shown in Settings › Privacy). The
 policy file itself is protected from mutating tools. New code that sends
 project content to a model must go through `PrivacyPolicy::check` and note
 attached files in the audit scope.
+
+MCP tool calls are checked in `privacy/mcp.rs` (the bridge in
+`tools/mcp_bridge.rs` calls it): every argument that can name a local file is
+resolved the way the server would (project root, the server's working
+directory and command-line directories, `~`, `file://`, Unicode-equivalent
+directory entries) and run through `PrivacyPolicy::check`; a tool the server
+doesn't mark `readOnlyHint: true` may not touch `.phazeai/`; and results lose
+`git diff` sections, whole-line denied paths, and (for the official filesystem
+server) denied listing entries. This is best-effort — it can't see files a
+server opens on its own, reaches by another name, or sends over the network.
 
 ### Context compaction & budgets (`phazeai-core/src/context/`)
 
