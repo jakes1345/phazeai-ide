@@ -1915,3 +1915,195 @@ async fn mcp_bridge_refuses_before_contacting_the_server() {
             if path == ".env" && via == "mcp__fs__read_text_file"
     )));
 }
+
+/// A result holding one text block, as an MCP server sends it.
+fn mcp_text_result(text: &str, is_error: bool) -> crate::mcp::McpToolResult {
+    crate::mcp::McpToolResult {
+        content: vec![crate::mcp::McpContent {
+            content_type: "text".to_string(),
+            text: Some(text.to_string()),
+            data: None,
+            mime_type: None,
+        }],
+        is_error,
+    }
+}
+
+#[test]
+fn mcp_filesystem_listing_errors_are_passed_on_as_errors() {
+    use crate::tools::mcp_bridge::filter_result;
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, "notes.txt", "ok");
+    write(&root, "private/plan.md", "x");
+    let _g = activate(&root);
+    let srv = server(vec![root.clone()], None);
+
+    // The server's answer to a listing of a missing directory is an error, not
+    // a listing: it reaches the model unchanged, not as a privacy refusal.
+    let enoent = format!(
+        "ENOENT: no such file or directory, scandir '{}'",
+        root.join("does_not_exist").display()
+    );
+    let args = serde_json::json!({ "path": "does_not_exist" });
+    for tool in [
+        "list_directory",
+        "list_directory_with_sizes",
+        "directory_tree",
+    ] {
+        let full = format!("mcp__fs__{tool}");
+        let error = mcp_text_result(&enoent, true);
+        let (out, hidden) = filter_result(&full, tool, true, &args, &srv, error)
+            .unwrap_or_else(|e| panic!("{tool}: the server's error became a refusal: {e}"));
+        assert!(out.is_error, "{tool}");
+        assert_eq!(
+            out.content[0].text.as_deref(),
+            Some(enoent.as_str()),
+            "{tool}"
+        );
+        assert_eq!(hidden, 0, "{tool}");
+    }
+
+    // directory_tree stops at the first descendant it can't open and quotes
+    // it: a path inside a denied directory is hidden, the error kept.
+    let args = serde_json::json!({ "path": s(&root) });
+    let eacces = format!(
+        "EACCES: permission denied, scandir '{}'",
+        root.join("private/locked").display()
+    );
+    let error = mcp_text_result(&eacces, true);
+    let (out, hidden) = filter_result(
+        "mcp__fs__directory_tree",
+        "directory_tree",
+        true,
+        &args,
+        &srv,
+        error,
+    )
+    .unwrap();
+    let text = out.content[0].text.clone().unwrap();
+    assert!(!text.contains("locked"), "{text}");
+    assert!(
+        text.starts_with("EACCES: permission denied, scandir '")
+            && text.contains("hidden by the project's privacy policy"),
+        "{text}"
+    );
+    assert_eq!(hidden, 1);
+}
+
+#[test]
+fn mcp_filesystem_errors_hide_only_quoted_denied_paths() {
+    use super::mcp::filter_fs_error;
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let bases = vec![root.clone()];
+    let f = |t: &str| filter_fs_error(&p, &bases, None, t, "[hidden]");
+    let r = |rel: &str| root.join(rel).display().to_string();
+
+    // Allowed paths (the policy file among them: reading it is fine), prose
+    // apostrophes, non-ASCII and a stray quote are left alone.
+    let kept = [
+        format!("ENOENT: no such file or directory, scandir '{}'", r("gone")),
+        format!("ENOTDIR: not a directory, scandir '{}'", r(POLICY_FILE)),
+        format!(
+            "Access denied - path outside allowed directories: /etc not in {}",
+            r("")
+        ),
+        "can't parse 'path': expected string, it's undefined".to_string(),
+        format!("ENOENT: '{}' isn't there", r("\u{65e5}\u{672c}\u{8a9e}")),
+        "'".to_string(),
+        String::new(),
+    ];
+    for text in kept {
+        assert_eq!(f(&text), (text.clone(), 0));
+    }
+
+    // A denied path is hidden: alone, after an apostrophe in prose, holding an
+    // apostrophe itself (a prefix of it denied, or only the whole), as the
+    // second of two quoted paths, and on a line of its own.
+    let hidden = [
+        (
+            format!("EACCES: permission denied, scandir '{}'", r("private/x")),
+            "EACCES: permission denied, scandir '[hidden]'".to_string(),
+        ),
+        (
+            format!("can't open '{}'", r(".env")),
+            "can't open '[hidden]'".to_string(),
+        ),
+        (
+            format!("EACCES: scandir '{}'", r("private/it's here")),
+            "EACCES: scandir '[hidden]'".to_string(),
+        ),
+        (
+            format!("EACCES: scandir '{}'", r("it's/.env")),
+            "EACCES: scandir '[hidden]'".to_string(),
+        ),
+        (
+            format!("rename '{}' -> '{}'", r("a.txt"), r("private/b.txt")),
+            format!("rename '{}' -> '[hidden]'", r("a.txt")),
+        ),
+        (
+            format!("Error:\n{}\nend", r(".env")),
+            "Error:\n[hidden]\nend".to_string(),
+        ),
+    ];
+    for (text, want) in hidden {
+        assert_eq!(f(&text), (want, 1), "{text}");
+    }
+}
+
+#[test]
+fn mcp_filesystem_listing_refused_unchecked_is_logged() {
+    use crate::tools::mcp_bridge::filter_result;
+    let (_d, root) = project(None);
+    std::fs::create_dir_all(root.join("odd listing")).unwrap();
+    let _g = activate(&root);
+    let srv = server(vec![root.clone()], None);
+    let args = serde_json::json!({ "path": s(&root.join("odd listing")) });
+
+    // A line that is neither an entry nor a summary (a name holding a newline):
+    // the listing can't be checked, so it is refused, and the refusal logged.
+    for tool in ["list_directory", "list_directory_with_sizes"] {
+        let full = format!("mcp__fs__{tool}");
+        let listing = mcp_text_result("[FILE] two\nlines.txt", false);
+        let err = filter_result(&full, tool, true, &args, &srv, listing)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("could not check this listing"),
+            "{tool}: {err}"
+        );
+        assert!(
+            audit::recent(audit::CAPACITY).iter().any(|e| matches!(
+                &e.kind,
+                audit::AuditKind::BlockedFile { path, reason, via }
+                    if path == "odd listing" && via == &full && reason.contains("could not be checked")
+            )),
+            "{tool}: the refusal is not in the audit log"
+        );
+    }
+}
+
+#[test]
+fn mcp_call_too_big_to_check_is_refused_and_logged() {
+    use super::mcp::tool_check;
+    let (_d, root) = project(None);
+    let _g = activate(&root);
+    let srv = server(vec![root.clone()], None);
+    let many: Vec<serde_json::Value> = (0..10_001)
+        .map(|i| serde_json::json!(format!("f{i}")))
+        .collect();
+    let args = serde_json::json!({ "paths": many });
+    let err = tool_check("mcp__fs__read_multiple_files", true, &args, &srv)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("could not check this call"), "{err}");
+    assert!(
+        audit::recent(audit::CAPACITY).iter().any(|e| matches!(
+            &e.kind,
+            audit::AuditKind::BlockedFile { path, reason, via }
+                if path == "the call" && via == "mcp__fs__read_multiple_files"
+                    && reason.contains("too many to check")
+        )),
+        "the refusal is not in the audit log"
+    );
+}

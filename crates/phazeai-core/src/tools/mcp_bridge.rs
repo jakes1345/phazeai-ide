@@ -17,6 +17,7 @@ use crate::mcp::{McpManager, McpToolResult};
 use crate::privacy::mcp::McpServerPaths;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Shared handle for MCP bridges to emit [`AgentEvent::McpReconnected`] while a run is active.
@@ -210,24 +211,27 @@ impl Tool for McpToolBridge {
 }
 
 /// Left in an unrecognized server's text where a denied whole-line path was
-/// removed, so the model sees that something was withheld rather than the line
-/// vanishing silently from what might be file content.
+/// removed (and in a filesystem-server listing error, where a denied path it
+/// quoted was), so the model sees that something was withheld rather than the
+/// line vanishing silently from what might be file content.
 const HIDDEN_PATH_PLACEHOLDER: &str = "[path hidden by the project's privacy policy]";
 
 /// Filter what the model will see from an MCP tool result's text blocks.
 ///
 /// For the official filesystem server: listing tools lose their denied entries
-/// (a listing not in the expected format is refused — fail closed), the
-/// path-list tools (`search_files`, `list_allowed_directories`) lose denied
-/// paths, and the read/write/edit/move tools pass through unchanged, because
-/// their path arguments were already checked and the result is either an
-/// allowed file's exact contents or a status line. For any other server the
-/// format is unknown, so `git diff` sections naming denied files are dropped
-/// and denied whole-line paths are replaced with a visible placeholder.
+/// (a listing not in the expected format is refused — fail closed — and the
+/// refusal logged), their error results are the server's messages and keep
+/// only the paths the policy allows, the path-list tools (`search_files`,
+/// `list_allowed_directories`) lose denied paths, and the read/write/edit/move
+/// tools pass through unchanged, because their path arguments were already
+/// checked and the result is either an allowed file's exact contents or a
+/// status line. For any other server the format is unknown, so `git diff`
+/// sections naming denied files are dropped and denied whole-line paths are
+/// replaced with a visible placeholder.
 ///
 /// Returns the filtered result and how many items were removed, or an error
 /// when a filesystem-server listing is not in the expected format.
-fn filter_result(
+pub(crate) fn filter_result(
     full_name: &str,
     bare_tool: &str,
     fs_listings: bool,
@@ -238,6 +242,7 @@ fn filter_result(
     let policy = crate::privacy::active();
     let bases = crate::privacy::mcp::result_bases(&policy, paths, args);
     let home = paths.home.as_deref();
+    let is_error = result.is_error;
     let mut hidden = 0;
 
     for block in &mut result.content {
@@ -248,6 +253,22 @@ fn filter_result(
         };
 
         if fs_listings {
+            // A listing tool's error result is the server's message, not a
+            // listing: it is not parsed as one (a plain ENOENT must reach the
+            // model as an error, not a privacy refusal), but loses any denied
+            // path it names.
+            if is_error && crate::privacy::mcp::is_fs_listing_tool(bare_tool) {
+                let (filtered, n) = crate::privacy::mcp::filter_fs_error(
+                    &policy,
+                    &bases,
+                    home,
+                    text,
+                    HIDDEN_PATH_PLACEHOLDER,
+                );
+                *text = filtered;
+                hidden += n;
+                continue;
+            }
             // A listing tool: drop denied entries with the structured filter.
             if let Some(outcome) =
                 crate::privacy::mcp::filter_fs_listing(&policy, paths, bare_tool, args, text)
@@ -258,6 +279,12 @@ fn filter_result(
                         hidden += n;
                     }
                     Err(why) => {
+                        // Fail closed, and log it like any other refusal.
+                        let shown = args.get("path").and_then(Value::as_str).map_or_else(
+                            || "the listing".to_string(),
+                            |p| policy.display_path(Path::new(p)),
+                        );
+                        crate::privacy::mcp::record_unchecked(&shown, &why, full_name);
                         return Err(PhazeError::tool(
                             full_name,
                             format!(

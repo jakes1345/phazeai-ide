@@ -2,9 +2,10 @@
 //!
 //! The bridge in [`crate::tools::mcp_bridge`] hands every call here before it
 //! reaches the server ([`tool_check`]) and every text result back for
-//! filtering ([`filter_text`], [`filter_fs_listing`]). An MCP server is a
-//! separate process that reads the local filesystem, so the only hooks the
-//! policy has are the arguments the model sends and the text that comes back.
+//! filtering ([`filter_text`], [`filter_fs_listing`], [`filter_fs_error`]).
+//! An MCP server is a separate process that reads the local filesystem, so the
+//! only hooks the policy has are the arguments the model sends and the text
+//! that comes back.
 //!
 //! What this does:
 //! - **Arguments.** Every string that can name a file is resolved the way the
@@ -20,11 +21,12 @@
 //! - **Results.** The official filesystem server's `list_directory`,
 //!   `list_directory_with_sizes` and `directory_tree` lose their denied
 //!   entries (a listing not in the expected format is refused, not passed
-//!   through), and `search_files` / `list_allowed_directories` lose denied
-//!   paths; its read tools return allowed files' contents unchanged (their
-//!   path arguments were already checked). For any other server, `git diff`
-//!   sections and whole-line paths naming denied files are removed from each
-//!   text block.
+//!   through, and the refusal logged; an error result is the server's message,
+//!   passed on as an error with any denied path it names hidden), and
+//!   `search_files` / `list_allowed_directories` lose denied paths; its read
+//!   tools return allowed files' contents unchanged (their path arguments were
+//!   already checked). For any other server, `git diff` sections and
+//!   whole-line paths naming denied files are removed from each text block.
 //!
 //! What this cannot do: see a file the server opens on its own initiative (an
 //! indexer, a packer, git history), a file reached by another name (a hard
@@ -389,8 +391,20 @@ fn name_tokens(name: &str) -> Vec<String> {
     tokens
 }
 
+/// Record a call or listing refused because it could not be checked against
+/// the policy (fail closed), like any other refusal. `shown` names what was
+/// refused: the listed directory, or `the call` as a whole.
+pub(crate) fn record_unchecked(shown: &str, why: &str, tool: &str) {
+    super::audit::record_blocked_file(
+        shown,
+        &format!("could not be checked against the privacy policy ({why})"),
+        tool,
+    );
+}
+
 /// [`check_call`] against the active policy, recording one audit entry per
-/// denial and formatting the refusal the model sees.
+/// denial (or one for a call that could not be checked) and formatting the
+/// refusal the model sees.
 pub fn tool_check(
     tool: &str,
     read_only: bool,
@@ -412,10 +426,13 @@ pub fn tool_check(
             }
             Err(crate::error::PhazeError::tool(tool, msg))
         }
-        Err(McpRefusal::Unchecked(why)) => Err(crate::error::PhazeError::tool(
-            tool,
-            format!("REFUSED: PhazeAI could not check this call against the project's privacy policy: {why}."),
-        )),
+        Err(McpRefusal::Unchecked(why)) => {
+            record_unchecked("the call", &why, tool);
+            Err(crate::error::PhazeError::tool(
+                tool,
+                format!("REFUSED: PhazeAI could not check this call against the project's privacy policy: {why}."),
+            ))
+        }
     }
 }
 
@@ -877,6 +894,68 @@ pub fn filter_fs_listing(
         "directory_tree" => Some(filter_directory_tree(policy, server, args, text)),
         _ => None,
     }
+}
+
+/// Whether `tool` is one of the official filesystem server's listing tools,
+/// whose successful output [`filter_fs_listing`] filters.
+pub fn is_fs_listing_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "list_directory" | "list_directory_with_sizes" | "directory_tree"
+    )
+}
+
+/// Filter an error result from one of the official filesystem server's
+/// listing tools. The server's message (`ENOENT: no such file or directory,
+/// scandir '/p/x'`) is not a listing, so it is never parsed as one, which
+/// would pass a plain error off as a privacy refusal. It gets the
+/// [`filter_text`] pass, and each path it quotes is checked as well:
+/// `directory_tree` stops at the first descendant it can't open and quotes
+/// that path, a name its listing would have hidden. A denied quoted path is
+/// replaced with `placeholder`. Returns the text and how many paths were
+/// hidden.
+pub fn filter_fs_error(
+    policy: &PrivacyPolicy,
+    bases: &[PathBuf],
+    home: Option<&Path>,
+    text: &str,
+    placeholder: &str,
+) -> (String, usize) {
+    let (text, mut hidden) = filter_text(policy, bases, home, text, Some(placeholder));
+    let out = text
+        .split_inclusive('\n')
+        .map(|line| hide_quoted_path(policy, home, line, placeholder, &mut hidden))
+        .collect();
+    (out, hidden)
+}
+
+/// `line` with a quoted denied path hidden. A quoted path runs from a `'`
+/// that starts a whole path to the next `'` or, for a name that itself holds
+/// a `'`, to the last one on the line (Node quotes the path last). When either
+/// span is denied, everything from there to the last `'` is replaced with
+/// `placeholder`.
+fn hide_quoted_path(
+    policy: &PrivacyPolicy,
+    home: Option<&Path>,
+    line: &str,
+    placeholder: &str,
+    hidden: &mut usize,
+) -> String {
+    let Some(last) = line.rfind('\'') else {
+        return line.to_string();
+    };
+    let denied = |s: &str| is_whole_path(s) && path_str_denied(policy, &[], home, s, false);
+    let mut from = 0;
+    while let Some(off) = line[from..last].find('\'') {
+        let start = from + off + 1;
+        let next = line[start..].find('\'').map_or(last, |o| start + o);
+        if denied(&line[start..next]) || (next != last && denied(&line[start..last])) {
+            *hidden += 1;
+            return format!("{}{placeholder}{}", &line[..start], &line[last..]);
+        }
+        from = start;
+    }
+    line.to_string()
 }
 
 /// The existing directories `args.path` resolves to — lexically normalized and

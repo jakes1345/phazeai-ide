@@ -804,3 +804,152 @@ async fn agent_reads_allowed_file_contents_verbatim() {
     );
     assert!(g2.get("privacy_skipped").is_none(), "{g2}");
 }
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn listing_errors_reach_the_model_as_errors_not_refusals() {
+    // The server answers a listing of a missing directory (or of a file) with
+    // an error result. That message is not a listing: the model must get the
+    // server's error, as it does from read_text_file, not a privacy refusal.
+    let (_dir, root) = denied_project();
+    // directory_tree stops at the first descendant it can't open and quotes
+    // that path in its error. A chain deeper than PATH_MAX inside the denied
+    // `private/` makes the server's realpath fail with ENAMETOOLONG on a path
+    // the policy denies, so the error itself names a denied directory.
+    let level = format!("deep-denied-{}", "q".repeat(188));
+    let chain = vec![level.as_str(); 22].join("/");
+    let made = std::process::Command::new("mkdir")
+        .arg("-p")
+        .arg(&chain)
+        .current_dir(root.join("private"))
+        .status()
+        .expect("run mkdir");
+    assert!(made.success(), "mkdir -p could not build the deep chain");
+    let _active = activate(&root);
+    let calls = vec![
+        (
+            "e1",
+            "mcp__fs__list_directory",
+            json!({ "path": "does_not_exist" }),
+        ),
+        (
+            "e2",
+            "mcp__fs__list_directory_with_sizes",
+            json!({ "path": "does_not_exist" }),
+        ),
+        (
+            "e3",
+            "mcp__fs__directory_tree",
+            json!({ "path": "does_not_exist" }),
+        ),
+        (
+            "e4",
+            "mcp__fs__list_directory",
+            json!({ "path": "notes.txt" }),
+        ),
+        ("e5", "mcp__fs__directory_tree", json!({ "path": s(&root) })),
+        (
+            "e6",
+            "mcp__fs__read_text_file",
+            json!({ "path": "notes.txt" }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(
+        outcomes(&response),
+        vec![false, false, false, false, false, true]
+    );
+    for (turn, id, code) in [
+        (1, "e1", "ENOENT"),
+        (2, "e2", "ENOENT"),
+        (3, "e3", "ENOENT"),
+        (4, "e4", "ENOTDIR"),
+        (5, "e5", "ENAMETOOLONG"),
+    ] {
+        let text = tool_result(&requests[turn].0, id);
+        assert!(
+            !text.contains("REFUSED") && !text.contains("could not check"),
+            "{id}: the server's error was reported as a privacy refusal: {text}"
+        );
+        assert!(text.contains(code), "{id}: {text}");
+    }
+    // The denied path in directory_tree's error never reaches the model.
+    let e5 = tool_result(&requests[5].0, "e5");
+    assert!(
+        !e5.contains("deep-denied"),
+        "the error named a denied path: {e5}"
+    );
+    assert!(
+        e5.contains("hidden by the project's privacy policy"),
+        "{e5}"
+    );
+    // A server error is not a privacy refusal, so it is not logged as one.
+    let logged: Vec<String> = audit::recent(audit::CAPACITY)
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            audit::AuditKind::BlockedFile { path, .. } => Some(path),
+            _ => None,
+        })
+        .filter(|p| p.contains("does_not_exist") || p == "notes.txt")
+        .collect();
+    assert!(logged.is_empty(), "logged as refused: {logged:?}");
+    assert_eq!(result_json(&requests, 6, "e6")["result"], NOTE_OK);
+}
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn a_listing_the_filter_cannot_parse_is_refused_and_logged() {
+    // A file name holding a newline splits its entry across two lines, so the
+    // listing filter can't tell what the second line names. It refuses the
+    // listing (fail closed) and, like every refusal, records it in the audit
+    // log the user reads in Settings › Privacy.
+    let (_dir, root) = denied_project();
+    std::fs::create_dir(root.join("odd names")).unwrap();
+    std::fs::write(root.join("odd names/two\nlines.txt"), "x").unwrap();
+    let _active = activate(&root);
+    let calls = vec![
+        (
+            "p1",
+            "mcp__fs__list_directory",
+            json!({ "path": "odd names" }),
+        ),
+        (
+            "p2",
+            "mcp__fs__list_directory_with_sizes",
+            json!({ "path": s(&root.join("odd names")) }),
+        ),
+        (
+            "p3",
+            "mcp__fs__read_text_file",
+            json!({ "path": "notes.txt" }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(outcomes(&response), vec![false, false, true]);
+    for (turn, id) in [(1, "p1"), (2, "p2")] {
+        let text = tool_result(&requests[turn].0, id);
+        assert!(
+            text.contains("could not check this listing"),
+            "{id}: {text}"
+        );
+    }
+    let blocked: Vec<(String, String)> = audit::recent(audit::CAPACITY)
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            audit::AuditKind::BlockedFile { path, via, .. } => Some((path, via)),
+            _ => None,
+        })
+        .collect();
+    for via in [
+        "mcp__fs__list_directory",
+        "mcp__fs__list_directory_with_sizes",
+    ] {
+        assert!(
+            blocked.iter().any(|(p, v)| p == "odd names" && v == via),
+            "the refused listing ({via}) is not in the audit log: {blocked:?}"
+        );
+    }
+    assert_eq!(result_json(&requests, 3, "p3")["result"], NOTE_OK);
+}
