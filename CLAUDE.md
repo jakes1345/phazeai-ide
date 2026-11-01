@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Start here.** Read [`docs/MISSION.md`](docs/MISSION.md) (what PhazeAI is, its principles, and the rules for automated runs) and [`docs/STATUS.md`](docs/STATUS.md) (what is real today, known problems, how to build and test on Linux) before changing anything. Where they disagree with the code, the code is right: fix the doc.
+
 ## Commands
 
 ```bash

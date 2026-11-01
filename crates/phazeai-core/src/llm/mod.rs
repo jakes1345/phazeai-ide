@@ -8,6 +8,7 @@ pub mod ollama_manager;
 mod openai;
 pub mod provider;
 pub mod retry;
+mod text_only;
 mod traits;
 
 pub use claude::ClaudeClient;
@@ -17,4 +18,5 @@ pub use ollama::OllamaClient;
 pub use ollama_manager::OllamaManager;
 pub use openai::OpenAIClient;
 pub use provider::{ModelInfo, ProviderConfig, ProviderId, ProviderRegistry, UsageTracker};
+pub use text_only::{text_only_reply, TextReply};
 pub use traits::*;

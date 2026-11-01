@@ -13,7 +13,7 @@ use crate::domain_state::IdeState;
 use crate::lsp_bridge::LspCommand;
 use crate::theme::{PhazeTheme, ThemeVariant};
 
-use super::Tab;
+use super::{request_quit, Tab};
 
 pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
     // Helper: a hoverable menu-bar label.
@@ -65,8 +65,9 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
                 }))
                 .separator()
                 .entry(MenuItem::new("Exit").action(move || {
-                    let _ = s4.clone();
-                    std::process::exit(0);
+                    // Same path as the window's close button, so the local-model server is
+                    // stopped and the session saved.
+                    request_quit(s4.workbench.quit_nonce);
                 }));
             show_context_menu(menu, None);
         })

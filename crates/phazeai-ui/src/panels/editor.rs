@@ -15,7 +15,9 @@ use floem::{
     ext_event::create_signal_from_channel,
     keyboard::{Key, Modifiers},
     kurbo::{Circle, Point},
-    reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    reactive::{
+        create_effect, create_memo, create_rw_signal, RwSignal, Scope, SignalGet, SignalUpdate,
+    },
     text::{Attrs, AttrsList, FamilyOwned, Stretch, Style as TextStyle, Weight},
     views::{
         canvas, container, dyn_stack,
@@ -36,6 +38,7 @@ use floem::{
     IntoView, Renderer,
 };
 
+use crate::app::ex_command::{EditorPaneHandle, SaveOutcome, TabInfo};
 use crate::lsp_bridge::DiagSeverity;
 use crate::util::safe_get;
 use lazy_static::lazy_static;
@@ -1050,6 +1053,118 @@ struct TabState {
     dirty: RwSignal<bool>,
 }
 
+impl TabState {
+    /// `dirty` is created in `owner` (the editor panel's scope), never in the caller's.
+    /// Tabs are opened from inside effects, and a signal created in an effect is disposed as
+    /// soon as that effect runs again: after that `dirty.set(true)` does nothing, the tab never
+    /// looks modified, and `:q` could quit over unsaved edits.
+    fn new(owner: Scope, path: PathBuf, name: String) -> Self {
+        Self {
+            path,
+            name,
+            dirty: owner.create_rw_signal(false),
+        }
+    }
+}
+
+/// Flag a tab as having unsaved edits. Only the false -> true change is written: floem re-runs
+/// every subscriber on each `set`, equal value or not, and the git-gutter, fold and bracket
+/// effects (a `git diff` process, a copy of the whole buffer) watch `dirty` to refresh on save.
+/// Setting it on every keystroke would re-run all of them on every keystroke.
+fn mark_modified(dirty: RwSignal<bool>) {
+    if dirty.try_get_untracked() != Some(true) {
+        dirty.set(true);
+    }
+}
+
+/// Write `tab`'s document (looked up in `docs` by path) to disk. Only on success is the tab
+/// marked saved and its crash-recovery shadow removed; on failure both stay as they were, so
+/// the edits are neither lost nor shown as saved.
+fn write_tab_to_disk(
+    tab: &TabState,
+    docs: &RefCell<HashMap<String, Rc<dyn Document>>>,
+) -> SaveOutcome {
+    let key = tab.path.to_string_lossy().to_string();
+    let content = {
+        let registry = docs.borrow();
+        let Some(doc) = registry.get(&key) else {
+            return SaveOutcome::NotLoaded;
+        };
+        doc.text().to_string()
+    };
+    if let Err(e) = std::fs::write(&tab.path, content) {
+        return SaveOutcome::Failed(e);
+    }
+    tab.dirty.set(false);
+    crate::crash_recovery::clear_recovery(&tab.path);
+    SaveOutcome::Saved
+}
+
+/// What the Vim ex bar sees of one editor pane: its tabs (name, unsaved?, active?), how to
+/// save one through `save`, and how to drop its crash-recovery shadow when it is discarded.
+fn pane_handle(
+    primary: bool,
+    tabs: RwSignal<Vec<TabState>>,
+    active_idx: RwSignal<Option<usize>>,
+    save: Rc<dyn Fn(&TabState) -> SaveOutcome>,
+) -> EditorPaneHandle {
+    EditorPaneHandle {
+        primary,
+        tabs: Rc::new(move || {
+            let active = active_idx.get_untracked();
+            tabs.get_untracked()
+                .iter()
+                .enumerate()
+                .map(|(i, t)| TabInfo {
+                    name: t.name.clone(),
+                    // A flag that cannot be read counts as unsaved: better to refuse a quit
+                    // than to drop edits.
+                    dirty: t.dirty.try_get_untracked().unwrap_or(true),
+                    active: active == Some(i),
+                })
+                .collect()
+        }),
+        save_tab: Rc::new(move |i| match tabs.get_untracked().get(i) {
+            Some(tab) => save(tab),
+            None => SaveOutcome::NotLoaded,
+        }),
+        discard_tab: Rc::new(move |i| {
+            if let Some(tab) = tabs.get_untracked().get(i) {
+                crate::crash_recovery::clear_recovery(&tab.path);
+            }
+        }),
+    }
+}
+
+/// Open `raw` as a tab, or focus the tab that already has it. Does nothing if the file is gone.
+fn open_in_tabs(
+    owner: Scope,
+    tabs: RwSignal<Vec<TabState>>,
+    active_idx: RwSignal<Option<usize>>,
+    raw: PathBuf,
+) {
+    if !raw.exists() {
+        return;
+    }
+    let p = std::fs::canonicalize(&raw).unwrap_or(raw);
+    let existing = tabs.get().iter().position(|t| t.path == p);
+    if let Some(idx) = existing {
+        active_idx.set(Some(idx));
+    } else {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".to_string());
+        let new_idx = std::cell::Cell::new(0usize);
+        tabs.update(|list| {
+            list.push(TabState::new(owner, p.clone(), name));
+            disambiguate_tab_names(list);
+            new_idx.set(list.len() - 1);
+        });
+        active_idx.set(Some(new_idx.get()));
+    }
+}
+
 // ── Editor panel ──────────────────────────────────────────────────────────────
 
 /// Full multi-tab code editor with syntect syntax highlighting.
@@ -1118,12 +1233,20 @@ pub fn editor_panel(
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
     // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
     fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
+    // `[editor] ai_completions`: while false, no completion request is made.
+    ai_completions: RwSignal<bool>,
     selected_text: RwSignal<String>,
     // Re-indexed after every save; `None` when code search is turned off.
     code_search: Option<phazeai_core::CodeSearch>,
+    // Every pane registers itself here so the Vim ex bar can read tabs and save them.
+    ex_panes: RwSignal<Vec<EditorPaneHandle>>,
+    // The main editor (not a split): `:w` / `:wq` act on its active tab.
+    is_primary_pane: bool,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
+    // Owner of every tab's `dirty` signal; see `TabState::new`.
+    let tab_scope = Scope::current();
 
     // ── Restore session tabs on first mount ──────────────────────────────────
     // Open all paths from the previous session as background tabs before the
@@ -1144,11 +1267,7 @@ pub fn editor_panel(
                 let p = p.clone();
                 tabs.update(|list| {
                     if !list.iter().any(|t| t.path == p) {
-                        list.push(TabState {
-                            path: p,
-                            name,
-                            dirty: create_rw_signal(false),
-                        });
+                        list.push(TabState::new(tab_scope, p, name));
                     }
                 });
             }
@@ -1173,10 +1292,12 @@ pub fn editor_panel(
     // wires the receiver into Floem's reactive system.
     let (fim_tx, fim_rx) = std::sync::mpsc::sync_channel::<String>(4);
     let fim_signal = create_signal_from_channel(fim_rx);
-    // Forward channel values to the shared ghost_text signal.
+    // Forward channel values to the shared ghost_text signal. A reply that
+    // lands after AI completions were turned off is dropped.
     create_effect(move |_| {
         if let Some(text) = fim_signal.get() {
-            ghost_text.set(if text.is_empty() { None } else { Some(text) });
+            let show = !text.is_empty() && ai_completions.get_untracked();
+            ghost_text.set(show.then_some(text));
         }
     });
     // Vim yank register — shared across all tabs (yy copies here, p/P paste from here).
@@ -1328,32 +1449,8 @@ pub fn editor_panel(
     // "src/foo.rs") and one opened via its absolute path resolve to the same
     // entry — otherwise dedupe by `path` fails and we get duplicate tabs.
     create_effect(move |_| {
-        let path = open_file.get();
-        if let Some(raw) = path {
-            if !raw.exists() {
-                return;
-            }
-            let p = std::fs::canonicalize(&raw).unwrap_or(raw);
-            let existing = tabs.get().iter().position(|t| t.path == p);
-            if let Some(idx) = existing {
-                active_idx.set(Some(idx));
-            } else {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "untitled".to_string());
-                let new_idx = std::cell::Cell::new(0usize);
-                tabs.update(|list| {
-                    list.push(TabState {
-                        path: p.clone(),
-                        name,
-                        dirty: create_rw_signal(false),
-                    });
-                    disambiguate_tab_names(list);
-                    new_idx.set(list.len() - 1);
-                });
-                active_idx.set(Some(new_idx.get()));
-            }
+        if let Some(raw) = open_file.get() {
+            open_in_tabs(tab_scope, tabs, active_idx, raw);
         }
     });
 
@@ -1395,65 +1492,76 @@ pub fn editor_panel(
         n
     });
 
-    // Ctrl+S save handler
+    // Writes one tab through the full save path (disk, crash-recovery cleanup, LSP didSave,
+    // organize imports, formatter, re-index) and reports what happened. Ctrl+S, auto-save and
+    // the Vim ex bar all save through here; the caller decides how to surface a failure.
     let lsp_cmd_for_save = lsp_cmd.clone();
     let code_search_for_save = code_search.clone();
-    let save_fn = Rc::new(move || {
-        let Some(idx) = active_idx.get() else { return };
-        let tab_list = tabs.get();
-        let Some(tab) = tab_list.get(idx) else { return };
-        let key = tab.path.to_string_lossy().to_string();
-        let registry = docs_for_save.borrow();
-        let Some(doc) = registry.get(&key) else {
-            return;
-        };
-        let content = doc.text().to_string();
-        let write_result = std::fs::write(&tab.path, content);
-        if let Err(e) = &write_result {
-            // Don't lose work silently: keep the tab modified and say why.
-            crate::notify::error_dialog(
-                "Save failed",
-                crate::notify::save_failure_message(&tab.path, e),
-            );
+    let save_tab = Rc::new(move |tab: &TabState| -> SaveOutcome {
+        let outcome = write_tab_to_disk(tab, &docs_for_save);
+        if !matches!(outcome, SaveOutcome::Saved) {
+            // The tab stays modified; nothing below ran.
+            return outcome;
         }
-        if write_result.is_ok() {
-            tab.dirty.set(false);
-            crate::crash_recovery::clear_recovery(&tab.path);
-            // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
-            // doesn't need it, but gopls, pylsp, etc. do) get the save notification.
-            let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::SaveFile {
+        // Send textDocument/didSave so LSP servers that rely on it (e.g. rust-analyzer
+        // doesn't need it, but gopls, pylsp, etc. do) get the save notification.
+        let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::SaveFile {
+            path: tab.path.clone(),
+        });
+        // Organize imports if enabled
+        if organize_imports_on_save.get_untracked() {
+            let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::OrganizeImports {
                 path: tab.path.clone(),
             });
-            // Organize imports if enabled
-            if organize_imports_on_save.get_untracked() {
-                let _ = lsp_cmd_for_save.send(crate::lsp_bridge::LspCommand::OrganizeImports {
-                    path: tab.path.clone(),
-                });
-            }
-            // Run formatter in background — file is already saved to disk
-            let path = tab.path.clone();
-            let code_search = code_search_for_save.clone();
-            std::thread::spawn(move || {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let formatter: Option<(&str, Vec<String>)> = match ext {
-                    "rs" => Some(("rustfmt", vec![path.to_string_lossy().to_string()])),
-                    "js" | "ts" | "jsx" | "tsx" | "json" => Some((
-                        "prettier",
-                        vec!["--write".to_string(), path.to_string_lossy().to_string()],
-                    )),
-                    "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
-                    _ => None,
-                };
-                if let Some((cmd, args)) = formatter {
-                    let _ = phazeai_core::process::std_command(cmd).args(&args).status();
-                }
-                // Index the file as it ended up on disk, after any formatting.
-                if let Some(search) = &code_search {
-                    crate::code_search::refresh_saved_file(search, &path);
-                }
-            });
         }
+        // Run formatter in background — file is already saved to disk
+        let path = tab.path.clone();
+        let code_search = code_search_for_save.clone();
+        std::thread::spawn(move || {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let formatter: Option<(&str, Vec<String>)> = match ext {
+                "rs" => Some(("rustfmt", vec![path.to_string_lossy().to_string()])),
+                "js" | "ts" | "jsx" | "tsx" | "json" => Some((
+                    "prettier",
+                    vec!["--write".to_string(), path.to_string_lossy().to_string()],
+                )),
+                "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
+                _ => None,
+            };
+            if let Some((cmd, args)) = formatter {
+                let _ = phazeai_core::process::std_command(cmd).args(&args).status();
+            }
+            // Index the file as it ended up on disk, after any formatting.
+            if let Some(search) = &code_search {
+                crate::code_search::refresh_saved_file(search, &path);
+            }
+        });
+        SaveOutcome::Saved
     });
+
+    // Ctrl+S save handler: the active tab.
+    let save_fn = {
+        let save_tab = save_tab.clone();
+        Rc::new(move || {
+            let Some(idx) = active_idx.get() else { return };
+            let tab_list = tabs.get();
+            let Some(tab) = tab_list.get(idx) else { return };
+            if let SaveOutcome::Failed(e) = save_tab(tab) {
+                // Don't lose work silently: keep the tab modified and say why.
+                crate::notify::error_dialog(
+                    "Save failed",
+                    crate::notify::save_failure_message(&tab.path, &e),
+                );
+            }
+        })
+    };
+
+    // Let the Vim ex bar (`:w`, `:wq`, `:q`, ...) see this pane's tabs and save them through
+    // `save_tab`, the same code Ctrl+S runs.
+    {
+        let handle = pane_handle(is_primary_pane, tabs, active_idx, save_tab.clone());
+        ex_panes.update(|panes| panes.push(handle));
+    }
     let save_fn_bar = save_fn.clone();
     let save_fn_key = save_fn.clone();
     let save_fn_auto = save_fn.clone();
@@ -2647,7 +2755,7 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -2696,7 +2804,7 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -2746,7 +2854,7 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
             // ── Delete line (Ctrl+Shift+K) ──────────────────────────────
@@ -2790,7 +2898,7 @@ pub fn editor_panel(
                         None,
                         None,
                     ));
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -3300,7 +3408,7 @@ pub fn editor_panel(
                                     &ch.to_string(),
                                     EditType::InsertChars,
                                 );
-                                dirty.set(true);
+                                mark_modified(dirty);
                             }
                             cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
@@ -3414,7 +3522,7 @@ pub fn editor_panel(
                                     "",
                                     EditType::Delete,
                                 );
-                                dirty.set(true);
+                                mark_modified(dirty);
                             }
                             cur_offset.min(doc_for_vim.rope_text().len().saturating_sub(1))
                         }
@@ -3434,7 +3542,7 @@ pub fn editor_panel(
                                     "",
                                     EditType::Delete,
                                 );
-                                dirty.set(true);
+                                mark_modified(dirty);
                             }
                             vim_visual_anchor.set(None);
                             start.min(doc_for_vim.rope_text().len())
@@ -3461,7 +3569,7 @@ pub fn editor_panel(
                                     "",
                                     EditType::Delete,
                                 );
-                                dirty.set(true);
+                                mark_modified(dirty);
                             }
                             vim_visual_anchor.set(None);
                             start.min(doc_for_vim.rope_text().len())
@@ -3636,7 +3744,7 @@ pub fn editor_panel(
                                 &text,
                                 EditType::InsertChars,
                             );
-                            dirty.set(true);
+                            mark_modified(dirty);
                         }
                     }
                     if lower_n > 0 && lower_n != last_lower.get_untracked() {
@@ -3662,7 +3770,7 @@ pub fn editor_panel(
                                 &text,
                                 EditType::InsertChars,
                             );
-                            dirty.set(true);
+                            mark_modified(dirty);
                         }
                     }
                 });
@@ -3709,7 +3817,7 @@ pub fn editor_panel(
                         " ",
                         EditType::Delete,
                     );
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -3767,7 +3875,7 @@ pub fn editor_panel(
                         &sorted,
                         EditType::InsertChars,
                     );
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -3821,7 +3929,7 @@ pub fn editor_panel(
                         &titled,
                         EditType::InsertChars,
                     );
-                    dirty.set(true);
+                    mark_modified(dirty);
                 });
             }
 
@@ -3845,7 +3953,7 @@ pub fn editor_panel(
                                 &text,
                                 EditType::InsertChars,
                             );
-                            dirty.set(true);
+                            mark_modified(dirty);
                         }
                     });
                 }
@@ -4004,8 +4112,12 @@ pub fn editor_panel(
                         return;
                     }
                     let offset = cursor_sig.get().offset();
-                    // Denied files never get ghost-text completions (nothing is sent).
-                    if phazeai_core::privacy::active().is_denied(&fim_file) {
+                    // Nothing is sent while AI completions are off or for a denied file.
+                    if !phazeai_core::fim::should_request_fim(
+                        ai_completions.get_untracked(),
+                        &phazeai_core::privacy::active(),
+                        &fim_file,
+                    ) {
                         return;
                     }
                     let fim_file = fim_file.clone();
@@ -4045,6 +4157,15 @@ pub fn editor_panel(
                         }
 
                         let settings = Settings::load();
+                        // Checked again as the request leaves: AI completions
+                        // may have been turned off during the wait.
+                        if !phazeai_core::fim::should_request_fim(
+                            settings.editor.ai_completions,
+                            &phazeai_core::privacy::active(),
+                            &fim_file,
+                        ) {
+                            return;
+                        }
                         let rt = match tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()
@@ -4320,7 +4441,7 @@ pub fn editor_panel(
                     let rec_gen = Arc::clone(&recovery_gen);
                     let rec_tx = recovery_tx.clone();
                     move |_| {
-                        dirty.set(true);
+                        mark_modified(dirty);
                         // Notify LSP server of content change (textDocument/didChange).
                         let text = doc_for_lsp.text().to_string();
                         let ver = lsp_ver.get();
@@ -4365,8 +4486,14 @@ pub fn editor_panel(
                                 }
                             }
                         }
-                        // FIM inline completion: debounce 600ms — send prefix/suffix to worker.
-                        {
+                        // FIM inline completion: debounce 600ms — send prefix/suffix to the
+                        // worker, which checks again right before sending. Nothing is queued
+                        // while AI completions are off or for a denied file.
+                        if phazeai_core::fim::should_request_fim(
+                            ai_completions.get_untracked(),
+                            &phazeai_core::privacy::active(),
+                            &fim_path,
+                        ) {
                             let gen = fim_gen.fetch_add(1, Ordering::Relaxed) + 1;
                             let gen_ref = Arc::clone(&fim_gen);
                             let tx = fim_tx_tab.clone();
@@ -4385,10 +4512,6 @@ pub fn editor_panel(
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("text")
                                     .to_string();
-                                // Denied files never get completions (nothing is sent).
-                                if phazeai_core::privacy::active().is_denied(&path2) {
-                                    return;
-                                }
                                 let _ = tx.try_send((path2, prefix, suffix, lang));
                             });
                         }
@@ -6138,5 +6261,399 @@ pub fn read_editorconfig(
         indent_size,
         use_tabs,
         end_of_line,
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    /// The editor panel's open-file effect: opens whatever `open` points at.
+    fn wire(
+        open: RwSignal<Option<PathBuf>>,
+        tabs: RwSignal<Vec<TabState>>,
+        active: RwSignal<Option<usize>>,
+    ) {
+        let owner = Scope::new();
+        create_effect(move |_| {
+            if let Some(raw) = open.get() {
+                open_in_tabs(owner, tabs, active, raw);
+            }
+        });
+    }
+
+    fn file(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, "fn main() {}\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn a_tab_opened_from_the_effect_can_be_marked_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = create_rw_signal(None);
+        let tabs = create_rw_signal(Vec::new());
+        let active = create_rw_signal(None);
+        wire(open, tabs, active);
+
+        open.set(Some(file(&dir, "a.rs")));
+
+        let tab = tabs.get_untracked()[0].clone();
+        assert_eq!(tab.dirty.try_get_untracked(), Some(false));
+        tab.dirty.set(true);
+        assert_eq!(
+            tab.dirty.try_get_untracked(),
+            Some(true),
+            "an edit must be able to mark the tab modified"
+        );
+    }
+
+    #[test]
+    fn modified_marks_survive_opening_more_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = create_rw_signal(None);
+        let tabs = create_rw_signal(Vec::new());
+        let active = create_rw_signal(None);
+        wire(open, tabs, active);
+
+        open.set(Some(file(&dir, "a.rs")));
+        tabs.get_untracked()[0].dirty.set(true);
+        open.set(Some(file(&dir, "b.rs")));
+        open.set(Some(file(&dir, "c.rs")));
+
+        let flags: Vec<Option<bool>> = tabs
+            .get_untracked()
+            .iter()
+            .map(|t| t.dirty.try_get_untracked())
+            .collect();
+        assert_eq!(flags, vec![Some(true), Some(false), Some(false)]);
+        assert_eq!(active.get_untracked(), Some(2));
+    }
+
+    #[test]
+    fn reopening_an_open_file_focuses_its_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (file(&dir, "a.rs"), file(&dir, "b.rs"));
+        let open = create_rw_signal(None);
+        let tabs = create_rw_signal(Vec::new());
+        let active = create_rw_signal(None);
+        wire(open, tabs, active);
+
+        open.set(Some(a.clone()));
+        open.set(Some(b));
+        open.set(Some(a));
+
+        assert_eq!(tabs.get_untracked().len(), 2);
+        assert_eq!(active.get_untracked(), Some(0));
+    }
+
+    #[test]
+    fn a_missing_file_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = create_rw_signal(None);
+        let tabs = create_rw_signal(Vec::new());
+        let active = create_rw_signal(None);
+        wire(open, tabs, active);
+
+        open.set(Some(dir.path().join("gone.rs")));
+
+        assert!(tabs.get_untracked().is_empty());
+        assert_eq!(active.get_untracked(), None);
+    }
+
+    // ── open_in_tabs, called directly (no effect around it to paper over a missing step) ──
+
+    #[test]
+    fn a_newly_opened_tab_becomes_the_active_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tabs, active) = (create_rw_signal(Vec::new()), create_rw_signal(None));
+        let owner = Scope::new();
+
+        open_in_tabs(owner, tabs, active, file(&dir, "a.rs"));
+        assert_eq!(active.get_untracked(), Some(0));
+        open_in_tabs(owner, tabs, active, file(&dir, "b.rs"));
+        assert_eq!(active.get_untracked(), Some(1));
+        assert_eq!(tabs.get_untracked().len(), 2);
+    }
+
+    #[test]
+    fn one_file_reached_by_two_spellings_is_one_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let a = file(&dir, "a.rs");
+        let roundabout = dir.path().join("sub").join("..").join("a.rs");
+        let (tabs, active) = (create_rw_signal(Vec::new()), create_rw_signal(None));
+        let owner = Scope::new();
+
+        open_in_tabs(owner, tabs, active, a.clone());
+        open_in_tabs(owner, tabs, active, roundabout);
+
+        let list = tabs.get_untracked();
+        assert_eq!(list.len(), 1, "duplicate tab for the same file");
+        assert_eq!(list[0].path, std::fs::canonicalize(a).unwrap());
+    }
+
+    #[test]
+    fn tabs_of_same_named_files_are_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        for d in ["one", "two"] {
+            std::fs::create_dir(dir.path().join(d)).unwrap();
+        }
+        let (tabs, active) = (create_rw_signal(Vec::new()), create_rw_signal(None));
+        let owner = Scope::new();
+
+        open_in_tabs(owner, tabs, active, file(&dir, "lone.rs"));
+        assert_eq!(tabs.get_untracked()[0].name, "lone.rs");
+        for d in ["one", "two"] {
+            let p = dir.path().join(d).join("mod.rs");
+            std::fs::write(&p, "").unwrap();
+            open_in_tabs(owner, tabs, active, p);
+        }
+
+        let names: Vec<String> = tabs
+            .get_untracked()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(names, ["lone.rs", "one/mod.rs", "two/mod.rs"]);
+    }
+
+    // ── mark_modified ───────────────────────────────────────────────────────
+
+    #[test]
+    fn marking_a_modified_tab_again_wakes_nobody() {
+        // Every keystroke marks the tab; the effects that watch `dirty` (git gutter, folds,
+        // bracket pairs) must only run when the flag really changes.
+        let dirty = create_rw_signal(false);
+        let runs = Rc::new(std::cell::Cell::new(0u32));
+        {
+            let runs = runs.clone();
+            create_effect(move |_| {
+                dirty.get();
+                runs.set(runs.get() + 1);
+            });
+        }
+        assert_eq!(runs.get(), 1, "the effect's first run");
+
+        mark_modified(dirty);
+        assert_eq!(runs.get(), 2, "false -> true is a change");
+        for _ in 0..5 {
+            mark_modified(dirty);
+        }
+        assert_eq!(runs.get(), 2, "typing more must not re-run the effect");
+        assert!(dirty.get_untracked());
+
+        dirty.set(false); // a save
+        assert_eq!(runs.get(), 3);
+        mark_modified(dirty);
+        assert_eq!(
+            runs.get(),
+            4,
+            "the next edit after a save is a change again"
+        );
+    }
+
+    #[test]
+    fn marking_a_disposed_flag_does_not_panic() {
+        let scope = Scope::new();
+        let dirty = scope.create_rw_signal(false);
+        scope.dispose();
+        mark_modified(dirty);
+        assert_eq!(dirty.try_get_untracked(), None);
+    }
+
+    // ── write_tab_to_disk ───────────────────────────────────────────────────
+
+    type Registry = RefCell<HashMap<String, Rc<dyn Document>>>;
+
+    fn registry_with(path: &std::path::Path, text: &str) -> Registry {
+        let doc: Rc<dyn Document> = Rc::new(
+            floem::views::editor::text_document::TextDocument::new(Scope::new(), text),
+        );
+        RefCell::new(HashMap::from([(path.to_string_lossy().to_string(), doc)]))
+    }
+
+    fn modified_tab(path: &std::path::Path) -> TabState {
+        let tab = TabState::new(Scope::new(), path.to_path_buf(), "t".into());
+        tab.dirty.set(true);
+        tab
+    }
+
+    #[test]
+    fn a_successful_write_saves_the_text_marks_the_tab_clean_and_drops_the_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let _recovery = crate::crash_recovery::test_support::use_dir(&dir.path().join("rec"));
+        let path = file(&dir, "a.rs");
+        crate::crash_recovery::write_recovery(&path, "old unsaved text");
+        let tab = modified_tab(&path);
+        let docs = registry_with(&path, "fn edited() {}\n");
+
+        let outcome = write_tab_to_disk(&tab, &docs);
+
+        assert!(matches!(outcome, SaveOutcome::Saved), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn edited() {}\n");
+        assert_eq!(tab.dirty.try_get_untracked(), Some(false));
+        assert!(!crate::crash_recovery::test_support::shadow_exists(&path));
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_tab_modified_and_keeps_its_recovery_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let _recovery = crate::crash_recovery::test_support::use_dir(&dir.path().join("rec"));
+        // A directory cannot be written as a file, whoever runs the test.
+        let path = dir.path().join("a_directory");
+        std::fs::create_dir(&path).unwrap();
+        crate::crash_recovery::write_recovery(&path, "unsaved text");
+        let tab = modified_tab(&path);
+        let docs = registry_with(&path, "edited");
+
+        let outcome = write_tab_to_disk(&tab, &docs);
+
+        assert!(matches!(outcome, SaveOutcome::Failed(_)), "{outcome:?}");
+        assert_eq!(
+            tab.dirty.try_get_untracked(),
+            Some(true),
+            "a tab that could not be saved must still show as unsaved"
+        );
+        assert!(
+            crate::crash_recovery::test_support::shadow_exists(&path),
+            "the shadow is the only other copy of the edits"
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_document_is_not_loaded_is_not_reported_as_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let _recovery = crate::crash_recovery::test_support::use_dir(&dir.path().join("rec"));
+        let path = file(&dir, "a.rs");
+        let tab = modified_tab(&path);
+        let docs: Registry = RefCell::new(HashMap::new());
+
+        let outcome = write_tab_to_disk(&tab, &docs);
+
+        assert!(matches!(outcome, SaveOutcome::NotLoaded), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn main() {}\n");
+        assert_eq!(tab.dirty.try_get_untracked(), Some(true));
+    }
+
+    // ── pane_handle: what the ex bar sees of a pane ─────────────────────────
+
+    /// Tabs `a.rs`, `b.rs`, `c.rs` in `dir`; `dirty[i]` says whether tab i starts modified.
+    fn three_tabs(dir: &tempfile::TempDir, dirty: [bool; 3]) -> RwSignal<Vec<TabState>> {
+        let scope = Scope::new();
+        let list = ["a.rs", "b.rs", "c.rs"]
+            .iter()
+            .zip(dirty)
+            .map(|(name, d)| {
+                let tab = TabState::new(scope, dir.path().join(name), (*name).to_string());
+                tab.dirty.set(d);
+                tab
+            })
+            .collect();
+        create_rw_signal(list)
+    }
+
+    fn never_saves() -> Rc<dyn Fn(&TabState) -> SaveOutcome> {
+        Rc::new(|_| panic!("nothing should be saved"))
+    }
+
+    #[test]
+    fn the_handle_reports_each_tab_with_its_own_dirty_and_active_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = three_tabs(&dir, [true, false, true]);
+        let active = create_rw_signal(Some(1));
+        let handle = pane_handle(true, tabs, active, never_saves());
+
+        let info = (handle.tabs)();
+
+        let got: Vec<(&str, bool, bool)> = info
+            .iter()
+            .map(|t| (t.name.as_str(), t.dirty, t.active))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.rs", true, false),
+                ("b.rs", false, true),
+                ("c.rs", true, false)
+            ]
+        );
+        assert!(handle.primary);
+
+        active.set(None);
+        assert!((handle.tabs)().iter().all(|t| !t.active), "no active tab");
+        active.set(Some(2));
+        let now: Vec<bool> = (handle.tabs)().iter().map(|t| t.active).collect();
+        assert_eq!(now, [false, false, true], "follows the active tab");
+    }
+
+    #[test]
+    fn a_dirty_flag_that_cannot_be_read_counts_as_unsaved() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = three_tabs(&dir, [false, false, false]);
+        // Tab 1's flag is owned by a scope that is gone, as for a tab built inside an effect.
+        let gone = Scope::new();
+        tabs.update(|list| list[1].dirty = gone.create_rw_signal(false));
+        gone.dispose();
+        let handle = pane_handle(true, tabs, create_rw_signal(None), never_saves());
+
+        let dirty: Vec<bool> = (handle.tabs)().iter().map(|t| t.dirty).collect();
+
+        assert_eq!(dirty, [false, true, false]);
+    }
+
+    #[test]
+    fn saving_a_tab_through_the_handle_saves_that_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = three_tabs(&dir, [false, false, false]);
+        let saved: Rc<RefCell<Vec<String>>> = Rc::default();
+        let save: Rc<dyn Fn(&TabState) -> SaveOutcome> = {
+            let saved = saved.clone();
+            Rc::new(move |tab| {
+                saved.borrow_mut().push(tab.name.clone());
+                SaveOutcome::Saved
+            })
+        };
+        let handle = pane_handle(false, tabs, create_rw_signal(Some(0)), save);
+
+        assert!(matches!((handle.save_tab)(2), SaveOutcome::Saved));
+        assert!(matches!((handle.save_tab)(1), SaveOutcome::Saved));
+
+        assert_eq!(*saved.borrow(), ["c.rs", "b.rs"]);
+        assert!(!handle.primary);
+    }
+
+    #[test]
+    fn saving_a_tab_that_is_gone_reports_it_instead_of_saving_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let tabs = three_tabs(&dir, [true, true, true]);
+        let handle = pane_handle(true, tabs, create_rw_signal(Some(0)), never_saves());
+
+        assert!(matches!((handle.save_tab)(3), SaveOutcome::NotLoaded));
+    }
+
+    #[test]
+    fn discarding_a_tab_drops_only_its_recovery_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let _recovery = crate::crash_recovery::test_support::use_dir(&dir.path().join("rec"));
+        let tabs = three_tabs(&dir, [true, true, true]);
+        let paths: Vec<PathBuf> = tabs
+            .get_untracked()
+            .iter()
+            .map(|t| t.path.clone())
+            .collect();
+        for p in &paths {
+            crate::crash_recovery::write_recovery(p, "unsaved");
+        }
+        let handle = pane_handle(true, tabs, create_rw_signal(None), never_saves());
+
+        (handle.discard_tab)(1);
+        (handle.discard_tab)(7); // a tab that is gone: nothing to do, nothing to panic about
+
+        let exists: Vec<bool> = paths
+            .iter()
+            .map(|p| crate::crash_recovery::test_support::shadow_exists(p))
+            .collect();
+        assert_eq!(exists, [true, false, true]);
     }
 }

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
+pub mod ai_helpers;
 pub mod app;
 pub mod code_search;
 pub mod commands;
