@@ -287,14 +287,14 @@ pub enum PreviewLine {
 }
 
 /// Build the preview shown in the approval prompt.
-pub fn approval_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
+pub async fn approval_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
     match name {
         "bash" => str_param(params, "command")
             .unwrap_or("")
             .lines()
             .map(|l| PreviewLine::Command(l.to_string()))
             .collect(),
-        "edit_file" | "write_file" => file_change_preview(name, params),
+        "edit_file" | "write_file" => file_change_preview(name, params).await,
         _ => {
             let label = call_label(name, params);
             if label.is_empty() {
@@ -306,45 +306,42 @@ pub fn approval_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
     }
 }
 
-fn file_change_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
-    let Some(path) = str_param(params, "path") else {
-        return vec![PreviewLine::Note("missing `path` parameter".into())];
-    };
-    let resolved = match phazeai_core::tools::sandbox::resolve_within_workspace(name, path) {
-        Ok(p) => p,
-        Err(e) => return vec![PreviewLine::Note(format!("will be refused: {e}"))],
-    };
-    let existing = std::fs::read_to_string(&resolved).ok();
-    let (before, after) = if name == "write_file" {
-        let after = str_param(params, "content").unwrap_or("").to_string();
-        (existing.clone().unwrap_or_default(), after)
+/// The change `edit_file` or `write_file` will make, worked out by the tool
+/// itself ([`Tool::plan_write`]): the same path resolution, privacy and
+/// protected-file checks, and computation as when it runs, so the preview is
+/// what the tool writes, and a call the tool will refuse shows its reason.
+async fn file_change_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
+    use phazeai_core::tools::{EditTool, Tool, WriteFileTool};
+    let planned = if name == "write_file" {
+        WriteFileTool.plan_write(params).await
     } else {
-        let Some(before) = existing.clone() else {
-            return vec![PreviewLine::Note(format!("{path} does not exist"))];
-        };
-        // The edit tool's own computation (`replace_all`, `context`, its
-        // refusals), so the preview is what the tool will write.
-        let after = match phazeai_core::tools::apply_edit(&before, params) {
-            Ok(edited) => edited.content,
-            Err(e) => {
-                let why = match e {
-                    phazeai_core::PhazeError::Tool { message, .. } => message,
-                    other => other.to_string(),
-                };
-                return vec![PreviewLine::Note(format!("the edit will fail: {why}"))];
-            }
-        };
-        (before, after)
+        EditTool.plan_write(params).await
+    };
+    let plan = match planned {
+        Some(Ok(plan)) => plan,
+        Some(Err(e)) => {
+            let why = match e {
+                phazeai_core::PhazeError::Tool { message, .. } => message,
+                other => other.to_string(),
+            };
+            let what = if name == "write_file" {
+                "write"
+            } else {
+                "edit"
+            };
+            return vec![PreviewLine::Note(format!("the {what} will fail: {why}"))];
+        }
+        None => return vec![PreviewLine::Note(format!("{name} has no preview"))],
     };
 
     let mut out = Vec::new();
-    if existing.is_none() {
+    if plan.creates_file() {
         out.push(PreviewLine::Note(format!(
             "new file, {} lines",
-            after.lines().count()
+            plan.after().lines().count()
         )));
     }
-    out.extend(unified_diff(&before, &after, 2));
+    out.extend(unified_diff(&plan.before(), plan.after(), 2));
     if out.is_empty() {
         out.push(PreviewLine::Note("no changes".into()));
     }
@@ -510,16 +507,16 @@ mod tests {
         assert!(unified_diff("same\n", "same\n", 2).is_empty());
     }
 
-    #[test]
-    fn bash_preview_is_the_command() {
+    #[tokio::test]
+    async fn bash_preview_is_the_command() {
         assert_eq!(
-            approval_preview("bash", &json!({"command": "ls -la"})),
+            approval_preview("bash", &json!({"command": "ls -la"})).await,
             vec![PreviewLine::Command("ls -la".into())]
         );
     }
 
-    #[test]
-    fn edit_preview_reads_the_file() {
+    #[tokio::test]
+    async fn edit_preview_reads_the_file() {
         let dir = std::env::temp_dir().join(format!("phazeai-prev-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("f.txt");
@@ -528,13 +525,15 @@ mod tests {
         let lines = approval_preview(
             "edit_file",
             &json!({"path": path, "old_text": "two", "new_text": "2"}),
-        );
+        )
+        .await;
         assert!(lines.contains(&PreviewLine::Remove("two".into())));
         assert!(lines.contains(&PreviewLine::Add("2".into())));
         let lines = approval_preview(
             "edit_file",
             &json!({"path": path, "old_text": "zzz", "new_text": "2"}),
-        );
+        )
+        .await;
         assert!(matches!(&lines[0], PreviewLine::Note(n) if n.contains("not found")));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -551,7 +550,7 @@ mod tests {
         // Three occurrences; the context picks the second.
         let edit = json!({"path": path, "old_text": "todo!()", "new_text": "42",
                           "context": "fn b() { todo!() }"});
-        let preview = approval_preview("edit_file", &edit);
+        let preview = approval_preview("edit_file", &edit).await;
         EditTool.execute(edit).await.unwrap();
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
@@ -567,13 +566,58 @@ mod tests {
         // Two occurrences and no way to choose: the tool refuses, and the
         // preview says so instead of showing a change.
         let ambiguous = json!({"path": path, "old_text": "todo!()", "new_text": "42"});
-        let preview = approval_preview("edit_file", &ambiguous);
+        let preview = approval_preview("edit_file", &ambiguous).await;
         assert!(
             matches!(preview.as_slice(), [PreviewLine::Note(n)] if n.contains("matches 2 times")),
             "{preview:?}"
         );
         assert!(EditTool.execute(ambiguous).await.is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+    }
+
+    #[tokio::test]
+    async fn write_preview_over_a_file_that_is_not_utf8_is_not_a_new_file() {
+        use phazeai_core::tools::{Tool, WriteFileTool};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("data.bin");
+        std::fs::write(&file, b"old\xff\n").unwrap();
+        let call = json!({"path": file.display().to_string(), "content": "new\n"});
+
+        let preview = approval_preview("write_file", &call).await;
+        assert!(
+            !preview
+                .iter()
+                .any(|l| matches!(l, PreviewLine::Note(n) if n.starts_with("new file"))),
+            "the file exists and will be overwritten: {preview:?}"
+        );
+        assert!(
+            preview.contains(&PreviewLine::Remove("old\u{fffd}".into())),
+            "{preview:?}"
+        );
+        assert!(
+            preview.contains(&PreviewLine::Add("new".into())),
+            "{preview:?}"
+        );
+        WriteFileTool.execute(call).await.unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_preview_shows_the_refusal_for_a_dangling_link() {
+        use phazeai_core::tools::{Tool, WriteFileTool};
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(dir.path().join("missing.txt"), &link).unwrap();
+        let call = json!({"path": link.display().to_string(), "content": "x\n"});
+
+        let preview = approval_preview("write_file", &call).await;
+        assert!(
+            matches!(preview.as_slice(),
+                [PreviewLine::Note(n)] if n.starts_with("the write will fail") && n.contains("symbolic link")),
+            "the tool refuses this write, so the preview must not offer a new file: {preview:?}"
+        );
+        assert!(WriteFileTool.execute(call).await.is_err());
     }
 
     #[test]

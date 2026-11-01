@@ -95,7 +95,7 @@ fn build_approval_fn(
                 return true;
             }
 
-            let preview = approval_preview(&name, &params);
+            let preview = approval_preview(&name, &params).await;
             let (tx, rx) = oneshot::channel();
             let request = ApprovalRequest {
                 name: name.clone(),
