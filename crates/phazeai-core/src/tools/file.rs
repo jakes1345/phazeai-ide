@@ -278,9 +278,31 @@ impl FileWrite {
 /// again when it is committed.
 pub(crate) fn writable_target(tool: &str, path: &str) -> Result<PathBuf, PhazeError> {
     let target = sandbox::resolve_target_path(tool, path)?;
+    refuse_dangling_link(tool, path, &target)?;
     crate::privacy::tool_check(tool, &target, path)?;
     crate::privacy::tool_check_protected(tool, &target, path)?;
     Ok(target)
+}
+
+/// A symbolic link whose destination does not exist. Writing there would
+/// have to follow the link to a file nobody reviewed (possibly outside the
+/// workspace), and the exclusive create used for new files fails on it, so
+/// it is refused up front with the real reason.
+fn refuse_dangling_link(tool: &str, path: &str, target: &Path) -> Result<(), PhazeError> {
+    let is_link = std::fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link || std::fs::metadata(target).is_ok() {
+        return Ok(());
+    }
+    let points_to = std::fs::read_link(target)
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|_| "an unreadable destination".into());
+    Err(PhazeError::tool(
+        tool,
+        format!(
+            "'{path}' is a symbolic link to '{points_to}', which does not exist; nothing \
+             was written. Write to the file the link should point to instead."
+        ),
+    ))
 }
 
 /// The bytes of the file at `target`, or `None` when there is none.

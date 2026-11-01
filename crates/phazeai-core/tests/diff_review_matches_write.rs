@@ -429,3 +429,41 @@ async fn every_write_that_changes_a_file_is_reviewed_first() {
     assert!(ok, "{result}");
     assert_eq!(read(&same), "same\n");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_through_a_dangling_link_is_refused_with_the_real_reason() {
+    // The link's destination does not exist, inside the workspace or out of
+    // it. Nothing may be shown as "a new file" and then fail, and nothing may
+    // be created through the link.
+    let dir = project();
+    let outside = tempfile::tempdir().unwrap();
+    for dest in [
+        dir.path().join("config/local.toml"),
+        outside.path().join("gone.txt"),
+    ] {
+        let link = dir.path().join(format!(
+            "link-{}",
+            dest.file_name().unwrap().to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(&dest, &link).unwrap();
+        let (shown, ok, result) = run(
+            "write_file",
+            at(&link, json!({"content": "hello\n"})),
+            true,
+            || {},
+        )
+        .await;
+        assert!(shown.is_empty(), "a diff was offered: {shown:?}");
+        assert!(!ok, "{result}");
+        assert!(
+            result.contains("symbolic link") && result.contains("does not exist"),
+            "{result}"
+        );
+        assert!(
+            !dest.exists(),
+            "created through the link: {}",
+            dest.display()
+        );
+    }
+}

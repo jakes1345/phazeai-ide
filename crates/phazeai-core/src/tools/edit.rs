@@ -120,21 +120,7 @@ impl<'a> EditRequest<'a> {
         } else if match_count == 1 {
             content.replacen(old_text, new_text, 1)
         } else if let Some(ctx) = self.context {
-            // Find the occurrence of old_text closest to the context region
-            let ctx_offset = content.find(ctx).ok_or_else(|| {
-                PhazeError::tool(
-                    TOOL,
-                    "Provided 'context' string was not found in the file. Please provide an exact match of surrounding code.",
-                )
-            })?;
-            let best_offset = content
-                .match_indices(old_text)
-                .min_by_key(|(idx, _)| {
-                    let idx = *idx;
-                    ctx_offset.abs_diff(idx)
-                })
-                .map(|(idx, _)| idx)
-                .ok_or_else(|| PhazeError::tool(TOOL, "old_text not found"))?;
+            let best_offset = occurrence_in_context(content, old_text, ctx)?;
             format!(
                 "{}{}{}",
                 &content[..best_offset],
@@ -180,4 +166,103 @@ async fn plan_edit(params: &Value) -> Result<FileWrite, PhazeError> {
         edited.content,
         result,
     ))
+}
+
+/// Where to apply an edit whose `old_text` occurs several times, given the
+/// model's `context` (surrounding code): the one occurrence that lies inside
+/// a place where the context appears. If the context holds no occurrence
+/// (it is the code next to it), the occurrence nearest the context's single
+/// appearance is used. Anything else is ambiguous and refused, so the model
+/// gives more surrounding code instead of the edit landing on a line it did
+/// not name.
+fn occurrence_in_context(content: &str, old_text: &str, ctx: &str) -> Result<usize, PhazeError> {
+    let places: Vec<usize> = content.match_indices(ctx).map(|(i, _)| i).collect();
+    if places.is_empty() {
+        return Err(PhazeError::tool(
+            TOOL,
+            "Provided 'context' string was not found in the file. Please provide an exact match of surrounding code.",
+        ));
+    }
+    let occurrences: Vec<usize> = content.match_indices(old_text).map(|(i, _)| i).collect();
+    let inside: Vec<usize> = occurrences
+        .iter()
+        .copied()
+        .filter(|&o| {
+            places
+                .iter()
+                .any(|&p| o >= p && o + old_text.len() <= p + ctx.len())
+        })
+        .collect();
+    match (inside.as_slice(), places.as_slice()) {
+        ([one], _) => Ok(*one),
+        ([], [place]) => occurrences
+            .iter()
+            .copied()
+            .min_by_key(|&o| o.abs_diff(*place))
+            .ok_or_else(|| PhazeError::tool(TOOL, "old_text not found")),
+        ([], _) => Err(PhazeError::tool(
+            TOOL,
+            format!(
+                "'context' appears {} times in the file and contains old_text in none of them. \
+                 Give more surrounding code, including old_text, so it names one place.",
+                places.len()
+            ),
+        )),
+        (several, _) => Err(PhazeError::tool(
+            TOOL,
+            format!(
+                "old_text appears {} times inside the given 'context'. Give a context that \
+                 contains it once.",
+                several.len()
+            ),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::apply_edit;
+    use serde_json::json;
+
+    fn edit(content: &str, old: &str, ctx: &str) -> Result<String, String> {
+        apply_edit(
+            content,
+            &json!({ "path": "f", "old_text": old, "new_text": "Y", "context": ctx }),
+        )
+        .map(|e| e.content)
+        .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn the_occurrence_inside_the_context_is_edited_even_when_another_starts_nearer() {
+        // The first `x` starts 2 bytes before the context; the second is inside it.
+        assert_eq!(
+            edit("aaaaa x\nc = x\n", "x", "c = x").unwrap(),
+            "aaaaa x\nc = Y\n"
+        );
+    }
+
+    #[test]
+    fn a_context_next_to_the_occurrence_picks_the_nearest_one() {
+        let content = "x = 1\nfn a() {}\nfn b() {\nx = 1\n}\n";
+        assert_eq!(
+            edit(content, "x = 1", "fn b() {").unwrap(),
+            "x = 1\nfn a() {}\nfn b() {\nY\n}\n"
+        );
+    }
+
+    #[test]
+    fn ambiguous_contexts_are_refused() {
+        // The context holds old_text twice.
+        let twice_inside = edit("x x\nx\n", "x", "x x");
+        assert!(twice_inside.unwrap_err().contains("2 times inside"));
+        // The context appears twice, so it holds old_text in both places.
+        let context_twice = edit("f(1)\nf(1)\n", "1", "f(1)");
+        assert!(context_twice.unwrap_err().contains("2 times inside"));
+        // The context appears twice and holds old_text in neither.
+        let repeated_without = edit("}\nx\n}\nx\n", "x", "}");
+        assert!(repeated_without
+            .unwrap_err()
+            .contains("contains old_text in none"));
+    }
 }
