@@ -953,3 +953,39 @@ async fn a_listing_the_filter_cannot_parse_is_refused_and_logged() {
     }
     assert_eq!(result_json(&requests, 3, "p3")["result"], NOTE_OK);
 }
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn agent_cannot_hide_a_denied_path_behind_padding_or_a_line_break() {
+    // The server resolves `..` before opening, however long the string is, so
+    // `a/a/.../../../.env` past 4096 bytes opens `.env`. A file name may also
+    // hold a line break. Neither may skip the check.
+    let (_dir, root) = denied_project();
+    std::fs::write(root.join("private/two\nlines.txt"), PLAN_SECRET).unwrap();
+    let _active = activate(&root);
+    let padded = format!("{}{}.env", "a/".repeat(2000), "../".repeat(2000));
+    let calls = vec![
+        ("l1", "mcp__fs__read_text_file", json!({ "path": padded })),
+        (
+            "l2",
+            "mcp__fs__read_text_file",
+            json!({ "path": "private/two\nlines.txt" }),
+        ),
+        (
+            "l3",
+            "mcp__fs__read_text_file",
+            json!({ "path": "notes.txt" }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(outcomes(&response), vec![false, false, true]);
+    let seen = format!("{requests:?}");
+    for secret in [ENV_SECRET, PLAN_SECRET] {
+        assert!(
+            !seen.contains(secret),
+            "a secret reached the model: {secret}"
+        );
+    }
+    assert_eq!(result_json(&requests, 3, "l3")["result"], NOTE_OK);
+}

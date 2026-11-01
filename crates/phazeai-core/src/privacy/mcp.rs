@@ -42,7 +42,10 @@ use std::path::{Path, PathBuf};
 /// MCP tool may not name anything inside it (see [`super::SETTINGS_REASON`]).
 pub const SETTINGS_DIR: &str = ".phazeai";
 
-/// Strings longer than this (bytes) are not treated as a path to check.
+/// A candidate path longer than this (bytes) once `.` and `..` are resolved
+/// is past PATH_MAX: no server can open it, so it names no file. The length
+/// is measured after resolving, never before: `a/../` padding makes a short
+/// path as long as you like, and the server resolves it back.
 const MAX_PATH_STRING: usize = 4096;
 /// A call carrying more strings than this is refused rather than checked in
 /// part, so a path can't be hidden behind padding.
@@ -536,13 +539,12 @@ fn role_for(key: &str) -> Role {
     }
 }
 
-/// Strings never treated as a path: empty, oversized, with a newline or NUL,
-/// or a URL whose scheme is not `file`.
+/// Strings that cannot name a file: empty, holding a NUL (no OS path can), or
+/// a URL whose scheme is not `file`. Length and line breaks are not reasons:
+/// a long string can resolve to a short path (see [`MAX_PATH_STRING`]), and
+/// file names may contain line breaks.
 fn skippable(s: &str) -> bool {
-    s.is_empty()
-        || s.len() > MAX_PATH_STRING
-        || s.bytes().any(|b| b == b'\n' || b == b'\r' || b == 0)
-        || non_file_url(s)
+    s.is_empty() || s.bytes().any(|b| b == 0) || non_file_url(s)
 }
 
 fn non_file_url(s: &str) -> bool {
@@ -616,6 +618,10 @@ fn candidates(
     let mut out: Vec<PathBuf> = Vec::new();
     for p in raw_paths {
         let p = super::normalize_lexically(&p);
+        // Too long to open even after resolving: it names no file.
+        if p.as_os_str().len() > MAX_PATH_STRING {
+            continue;
+        }
         if !out.contains(&p) {
             out.push(p);
         }

@@ -2107,3 +2107,58 @@ fn mcp_call_too_big_to_check_is_refused_and_logged() {
         "the refusal is not in the audit log"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn mcp_long_and_multiline_spellings_of_denied_paths_are_refused() {
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, ".env", "API_KEY=supersecret");
+    write(&root, "private/two\nlines.txt", "confidential");
+    write(&root, "notes.txt", "ok");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // Over 4096 bytes as sent, but `.env` once `..` is resolved, which is how
+    // the server opens it. Checking only short strings let this through.
+    let padded = format!("{}{}.env", "a/".repeat(2000), "../".repeat(2000));
+    assert!(padded.len() > 4096);
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": padded }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, ".env");
+
+    // A denied file whose name holds a line break (legal on Linux and macOS).
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "private/two\nlines.txt" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "private/**");
+
+    // Still past PATH_MAX after resolving: no file can have that path, so the
+    // call is left to the server (which fails it) instead of being refused.
+    let unopenable = format!("{}x", "b/".repeat(3000));
+    assert!(check_call(
+        &p,
+        "read_text_file",
+        true,
+        &serde_json::json!({ "path": unopenable }),
+        &srv
+    )
+    .is_ok());
+    // An allowed file is untouched.
+    assert!(check_call(
+        &p,
+        "read_text_file",
+        true,
+        &serde_json::json!({ "path": "notes.txt" }),
+        &srv
+    )
+    .is_ok());
+}
