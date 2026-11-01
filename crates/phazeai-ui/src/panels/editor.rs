@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -1100,6 +1100,31 @@ fn write_tab_to_disk(
     SaveOutcome::Saved
 }
 
+/// Auto-save for an edit made in the tab showing `edited`: saves that tab
+/// through `save`, if it is still open and still has unsaved edits, and
+/// returns what happened (`None`: nothing to save).
+///
+/// Not the active tab: the save runs after a pause, by which time the user
+/// may have switched to another tab, and writing that one would overwrite
+/// its file with the tab's copy (undoing a change made on disk since it was
+/// opened, by the agent or git, say) while the edited tab stayed unsaved.
+fn autosave_edited_tab(
+    tabs: RwSignal<Vec<TabState>>,
+    edited: &Path,
+    save: &dyn Fn(&TabState) -> SaveOutcome,
+) -> Option<SaveOutcome> {
+    let tab = tabs
+        .get_untracked()
+        .into_iter()
+        .find(|t| t.path == edited)?;
+    // Saved already (Ctrl+S during the pause) or a flag that cannot be read:
+    // writing again could only overwrite a newer file.
+    if tab.dirty.try_get_untracked() != Some(true) {
+        return None;
+    }
+    Some(save(&tab))
+}
+
 /// What the Vim ex bar sees of one editor pane: its tabs (name, unsaved?, active?), how to
 /// save one through `save`, and how to drop its crash-recovery shadow when it is discarded.
 fn pane_handle(
@@ -1564,21 +1589,29 @@ pub fn editor_panel(
     }
     let save_fn_bar = save_fn.clone();
     let save_fn_key = save_fn.clone();
-    let save_fn_auto = save_fn.clone();
 
     // ── Auto-save debounce ─────────────────────────────────────────────────
     // A global cancel-token counter; each keystroke increments it and starts
     // a 1.5 s timer thread.  When the timer fires it checks the token still
-    // matches → only the LAST edit per 1.5 s window triggers a save.
+    // matches → only the LAST edit per 1.5 s window triggers a save. The
+    // timer sends the path of the tab that was edited: by then another tab
+    // may be the active one.
     let auto_save_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    let (auto_save_tx, auto_save_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (auto_save_tx, auto_save_rx) = std::sync::mpsc::sync_channel::<PathBuf>(16);
 
-    // React to the auto-save channel signal on the UI thread (safe to call Rc save_fn).
+    // React to the auto-save channel signal on the UI thread (safe to call Rc save_tab).
     let auto_save_sig = create_signal_from_channel(auto_save_rx);
     {
+        let save_tab = save_tab.clone();
         create_effect(move |_| {
-            if auto_save_sig.get().is_some() {
-                save_fn_auto();
+            let Some(path) = auto_save_sig.get() else {
+                return;
+            };
+            if let Some(SaveOutcome::Failed(e)) = autosave_edited_tab(tabs, &path, &*save_tab) {
+                crate::notify::error_dialog(
+                    "Auto-save failed",
+                    crate::notify::save_failure_message(&path, &e),
+                );
             }
         });
     }
@@ -4520,10 +4553,11 @@ pub fn editor_panel(
                             let gen = as_gen.fetch_add(1, Ordering::Relaxed) + 1;
                             let gen_ref = Arc::clone(&as_gen);
                             let tx = as_tx.clone();
+                            let edited = lsp_path.clone();
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(1500));
                                 if gen_ref.load(Ordering::Relaxed) == gen {
-                                    let _ = tx.try_send(());
+                                    let _ = tx.try_send(edited);
                                 }
                             });
                         }
@@ -6286,6 +6320,42 @@ mod tab_tests {
         let p = dir.path().join(name);
         std::fs::write(&p, "fn main() {}\n").unwrap();
         p
+    }
+
+    #[test]
+    fn auto_save_writes_the_edited_tab_not_the_active_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = create_rw_signal(None);
+        let tabs = create_rw_signal(Vec::new());
+        let active = create_rw_signal(None);
+        wire(open, tabs, active);
+        let a = std::fs::canonicalize(file(&dir, "a.rs")).unwrap();
+        let b = std::fs::canonicalize(file(&dir, "b.rs")).unwrap();
+        open.set(Some(a.clone()));
+        open.set(Some(b.clone()));
+        // An edit in a.rs, then the user switched to b.rs before the timer fired.
+        tabs.get_untracked()[0].dirty.set(true);
+        assert_eq!(active.get_untracked(), Some(1), "b.rs is the active tab");
+
+        let saved = std::cell::RefCell::new(Vec::new());
+        let save = |t: &TabState| {
+            saved.borrow_mut().push(t.path.clone());
+            SaveOutcome::Saved
+        };
+        assert!(matches!(
+            autosave_edited_tab(tabs, &a, &save),
+            Some(SaveOutcome::Saved)
+        ));
+        assert_eq!(*saved.borrow(), vec![a.clone()], "only a.rs is written");
+
+        // b.rs has no unsaved edits, and a.rs no longer once saved (here by
+        // hand, as the real save does): a timer for either writes nothing.
+        tabs.get_untracked()[0].dirty.set(false);
+        assert!(autosave_edited_tab(tabs, &b, &save).is_none());
+        assert!(autosave_edited_tab(tabs, &a, &save).is_none());
+        // A tab closed during the pause is not written either.
+        assert!(autosave_edited_tab(tabs, &dir.path().join("gone.rs"), &save).is_none());
+        assert_eq!(saved.borrow().len(), 1);
     }
 
     #[test]
