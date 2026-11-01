@@ -1,12 +1,15 @@
-//! Interrupting a run kills the shell command it was waiting on.
+//! Interrupting a run kills the command it was waiting on: the shell of
+//! `bash`, and the `cargo check` of `diagnostics`. Also: how `bash` returns
+//! long output.
 //!
 //! The IDE's Stop button and Esc / Ctrl+C in the CLI set the agent's cancel
 //! token; the CLI worker also drops the whole run. The agent used to keep
 //! awaiting `bash` until the command finished on its own, and a dropped
 //! `tokio::process` future left the child running, so a cancelled `cargo
 //! build` or `sleep 30` carried on in the background. Now the agent drops the
-//! tool's future as soon as the token is set, and `BashTool` kills the shell's
-//! whole process group when its future goes or its timeout fires.
+//! tool's future as soon as the token is set, and both tools kill the
+//! command's whole process group when their future goes or their timeout
+//! fires (`process::output_or_kill`).
 //!
 //! These are integration tests rather than unit tests because other lib tests
 //! set the global workspace sandbox, which would refuse a shell in a temp dir.
@@ -18,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
-use phazeai_core::tools::BashTool;
+use phazeai_core::tools::{BashTool, DiagnosticsTool};
 use phazeai_core::{
     Agent, LlmClient, LlmResponse, Message, PhazeError, StreamEvent, Tool, ToolDefinition,
     ToolRegistry,
@@ -68,10 +71,7 @@ fn is_dead(pid: i32) -> bool {
 async fn wait_until_dead(pid: i32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !is_dead(pid) {
-        assert!(
-            Instant::now() < deadline,
-            "sleep (pid {pid}) is still running"
-        );
+        assert!(Instant::now() < deadline, "process {pid} is still running");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -142,6 +142,126 @@ async fn finished_commands_still_report_output_exit_code_and_cwd() {
     assert_eq!(out["success"], false);
     assert_eq!(out["exit_code"], 3);
     assert_eq!(out["stderr"], "failing\n");
+}
+
+/// The line a long output is cut around: `OMITTED_PREFIX`, the number of
+/// bytes left out, then `OMITTED_SUFFIX`.
+const OMITTED_PREFIX: &str = "\n[... ";
+const OMITTED_SUFFIX: &str = " bytes omitted ...]\n";
+
+/// Long output keeps its start and its end (where errors and totals usually
+/// are) around a line saying how many bytes were left out. It used to be cut
+/// with `String::truncate` at byte 30 000, which panics when that byte falls
+/// inside a multi-byte character, so a test run full of check marks killed
+/// the whole agent run instead of returning.
+#[tokio::test]
+async fn long_output_keeps_its_start_and_end_and_never_splits_a_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let content = format!("HEAD-START\n{}\nTAIL-END", "✓".repeat(20_000));
+    // The old cut point lands inside a 3-byte check mark.
+    assert!(!content.is_char_boundary(30_000));
+    std::fs::write(dir.path().join("big.txt"), &content).unwrap();
+    let tool = BashTool::new(dir.path().to_path_buf());
+    let out = tool
+        .execute(json!({ "command": "cat big.txt; cat big.txt >&2" }))
+        .await
+        .unwrap();
+    assert_eq!(out["exit_code"], 0);
+    for stream in ["stdout", "stderr"] {
+        let text = out[stream].as_str().unwrap();
+        let (head, rest) = text
+            .split_once(OMITTED_PREFIX)
+            .unwrap_or_else(|| panic!("{stream} was not cut ({} bytes)", text.len()));
+        let (omitted, tail) = rest.split_once(OMITTED_SUFFIX).unwrap();
+        let omitted: usize = omitted.parse().unwrap();
+        assert!(head.starts_with("HEAD-START\n"), "{stream} lost its start");
+        assert!(tail.ends_with("\nTAIL-END"), "{stream} lost its end");
+        assert!(
+            content.starts_with(head) && content.ends_with(tail),
+            "{stream}"
+        );
+        assert_eq!(head.len() + omitted + tail.len(), content.len(), "{stream}");
+        assert!(head.len() + tail.len() <= 30_000, "{stream} kept too much");
+    }
+}
+
+/// A crate whose build script writes its own pid and its parent's (cargo's)
+/// to `pids`, then sleeps: `cargo check` on it stays busy for 30 s unless
+/// something stops it, like a check of a large project.
+fn slow_to_check_crate(dir: &Path) {
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"slow-to-check\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        dir.join("build.rs"),
+        r#"fn main() {
+    let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let pids = format!("{} {}", std::process::id(), std::os::unix::process::parent_id());
+    std::fs::write(dir.join("pids.part"), pids).unwrap();
+    std::fs::rename(dir.join("pids.part"), dir.join("pids")).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
+"#,
+    )
+    .unwrap();
+}
+
+/// Stop while `diagnostics` waits on `cargo check` kills cargo and the build
+/// script it is running. The checker used to be awaited with plain
+/// `output()`, and a dropped `tokio::process` future leaves its child running,
+/// so a cancelled check of a large project kept compiling (and holding the
+/// build directory lock) in the background.
+#[tokio::test]
+async fn dropping_the_diagnostics_future_kills_cargo_and_its_build_script() {
+    let dir = tempfile::tempdir().unwrap();
+    slow_to_check_crate(dir.path());
+    let path = dir.path().to_str().unwrap().to_string();
+    let run = tokio::spawn(async move {
+        DiagnosticsTool
+            .execute(json!({ "path": path, "language": "rust" }))
+            .await
+    });
+
+    // Cargo compiles the build script first, so allow it a while.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let pids_file = dir.path().join("pids");
+    let pids: Vec<i32> = loop {
+        if let Ok(text) = std::fs::read_to_string(&pids_file) {
+            break text
+                .split_whitespace()
+                .map(|p| p.parse().unwrap())
+                .collect();
+        }
+        if run.is_finished() {
+            panic!(
+                "diagnostics returned before the build script ran: {:?}",
+                run.await
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cargo never ran the build script"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let [build_script, cargo] = pids[..] else {
+        panic!("expected two pids, got {pids:?}");
+    };
+    assert!(
+        !is_dead(build_script) && !is_dead(cargo),
+        "the check should be running"
+    );
+
+    // What the CLI worker does on Esc / Ctrl+C, and what the agent does on
+    // Stop: stop awaiting the tool, which drops its future.
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    wait_until_dead(cargo).await;
+    wait_until_dead(build_script).await;
 }
 
 /// Scripted provider: the first turn asks for one `bash` call, every later

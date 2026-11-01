@@ -308,7 +308,11 @@ impl ToolApprovalManager {
                     prompt.push_str(&format!("Write to file: {}\n", path));
                     if let Some(content) = params.get("content").and_then(|v| v.as_str()) {
                         let preview = if content.len() > 100 {
-                            format!("{}... ({} bytes)", &content[..100], content.len())
+                            format!(
+                                "{}... ({} bytes)",
+                                crate::text::truncate_bytes(content, 100),
+                                content.len()
+                            )
                         } else {
                             content.to_string()
                         };
@@ -322,7 +326,7 @@ impl ToolApprovalManager {
                 }
                 if let Some(old) = params.get("old_string").and_then(|v| v.as_str()) {
                     let preview = if old.len() > 50 {
-                        format!("{}...", &old[..50])
+                        format!("{}...", crate::text::truncate_bytes(old, 50))
                     } else {
                         old.to_string()
                     };
@@ -1014,6 +1018,32 @@ mod tests {
         assert!(prompt.contains("CRITICAL"));
         assert!(prompt.contains("rm -rf /tmp/test"));
         assert!(prompt.contains("WARNING"));
+    }
+
+    /// The previews used to be byte slices (`&content[..100]`, `&old[..50]`),
+    /// which panic when the cut falls inside a multi-byte character.
+    #[test]
+    fn approval_prompt_previews_never_split_a_character() {
+        let manager = ToolApprovalManager::default();
+        // 1 + 80 × 2 bytes: bytes 100 and 50 are both inside an 'é'.
+        let content = format!("a{}", "é".repeat(80));
+        assert!(!content.is_char_boundary(100) && !content.is_char_boundary(50));
+
+        let prompt = manager.format_approval_prompt(
+            "write_file",
+            &json!({"path": "notes.txt", "content": content}),
+        );
+        let preview = format!("Content preview: a{}... (161 bytes)\n", "é".repeat(49));
+        assert!(prompt.contains(&preview), "{prompt}");
+
+        let prompt = manager.format_approval_prompt(
+            "edit_file",
+            &json!({"path": "notes.txt", "old_string": content}),
+        );
+        assert!(
+            prompt.contains(&format!("Replace: a{}...\n", "é".repeat(24))),
+            "{prompt}"
+        );
     }
 
     #[test]
