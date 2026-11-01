@@ -68,6 +68,8 @@ fn customised() -> Settings {
     s.editor.font_size = 17.5;
     s.editor.tab_size = 2;
     s.editor.word_wrap = true;
+    s.editor.ai_completions = false;
+    s.updates.check_at_start = false;
     s.search.enabled = false;
     s.providers.push(ProviderEntry {
         name: "groq".to_string(),

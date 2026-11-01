@@ -7,7 +7,7 @@ use crate::theme::PhazeTheme;
 use floem::reactive::RwSignal;
 
 pub use ai::AiState;
-pub use editor::EditorState;
+pub use editor::{EditorPrefs, EditorState};
 pub use project::ProjectState;
 pub use workbench::{SearchResult, WorkbenchState};
 

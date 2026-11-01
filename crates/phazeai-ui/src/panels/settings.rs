@@ -1,5 +1,5 @@
 use floem::{
-    reactive::{SignalGet, SignalUpdate, SignalWith},
+    reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -250,6 +250,61 @@ fn stepper_row(
         controls,
     ))
     .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0))
+}
+
+/// A labelled ON/OFF switch bound to `sig`. `note`, when given, is a muted
+/// line under it saying what the setting does.
+fn toggle_row(
+    label_text: &'static str,
+    note: Option<&'static str>,
+    sig: RwSignal<bool>,
+    theme: RwSignal<PhazeTheme>,
+) -> impl IntoView {
+    use floem::reactive::create_rw_signal;
+    let hov = create_rw_signal(false);
+    let switch = container(label(move || if sig.get() { "ON" } else { "OFF" }))
+        .style(move |s| {
+            let p = theme.get().palette;
+            let on = sig.get();
+            s.font_size(font::CAPTION)
+                .padding_horiz(space::MD)
+                .padding_vert(space::XXS + 1.0)
+                .border_radius(radius::SM)
+                .color(p.bg_base)
+                .background(if on { p.success } else { p.bg_elevated })
+                .border(stroke::HAIRLINE)
+                .border_color(if on { p.success } else { p.border })
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
+        })
+        .on_click_stop(move |_| {
+            sig.update(|v| *v = !*v);
+        })
+        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+            hov.set(true)
+        })
+        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+            hov.set(false)
+        });
+    let row = container(
+        stack((
+            label(move || label_text).style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(font::BODY).color(p.text_primary).flex_grow(1.0)
+            }),
+            switch,
+        ))
+        .style(|s| s.flex_row().items_center().padding_vert(space::XS)),
+    )
+    .style(|s| s.width_full().padding_horiz(space::XS));
+    let note_line = label(move || note.unwrap_or_default()).style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .padding_horiz(space::XS)
+            .margin_bottom(space::XS)
+            .apply_if(note.is_none(), |s| s.display(floem::style::Display::None))
+    });
+    stack((row, note_line)).style(|s| s.flex_col().width_full())
 }
 
 // ─── theme tiles ─────────────────────────────────────────────────────────────
@@ -518,70 +573,28 @@ fn editor_section(state: IdeState) -> impl IntoView {
     let code_lens_vis = state.editor.code_lens_visible;
     let inlay_hints = state.editor.inlay_hints_toggle;
     let relative_ln = state.editor.relative_line_numbers;
-    let theme_as = state.workbench.theme;
-    let as_hov = floem::reactive::create_rw_signal(false);
-    let ww_hov = floem::reactive::create_rw_signal(false);
-    let oi_hov = floem::reactive::create_rw_signal(false);
-    let cl_hov = floem::reactive::create_rw_signal(false);
-    let ih_hov = floem::reactive::create_rw_signal(false);
-    let rln_hov = floem::reactive::create_rw_signal(false);
-
-    let toggle_row =
-        |label_text: &'static str,
-         sig: floem::reactive::RwSignal<bool>,
-         hov: floem::reactive::RwSignal<bool>,
-         theme_sig: floem::reactive::RwSignal<crate::theme::PhazeTheme>| {
-            container(
-                stack((
-                    label(move || label_text).style(move |s| {
-                        let p = theme_sig.get().palette;
-                        s.font_size(12.0).color(p.text_primary).flex_grow(1.0)
-                    }),
-                    container(label(move || if sig.get() { "ON" } else { "OFF" }))
-                        .style(move |s| {
-                            let p = theme_sig.get().palette;
-                            let on = sig.get();
-                            s.font_size(11.0)
-                                .padding_horiz(8.0)
-                                .padding_vert(3.0)
-                                .border_radius(4.0)
-                                .color(p.bg_base)
-                                .background(if on { p.success } else { p.bg_elevated })
-                                .border(1.0)
-                                .border_color(if on { p.success } else { p.border })
-                                .cursor(floem::style::CursorStyle::Pointer)
-                                .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
-                        })
-                        .on_click_stop(move |_| {
-                            sig.update(|v| *v = !*v);
-                        })
-                        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-                            hov.set(true)
-                        })
-                        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-                            hov.set(false)
-                        }),
-                ))
-                .style(|s| s.flex_row().items_center().padding_vert(4.0)),
-            )
-            .style(|s| s.width_full().padding_horiz(4.0))
-        };
+    let ai_completions = state.editor.ai_completions;
+    let theme = state.workbench.theme;
 
     stack((
         section_header("EDITOR", state.clone()),
         stepper_row("Font Size", font_size, 8, 48, state.clone()),
         stepper_row("Tab Size", tab_size, 1, 16, state.clone()),
-        toggle_row("Auto Save (1.5 s delay)", auto_save, as_hov, theme_as),
-        toggle_row("Word Wrap  (Alt+Z)", word_wrap, ww_hov, theme_as),
+        toggle_row("Auto Save (1.5 s delay)", None, auto_save, theme),
+        toggle_row("Word Wrap  (Alt+Z)", None, word_wrap, theme),
+        toggle_row("Organize Imports on Save", None, organize_imports, theme),
+        toggle_row("Show Code Lens", None, code_lens_vis, theme),
+        toggle_row("Inlay Hints  (Ctrl+Alt+I)", None, inlay_hints, theme),
+        toggle_row("Relative Line Numbers", None, relative_ln, theme),
         toggle_row(
-            "Organize Imports on Save",
-            organize_imports,
-            oi_hov,
-            theme_as,
+            "AI Completions",
+            Some(
+                "Sends the code around the cursor to your AI provider while you \
+                 edit. Off: nothing is sent.",
+            ),
+            ai_completions,
+            theme,
         ),
-        toggle_row("Show Code Lens", code_lens_vis, cl_hov, theme_as),
-        toggle_row("Inlay Hints  (Ctrl+Alt+I)", inlay_hints, ih_hov, theme_as),
-        toggle_row("Relative Line Numbers", relative_ln, rln_hov, theme_as),
     ))
     .style(|s| s.flex_col().width_full())
 }
@@ -1097,8 +1110,24 @@ fn about_section(state: IdeState) -> impl IntoView {
             .spawn();
     });
 
-    stack((section_header("ABOUT", state.clone()), icon_row, link))
-        .style(|s| s.flex_col().width_full())
+    let update_check = toggle_row(
+        "Check for Updates at Start",
+        Some(
+            "Asks GitHub's releases API for a newer version when PhazeAI starts. \
+             Skipped when the folder PhazeAI starts in is local-only. A change \
+             applies at the next start.",
+        ),
+        state.workbench.check_updates_at_start,
+        theme,
+    );
+
+    stack((
+        section_header("ABOUT", state.clone()),
+        icon_row,
+        update_check,
+        link,
+    ))
+    .style(|s| s.flex_col().width_full())
 }
 
 // ─── keybindings reference ───────────────────────────────────────────────────────
