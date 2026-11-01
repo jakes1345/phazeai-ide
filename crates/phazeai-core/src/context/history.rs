@@ -70,14 +70,11 @@ impl ConversationHistory {
     pub fn add_tool_result(&mut self, tool_call_id: impl Into<String>, result: impl Into<String>) {
         let mut result_str = result.into();
 
-        // Truncate huge tool results to save context
+        // Cap huge tool results to save context, keeping the start and the
+        // end (errors and totals are usually last) around a marker.
         const MAX_TOOL_RESULT_LEN: usize = 12000;
         if result_str.len() > MAX_TOOL_RESULT_LEN {
-            result_str = format!(
-                "{}... [Truncated {} bytes]",
-                crate::text::truncate_bytes(&result_str, MAX_TOOL_RESULT_LEN),
-                result_str.len() - MAX_TOOL_RESULT_LEN
-            );
+            result_str = crate::text::cut_middle(&result_str, MAX_TOOL_RESULT_LEN).into_owned();
         }
 
         self.messages
@@ -776,5 +773,24 @@ mod tests {
         let (head, count, tail) = split_cut(&cut).expect("a marker");
         assert_eq!((head, count), ("start", usize::MAX));
         assert_eq!(tail, "x".repeat(95));
+    }
+
+    #[test]
+    fn a_long_tool_result_keeps_its_end() {
+        let mut history = ConversationHistory::new();
+        let output = format!(
+            "START\n{}\nerror: build failed (TAIL)\n",
+            "x".repeat(50_000)
+        );
+        history.add_tool_result("call_1", output);
+        let kept = &history.get_messages()[0].content;
+        assert!(kept.starts_with("START"), "lost the start");
+        assert!(
+            kept.ends_with("error: build failed (TAIL)\n"),
+            "lost the end: {}",
+            &kept[kept.len().saturating_sub(80)..]
+        );
+        assert!(kept.contains("bytes omitted"));
+        assert!(kept.len() < 12_100);
     }
 }

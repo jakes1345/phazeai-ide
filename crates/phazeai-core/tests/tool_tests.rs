@@ -436,8 +436,9 @@ async fn test_bash_output_truncation() {
         .unwrap();
 
     let stdout = result["stdout"].as_str().unwrap();
-    // Should be truncated
-    assert!(stdout.contains("[output truncated]"));
+    // Should be cut in the middle, keeping the last line
+    assert!(stdout.contains(" bytes omitted ...]"));
+    assert!(stdout.ends_with("This is a long line of text for testing truncation"));
 }
 
 #[tokio::test]
