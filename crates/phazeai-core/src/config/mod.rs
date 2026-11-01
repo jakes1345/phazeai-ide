@@ -62,6 +62,13 @@ pub struct LlmSettings {
     pub provider: LlmProvider,
     pub model: String,
     pub api_key_env: String,
+    /// Where to reach the active provider instead of its default address: an
+    /// Ollama or LM Studio server on another machine or port, or an
+    /// OpenAI-compatible proxy. Every client built from these settings sends
+    /// its requests here, so `local_only` judges this address. It belongs to
+    /// `provider` ([`Settings::set_provider`] drops it on a switch) and is
+    /// ignored by the built-in provider, whose server picks its own port.
+    /// [`Settings::check_base_url`] says which addresses are refused.
     pub base_url: Option<String>,
     pub max_tokens: u32,
     /// Conversation tokens the agent may send before compacting older
@@ -69,6 +76,17 @@ pub struct LlmSettings {
     /// window (see `llm::context_budget`).
     #[serde(default)]
     pub context_tokens: Option<usize>,
+}
+
+impl LlmSettings {
+    /// [`Self::base_url`] as the clients and the IDE's readiness probe read
+    /// it: trimmed, and `None` when unset or blank.
+    pub fn base_url_override(&self) -> Option<&str> {
+        self.base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,6 +282,17 @@ impl Settings {
         std::env::var(&self.llm.api_key_env).ok()
     }
 
+    /// Make `provider` the active provider. `[llm] base_url` is the address
+    /// of the provider it was written for, so switching to another provider
+    /// drops it: kept, it would receive the new provider's requests and API
+    /// key.
+    pub fn set_provider(&mut self, provider: LlmProvider) {
+        if self.llm.provider != provider {
+            self.llm.base_url = None;
+        }
+        self.llm.provider = provider;
+    }
+
     /// Build a ProviderRegistry from settings.
     pub fn build_provider_registry(&self) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
@@ -302,14 +331,20 @@ impl Settings {
             registry.add_custom_provider(entry.name.clone(), config);
         }
 
-        // Set active provider from legacy settings
+        // Set active provider from legacy settings. `[llm] base_url` moves it
+        // off its default address; the built-in provider's address is the
+        // port its server was started on.
         let provider_id = self.llm.provider.to_provider_id();
+        if let Some(url) = self.llm.base_url_override() {
+            if provider_id != ProviderId::BuiltIn {
+                registry.set_base_url(&provider_id, url);
+            }
+        }
         registry.set_active(provider_id, self.llm.model.clone());
 
         registry
     }
 
-    /// Build an LLM client from the current settings.
     /// Conversation tokens the agent may send to the active model before
     /// compacting. Honours `[llm] context_tokens` when set.
     pub fn context_budget(&self) -> usize {
@@ -331,9 +366,14 @@ impl Settings {
         )
     }
 
+    /// Build an LLM client from the current settings: the active provider, at
+    /// `[llm] base_url` when that is set, behind the model router when
+    /// `[model_routes]` are configured. Every client is wrapped in the privacy
+    /// guard.
     pub fn build_llm_client(
         &self,
     ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
+        self.check_base_url()?;
         let registry = self.build_provider_registry();
         let default_client = registry.build_active_client()?;
 
@@ -343,6 +383,52 @@ impl Settings {
             let router = ModelRouter::new(&self.model_routes, &registry, default_client);
             Ok(Box::new(router))
         }
+    }
+
+    /// Refuse a `[llm] base_url` the clients must not use. Anything that sends
+    /// the active provider's key to `[llm] base_url` checks this first.
+    ///
+    /// - Not a full `http://` or `https://` address: as written it would fail
+    ///   at the first request, or for Ollama quietly go to localhost:11434
+    ///   instead; and guessing a scheme could put an API key on plain HTTP.
+    /// - Plain `http://` to another machine for a provider that needs a key:
+    ///   the key and the prompts would cross the network unencrypted. Older
+    ///   builds kept `base_url` when the provider changed, so an Ollama or LM
+    ///   Studio address left behind looks exactly like this.
+    pub fn check_base_url(&self) -> Result<(), crate::error::PhazeError> {
+        let Some(url) = self.llm.base_url_override() else {
+            return Ok(());
+        };
+        let id = self.llm.provider.to_provider_id();
+        if id == ProviderId::BuiltIn {
+            return Ok(());
+        }
+        let Some(parsed) = reqwest::Url::parse(url).ok().filter(|u| {
+            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+        }) else {
+            return Err(crate::error::PhazeError::Config(format!(
+                "[llm] base_url = \"{url}\" in config.toml is not a full http:// or https:// \
+                 address (for example http://localhost:11434). Fix it, or remove it to use the \
+                 default address of {}.",
+                id.name()
+            )));
+        };
+        let host = parsed.host_str().unwrap_or_default();
+        if parsed.scheme() == "http"
+            && id.needs_api_key()
+            && !crate::privacy::is_loopback_host(host)
+        {
+            // Not "API key": the CLI reads that as a missing key
+            // (`setup::explain_build_error`).
+            return Err(crate::error::PhazeError::Config(format!(
+                "[llm] base_url = \"{url}\" in config.toml would send your {name} key and \
+                 prompts to {host} unencrypted. If it is left from a local server you used \
+                 before, remove the line to use {name}'s own address; otherwise use an \
+                 https:// address or a server on this machine.",
+                name = id.name()
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -461,6 +547,167 @@ auto_start = false
     fn a_config_without_the_required_tables_is_still_refused() {
         assert!(toml::from_str::<Settings>("[sidecar]\nenabled = false\n").is_err());
         assert!(toml::from_str::<Settings>("[llm]\nprovider = \"ollama\"\n").is_err());
+    }
+
+    // ── [llm] base_url ───────────────────────────────────────────────────────
+    // That the clients really send to it is tested end to end, against a
+    // scripted server, in tests/llm_base_url.rs.
+
+    /// Every `[llm] provider` value.
+    const PROVIDERS: [LlmProvider; 9] = [
+        LlmProvider::Claude,
+        LlmProvider::OpenAI,
+        LlmProvider::Ollama,
+        LlmProvider::Groq,
+        LlmProvider::Together,
+        LlmProvider::OpenRouter,
+        LlmProvider::LmStudio,
+        LlmProvider::Gemini,
+        LlmProvider::BuiltIn,
+    ];
+
+    fn llm(provider: LlmProvider, base_url: Option<&str>) -> Settings {
+        let mut s = Settings::default();
+        s.llm.provider = provider;
+        s.llm.base_url = base_url.map(str::to_string);
+        s
+    }
+
+    /// The address the active provider's client is built for.
+    fn active_url(s: &Settings) -> String {
+        let registry = s.build_provider_registry();
+        registry
+            .active_config()
+            .expect("active provider")
+            .base_url
+            .clone()
+    }
+
+    #[test]
+    fn without_a_base_url_every_provider_keeps_its_default_address() {
+        for provider in PROVIDERS {
+            let default = provider.to_provider_id().default_base_url().to_string();
+            for unset in [None, Some(""), Some(" \t ")] {
+                let s = llm(provider.clone(), unset);
+                assert_eq!(active_url(&s), default, "{provider:?}, base_url {unset:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn base_url_moves_the_active_provider_and_nothing_else() {
+        let mut s = llm(LlmProvider::Ollama, Some(" http://gpu-box:11434 "));
+        s.providers.push(ProviderEntry {
+            name: "myproxy".into(),
+            enabled: true,
+            api_key_env: "MYPROXY_KEY".into(),
+            base_url: "https://proxy.example/v1".into(),
+            default_model: "m".into(),
+        });
+        let registry = s.build_provider_registry();
+        let url = |id: ProviderId| registry.get_config(&id).unwrap().base_url.clone();
+        assert_eq!(url(ProviderId::Ollama), "http://gpu-box:11434", "trimmed");
+        for other in [ProviderId::OpenAI, ProviderId::LmStudio, ProviderId::Claude] {
+            assert_eq!(url(other.clone()), other.default_base_url(), "{other:?}");
+        }
+        assert_eq!(
+            url(ProviderId::Custom("myproxy".into())),
+            "https://proxy.example/v1",
+            "a [[providers]] entry keeps its own address"
+        );
+
+        // The built-in provider is reached at the port its server started on.
+        let s = llm(LlmProvider::BuiltIn, Some("http://gpu-box:11434"));
+        assert_eq!(active_url(&s), "");
+    }
+
+    #[test]
+    fn a_base_url_that_is_not_a_full_http_address_is_refused() {
+        for bad in [
+            "192.168.1.5:11434",
+            "gpu-box:11434",
+            "localhost:11434",
+            "ftp://gpu-box/v1",
+            "http://",
+        ] {
+            for provider in [LlmProvider::Ollama, LlmProvider::LmStudio] {
+                let err = match llm(provider.clone(), Some(bad)).build_llm_client() {
+                    Ok(_) => panic!("{provider:?} with base_url {bad:?} must be refused"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(err.contains("base_url") && err.contains(bad), "{err}");
+            }
+        }
+        // Building sends nothing; a full address on this machine is accepted
+        // whatever the privacy policy of a concurrently running test.
+        let ok = llm(LlmProvider::Ollama, Some("http://localhost:11434/"));
+        assert!(ok.build_llm_client().is_ok());
+    }
+
+    #[test]
+    fn a_key_never_goes_to_another_machine_unencrypted() {
+        // What older builds left behind: the address of an Ollama or LM Studio
+        // on another machine, kept when the provider changed. As configured,
+        // the provider's key and the prompts would go there over plain HTTP.
+        for provider in PROVIDERS {
+            if !provider.to_provider_id().needs_api_key() {
+                continue;
+            }
+            for url in [
+                "http://192.0.2.2:11434",
+                "http://gpu-box:1234/v1",
+                "http://api.openai.com/v1",
+            ] {
+                let err = match llm(provider.clone(), Some(url)).build_llm_client() {
+                    Ok(_) => panic!("{provider:?} must not send its key to {url}"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(
+                    err.contains("base_url") && err.contains(url) && err.contains("unencrypted"),
+                    "{provider:?}, {url}: {err}"
+                );
+                assert!(
+                    !err.to_lowercase().contains("api key"),
+                    "the CLI would report a missing key: {err}"
+                );
+            }
+        }
+
+        // Still accepted: a server on this machine, https, and the providers
+        // that need no key (an Ollama on another machine is what base_url is
+        // for).
+        for (provider, url) in [
+            (LlmProvider::OpenAI, "http://127.0.0.1:8080/v1"),
+            (LlmProvider::OpenAI, "http://localhost:1234/v1"),
+            (LlmProvider::Claude, "http://[::1]:8080"),
+            (LlmProvider::Claude, "https://gateway.example/anthropic"),
+            (LlmProvider::Groq, "https://192.0.2.2/v1"),
+            (LlmProvider::Ollama, "http://192.0.2.2:11434"),
+            (LlmProvider::LmStudio, "http://gpu-box:1234/v1"),
+        ] {
+            let s = llm(provider.clone(), Some(url));
+            assert!(s.check_base_url().is_ok(), "{provider:?}, {url}");
+            assert_eq!(active_url(&s), url, "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn switching_provider_drops_the_old_providers_base_url() {
+        let mut s = llm(LlmProvider::Ollama, Some("http://gpu-box:11434"));
+        s.set_provider(LlmProvider::Ollama);
+        assert_eq!(
+            s.llm.base_url.as_deref(),
+            Some("http://gpu-box:11434"),
+            "the same provider keeps it"
+        );
+
+        s.set_provider(LlmProvider::Claude);
+        assert_eq!(s.llm.provider, LlmProvider::Claude);
+        assert_eq!(
+            s.llm.base_url, None,
+            "Claude's requests and key must not go to the Ollama server"
+        );
+        assert_eq!(active_url(&s), ProviderId::Claude.default_base_url());
     }
 
     #[test]

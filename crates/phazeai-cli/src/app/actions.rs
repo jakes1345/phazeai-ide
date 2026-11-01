@@ -296,7 +296,8 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
                 .map(String::from)
                 .unwrap_or_else(|| setup::default_model_for(&state.settings, &provider));
             let mut next = state.settings.clone();
-            next.llm.provider = provider.clone();
+            // Drops `[llm] base_url` when the provider changes.
+            next.set_provider(provider.clone());
             next.llm.model = model.clone();
             let current = state
                 .settings
