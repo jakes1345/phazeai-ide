@@ -32,6 +32,13 @@ impl OllamaClient {
         }
     }
 
+    /// Connect directly, ignoring proxies (for a server on this machine).
+    /// Call after `with_base_url`, which builds a new connection.
+    pub fn without_proxy(mut self) -> Self {
+        self.ollama = self.ollama.without_proxy();
+        self
+    }
+
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         let new_url = url.into();
         match Ollama::try_new(&new_url) {

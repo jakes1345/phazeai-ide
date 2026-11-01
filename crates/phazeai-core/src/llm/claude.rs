@@ -29,6 +29,14 @@ impl ClaudeClient {
         self
     }
 
+    /// Connect directly, ignoring `HTTP(S)_PROXY` (for a server on this machine).
+    pub fn without_proxy(mut self) -> Self {
+        if let Ok(client) = reqwest::Client::builder().no_proxy().build() {
+            self.client = client;
+        }
+        self
+    }
+
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self

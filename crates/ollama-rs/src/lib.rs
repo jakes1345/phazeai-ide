@@ -114,6 +114,15 @@ impl Ollama {
     ///
     /// Panics if the URL does not have a host.
     #[inline]
+    /// Connect directly, ignoring `HTTP(S)_PROXY` / `ALL_PROXY`: for a
+    /// server on this machine, which a proxy must never see.
+    pub fn without_proxy(mut self) -> Self {
+        if let Ok(client) = reqwest::Client::builder().no_proxy().build() {
+            self.reqwest_client = client;
+        }
+        self
+    }
+
     pub fn uri(&self) -> String {
         self.url.host().unwrap().to_string()
     }
