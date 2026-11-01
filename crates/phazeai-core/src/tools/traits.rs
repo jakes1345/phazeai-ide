@@ -1,3 +1,4 @@
+use super::file::FileWrite;
 use crate::error::PhazeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +20,19 @@ pub trait Tool: Send + Sync {
     fn parameters_schema(&self) -> Value;
 
     async fn execute(&self, params: Value) -> ToolResult;
+
+    /// For a tool whose whole effect is writing one file (`write_file`,
+    /// `edit_file`): the write this call would make, worked out without
+    /// making it, or the error the call would fail with. `None`, the
+    /// default, for every other tool.
+    ///
+    /// An agent with a diff hook shows this write for review and then
+    /// commits exactly what was approved ([`FileWrite::commit`]) instead of
+    /// calling [`Tool::execute`]; so a tool that returns `Some` here must make
+    /// `execute` do the same thing: plan, then commit.
+    async fn plan_write(&self, _params: &Value) -> Option<Result<FileWrite, PhazeError>> {
+        None
+    }
 
     fn to_definition(&self) -> ToolDefinition {
         ToolDefinition {

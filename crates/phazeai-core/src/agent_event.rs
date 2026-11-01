@@ -39,8 +39,9 @@ pub enum AgentEvent {
     McpReconnected {
         servers: Vec<String>,
     },
-    /// Emitted just before a write_file / edit_file tool is executed.
-    /// The UI can display a diff and call the diff hook to approve or reject.
+    /// A file write is about to be shown to the diff hook for review (only
+    /// with one; see [`crate::DiffHookFn`]): the file, what it holds now and
+    /// exactly what it will hold if approved.
     FilePatch {
         path: String,
         before: String,
