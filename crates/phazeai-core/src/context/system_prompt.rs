@@ -561,7 +561,7 @@ Step 1 — Read the file first:
 Tool call: read_file({\"path\": \"src/main.rs\", \"offset\": 0, \"limit\": 50})
 
 Step 2 — Make the targeted edit:
-Tool call: edit_file({\"path\": \"src/main.rs\", \"search\": \"let messge = \", \"replace\": \"let message = \"})
+Tool call: edit_file({\"path\": \"src/main.rs\", \"old_text\": \"let messge = \", \"new_text\": \"let message = \"})
 
 Step 3 — Verify the fix compiles:
 Tool call: bash({\"command\": \"cargo check 2>&1 | head -20\"})
@@ -569,7 +569,7 @@ Tool call: bash({\"command\": \"cargo check 2>&1 | head -20\"})
 ### Example 2: Multi-file investigation
 User: \"Where is the database connection handled?\"
 
-Tool call: grep({\"pattern\": \"connection|connect|pool|database\", \"path\": \"src/\", \"regex\": true})
+Tool call: grep({\"pattern\": \"connection|connect|pool|database\", \"path\": \"src/\"})
 Then read relevant files based on results.
 
 ### Example 3: Create a new module
@@ -582,7 +582,7 @@ Step 2 — Write the new file:
 Tool call: write_file({\"path\": \"src/cache.rs\", \"content\": \"use std::collections::HashMap;\\n...\"})
 
 Step 3 — Update mod.rs:
-Tool call: edit_file({\"path\": \"src/lib.rs\", \"search\": \"mod utils;\", \"replace\": \"mod cache;\\nmod utils;\"})
+Tool call: edit_file({\"path\": \"src/lib.rs\", \"old_text\": \"mod utils;\", \"new_text\": \"mod cache;\\nmod utils;\"})
 
 Step 4 — Verify:
 Tool call: bash({\"command\": \"cargo check 2>&1\"})
@@ -644,6 +644,37 @@ pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn every_tool_call_example_uses_the_tools_real_parameters() {
+        // Models copy these examples, so a parameter the tool does not take
+        // turns into a failed call (edit_file once showed search/replace).
+        let tools = crate::tools::ToolRegistry::default();
+        let mut checked = 0;
+        for line in TOOL_GUIDELINES.lines() {
+            let Some(call) = line.trim().strip_prefix("Tool call: ") else {
+                continue;
+            };
+            let (name, rest) = call.split_once('(').expect("name(args)");
+            let args: serde_json::Value =
+                serde_json::from_str(rest.strip_suffix(')').expect("ends with )"))
+                    .unwrap_or_else(|e| panic!("{line}: {e}"));
+            let tool = tools
+                .get(name)
+                .unwrap_or_else(|| panic!("example names unknown tool {name}"));
+            let schema = tool.parameters_schema();
+            let props = schema["properties"].as_object().expect("properties");
+            for key in args.as_object().expect("object").keys() {
+                assert!(
+                    props.contains_key(key),
+                    "{name} has no parameter `{key}` (it takes {:?})",
+                    props.keys().collect::<Vec<_>>()
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 8, "only {checked} examples found");
+    }
     use super::*;
 
     fn git(root: &Path, args: &[&str]) {
