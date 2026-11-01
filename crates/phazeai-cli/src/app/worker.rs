@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use phazeai_core::tools::{ToolApprovalManager, ToolPermission};
-use phazeai_core::{Agent, AgentEvent, CodeSearch, ConversationHistory, LlmClient};
+use phazeai_core::{
+    Agent, AgentEvent, CodeSearch, ConversationHistory, LlmClient, SystemPromptBuilder,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::tool_view::{approval_preview, unanswered_tool_calls, ApprovalPolicy, PreviewLine};
@@ -22,7 +24,8 @@ pub enum WorkerCommand {
     /// Forget the conversation context.
     Clear,
     /// Replace the LLM client (provider / model / key change) and the
-    /// context budget that goes with the new model.
+    /// context budget that goes with the new model; the system prompt is
+    /// resized to that budget too.
     SetLlm {
         llm: Box<dyn LlmClient>,
         context_budget: usize,
@@ -53,12 +56,15 @@ pub enum UiEvent {
 
 pub struct WorkerConfig {
     pub llm: Option<Box<dyn LlmClient>>,
-    pub system_prompt: String,
+    /// What the system prompt is built from; each agent gets it sized to
+    /// `context_budget` (see [`system_prompt`]).
+    pub prompt: SystemPromptBuilder,
     pub restore: Vec<(String, String)>,
     pub approval_manager: Arc<Mutex<ToolApprovalManager>>,
     pub policy: Arc<Mutex<ApprovalPolicy>>,
     pub cancel: Arc<AtomicBool>,
-    /// Conversation tokens the agent may send before compacting.
+    /// Conversation tokens the agent may send before compacting, for the
+    /// current model.
     pub context_budget: usize,
     /// Shared by every agent the worker builds; `None` when search is off.
     pub code_search: Option<CodeSearch>,
@@ -114,6 +120,15 @@ fn build_approval_fn(
     })
 }
 
+/// The system prompt for the current model: instructions take at most their
+/// share of its context budget.
+fn system_prompt(cfg: &WorkerConfig) -> String {
+    cfg.prompt
+        .clone()
+        .with_context_budget(cfg.context_budget)
+        .build()
+}
+
 fn build_agent(
     llm: Box<dyn LlmClient>,
     cfg: &WorkerConfig,
@@ -126,7 +141,7 @@ fn build_agent(
         approval_tx.clone(),
     );
     let mut agent = Agent::new(llm)
-        .with_system_prompt(cfg.system_prompt.clone())
+        .with_system_prompt(system_prompt(cfg))
         .with_shared_conversation(conversation)
         .with_context_budget(cfg.context_budget)
         .with_approval(approval)
@@ -200,17 +215,21 @@ pub fn spawn(
                 WorkerCommand::SetLlm {
                     llm,
                     context_budget,
-                } => match agent.as_mut() {
-                    Some(a) => {
-                        a.swap_llm(llm);
-                        a.set_context_budget(context_budget);
+                } => {
+                    // The new model's budget sizes the conversation and the
+                    // system prompt alike.
+                    cfg.context_budget = context_budget;
+                    match agent.as_mut() {
+                        Some(a) => {
+                            a.swap_llm(llm);
+                            a.set_context_budget(context_budget);
+                            a.set_system_prompt(system_prompt(&cfg));
+                        }
+                        None => {
+                            agent = Some(build_agent(llm, &cfg, conversation.clone(), &approval_tx))
+                        }
                     }
-                    None => {
-                        let mut built = build_agent(llm, &cfg, conversation.clone(), &approval_tx);
-                        built.set_context_budget(context_budget);
-                        agent = Some(built);
-                    }
-                },
+                }
                 WorkerCommand::Run(prompt) => {
                     cfg.cancel.store(false, Ordering::SeqCst);
                     let Some(agent) = agent.as_ref() else {
