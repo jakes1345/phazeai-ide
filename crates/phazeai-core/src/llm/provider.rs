@@ -403,6 +403,10 @@ impl ProviderRegistry {
         base_url: &str,
         model: &str,
     ) -> Result<Box<dyn super::LlmClient>, crate::error::PhazeError> {
+        // A server the privacy guard counts as on this machine is reached
+        // directly: an HTTP(S)_PROXY / ALL_PROXY would otherwise carry the
+        // prompt (and key) off the machine while local_only allows it.
+        let direct = crate::privacy::is_local_endpoint(&config.id, base_url);
         match config.id {
             ProviderId::Claude => {
                 let api_key = config.api_key().ok_or_else(|| {
@@ -415,10 +419,20 @@ impl ProviderRegistry {
                     .with_model(model)
                     .with_base_url(base_url)
                     .with_max_tokens(8192);
+                let client = if direct {
+                    client.without_proxy()
+                } else {
+                    client
+                };
                 Ok(Box::new(client))
             }
             ProviderId::Ollama => {
                 let client = super::OllamaClient::new(model).with_base_url(base_url);
+                let client = if direct {
+                    client.without_proxy()
+                } else {
+                    client
+                };
                 Ok(Box::new(client))
             }
             ProviderId::BuiltIn => {
@@ -446,6 +460,11 @@ impl ProviderRegistry {
                 let client = super::OpenAIClient::new(api_key)
                     .with_model(model)
                     .with_base_url(base_url);
+                let client = if direct {
+                    client.without_proxy()
+                } else {
+                    client
+                };
                 Ok(Box::new(client))
             }
         }

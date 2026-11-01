@@ -451,3 +451,66 @@ async fn fim_completions_go_to_the_configured_server() {
         seen[0].body
     );
 }
+
+/// A proxy on 127.0.0.1 that counts the connections it gets and refuses them.
+async fn counting_proxy() -> (String, Arc<Mutex<usize>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = format!("http://{}", listener.local_addr().unwrap());
+    let count = Arc::new(Mutex::new(0usize));
+    let seen = count.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            *seen.lock().unwrap() += 1;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+        }
+    });
+    (addr, count)
+}
+
+#[tokio::test]
+async fn a_server_on_this_machine_is_reached_without_any_proxy() {
+    // With a proxy in the environment, a request to a local model must still
+    // go straight to it: through the proxy it would leave the machine while
+    // local_only counts it as on-device.
+    let _turn = turn();
+    let (proxy, proxied) = counting_proxy().await;
+    let _env = EnvVars::set(&[
+        ("HTTP_PROXY", &proxy),
+        ("http_proxy", &proxy),
+        ("ALL_PROXY", &proxy),
+        ("all_proxy", &proxy),
+        ("NO_PROXY", ""),
+        ("no_proxy", ""),
+    ]);
+    let (server, log) = model_server().await;
+    for (provider, model, base) in [
+        (LlmProvider::Ollama, "llama3.2:3b", server.clone()),
+        (
+            LlmProvider::LmStudio,
+            "qwen2.5-coder-7b",
+            format!("{server}/v1"),
+        ),
+    ] {
+        let s = settings(provider, model, Some(&base));
+        let client = s.build_llm_client().expect("client builds");
+        let reply = client
+            .chat(&[Message::user("hello")], &[])
+            .await
+            .unwrap_or_else(|e| panic!("{model}: {e}"));
+        assert_eq!(reply.message.content, REPLY);
+    }
+    assert_eq!(
+        requests(&log).len(),
+        2,
+        "the local server got both requests"
+    );
+    assert_eq!(
+        *proxied.lock().unwrap(),
+        0,
+        "a local request went through the proxy"
+    );
+}
