@@ -66,7 +66,7 @@ The central execution model is a streaming agentic loop:
 - All cloud providers except Claude use `OpenAIClient` (OpenAI-compatible API)
 - `ModelRouter` (`model_router.rs`) — selects provider/model per task type
 - Local model auto-discovery via `discovery.rs`
-- `[llm] base_url` moves the active provider (never the built-in one) off its default address: `Settings::build_provider_registry` writes it into that provider's `ProviderConfig`, so every client and the `local_only` check use it; `build_llm_client` refuses one that is not a full http(s) URL. It is the old provider's address, so switch providers with `Settings::set_provider`, which drops it.
+- `[llm] base_url` moves the active provider (never the built-in one) off its default address: `Settings::build_provider_registry` writes it into that provider's `ProviderConfig`, so every client and the `local_only` check use it. `Settings::check_base_url` (run by `build_llm_client` and the Settings › AI key test) refuses one that is not a full http(s) URL, or that is plain http to another machine for a provider that needs a key. It is the old provider's address, so switch providers with `Settings::set_provider`, which drops it (older builds kept it).
 
 Supported providers: Anthropic Claude, OpenAI, Groq, Together.ai, OpenRouter, Gemini, Ollama (local), LM Studio (local).
 

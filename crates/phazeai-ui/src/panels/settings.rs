@@ -6,7 +6,7 @@ use floem::{
 use phazeai_core::{
     llm::{
         key_setup::{check_api_key, key_help},
-        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderConfig, ProviderId},
     },
     Settings,
 };
@@ -784,6 +784,18 @@ fn ai_section(state: IdeState) -> impl IntoView {
     .style(|s| s.flex_col().width_full())
 }
 
+/// Where the Test button sends the key of `cfg` (from
+/// `settings.build_provider_registry()`): the address its clients use, which
+/// for the active provider is `[llm] base_url` when set. An address the
+/// clients refuse (`Settings::check_base_url`) is refused here too, with
+/// their message, before the key goes anywhere.
+fn key_test_url(settings: &Settings, cfg: &ProviderConfig) -> Result<String, String> {
+    if cfg.id == settings.llm.provider.to_provider_id() {
+        settings.check_base_url().map_err(|e| e.to_string())?;
+    }
+    Ok(cfg.base_url.clone())
+}
+
 /// API key input row — masked text input with Save / Clear buttons. Saves to
 /// the OS keyring under the active provider's `api_key_env` entry name.
 fn api_key_input_row(state: IdeState) -> impl IntoView {
@@ -873,8 +885,14 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
                 feedback.set("Paste a key first.".into());
                 return;
             }
+            let base_url = match key_test_url(&settings, cfg) {
+                Ok(url) => url,
+                Err(refusal) => {
+                    feedback.set(refusal);
+                    return;
+                }
+            };
             feedback.set("Testing…".into());
-            let base_url = cfg.base_url.clone();
             let send = create_ext_action(Scope::new(), move |msg: String| feedback.set(msg));
             std::thread::spawn(move || {
                 let msg = match tokio::runtime::Builder::new_current_thread()
@@ -1302,5 +1320,40 @@ mod tests {
         let (next, problem) = theme_after_reload(ember("#ff7a18"), &LoadedThemes::default());
         assert_eq!(next.display_name(), "Ember");
         assert!(problem.unwrap().contains("no longer"));
+    }
+
+    #[test]
+    fn the_key_test_refuses_an_address_the_clients_refuse() {
+        use super::key_test_url;
+        use phazeai_core::{config::LlmProvider, llm::provider::ProviderId, Settings};
+
+        // What an older build left behind: an Ollama on another machine as
+        // base_url, provider since switched to Claude.
+        let mut s = Settings::default();
+        s.llm.provider = LlmProvider::Claude;
+        s.llm.base_url = Some("http://192.0.2.2:11434".into());
+        let registry = s.build_provider_registry();
+        let claude = registry.get_config(&ProviderId::Claude).unwrap();
+        let refusal = key_test_url(&s, claude).expect_err("the key must not be sent there");
+        assert!(
+            refusal.contains("base_url") && refusal.contains("unencrypted"),
+            "{refusal}"
+        );
+
+        // Another provider's key is tested at that provider's own address.
+        let openai = registry.get_config(&ProviderId::OpenAI).unwrap();
+        assert_eq!(
+            key_test_url(&s, openai).unwrap(),
+            ProviderId::OpenAI.default_base_url()
+        );
+
+        // Over https, the configured address is the one tested.
+        s.llm.base_url = Some("https://gateway.example/anthropic".into());
+        let registry = s.build_provider_registry();
+        let claude = registry.get_config(&ProviderId::Claude).unwrap();
+        assert_eq!(
+            key_test_url(&s, claude).unwrap(),
+            "https://gateway.example/anthropic"
+        );
     }
 }
