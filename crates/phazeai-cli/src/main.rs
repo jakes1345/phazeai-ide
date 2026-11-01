@@ -191,7 +191,8 @@ async fn run(cli: Cli) -> Result<()> {
             // The configured model belongs to the old provider.
             settings.llm.model = setup::default_model_for(&settings, &p);
         }
-        settings.llm.provider = p;
+        // So does `[llm] base_url`, which this drops on a change.
+        settings.set_provider(p);
     }
     if let Some(ref model) = cli.model {
         settings.llm.model = model.clone();
@@ -215,9 +216,9 @@ async fn run(cli: Cli) -> Result<()> {
     {
         let base_url = settings
             .llm
-            .base_url
-            .clone()
-            .unwrap_or_else(|| "http://localhost:11434".to_string());
+            .base_url_override()
+            .unwrap_or(phazeai_core::constants::endpoints::OLLAMA_BASE_URL)
+            .to_string();
 
         if let Ok(manager) = phazeai_core::llm::OllamaManager::new(&base_url) {
             if let Err(e) = manager.ensure_phaze_beast().await {

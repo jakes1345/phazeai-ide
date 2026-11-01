@@ -1129,4 +1129,21 @@ mod tests {
         assert!(run_input(&mut rx).is_none());
         assert_eq!(state.queued, ["and then"]);
     }
+
+    #[test]
+    fn switching_provider_drops_the_old_providers_base_url() {
+        use phazeai_core::config::LlmProvider;
+        let tmp = TempDir::new("provider");
+        let (mut state, _rx) = test_state(tmp.path());
+        assert_eq!(state.settings.llm.provider, LlmProvider::Ollama);
+        state.settings.llm.base_url = Some("http://gpu-box.invalid:11434".into());
+
+        actions::submit_line(&mut state, "/provider lmstudio");
+
+        assert_eq!(state.settings.llm.provider, LlmProvider::LmStudio);
+        assert_eq!(
+            state.settings.llm.base_url, None,
+            "the Ollama server's address must not carry over to LM Studio"
+        );
+    }
 }
