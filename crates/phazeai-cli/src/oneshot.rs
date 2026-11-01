@@ -113,7 +113,7 @@ pub fn approval_fn(allow: Allow, can_ask: bool, refusals: Refusals) -> phazeai_c
                 return false;
             }
             let _guard = prompt_lock.lock().await;
-            let question = render_question(&name, &params, permission);
+            let question = render_question(&name, &params, permission).await;
             tokio::task::spawn_blocking(move || ask_yes_no(&question))
                 .await
                 .unwrap_or(false)
@@ -130,13 +130,13 @@ fn risk_label(permission: ToolPermission) -> &'static str {
     }
 }
 
-fn render_question(name: &str, params: &Value, permission: ToolPermission) -> String {
+async fn render_question(name: &str, params: &Value, permission: ToolPermission) -> String {
     let mut out = format!(
         "\nPhazeAI wants to run {} ({}):\n",
         name,
         risk_label(permission)
     );
-    for line in approval_preview(name, params).iter().take(40) {
+    for line in approval_preview(name, params).await.iter().take(40) {
         let text = match line {
             PreviewLine::Command(c) => format!("  $ {c}"),
             PreviewLine::Add(l) => format!("  + {l}"),

@@ -210,6 +210,11 @@ impl FileWrite {
         &self.after
     }
 
+    /// Whether there is no file yet, so committing creates one.
+    pub fn creates_file(&self) -> bool {
+        self.current.is_none()
+    }
+
     /// Whether committing changes anything on disk. Creating a file does,
     /// even an empty one.
     pub fn changes_file(&self) -> bool {
