@@ -20,6 +20,8 @@ pub struct Skill {
     pub description: String,
     /// Full file content with frontmatter stripped — the expert persona body.
     pub body: String,
+    /// The line of `path` that `body` starts on (1-based).
+    pub body_line: usize,
     /// Original file path.
     pub path: PathBuf,
     /// Where it came from.
@@ -29,7 +31,21 @@ pub struct Skill {
 impl Skill {
     /// Returns the full system-prompt block to inject when this skill is active.
     pub fn as_system_prompt(&self) -> String {
-        format!("# Active Expert Skill: {}\n\n{}\n", self.name, self.body)
+        let block = self.instructions();
+        format!("{}{}", block.heading, block.text)
+    }
+
+    /// This skill as a block of system-prompt instructions: what
+    /// [`Self::as_system_prompt`] renders, in a form
+    /// [`crate::context::system_prompt::fit_instructions`] can shorten to a
+    /// context budget (a cut points at the skill file's own line numbers).
+    pub fn instructions(&self) -> crate::context::system_prompt::Instructions {
+        crate::context::system_prompt::Instructions::from_file(
+            &self.path,
+            self.body_line,
+            format!("{}\n", self.body),
+        )
+        .with_heading(format!("# Active Expert Skill: {}\n\n", self.name))
     }
 
     /// Returns true if this skill's name or description loosely matches `query`.
@@ -147,10 +163,15 @@ fn parse_skill_file(path: &Path, content: &str, source: SkillSource) -> Option<S
         .cloned()
         .unwrap_or_else(|| first_sentence(&body));
 
+    // `body` is the end of `content`, so the trimmed body starts this far in.
+    let body_start = content.len() - body.trim_start().len();
+    let body_line = content[..body_start].matches('\n').count() + 1;
+
     Some(Skill {
         name,
         description,
         body: body.trim().to_string(),
+        body_line,
         path: path.to_path_buf(),
         source,
     })
@@ -224,5 +245,43 @@ mod tests {
         assert_eq!(first_sentence(&long), format!("{} wins.", "é".repeat(100)));
         assert_eq!(first_sentence("short"), "short");
         assert_eq!(first_sentence(""), "");
+    }
+
+    #[test]
+    fn a_shortened_skill_points_at_the_lines_of_its_own_file() {
+        use crate::context::system_prompt::fit_instructions;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let _ws = crate::context::system_prompt::tests::workspace(&root);
+
+        let path = root.join("reviewer.md");
+        let mut content = "---\nname: reviewer\ndescription: Reviews changes\n---\n\n".to_string();
+        for n in 1..=300 {
+            content.push_str(&format!(
+                "Step {n:03}: check the change against the spec.\n"
+            ));
+        }
+        let skill = parse_skill_file(&path, &content, SkillSource::Project).unwrap();
+        // Four lines of front matter and a blank line come first.
+        assert_eq!(skill.body_line, 6);
+        assert!(skill.body.starts_with("Step 001:"));
+        // Whole, the block is exactly the old system-prompt text.
+        assert_eq!(
+            fit_instructions(&[skill.instructions()], usize::MAX),
+            format!("# Active Expert Skill: reviewer\n\n{}\n", skill.body)
+        );
+        // Cut short, the read_file offset is the file line of the first step
+        // left out.
+        let out = fit_instructions(&[skill.instructions()], 2_000);
+        assert!(out.len() <= 2_000, "{} bytes", out.len());
+        let shown = out.matches("Step ").count();
+        let next = format!("Step {:03}:", shown + 1);
+        let next_line = content.lines().position(|l| l.starts_with(&next)).unwrap() + 1;
+        assert_eq!(next_line, 6 + shown);
+        assert!(
+            out.ends_with(&format!("\"offset\": {next_line}}}.]")),
+            "{}",
+            &out[out.rfind("[... ").unwrap()..]
+        );
     }
 }

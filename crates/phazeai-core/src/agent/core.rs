@@ -196,6 +196,12 @@ impl Agent {
         self
     }
 
+    /// Change the system prompt of an agent between runs (e.g. rebuilt for a
+    /// new model's context budget); the next run sends it.
+    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        self.system_prompt = Some(prompt.into());
+    }
+
     pub fn register_tool(&mut self, tool: Box<dyn crate::tools::Tool>) {
         self.tools.register(tool);
     }

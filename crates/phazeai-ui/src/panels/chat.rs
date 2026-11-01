@@ -9,6 +9,9 @@ use floem::{
     views::{container, dyn_container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
+use phazeai_core::context::system_prompt::{
+    fit_instructions, instructions_allowance, Instructions,
+};
 use phazeai_core::{
     discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
     CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata, ConversationStore,
@@ -347,8 +350,8 @@ struct SendToAiJob {
     settings: Settings,
     workspace_root: std::path::PathBuf,
     mode_hint: &'static str,
-    /// Full content of an explicitly-activated skill, or None.
-    active_skill: Option<String>,
+    /// An explicitly-activated skill, or None.
+    active_skill: Option<Skill>,
     /// Brief skill menu for auto-select; injected when no skill is explicitly active.
     skills_menu: String,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
@@ -357,6 +360,30 @@ struct SendToAiJob {
     code_search: Option<CodeSearch>,
     /// Files whose contents are in `user_message` (for the privacy audit log).
     attached_files: Vec<std::path::PathBuf>,
+}
+
+/// The chat's system prompt: the active skill (if any), the mode hint, and,
+/// with no skill active, the menu of skills. The skill or the menu takes at
+/// most the instructions' share of the model's context budget
+/// (`fit_instructions`), so a long skill file can't push a small local
+/// model's requests over budget, where the trim would cut every tool result
+/// down to a bare marker.
+fn chat_system_prompt(
+    active_skill: Option<&Skill>,
+    mode_hint: &str,
+    skills_menu: &str,
+    context_budget: usize,
+) -> String {
+    let room = instructions_allowance(context_budget);
+    let skill = active_skill.map(|s| fit_instructions(&[s.instructions()], room));
+    let menu = (active_skill.is_none() && !skills_menu.is_empty())
+        .then(|| fit_instructions(&[Instructions::new(skills_menu)], room));
+    [skill.as_deref(), Some(mode_hint), menu.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn send_to_ai(job: SendToAiJob) {
@@ -409,22 +436,12 @@ fn send_to_ai(job: SendToAiJob) {
                     return;
                 }
             };
-            // Build system prompt: skill (if active) + mode hint + skill menu.
-            let system_prompt = {
-                let mut parts: Vec<&str> = Vec::new();
-                let skill_body;
-                if let Some(ref s) = active_skill {
-                    skill_body = s.clone();
-                    parts.push(&skill_body);
-                }
-                if !mode_hint.is_empty() {
-                    parts.push(mode_hint);
-                }
-                if active_skill.is_none() && !skills_menu.is_empty() {
-                    parts.push(&skills_menu);
-                }
-                parts.join("\n\n")
-            };
+            let system_prompt = chat_system_prompt(
+                active_skill.as_ref(),
+                mode_hint,
+                &skills_menu,
+                settings.context_budget(),
+            );
             // The UI index of this run's user message: the bubble pushed (or,
             // on a retry, kept) right after `prior_messages`.
             let user_index = prior_messages.len();
@@ -1133,7 +1150,7 @@ pub fn chat_panel(
                         } else {
                             rest
                         };
-                        (msg, Some(skill.as_system_prompt()))
+                        (msg, Some(skill.clone()))
                     } else {
                         // Unknown slash word — pass through as-is
                         (trimmed.clone(), None)
@@ -2426,9 +2443,83 @@ pub fn chat_panel(
 #[cfg(test)]
 mod tests {
     use super::{
-        compaction_after_run, expand_file_mentions, rebuild_history, shape_retry_prior_messages,
-        ChatMessage, ChatRole, CompactionState,
+        chat_system_prompt, compaction_after_run, expand_file_mentions, rebuild_history,
+        shape_retry_prior_messages, AiMode, ChatMessage, ChatRole, CompactionState,
     };
+    use phazeai_core::context::system_prompt::instructions_allowance;
+
+    #[test]
+    fn a_long_skill_or_skill_menu_is_cut_to_its_share_of_a_small_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let skills_dir = root.join(".phazeai").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let mut file = "---\nname: reviewer\ndescription: Reviews changes\n---\n\n".to_string();
+        let mut n = 0;
+        while file.len() < 20 * 1024 {
+            n += 1;
+            file.push_str(&format!(
+                "Step {n:04}: check the change against the spec.\n"
+            ));
+        }
+        let path = skills_dir.join("reviewer.md");
+        std::fs::write(&path, &file).unwrap();
+        let skills = phazeai_core::discover_skills(Some(&root));
+        let skill = phazeai_core::find_skill(&skills, "reviewer").unwrap();
+        let hint = AiMode::Debug.system_hint();
+
+        // A cloud model's budget: exactly the prompt the chat sent before.
+        assert_eq!(
+            chat_system_prompt(Some(skill), hint, "ignored menu", 200_000),
+            format!(
+                "# Active Expert Skill: reviewer\n\n{}\n\n\n{hint}",
+                skill.body
+            )
+        );
+
+        // A local model's budget: the skill takes at most its share, cut at a
+        // line, and the marker gives the skill file's own line numbers.
+        let budget = 4_096;
+        let prompt = chat_system_prompt(Some(skill), "", "", budget);
+        assert!(
+            prompt.len() <= instructions_allowance(budget),
+            "{} bytes",
+            prompt.len()
+        );
+        let shown = prompt.matches("Step ").count();
+        assert!(shown > 10, "only {shown} steps shown");
+        // Front matter and a blank line take the file's first five lines.
+        let next = 5 + shown + 1;
+        let last = file.lines().count();
+        assert!(
+            prompt.ends_with(&format!(
+                "\n[... {p} is shortened here to fit this model's context budget: lines \
+                 {next}-{last} are not shown. To read them, call read_file with \
+                 {{\"path\": \"{p}\", \"offset\": {next}}}.]",
+                p = path.display()
+            )),
+            "{}",
+            &prompt[prompt.rfind("[... ").unwrap()..]
+        );
+        assert!(file
+            .lines()
+            .nth(next - 1)
+            .unwrap()
+            .starts_with(&format!("Step {:04}:", shown + 1)));
+
+        // With no skill active, a long menu of skills is held to the same share.
+        let menu: String = (0..500)
+            .map(|i| format!("- **skill-{i}** (project) — does task number {i}\n"))
+            .collect();
+        let prompt = chat_system_prompt(None, hint, &menu, budget);
+        let menu_part = prompt.strip_prefix(&format!("{hint}\n\n")).unwrap();
+        assert!(menu_part.len() <= instructions_allowance(budget));
+        assert!(menu.starts_with(menu_part.split("[... ").next().unwrap()));
+        assert!(
+            menu_part.ends_with("of them are not shown.]"),
+            "{menu_part}"
+        );
+    }
 
     #[test]
     fn mentions_of_denied_files_are_not_attached() {

@@ -1,16 +1,217 @@
 use std::path::{Path, PathBuf};
 
+use crate::llm::context_budget::MIN_BUDGET;
+
+/// Share of the context budget that instructions (project instruction files,
+/// an active skill) may take in a system prompt.
+///
+/// A quarter, because the rest of the budget has to carry everything else a
+/// request holds: the fixed part of the prompt (identity, tool guide, safety
+/// rules: about 1.5k tokens, over a third of the ~4k budget a local Ollama or
+/// LM Studio model gets), the question, and tool calls with their results.
+/// Compaction keeps 40% of the budget as recent messages and lets its summary
+/// take 15% (`context::compaction`), which leaves 45% for the whole system
+/// prompt: a quarter for instructions and the rest for the fixed part, on
+/// every budget above ~8k tokens. On the smallest budgets nothing fits all of
+/// that, and the trim cuts tool output down, but it still reaches the model
+/// (an over-budget system prompt left it a bare marker). A cloud model's
+/// budget (~190k tokens for Claude) allows ~140 KB of instructions, more than
+/// any real instructions file, so those models get them in full, as before.
+pub const INSTRUCTIONS_RATIO: f64 = 0.25;
+
+/// Bytes per token in the estimate `ConversationHistory::estimate_tokens`
+/// makes (~3 for code-heavy text), which decides what fits the budget.
+const BYTES_PER_TOKEN: usize = 3;
+
+/// Bytes the instructions may take in the system prompt of a model with
+/// `budget` tokens of context: [`INSTRUCTIONS_RATIO`] of it, counted the way
+/// the conversation history counts tokens.
+pub fn instructions_allowance(budget: usize) -> usize {
+    ((budget as f64 * INSTRUCTIONS_RATIO) as usize).saturating_mul(BYTES_PER_TOKEN)
+}
+
+/// One block of instructions for a system prompt: an instructions file, an
+/// active skill, or text given directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instructions {
+    /// Printed before `text` (e.g. `# From /dir\n`); not part of the file.
+    pub heading: String,
+    /// The instructions themselves.
+    pub text: String,
+    /// The file `text` was read from and the line of that file `text` starts
+    /// on (1 for a whole file), so a shortened block can say where the rest
+    /// is. `None` for text that was given directly.
+    pub file: Option<(PathBuf, usize)>,
+}
+
+impl Instructions {
+    /// Text given directly, not read from a file.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            heading: String::new(),
+            text: text.into(),
+            file: None,
+        }
+    }
+
+    /// `text`, read from `path` starting at line `first_line` (1-based).
+    pub fn from_file(path: impl Into<PathBuf>, first_line: usize, text: impl Into<String>) -> Self {
+        Self {
+            heading: String::new(),
+            text: text.into(),
+            file: Some((path.into(), first_line.max(1))),
+        }
+    }
+
+    pub fn with_heading(mut self, heading: impl Into<String>) -> Self {
+        self.heading = heading.into();
+        self
+    }
+}
+
+/// Separator between instruction blocks.
+const BLOCK_SEPARATOR: &str = "\n\n---\n\n";
+
+/// `blocks`, joined by a separator, in at most `max_bytes`.
+///
+/// When everything fits it is returned as it is. Otherwise each block gets an
+/// equal share of the room, and a block that needs less than its share leaves
+/// the rest to the others, so a short file is never cut because a long one is
+/// there. A block over its share keeps its heading and as many whole lines as
+/// fit, followed by a marker that says it was shortened, which lines are not
+/// shown and, for a file the tools can open, the `read_file` call that reads
+/// them.
+pub fn fit_instructions(blocks: &[Instructions], max_bytes: usize) -> String {
+    let whole: Vec<String> = blocks
+        .iter()
+        .map(|b| format!("{}{}", b.heading, b.text))
+        .collect();
+    let separators = BLOCK_SEPARATOR.len() * blocks.len().saturating_sub(1);
+    if whole.iter().map(String::len).sum::<usize>() + separators <= max_bytes {
+        return whole.join(BLOCK_SEPARATOR);
+    }
+    // Equal shares, smallest block first; what a block doesn't need goes back
+    // to the ones still to come.
+    let mut shares = vec![0; blocks.len()];
+    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    order.sort_by_key(|&i| whole[i].len());
+    let mut left = max_bytes.saturating_sub(separators);
+    for (done, &i) in order.iter().enumerate() {
+        shares[i] = whole[i].len().min(left / (blocks.len() - done));
+        left -= shares[i];
+    }
+    let fitted = blocks
+        .iter()
+        .zip(whole)
+        .zip(shares)
+        .map(|((block, whole), share)| {
+            if whole.len() <= share {
+                whole
+            } else {
+                shorten(block, share)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(BLOCK_SEPARATOR);
+    if fitted.len() <= max_bytes {
+        fitted
+    } else {
+        // Many blocks in very little room: their markers alone don't fit.
+        let note = "[... The rest of these instructions is left out to fit this model's \
+                    context budget.]";
+        if max_bytes < note.len() {
+            return String::new();
+        }
+        format!("{}{note}", whole_lines(&fitted, max_bytes - note.len()))
+    }
+}
+
+/// `block` in at most `share` bytes (unless even its heading and marker are
+/// longer): its heading, the whole lines of its text that fit, and a marker
+/// for the lines left out.
+fn shorten(block: &Instructions, share: usize) -> String {
+    let readable = block
+        .file
+        .as_ref()
+        .is_some_and(|(path, _)| tools_can_read(path));
+    let lines = block.text.lines().count();
+    // The marker is longest with the largest line numbers.
+    let marker_max = shortened_marker(block, readable, lines, lines).len();
+    let kept = whole_lines(
+        &block.text,
+        share.saturating_sub(block.heading.len() + marker_max),
+    );
+    // `kept` ends a line, so it holds one line per line break.
+    let first_left_out = kept.matches('\n').count() + 1;
+    let marker = shortened_marker(block, readable, first_left_out, lines);
+    format!("{}{kept}{marker}", block.heading)
+}
+
+/// The longest start of `text` that ends a line and is at most `max` bytes.
+fn whole_lines(text: &str, max: usize) -> &str {
+    let end = text.as_bytes()[..max.min(text.len())]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    &text[..end]
+}
+
+/// What a shortened block ends with: lines `first`..=`last` of its text are
+/// not shown. Line numbers are the file's, so they work as a `read_file`
+/// offset. `readable` says whether the file tools may open the file.
+fn shortened_marker(block: &Instructions, readable: bool, first: usize, last: usize) -> String {
+    let Some((path, start)) = &block.file else {
+        return format!(
+            "[... These instructions are shortened here to fit this model's context budget: \
+             lines {first}-{last} of them are not shown.]"
+        );
+    };
+    let (first, last) = (
+        (start + first).saturating_sub(1),
+        (start + last).saturating_sub(1),
+    );
+    let name = path.display();
+    if readable {
+        let json_path = serde_json::Value::String(path.to_string_lossy().into_owned());
+        format!(
+            "[... {name} is shortened here to fit this model's context budget: lines \
+             {first}-{last} are not shown. To read them, call read_file with \
+             {{\"path\": {json_path}, \"offset\": {first}}}.]"
+        )
+    } else {
+        format!(
+            "[... {name} is shortened here to fit this model's context budget: lines \
+             {first}-{last} are not shown. It is outside the workspace, so read_file cannot \
+             open it.]"
+        )
+    }
+}
+
+/// Whether `read_file` may open `path`: the file tools are confined to the
+/// workspace (when one is set), and instruction files can live above it.
+fn tools_can_read(path: &Path) -> bool {
+    crate::tools::sandbox::resolve_within_workspace("read_file", &path.to_string_lossy()).is_ok()
+}
+
 /// Builds the system prompt for the AI coding assistant.
 /// Incorporates project context, available tools, and user instructions.
+///
+/// The prompt is sized to the model's context budget
+/// ([`Self::with_context_budget`]): instructions take at most
+/// [`INSTRUCTIONS_RATIO`] of it (see [`fit_instructions`]), so a long
+/// instructions file can't leave a small local model's requests over budget
+/// before the conversation even starts.
+#[derive(Debug, Clone)]
 pub struct SystemPromptBuilder {
     project_root: Option<PathBuf>,
     project_type: Option<ProjectType>,
     git_branch: Option<String>,
     git_dirty_files: Vec<String>,
-    custom_instructions: Option<String>,
+    instructions: Vec<Instructions>,
     tool_names: Vec<String>,
     model_name: String,
     provider_name: String,
+    context_budget: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -106,11 +307,21 @@ impl SystemPromptBuilder {
             project_type: None,
             git_branch: None,
             git_dirty_files: Vec::new(),
-            custom_instructions: None,
+            instructions: Vec::new(),
             tool_names: Vec::new(),
             model_name: String::new(),
             provider_name: String::new(),
+            context_budget: MIN_BUDGET,
         }
+    }
+
+    /// Size the prompt for a model with `budget` tokens of context (what
+    /// `Settings::context_budget()` gives the agent). Until this is called the
+    /// smallest budget any model gets ([`MIN_BUDGET`]) is assumed, so a prompt
+    /// built without it still fits every model.
+    pub fn with_context_budget(mut self, budget: usize) -> Self {
+        self.context_budget = budget;
+        self
     }
 
     pub fn with_project_root(mut self, root: PathBuf) -> Self {
@@ -126,7 +337,7 @@ impl SystemPromptBuilder {
     }
 
     pub fn with_custom_instructions(mut self, instructions: String) -> Self {
-        self.custom_instructions = Some(instructions);
+        self.instructions = vec![Instructions::new(instructions)];
         self
     }
 
@@ -142,6 +353,8 @@ impl SystemPromptBuilder {
     }
 
     /// Load custom instructions from CLAUDE.md or .phazeai/instructions.md
+    /// (replacing any set before, when a file is found). How much of them
+    /// the prompt carries depends on the context budget.
     pub fn load_project_instructions(mut self) -> Self {
         if let Some(ref root) = self.project_root {
             let mut instructions = Vec::new();
@@ -162,7 +375,7 @@ impl SystemPromptBuilder {
             for path in &root_candidates {
                 if path.exists() && !policy.is_denied(path) {
                     if let Ok(content) = std::fs::read_to_string(path) {
-                        instructions.push(content);
+                        instructions.push(Instructions::from_file(path, 1, content));
                         break; // Only take the first match at project root
                     }
                 }
@@ -180,7 +393,10 @@ impl SystemPromptBuilder {
                     let parent_file = dir.join(file);
                     if parent_file.exists() && !policy.is_denied(&parent_file) {
                         if let Ok(content) = std::fs::read_to_string(&parent_file) {
-                            instructions.push(format!("# From {}\n{}", dir.display(), content));
+                            instructions.push(
+                                Instructions::from_file(&parent_file, 1, content)
+                                    .with_heading(format!("# From {}\n", dir.display())),
+                            );
                         }
                     }
                 }
@@ -201,13 +417,16 @@ impl SystemPromptBuilder {
                 let global_instructions = home.join(".phazeai").join("instructions.md");
                 if global_instructions.exists() {
                     if let Ok(content) = std::fs::read_to_string(&global_instructions) {
-                        instructions.push(format!("# Global instructions\n{}", content));
+                        instructions.push(
+                            Instructions::from_file(&global_instructions, 1, content)
+                                .with_heading("# Global instructions\n"),
+                        );
                     }
                 }
             }
 
             if !instructions.is_empty() {
-                self.custom_instructions = Some(instructions.join("\n\n---\n\n"));
+                self.instructions = instructions;
             }
         }
         self
@@ -215,15 +434,7 @@ impl SystemPromptBuilder {
 
     /// Append additional instructions to existing custom instructions
     pub fn with_additional_instructions(mut self, instructions: String) -> Self {
-        match self.custom_instructions {
-            Some(ref mut existing) => {
-                existing.push_str("\n\n---\n\n");
-                existing.push_str(&instructions);
-            }
-            None => {
-                self.custom_instructions = Some(instructions);
-            }
-        }
+        self.instructions.push(Instructions::new(instructions));
         self
     }
 
@@ -267,15 +478,20 @@ impl SystemPromptBuilder {
         // Safety rules
         prompt.push_str(SAFETY_RULES);
 
-        // Custom project instructions
-        if let Some(ref instructions) = self.custom_instructions {
-            prompt.push_str("\n\n## Project-Specific Instructions\n");
-            prompt.push_str(instructions);
+        // Custom project instructions, heading included, within their share
+        // of the context budget.
+        if !self.instructions.is_empty() {
+            let room = instructions_allowance(self.context_budget)
+                .saturating_sub(INSTRUCTIONS_HEADING.len());
+            prompt.push_str(INSTRUCTIONS_HEADING);
+            prompt.push_str(&fit_instructions(&self.instructions, room));
         }
 
         prompt
     }
 }
+
+const INSTRUCTIONS_HEADING: &str = "\n\n## Project-Specific Instructions\n";
 
 impl Default for SystemPromptBuilder {
     fn default() -> Self {
@@ -427,7 +643,7 @@ pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     #[test]
     fn every_tool_call_example_uses_the_tools_real_parameters() {
@@ -534,5 +750,198 @@ mod tests {
             !line.contains(".env") && !line.contains("private"),
             "{line}"
         );
+    }
+
+    // ── Instructions sized to the context budget ────────────────────────────
+
+    /// Holds the file tools' workspace (a process-wide setting other tests
+    /// change too) at `root` until dropped.
+    pub(crate) struct Workspace {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<PathBuf>,
+    }
+
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            crate::tools::sandbox::set_workspace_root(self.prev.take());
+        }
+    }
+
+    pub(crate) fn workspace(root: &Path) -> Workspace {
+        let lock = crate::tools::sandbox::tests::SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = crate::tools::sandbox::workspace_root();
+        crate::tools::sandbox::set_workspace_root(Some(root.to_path_buf()));
+        Workspace { _lock: lock, prev }
+    }
+
+    /// Numbered instruction lines, at least `bytes` long in all.
+    fn rules(bytes: usize) -> String {
+        let mut text = String::new();
+        let mut n = 0;
+        while text.len() < bytes {
+            n += 1;
+            text.push_str(&format!(
+                "- Rule {n:04}: run the tests before saying that a change works.\n"
+            ));
+        }
+        text
+    }
+
+    /// A project whose CLAUDE.md holds `rules(bytes)`.
+    fn project(bytes: usize) -> (tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let text = rules(bytes);
+        std::fs::write(root.join("CLAUDE.md"), &text).unwrap();
+        (dir, root, text)
+    }
+
+    #[test]
+    fn a_long_instructions_file_is_cut_to_its_share_of_a_small_budget() {
+        let (_dir, root, text) = project(20 * 1024);
+        let _ws = workspace(&root);
+        let budget = 4_096;
+        let prompt = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .load_project_instructions()
+            .with_context_budget(budget)
+            .build();
+        let without = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .build();
+
+        // The instructions come last and, heading and marker included, take
+        // at most a quarter of the budget as the history counts tokens.
+        let section = prompt.strip_prefix(without.as_str()).unwrap();
+        assert!(
+            section.len().div_ceil(3) <= budget / 4,
+            "the instructions are {} bytes, ~{} tokens",
+            section.len(),
+            section.len().div_ceil(3)
+        );
+        // Whole lines from the top of the file, then the marker.
+        let body = section.strip_prefix(INSTRUCTIONS_HEADING).unwrap();
+        let (kept, marker) = body.split_at(body.find("[... ").expect("a marker"));
+        assert!(kept.ends_with('\n') && text.starts_with(kept), "{kept:?}");
+        assert!(kept.len() > section.len() / 2, "{} bytes kept", kept.len());
+        // It names the file, the lines left out and how to read them.
+        let file = root.join("CLAUDE.md");
+        let next = kept.lines().count() + 1;
+        let total = text.lines().count();
+        assert_eq!(
+            marker,
+            format!(
+                "[... {path} is shortened here to fit this model's context budget: lines \
+                 {next}-{total} are not shown. To read them, call read_file with \
+                 {{\"path\": \"{path}\", \"offset\": {next}}}.]",
+                path = file.display()
+            )
+        );
+        assert!(prompt.ends_with(marker));
+    }
+
+    #[test]
+    fn a_large_budget_gets_the_whole_instructions_file_unchanged() {
+        let (_dir, root, text) = project(20 * 1024);
+        let prompt = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .load_project_instructions()
+            .with_context_budget(200_000)
+            .build();
+        let without = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .build();
+        // Exactly what the prompt held before instructions were sized.
+        assert_eq!(prompt, format!("{without}{INSTRUCTIONS_HEADING}{text}"));
+    }
+
+    #[test]
+    fn a_short_block_stays_whole_next_to_a_long_one() {
+        let long = rules(20 * 1024);
+        let short = "Answer in British English.".to_string();
+        let budget = 4_096;
+        let prompt = SystemPromptBuilder::new()
+            .with_custom_instructions(long.clone())
+            .with_additional_instructions(short.clone())
+            .with_context_budget(budget)
+            .build();
+        let section = &prompt[prompt.find(INSTRUCTIONS_HEADING).unwrap()..];
+        assert!(section.len() <= instructions_allowance(budget));
+        // The short block is whole; the long one is cut before the separator,
+        // with a marker for text that has no file to read the rest from.
+        let (first, second) = section.split_once(BLOCK_SEPARATOR).unwrap();
+        assert_eq!(second, short);
+        let kept = first
+            .strip_prefix(INSTRUCTIONS_HEADING)
+            .unwrap()
+            .split("[... ")
+            .next()
+            .unwrap();
+        assert!(long.starts_with(kept) && kept.ends_with('\n'));
+        let next = kept.lines().count() + 1;
+        assert!(
+            first.ends_with(&format!(
+                "[... These instructions are shortened here to fit this model's context \
+                 budget: lines {next}-{} of them are not shown.]",
+                long.lines().count()
+            )),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn a_file_the_tools_cannot_open_is_named_without_a_read_file_hint() {
+        let (_dir, root, _text) = project(20 * 1024);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _ws = workspace(&elsewhere.path().canonicalize().unwrap());
+        let prompt = SystemPromptBuilder::new()
+            .with_project_root(root.clone())
+            .load_project_instructions()
+            .with_context_budget(4_096)
+            .build();
+        let marker = &prompt[prompt.rfind("[... ").unwrap()..];
+        assert!(
+            marker.ends_with(
+                "are not shown. It is outside the workspace, so read_file cannot open it.]"
+            ),
+            "{marker}"
+        );
+        assert!(marker.contains(&root.join("CLAUDE.md").display().to_string()));
+    }
+
+    #[test]
+    fn line_numbers_are_the_files_and_every_layout_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let _ws = workspace(&root);
+        // A block that starts on line 5 of its file (a skill after its
+        // front matter): the offset counts the file's lines.
+        let path = root.join("skill.md");
+        let block = Instructions::from_file(&path, 5, rules(4_000)).with_heading("# Skill\n\n");
+        let out = fit_instructions(std::slice::from_ref(&block), 1_000);
+        assert!(out.len() <= 1_000, "{} bytes", out.len());
+        let kept = out
+            .strip_prefix("# Skill\n\n")
+            .unwrap()
+            .split("[... ")
+            .next()
+            .unwrap();
+        let offset = 5 + kept.lines().count();
+        assert!(out.ends_with(&format!("\"offset\": {offset}}}.]")), "{out}");
+
+        // Many blocks in little room: the markers alone would overflow, and
+        // the result still fits.
+        let blocks: Vec<Instructions> = (0..30)
+            .map(|i| Instructions::from_file(root.join(format!("{i}.md")), 1, rules(2_000)))
+            .collect();
+        for room in [0, 50, 500, 3_000, 10_000] {
+            let out = fit_instructions(&blocks, room);
+            assert!(out.len() <= room, "{} bytes in {room}", out.len());
+        }
+        // Text that fits is returned as it is, blocks joined by the separator.
+        let small = [Instructions::new("a\n"), Instructions::new("b")];
+        assert_eq!(fit_instructions(&small, 100), "a\n\n\n---\n\nb");
     }
 }
