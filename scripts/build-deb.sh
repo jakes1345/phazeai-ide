@@ -13,9 +13,9 @@ echo "==> Building PhazeAI IDE v$VERSION .deb package"
 
 # Compile release binary
 echo "==> Compiling release binary..."
-cargo build --release -p phazeai-ide --manifest-path "$PROJECT_ROOT/Cargo.toml"
+cargo build --release -p phazeai-ui --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
-BINARY="$PROJECT_ROOT/target/release/phazeai-ide"
+BINARY="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}/release/phazeai-ui"
 
 # Set up package structure
 echo "==> Setting up package structure..."
@@ -31,10 +31,8 @@ cp "$BINARY" "$BUILD_DIR/usr/bin/phazeai-ide"
 chmod 0755 "$BUILD_DIR/usr/bin/phazeai-ide"
 
 # Icon
-ICON_PNG="$PROJECT_ROOT/assets/icon-256.png"
-if [[ -f "$ICON_PNG" ]]; then
-    cp "$ICON_PNG" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png"
-fi
+ICON_PNG="$PROJECT_ROOT/assets/branding/icon_256.png"
+cp "$ICON_PNG" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/phazeai-ide.png"
 
 # Desktop file
 cat > "$BUILD_DIR/usr/share/applications/phazeai-ide.desktop" <<EOF
@@ -49,7 +47,7 @@ Terminal=false
 Categories=Development;IDE;TextEditor;
 MimeType=text/plain;
 Keywords=ide;editor;ai;rust;python;coding;
-StartupWMClass=phazeai-ide
+StartupWMClass=phazeai-ui
 EOF
 
 # Changelog
