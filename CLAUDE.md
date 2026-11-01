@@ -159,6 +159,13 @@ model-written summary kept in the system prompt. The budget comes from
 `Settings::context_budget()` (`llm/context_budget.rs`: model window minus
 reply/schema reserve; `[llm] context_tokens` overrides). The IDE chat carries
 the summary across sends (`CompactionState` in `panels/chat.rs`).
+The same budget sizes the system prompt: instructions (CLAUDE.md and the other
+instruction files via `SystemPromptBuilder::with_context_budget`, the IDE
+chat's active skill or skill menu) take at most a quarter of it
+(`context/system_prompt.rs`, `INSTRUCTIONS_RATIO`), and `fit_instructions`
+cuts a file at a line with a marker naming the `read_file` call for the rest.
+The CLI builds the prompt per model (the TUI worker rebuilds it on a model
+switch); route new file-sourced system-prompt text through `fit_instructions`.
 
 ### Code search (`phazeai-core/src/search/`)
 

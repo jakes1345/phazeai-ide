@@ -8,7 +8,7 @@ mod worker;
 
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +19,8 @@ use phazeai_core::{
     collect_git_info,
     context::{ConversationMetadata, ConversationStore, SavedConversation, SavedMessage},
     tools::{ToolApprovalManager, ToolApprovalMode},
-    Agent, AgentEvent, BuildIndexTool, CodeSearch, CodeSearchTool, Settings, SystemPromptBuilder,
+    Agent, AgentEvent, BuildIndexTool, CodeSearch, CodeSearchTool, LlmClient, Settings,
+    SystemPromptBuilder,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
@@ -52,7 +53,7 @@ pub async fn run_single_prompt(
             setup::Surface::OneShot
         ))
     })?;
-    let system_prompt = build_system_prompt(extra_instructions);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let refusals = crate::oneshot::Refusals::default();
     // Ctrl+C stops the run instead of killing this process outright: the
@@ -60,17 +61,13 @@ pub async fn run_single_prompt(
     // Those run in their own process group, so the terminal's SIGINT no
     // longer reaches them and dying here would leave them running.
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut agent = Agent::new(llm)
-        .with_system_prompt(system_prompt)
+    let agent = single_prompt_agent(settings, llm, &cwd, extra_instructions)
         .with_cancel_token(cancel.clone())
         .with_approval(crate::oneshot::approval_fn(
             allow,
             can_ask,
             refusals.clone(),
         ));
-    if let Some(search) = code_search(settings) {
-        register_code_search(&mut agent, &search);
-    }
 
     let styled = color.has_color() && io::stderr().is_terminal();
     let paint = |code: &str, s: &str| {
@@ -747,11 +744,11 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         state.error(msg);
     }
 
-    let system_prompt = build_system_prompt(opts.extra_instructions);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let _worker = worker::spawn(
         WorkerConfig {
             llm,
-            system_prompt,
+            prompt: system_prompt_builder(&cwd, opts.extra_instructions),
             restore,
             approval_manager,
             policy,
@@ -852,11 +849,13 @@ pub(crate) fn apply_mode_prefix(mode: &str, input: &str) -> String {
     format!("{prefix}{input}")
 }
 
-fn build_system_prompt(extra_instructions: Option<&str>) -> String {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
+/// What the session's system prompt is made of: the project in `root`, its
+/// instruction files and git state, and `extra_instructions` (`--instructions`).
+/// Read once per session; `with_context_budget` then sizes the prompt for each
+/// model, so a long instructions file can't fill a small model's budget.
+fn system_prompt_builder(root: &Path, extra_instructions: Option<&str>) -> SystemPromptBuilder {
     let mut builder = SystemPromptBuilder::new()
-        .with_project_root(cwd.clone())
+        .with_project_root(root.to_path_buf())
         .with_tools(vec![
             "read_file".into(),
             "write_file".into(),
@@ -869,14 +868,36 @@ fn build_system_prompt(extra_instructions: Option<&str>) -> String {
         ])
         .load_project_instructions();
 
-    let (branch, dirty) = collect_git_info(&cwd);
+    let (branch, dirty) = collect_git_info(root);
     builder = builder.with_git_info(branch, dirty);
 
     if let Some(extra) = extra_instructions {
         builder = builder.with_additional_instructions(extra.to_string());
     }
 
-    builder.build()
+    builder
+}
+
+/// The agent for one `-p` prompt, before its approval and cancel flag are
+/// attached: the model's context budget sizes both the system prompt and the
+/// conversation, as in the TUI.
+fn single_prompt_agent(
+    settings: &Settings,
+    llm: Box<dyn LlmClient>,
+    root: &Path,
+    extra_instructions: Option<&str>,
+) -> Agent {
+    let context_budget = settings.context_budget();
+    let system_prompt = system_prompt_builder(root, extra_instructions)
+        .with_context_budget(context_budget)
+        .build();
+    let mut agent = Agent::new(llm)
+        .with_system_prompt(system_prompt)
+        .with_context_budget(context_budget);
+    if let Some(search) = code_search(settings) {
+        register_code_search(&mut agent, &search);
+    }
+    agent
 }
 
 /// The code search for this session, rooted at the working directory, or
@@ -900,6 +921,9 @@ pub(crate) fn register_code_search(agent: &mut Agent, search: &CodeSearch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phazeai_core::context::system_prompt::instructions_allowance;
+    use phazeai_core::llm::OpenAIClient;
+    use serde_json::{json, Value};
 
     #[test]
     fn mode_prefix() {
@@ -1128,5 +1152,227 @@ mod tests {
         // Only one run at a time: the rest waits for it to finish.
         assert!(run_input(&mut rx).is_none());
         assert_eq!(state.queued, ["and then"]);
+    }
+
+    // ── The system prompt fits the model's context budget ───────────────────
+
+    /// Numbered lines of text, at least `bytes` long in all.
+    fn lines_of(word: &str, bytes: usize) -> String {
+        let mut text = String::new();
+        let mut n = 0;
+        while text.len() < bytes {
+            n += 1;
+            text.push_str(&format!(
+                "- {word} {n:04}: run the tests before you say it works.\n"
+            ));
+        }
+        text
+    }
+
+    /// One streamed reply in the OpenAI format: `delta`, then the end.
+    fn sse(delta: Value) -> String {
+        let chunk = json!({ "choices": [{ "delta": delta }] });
+        format!("data: {chunk}\n\ndata: [DONE]\n\n")
+    }
+
+    /// An OpenAI-compatible provider on a local port. It answers each chat
+    /// request with the next of `replies` (then "ok") and keeps the JSON body
+    /// of every request, i.e. exactly what a provider is sent.
+    async fn fake_provider(replies: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let mut replies = VecDeque::from(replies);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 16 * 1024];
+                let mut body_len = None;
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..n]);
+                    let head_end = request.windows(4).position(|w| w == b"\r\n\r\n");
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + len || n == 0 {
+                            body_len = Some((end + 4, len));
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let Some((start, len)) = body_len else {
+                    continue;
+                };
+                let body = serde_json::from_slice(&request[start..start + len]).unwrap();
+                seen.lock().unwrap().push(body);
+                let reply = replies
+                    .pop_front()
+                    .unwrap_or_else(|| sse(json!({ "content": "ok" })));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                sock.write_all(response.as_bytes()).await.unwrap();
+                let _ = sock.shutdown().await;
+            }
+        });
+        (url, bodies)
+    }
+
+    fn fake_client(url: &str) -> Box<dyn LlmClient> {
+        Box::new(OpenAIClient::new("k").with_base_url(url).without_proxy())
+    }
+
+    fn system_prompt_sent(request: &Value) -> &str {
+        assert_eq!(request["messages"][0]["role"], "system");
+        request["messages"][0]["content"].as_str().unwrap()
+    }
+
+    /// The instructions section of a system prompt (it comes last).
+    fn instructions_section(system_prompt: &str) -> &str {
+        let at = system_prompt
+            .find("\n\n## Project-Specific Instructions\n")
+            .expect("an instructions section");
+        &system_prompt[at..]
+    }
+
+    #[tokio::test]
+    async fn a_single_prompt_is_sized_to_the_models_context_budget() {
+        let tmp = TempDir::new("oneshot-budget");
+        let root = tmp.path();
+        let instructions = lines_of("Rule", 20 * 1024);
+        std::fs::write(root.join("CLAUDE.md"), &instructions).unwrap();
+        std::fs::write(root.join("build.log"), lines_of("Log", 20 * 1024)).unwrap();
+        let mut settings = Settings::default();
+        settings.llm.provider = phazeai_core::config::LlmProvider::Ollama;
+        settings.llm.model = "qwen2.5-coder:7b".into();
+        settings.search.enabled = false;
+
+        // A local model's budget: the instructions are cut to their share,
+        // and the conversation is held to the same budget (the 20 KB log the
+        // model reads is cut to fit, where the agent's 32k default sent it).
+        let budget = settings.context_budget();
+        let read_log = json!({ "tool_calls": [{
+            "index": 0,
+            "id": "c1",
+            "function": {
+                "name": "read_file",
+                "arguments": json!({ "path": root.join("build.log") }).to_string(),
+            },
+        }]});
+        let (url, bodies) =
+            fake_provider(vec![sse(read_log), sse(json!({ "content": "done" }))]).await;
+        let agent = single_prompt_agent(&settings, fake_client(&url), root, None);
+        let reply = agent.run("Why did the build fail?").await.unwrap();
+        assert_eq!(reply.content, "done");
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        let section = instructions_section(system_prompt_sent(&sent[0]));
+        assert!(
+            section.len() <= instructions_allowance(budget),
+            "{} bytes of instructions for a {budget}-token budget",
+            section.len()
+        );
+        assert!(section.contains(" is shortened here to fit this model's context budget"));
+        let log_result = sent[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("the log was sent back")["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            log_result.contains(" bytes of this tool output were cut to fit the context budget"),
+            "the output went out whole: the conversation is not held to the budget"
+        );
+
+        // A large budget ([llm] context_tokens): the whole file, as before.
+        settings.llm.context_tokens = Some(60_000);
+        let (url, bodies) = fake_provider(Vec::new()).await;
+        let agent = single_prompt_agent(&settings, fake_client(&url), root, None);
+        agent.run("Why did the build fail?").await.unwrap();
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(
+            instructions_section(system_prompt_sent(&sent[0])),
+            format!("\n\n## Project-Specific Instructions\n{instructions}")
+        );
+    }
+
+    /// Waits for the worker to report the end of a run.
+    async fn run_finished(rx: &mut mpsc::UnboundedReceiver<UiEvent>) {
+        let finished = async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, UiEvent::RunFinished { .. }) {
+                    return;
+                }
+            }
+            panic!("the worker stopped");
+        };
+        tokio::time::timeout(Duration::from_secs(30), finished)
+            .await
+            .expect("the run did not finish");
+    }
+
+    #[tokio::test]
+    async fn a_model_switch_resizes_the_system_prompt_to_the_new_budget() {
+        let tmp = TempDir::new("switch-budget");
+        let instructions = lines_of("Rule", 20 * 1024);
+        std::fs::write(tmp.path().join("CLAUDE.md"), &instructions).unwrap();
+        let (url, bodies) = fake_provider(Vec::new()).await;
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel();
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let _worker = worker::spawn(
+            WorkerConfig {
+                llm: Some(fake_client(&url)),
+                prompt: system_prompt_builder(tmp.path(), None),
+                restore: Vec::new(),
+                approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
+                policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+                cancel: Arc::new(AtomicBool::new(false)),
+                context_budget: 60_000,
+                code_search: None,
+            },
+            worker_rx,
+            ui_tx,
+        );
+
+        // A model with a large budget gets the whole file.
+        worker_tx.send(WorkerCommand::Run("first".into())).unwrap();
+        run_finished(&mut ui_rx).await;
+        // `/provider ollama` and the like: a small local model.
+        worker_tx
+            .send(WorkerCommand::SetLlm {
+                llm: fake_client(&url),
+                context_budget: 4_096,
+            })
+            .unwrap();
+        worker_tx.send(WorkerCommand::Run("second".into())).unwrap();
+        run_finished(&mut ui_rx).await;
+
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            instructions_section(system_prompt_sent(&sent[0])),
+            format!("\n\n## Project-Specific Instructions\n{instructions}")
+        );
+        let section = instructions_section(system_prompt_sent(&sent[1]));
+        assert!(
+            section.len() <= instructions_allowance(4_096),
+            "after the switch the instructions are still {} bytes",
+            section.len()
+        );
+        assert!(section.contains(" is shortened here to fit this model's context budget"));
     }
 }
