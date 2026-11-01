@@ -79,9 +79,44 @@ pub fn gib(bytes: u64) -> String {
 pub const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Free bytes on the volume containing `path` (or its nearest existing ancestor).
+///
+/// On Unix this asks about that one path (`statvfs`), never about other
+/// mounts: listing every disk queries each mount point, and one slow or hung
+/// mount (a sleeping USB drive, an unreachable network share) blocks the
+/// caller indefinitely. The download runs this before its first request, so
+/// such a mount left it at "Connecting…" forever, with no error.
 pub fn free_disk_space(path: &Path) -> Option<u64> {
     let target = existing_ancestor(path)?;
-    let target = std::fs::canonicalize(&target).unwrap_or(target);
+    #[cfg(unix)]
+    {
+        statvfs_available(&target)
+    }
+    #[cfg(not(unix))]
+    {
+        free_disk_space_listed(&target)
+    }
+}
+
+/// Bytes an unprivileged user may still write on the volume holding `path`
+/// (`f_bavail` blocks of `f_frsize` bytes, as `df` reports "Avail").
+#[cfg(unix)]
+fn statvfs_available(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a valid NUL-terminated string and `stat` a
+    // writable statvfs that the call fills in; it is read only on success.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)] // the field types differ between platforms
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+/// The disk-listing lookup, for platforms without `statvfs`.
+#[cfg(not(unix))]
+fn free_disk_space_listed(target: &Path) -> Option<u64> {
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     let target = strip_verbatim(&target);
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
@@ -110,6 +145,7 @@ fn existing_ancestor(path: &Path) -> Option<PathBuf> {
 
 /// `canonicalize` on Windows returns `\\?\C:\...`, while disk mount points are
 /// plain `C:\`. Drop the verbatim prefix so prefix matching works.
+#[cfg_attr(unix, allow(dead_code))] // used by the disk listing, which Unix no longer needs
 fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
@@ -136,6 +172,32 @@ mod tests {
         assert!(hw.free_disk.is_some_and(|d| d > 0), "{hw:?}");
         assert_eq!(hw.os, std::env::consts::OS);
         assert!(hw.summary().contains("GiB RAM"));
+    }
+
+    /// The free space is the volume's own figure, as `df` reports it, for
+    /// the folder asked about (and for a folder that does not exist yet).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn free_space_matches_df_for_that_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new("df")
+            .args(["-B1", "--output=avail"])
+            .arg(dir.path())
+            .output()
+            .expect("run df");
+        let df: u64 = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .nth(1)
+            .and_then(|l| l.trim().parse().ok())
+            .expect("df prints Avail in bytes");
+        for path in [dir.path().to_path_buf(), dir.path().join("models/not/yet")] {
+            let ours = free_disk_space(&path).expect("free space of a real folder");
+            // Other processes may write in between; allow 256 MiB of drift.
+            assert!(
+                ours.abs_diff(df) < 256 << 20,
+                "{path:?}: ours {ours}, df {df}"
+            );
+        }
     }
 
     #[test]
