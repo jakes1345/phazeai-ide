@@ -1,9 +1,10 @@
+use crate::process::ChildSlot;
 /// Lean LSP client that speaks the Language Server Protocol over stdio.
 /// Inspired by Lapce's LSP client but simplified for PhazeAI's architecture.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -64,7 +65,7 @@ pub struct LspClient {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pending: PendingMap,
     server_name: String,
-    child: Option<Child>,
+    child: ChildSlot,
     event_tx: mpsc::UnboundedSender<LspEvent>,
     capabilities: Arc<Mutex<Option<ServerCapabilities>>>,
     alive: Arc<AtomicBool>,
@@ -112,13 +113,14 @@ impl LspClient {
 
         let server_name = server_cmd.to_string();
         let alive = Arc::new(AtomicBool::new(true));
+        let child = ChildSlot::new(child);
 
         let client = Self {
             id_counter: AtomicU64::new(1),
             writer: writer.clone(),
             pending: pending.clone(),
             server_name: server_name.clone(),
-            child: Some(child),
+            child: child.clone(),
             event_tx: event_tx.clone(),
             capabilities: Arc::new(Mutex::new(None)),
             alive: alive.clone(),
@@ -137,6 +139,9 @@ impl LspClient {
                 writer.clone(),
                 server_name_clone.clone(),
             );
+            // Reaped before `is_alive` turns false, so a client that reports
+            // a dead server never leaves it behind as a zombie.
+            child.end();
             alive_clone.store(false, Ordering::SeqCst);
             tracing::warn!(
                 "LSP server '{}' reader loop exited (process likely died)",
@@ -595,16 +600,14 @@ impl LspClient {
     /// integration tests that need to SIGKILL the child externally and
     /// for diagnostics.
     pub fn child_pid(&self) -> Option<u32> {
-        self.child.as_ref().map(|c| c.id())
+        self.child.id()
     }
 
     /// Shutdown the language server
     pub async fn shutdown(&mut self) -> Result<(), String> {
         let _ = self.send_request::<request::Shutdown>(()).await;
         self.send_notification::<notification::Exit>(())?;
-        if let Some(ref mut child) = self.child {
-            let _ = child.kill();
-        }
+        self.child.end();
         let _ = self.event_tx.send(LspEvent::Shutdown);
         Ok(())
     }
@@ -856,8 +859,6 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        if let Some(ref mut child) = self.child {
-            let _ = child.kill();
-        }
+        self.child.end();
     }
 }

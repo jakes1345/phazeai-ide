@@ -2,16 +2,17 @@
 
 use super::protocol::*;
 use crate::error::PhazeError;
+use crate::process::ChildSlot;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 /// A running DAP session with a debug adapter process.
 pub struct DapClient {
-    child: Mutex<Child>,
+    child: ChildSlot,
     stdin: Mutex<Box<dyn Write + Send>>,
     seq: AtomicU64,
     alive: Arc<AtomicBool>,
@@ -39,9 +40,11 @@ impl DapClient {
         let stdout = child.stdout.take().unwrap();
         let (event_tx, event_rx) = mpsc::channel();
         let alive = Arc::new(AtomicBool::new(true));
+        let child = ChildSlot::new(child);
+        let reader_child = child.clone();
 
         let client = Arc::new(Self {
-            child: Mutex::new(child),
+            child,
             stdin: Mutex::new(Box::new(stdin)),
             seq: AtomicU64::new(1),
             alive: alive.clone(),
@@ -63,12 +66,13 @@ impl DapClient {
                         };
                         client.handle_message(msg);
                     }
-                    Err(_) => {
-                        alive2.store(false, Ordering::Relaxed);
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
+            // The adapter's output ended (it exited or crashed) or the client
+            // ended it: reap it before `is_alive` turns false.
+            reader_child.end();
+            alive2.store(false, Ordering::Relaxed);
         });
 
         Ok((client, event_rx))
@@ -208,9 +212,7 @@ impl DapClient {
             Some(serde_json::json!({ "terminateDebuggee": true })),
         );
         self.alive.store(false, Ordering::Relaxed);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-        }
+        self.child.end();
     }
 
     fn send_raw(&self, body: &str) -> Result<(), PhazeError> {
@@ -339,8 +341,6 @@ fn read_message(reader: &mut BufReader<impl std::io::Read>) -> Result<DapMessage
 impl Drop for DapClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-        }
+        self.child.end();
     }
 }

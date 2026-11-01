@@ -1,3 +1,4 @@
+use crate::process::ChildSlot;
 /// Model Context Protocol (MCP) client for PhazeAI.
 ///
 /// MCP allows PhazeAI to connect to external tool servers that expose
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -196,7 +197,7 @@ pub struct McpBridgeSpec {
 /// An active connection to a single MCP server over stdio.
 pub struct McpClient {
     name: String,
-    process: Child,
+    process: ChildSlot,
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
@@ -246,8 +247,13 @@ impl McpClient {
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
         let name_clone = config.name.clone();
+        let process = ChildSlot::new(process);
+        let reader_process = process.clone();
         std::thread::spawn(move || {
             Self::read_loop(stdout, pending_clone);
+            // The server exited or closed its output: reap it before
+            // `is_alive` turns false.
+            reader_process.end();
             alive_clone.store(false, Ordering::SeqCst);
             tracing::warn!("MCP server '{name_clone}' reader loop exited (EOF)");
         });
@@ -594,7 +600,7 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.process.kill();
+        self.process.end();
     }
 }
 
