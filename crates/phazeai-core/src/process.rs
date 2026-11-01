@@ -9,7 +9,8 @@
 //! plain `Command::new` calls.
 
 use std::ffi::OsStr;
-use std::process::{Output, Stdio};
+use std::process::{Child, Output, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -140,6 +141,44 @@ async fn read_to_end(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8>
         let _ = pipe.read_to_end(&mut buf).await;
     }
     buf
+}
+
+/// A server process that two parties may end: the client that started it
+/// (on shutdown, disconnect or drop) and the thread reading its output (when
+/// that output ends because the process exited or crashed).
+///
+/// Whoever ends it first kills it and collects its exit status; later calls
+/// find the slot empty. Without the collecting `wait`, a process that has
+/// ended stays in the process table as a zombie until PhazeAI exits, one more
+/// for every restart of a crashing server. After a kill the wait returns at
+/// once.
+#[derive(Clone)]
+pub(crate) struct ChildSlot(Arc<Mutex<Option<Child>>>);
+
+impl ChildSlot {
+    pub(crate) fn new(child: Child) -> Self {
+        Self(Arc::new(Mutex::new(Some(child))))
+    }
+
+    /// The pid, while the process has not been ended (afterwards the pid may
+    /// already belong to another process).
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.lock().as_ref().map(Child::id)
+    }
+
+    /// Kill the process if it still runs and reap it. Idempotent.
+    pub(crate) fn end(&self) {
+        // Taken out first so the lock is not held while waiting.
+        let child = self.lock().take();
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Child>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[cfg(test)]
