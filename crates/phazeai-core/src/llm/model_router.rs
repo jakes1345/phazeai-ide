@@ -49,15 +49,15 @@ impl TaskType {
         let lower = input.to_lowercase();
 
         // Reasoning keywords - should take priority because complex things can be short
-        if lower.contains("explain")
-            || lower.contains("why")
-            || lower.contains("design")
-            || lower.contains("architect")
-            || lower.contains("plan")
-            || lower.contains("trade-off")
-            || lower.contains("tradeoff")
-            || lower.contains("compare")
-            || lower.contains("perspective")
+        if starts_word(&lower, "explain")
+            || starts_word(&lower, "why")
+            || starts_word(&lower, "design")
+            || starts_word(&lower, "architect")
+            || starts_word(&lower, "plan")
+            || starts_word(&lower, "trade-off")
+            || starts_word(&lower, "tradeoff")
+            || starts_word(&lower, "compare")
+            || starts_word(&lower, "perspective")
         {
             return TaskType::Reasoning;
         }
@@ -68,33 +68,33 @@ impl TaskType {
         }
 
         // Code generation signals
-        if lower.contains("write")
-            || lower.contains("implement")
-            || lower.contains("create")
-            || lower.contains("add a")
-            || lower.contains("build")
-            || lower.contains("generate")
-            || lower.contains("code for")
+        if starts_word(&lower, "write")
+            || starts_word(&lower, "implement")
+            || starts_word(&lower, "create")
+            || starts_word(&lower, "add a")
+            || starts_word(&lower, "build")
+            || starts_word(&lower, "generate")
+            || starts_word(&lower, "code for")
         {
             return TaskType::CodeGeneration;
         }
 
         // Code review signals
-        if lower.contains("review")
-            || lower.contains("bug")
-            || lower.contains("wrong")
-            || lower.contains("fix")
-            || lower.contains("issue")
-            || lower.contains("diff")
-            || lower.contains("error")
+        if starts_word(&lower, "review")
+            || starts_word(&lower, "bug")
+            || starts_word(&lower, "wrong")
+            || starts_word(&lower, "fix")
+            || starts_word(&lower, "issue")
+            || starts_word(&lower, "diff")
+            || starts_word(&lower, "error")
         {
             return TaskType::CodeReview;
         }
 
         // Simple question signals - only if not already classified as reasoning/gen/review
-        if lower.contains("what is")
-            || lower.contains("how do")
-            || lower.contains("what does")
+        if starts_word(&lower, "what is")
+            || starts_word(&lower, "how do")
+            || starts_word(&lower, "what does")
             || lower.len() < 80
         {
             return TaskType::QuickAnswer;
@@ -103,6 +103,17 @@ impl TaskType {
         // Default to reasoning for anything complex
         TaskType::Reasoning
     }
+}
+
+/// Whether `keyword` appears in `text` starting at a word boundary, so
+/// "plan" matches "plan" and "planning" but not "explanation".
+fn starts_word(text: &str, keyword: &str) -> bool {
+    text.match_indices(keyword).any(|(i, _)| {
+        text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric())
+    })
 }
 
 /// A route mapping a task type to a specific provider/model pair.
@@ -258,5 +269,42 @@ impl LlmClient for ModelRouter {
         self.client_for(task_type)
             .chat_stream(messages, tools)
             .await
+    }
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::TaskType;
+
+    #[test]
+    fn keywords_match_whole_words_not_parts_of_words() {
+        // Every IDE helper prompt says "no explanation": that is not planning.
+        let commit = "Write a concise git commit message. Reply with ONLY the commit message, no explanation.";
+        assert_eq!(TaskType::classify(commit, false), TaskType::CodeGeneration);
+        assert_eq!(
+            TaskType::classify("make a plan for the migration", false),
+            TaskType::Reasoning
+        );
+        assert_eq!(
+            TaskType::classify(
+                "we are planning a refactor of the parser module here",
+                false
+            ),
+            TaskType::Reasoning
+        );
+        assert_eq!(
+            TaskType::classify("tell me about the planet mars", false),
+            TaskType::Reasoning,
+            "word-start match keeps stems"
+        );
+        assert_eq!(
+            TaskType::classify("rename the prefix field", false),
+            TaskType::QuickAnswer,
+            "'prefix' is not 'fix'"
+        );
+        assert_eq!(
+            TaskType::classify("fix the crash in main", false),
+            TaskType::CodeReview
+        );
     }
 }
