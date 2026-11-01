@@ -295,8 +295,9 @@ pub fn privacy_section(state: IdeState) -> impl IntoView {
         || {
             "Control what project content may be sent to AI providers. Denied files are \
              refused by the agent's tools and left out of @mentions, editor AI actions, \
-             inline edit and completions. Shell commands are only checked by the words \
-             they contain, and MCP servers aren't restricted — review those approvals."
+             inline edit and completions. Shell commands and MCP tool calls are checked \
+             by the paths they name (best-effort: a program or server can still reach a \
+             file another way), so review those approvals."
                 .to_string()
         },
         theme,
