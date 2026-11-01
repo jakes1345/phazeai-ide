@@ -135,19 +135,25 @@ impl Tool for McpToolBridge {
                     .map_err(|e| PhazeError::tool("mcp", e))?
             };
 
-            let client_guard = client_arc.lock().map_err(|e| {
-                PhazeError::tool(
-                    "mcp",
-                    format!("MCP client mutex poisoned ({server_name}): {e}"),
-                )
-            })?;
+            // Call the server, then release the client lock *before* filtering,
+            // so a failure (or panic) in the filter can never poison the client
+            // mutex — a poisoned client is treated as dead by health_check and
+            // would burn a restart, eventually dropping the server.
+            let result = {
+                let client_guard = client_arc.lock().map_err(|e| {
+                    PhazeError::tool(
+                        "mcp",
+                        format!("MCP client mutex poisoned ({server_name}): {e}"),
+                    )
+                })?;
+                client_guard
+                    .call_tool(&tool_name, params.clone())
+                    .map_err(|e| PhazeError::tool("mcp", e))?
+            };
 
-            let result = client_guard
-                .call_tool(&tool_name, params.clone())
-                .map_err(|e| PhazeError::tool("mcp", e))?;
-
-            // Privacy: filter denied paths and `git diff` sections out of the
-            // text the model will see, including any error text.
+            // Privacy: filter what the model will see (file contents from the
+            // filesystem server's read tools pass through — their paths were
+            // already checked).
             let (result, hidden) =
                 filter_result(&full_name, &tool_name, fs_listings, &params, &paths, result)?;
             Ok::<_, PhazeError>((result, checked, hidden))
@@ -203,10 +209,24 @@ impl Tool for McpToolBridge {
     }
 }
 
-/// Filter denied paths out of an MCP tool result's text blocks. Returns the
-/// filtered result and how many items (diff sections, path lines, listing
-/// entries) were removed, or an error when a filesystem-server listing is not
-/// in the expected format (fail closed rather than pass it through).
+/// Left in an unrecognized server's text where a denied whole-line path was
+/// removed, so the model sees that something was withheld rather than the line
+/// vanishing silently from what might be file content.
+const HIDDEN_PATH_PLACEHOLDER: &str = "[path hidden by the project's privacy policy]";
+
+/// Filter what the model will see from an MCP tool result's text blocks.
+///
+/// For the official filesystem server: listing tools lose their denied entries
+/// (a listing not in the expected format is refused — fail closed), the
+/// path-list tools (`search_files`, `list_allowed_directories`) lose denied
+/// paths, and the read/write/edit/move tools pass through unchanged, because
+/// their path arguments were already checked and the result is either an
+/// allowed file's exact contents or a status line. For any other server the
+/// format is unknown, so `git diff` sections naming denied files are dropped
+/// and denied whole-line paths are replaced with a visible placeholder.
+///
+/// Returns the filtered result and how many items were removed, or an error
+/// when a filesystem-server listing is not in the expected format.
 fn filter_result(
     full_name: &str,
     bare_tool: &str,
@@ -226,7 +246,9 @@ fn filter_result(
             // model today; if that ever changes, filter them by `uri` here.
             continue;
         };
+
         if fs_listings {
+            // A listing tool: drop denied entries with the structured filter.
             if let Some(outcome) =
                 crate::privacy::mcp::filter_fs_listing(&policy, paths, bare_tool, args, text)
             {
@@ -234,7 +256,6 @@ fn filter_result(
                     Ok((filtered, n)) => {
                         *text = filtered;
                         hidden += n;
-                        continue;
                     }
                     Err(why) => {
                         return Err(PhazeError::tool(
@@ -246,13 +267,62 @@ fn filter_result(
                         ));
                     }
                 }
+                continue;
             }
+            // A tool whose output is a list of absolute paths: hide denied ones
+            // (a dropped entry is expected here, so delete the line).
+            if matches!(bare_tool, "search_files" | "list_allowed_directories") {
+                let (filtered, n) =
+                    crate::privacy::mcp::filter_text(&policy, &bases, home, text, None);
+                *text = filtered;
+                hidden += n;
+                continue;
+            }
+            // A read/write/edit/move/create/get_file_info tool: the path
+            // arguments were already checked, so the content and status are
+            // from allowed files — pass them through unchanged, so an allowed
+            // file's exact bytes always reach the model (a `.gitignore` line
+            // such as `/.env` is a mention, not the secret, and is kept).
+            if is_fs_passthrough_tool(bare_tool) {
+                continue;
+            }
+            // An unexpected filesystem-server tool falls through to the
+            // conservative filter below.
         }
-        let (filtered, n) = crate::privacy::mcp::filter_text(&policy, &bases, home, text);
+
+        // An unrecognized server (or an unexpected filesystem-server tool): the
+        // output's shape is unknown, so drop `git diff` sections naming denied
+        // files and replace denied whole-line paths with a placeholder rather
+        // than silently deleting lines from what might be file content.
+        let (filtered, n) = crate::privacy::mcp::filter_text(
+            &policy,
+            &bases,
+            home,
+            text,
+            Some(HIDDEN_PATH_PLACEHOLDER),
+        );
         *text = filtered;
         hidden += n;
     }
     Ok((result, hidden))
+}
+
+/// Whether `tool` is a filesystem-server tool whose output is an allowed file's
+/// content or a status line (its path arguments were already privacy-checked),
+/// so the result is passed to the model unchanged.
+fn is_fs_passthrough_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read_text_file"
+            | "read_file"
+            | "read_media_file"
+            | "read_multiple_files"
+            | "write_file"
+            | "edit_file"
+            | "move_file"
+            | "create_directory"
+            | "get_file_info"
+    )
 }
 
 /// Create Tool-trait-compatible bridges for all tools from an McpManager.

@@ -17,11 +17,14 @@
 //!   denied; a `source`-like argument is checked as a whole tree, like
 //!   built-in `move_path`; and a tool the server does not mark
 //!   `readOnlyHint: true` may not name anything under `.phazeai/`.
-//! - **Results.** `git diff` sections and whole-line paths naming denied files
-//!   are dropped from every text block, and the official filesystem server's
-//!   `list_directory`, `list_directory_with_sizes` and `directory_tree` lose
-//!   their denied entries (a listing that is not in the expected format is
-//!   refused rather than passed through).
+//! - **Results.** The official filesystem server's `list_directory`,
+//!   `list_directory_with_sizes` and `directory_tree` lose their denied
+//!   entries (a listing not in the expected format is refused, not passed
+//!   through), and `search_files` / `list_allowed_directories` lose denied
+//!   paths; its read tools return allowed files' contents unchanged (their
+//!   path arguments were already checked). For any other server, `git diff`
+//!   sections and whole-line paths naming denied files are removed from each
+//!   text block.
 //!
 //! What this cannot do: see a file the server opens on its own initiative (an
 //! indexer, a packer, git history), a file reached by another name (a hard
@@ -234,84 +237,156 @@ fn check_candidate(
         });
     }
 
-    // 2. The Unicode-equivalent spellings the server would open for a name
-    //    that is not on disk verbatim.
-    if !c.exists() {
-        match unicode_equivalents(c) {
-            Ok(equivs) => {
-                for e in equivs {
-                    if let Some(denial) = policy.check(&e) {
-                        return CandOutcome::Denied(McpDenial {
-                            shown: format!(
-                                "{} (the server would open {})",
-                                pa.raw.escape_debug(),
-                                policy.display_path(&e)
-                            ),
-                            hit: e,
-                            denial,
-                        });
-                    }
-                }
-            }
-            Err(why) => return CandOutcome::Unchecked(why),
+    // The paths the server would open for this candidate: `c` itself when it
+    // exists, otherwise the Unicode-equivalent directory entries the server
+    // resolves it to (a no-break space for a space, NFC vs NFD, …), plus the
+    // non-existent terminal path for a new file. `c` is already lexically
+    // normalized by `candidates`, the way the server's `path.resolve` resolves
+    // `..` before it opens anything. Each target is flagged *definite* when the
+    // fold is exact (so the server really opens it) or only *possible* when two
+    // non-ASCII names might be equal (used only to widen the deny check — see
+    // [`unicode_equivalents`]).
+    let targets = match resolved_targets(c) {
+        Ok(t) => t,
+        Err(why) => return CandOutcome::Unchecked(why),
+    };
+
+    // 2. A Unicode-equivalent spelling the server might open that is denied
+    //    (both definite and possible matches — over-refusing a path is safe).
+    for (e, _definite) in &targets {
+        if e.as_path() == c {
+            continue; // the verbatim path is covered by step 1
+        }
+        if let Some(denial) = policy.check(e) {
+            return CandOutcome::Denied(McpDenial {
+                shown: format!(
+                    "{} (the server would open {})",
+                    pa.raw.escape_debug(),
+                    policy.display_path(e)
+                ),
+                hit: e.clone(),
+                denial,
+            });
         }
     }
 
-    // 3. A directory whose contents are all denied (e.g. listing `secrets`).
-    if c.is_dir() {
-        if let Some(denial) = policy.check(&c.join(CONTENTS_PROBE)) {
-            return CandOutcome::Denied(McpDenial {
-                shown: format!("{} (everything inside it)", pa.raw),
-                hit: c.to_path_buf(),
-                denial,
-            });
+    // 3. A directory whose contents are all denied (e.g. listing `secrets`),
+    //    under whatever spelling named it. Only a *definite* resolution is a
+    //    directory the server would really open, so a fuzzy non-ASCII match is
+    //    not treated as a real directory to probe.
+    for (e, definite) in &targets {
+        if *definite && e.is_dir() {
+            if let Some(denial) = policy.check(&e.join(CONTENTS_PROBE)) {
+                return CandOutcome::Denied(McpDenial {
+                    shown: format!("{} (everything inside it)", pa.raw),
+                    hit: e.clone(),
+                    denial,
+                });
+            }
         }
     }
 
     // 4. A source directory (or any directory, with tree_dirs) holding a
     //    denied file, like built-in copy_path / move_path.
-    if (pa.role == Role::Source || server.tree_dirs) && c.is_dir() {
-        if let Some((hit, denial)) = super::first_denied_under(policy, c) {
-            return CandOutcome::Denied(McpDenial {
-                shown: format!("{} (contains {})", pa.raw, policy.display_path(&hit)),
-                hit,
-                denial,
-            });
+    if pa.role == Role::Source || server.tree_dirs {
+        for (e, definite) in &targets {
+            if *definite && e.is_dir() {
+                if let Some((hit, denial)) = super::first_denied_under(policy, e) {
+                    return CandOutcome::Denied(McpDenial {
+                        shown: format!("{} (contains {})", pa.raw, policy.display_path(&hit)),
+                        hit,
+                        denial,
+                    });
+                }
+            }
         }
     }
 
     // 5. A tool that may write must not touch the policy or the MCP server
-    //    list (anything under .phazeai/). Read-only tools may read them.
+    //    list (anything under .phazeai/), under whatever spelling — including a
+    //    Unicode respelling of a parent directory the server maps back onto the
+    //    real path. Read-only tools may read them.
     if !read_only {
-        if policy.is_under_settings_dir(c) {
-            return CandOutcome::Denied(McpDenial {
-                shown: pa.raw.clone(),
-                hit: c.to_path_buf(),
-                denial: Denial::settings(),
-            });
-        }
         let moves = pa.role == Role::Source || tool_moves_or_deletes(tool);
-        if moves && policy.contains_policy_file(c) {
-            return CandOutcome::Denied(McpDenial {
-                shown: format!("{} (contains {})", pa.raw, super::POLICY_FILE),
-                hit: c.to_path_buf(),
-                denial: Denial::protected(),
-            });
+        let definite_targets = targets
+            .iter()
+            .filter(|(_, definite)| *definite)
+            .map(|(p, _)| p.as_path());
+        for e in std::iter::once(c).chain(definite_targets) {
+            if policy.is_under_settings_dir(e) {
+                return CandOutcome::Denied(McpDenial {
+                    shown: pa.raw.clone(),
+                    hit: e.to_path_buf(),
+                    denial: Denial::settings(),
+                });
+            }
+            if moves && policy.contains_policy_file(e) {
+                return CandOutcome::Denied(McpDenial {
+                    shown: format!("{} (contains {})", pa.raw, super::POLICY_FILE),
+                    hit: e.to_path_buf(),
+                    denial: Denial::protected(),
+                });
+            }
         }
     }
 
     CandOutcome::Ok
 }
 
+/// The paths on disk the server would operate on for the (already lexically
+/// normalized) candidate `c`: `c` itself (definite) when it exists, otherwise
+/// the Unicode-equivalent entries the official filesystem server resolves it to
+/// (which may include a non-existent terminal path for a new file). Each is
+/// flagged definite (an exact fold match or a verbatim/terminal path, which the
+/// server really opens) or possible (a fuzzy non-ASCII match, for the deny
+/// check only).
+fn resolved_targets(c: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    if c.exists() {
+        Ok(vec![(c.to_path_buf(), true)])
+    } else {
+        unicode_equivalents(c)
+    }
+}
+
 /// Whether the tool's name suggests it moves, renames or deletes, so naming a
-/// directory that contains the policy file is a protected operation.
+/// directory that contains the policy file is a protected operation. The name
+/// is split into whole word tokens first, so a destructive verb is matched as
+/// a word (`delete_file`, `moveFile`, `mv`) and not as a chance substring
+/// (`format_files`, `terraform_validate`, `transform` all *contain* "rm").
 fn tool_moves_or_deletes(tool: &str) -> bool {
-    let t = tool.to_ascii_lowercase();
-    [
+    const WORDS: &[&str] = &[
         "move", "rename", "mv", "delete", "remove", "rm", "unlink", "trash",
-    ]
-    .iter()
-    .any(|w| t.contains(w))
+    ];
+    name_tokens(tool)
+        .iter()
+        .any(|t| WORDS.contains(&t.as_str()))
+}
+
+/// Split a tool name into lowercase word tokens, breaking on any non-ASCII
+/// -alphanumeric character and on camelCase boundaries (`moveFile` → `move`,
+/// `file`).
+fn name_tokens(name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower_or_digit = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if c.is_ascii_uppercase() && prev_lower_or_digit && !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+            cur.push(c.to_ascii_lowercase());
+            prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+        } else {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+            prev_lower_or_digit = false;
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 /// [`check_call`] against the active policy, recording one audit entry per
@@ -486,38 +561,55 @@ fn bases_for(policy: &PrivacyPolicy, server: &McpServerPaths) -> Vec<PathBuf> {
 }
 
 /// Absolute paths one argument string could name, the way the server resolves
-/// it. A relative free-text string names nothing (only a whole path does).
+/// it, each **lexically normalized** (`..`/`.` resolved without touching the
+/// disk) exactly as the server's `path.resolve` does before it opens anything.
+/// A relative free-text string names nothing (only a whole path does).
 fn candidates(
     raw: &str,
     role: Role,
     policy: &PrivacyPolicy,
     server: &McpServerPaths,
 ) -> Vec<PathBuf> {
+    let mut raw_paths: Vec<PathBuf> = Vec::new();
+    // A `file:` URI, for a server that parses it as one.
     if let Some(p) = file_uri_path(raw) {
-        return vec![p];
+        raw_paths.push(p);
     }
+    // The same string as a plain path, the way a server that does *not* parse
+    // `file://` (the official filesystem server among them) resolves it — `~`,
+    // absolute, or relative joined to every base. Checking both interpretations
+    // is a safe over-approximation.
     if raw == "~" {
-        return server.home.clone().into_iter().collect();
+        if let Some(h) = &server.home {
+            raw_paths.push(h.clone());
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(h) = &server.home {
+            raw_paths.push(h.join(rest));
+        }
+    } else if Path::new(raw).is_absolute() {
+        raw_paths.push(PathBuf::from(raw));
+    } else if role != Role::FreeText {
+        // Free text counts only as a whole path, never a relative one.
+        for b in bases_for(policy, server) {
+            raw_paths.push(b.join(raw));
+        }
     }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return server.home.iter().map(|h| h.join(rest)).collect();
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in raw_paths {
+        let p = super::normalize_lexically(&p);
+        if !out.contains(&p) {
+            out.push(p);
+        }
     }
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        return vec![p.to_path_buf()];
-    }
-    if role == Role::FreeText {
-        return Vec::new(); // free text counts only as a whole path
-    }
-    bases_for(policy, server)
-        .into_iter()
-        .map(|b| b.join(raw))
-        .collect()
+    out
 }
 
-/// The filesystem path of a `file:` URI, or `None` for any other string.
+/// The filesystem path of a `file:` URI, or `None` for any other string. Uses
+/// a boundary-safe prefix test so a multi-byte first character can't panic.
 fn file_uri_path(s: &str) -> Option<PathBuf> {
-    if s.len() < 5 || !s[..5].eq_ignore_ascii_case("file:") {
+    if !s.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:")) {
         return None;
     }
     reqwest::Url::parse(s).ok()?.to_file_path().ok()
@@ -530,9 +622,17 @@ fn file_uri_path(s: &str) -> Option<PathBuf> {
 /// ancestor, matching each component against directory entries whose
 /// Unicode-folding ([`fold_key`]) is equal, and appends any missing tail.
 ///
+/// Each returned path carries a *definite* flag: `true` when every component
+/// was an exact fold match (a space separator or one of the three ASCII-NFC
+/// characters) or a verbatim/terminal path — a path the server really opens —
+/// and `false` when some component matched only because both names stay
+/// non-ASCII after folding ([`both_non_ascii`]), which without full NFC can't
+/// be decided. A possible (`false`) match is sound only for widening the deny
+/// check; it must not be treated as a real directory to list or prune.
+///
 /// `Err` when a directory is too large to walk or one component has too many
 /// equivalent spellings (fail closed).
-fn unicode_equivalents(c: &Path) -> Result<Vec<PathBuf>, String> {
+fn unicode_equivalents(c: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
     // Peel components off the end until we reach something that exists.
     let mut existing = c.to_path_buf();
     let mut tail: Vec<OsString> = Vec::new();
@@ -547,13 +647,14 @@ fn unicode_equivalents(c: &Path) -> Result<Vec<PathBuf>, String> {
     }
     tail.reverse();
 
-    let mut terminals: Vec<PathBuf> = Vec::new();
-    let mut frontier: Vec<PathBuf> = vec![existing];
+    let mut terminals: Vec<(PathBuf, bool)> = Vec::new();
+    let mut frontier: Vec<(PathBuf, bool)> = vec![(existing, true)];
     for (depth, comp) in tail.iter().enumerate() {
         let want = comp.to_string_lossy();
-        let mut next: Vec<PathBuf> = Vec::new();
-        for dir in &frontier {
-            let mut entries: Vec<OsString> = Vec::new();
+        let mut next: Vec<(PathBuf, bool)> = Vec::new();
+        for (dir, dir_definite) in &frontier {
+            // Each matching entry with whether its fold is exact (definite).
+            let mut matches: Vec<(OsString, bool)> = Vec::new();
             let mut exact: Option<OsString> = None;
             let rd = match std::fs::read_dir(dir) {
                 Ok(rd) => rd,
@@ -566,31 +667,33 @@ fn unicode_equivalents(c: &Path) -> Result<Vec<PathBuf>, String> {
                     return Err("a directory on the path is too large to check".to_string());
                 }
                 let name = entry.file_name();
-                if name.to_string_lossy() == want {
+                let ns = name.to_string_lossy();
+                if ns == want {
                     exact = Some(name);
                     break;
                 }
-                if fold_key(&name.to_string_lossy()) == fold_key(&want)
-                    || both_non_ascii(&name.to_string_lossy(), &want)
-                {
-                    entries.push(name);
+                if fold_key(&ns) == fold_key(&want) {
+                    matches.push((name, true));
+                } else if both_non_ascii(&ns, &want) {
+                    matches.push((name, false));
                 }
             }
             match exact {
-                Some(name) => next.push(dir.join(name)),
-                None if entries.is_empty() => {
+                Some(name) => next.push((dir.join(name), *dir_definite)),
+                None if matches.is_empty() => {
                     // The server appends the rest and gets a new (non-existent)
                     // path here; record it so a write under a denied directory
-                    // is still caught.
+                    // is still caught. It is the path the server opens, so it is
+                    // as definite as the ancestor it hangs off.
                     let mut p = dir.clone();
                     for seg in &tail[depth..] {
                         p.push(seg);
                     }
-                    terminals.push(p);
+                    terminals.push((p, *dir_definite));
                 }
                 None => {
-                    for name in entries {
-                        next.push(dir.join(name));
+                    for (name, m_definite) in matches {
+                        next.push((dir.join(name), *dir_definite && m_definite));
                     }
                 }
             }
@@ -659,12 +762,17 @@ pub fn result_bases(policy: &PrivacyPolicy, server: &McpServerPaths, args: &Valu
 }
 
 /// Drop `git diff` sections and whole-line paths naming denied files from
-/// `text`. Returns the filtered text and how many items were removed.
+/// `text`. Returns the filtered text and how many items were removed. When
+/// `placeholder` is `Some`, a removed whole-line path is replaced by that text
+/// (keeping the line, so nothing silently vanishes from what may be file
+/// content); when `None`, the line is deleted (for a tool whose output is a
+/// list of paths, where a dropped entry is expected).
 pub fn filter_text(
     policy: &PrivacyPolicy,
     bases: &[PathBuf],
     home: Option<&Path>,
     text: &str,
+    placeholder: Option<&str>,
 ) -> (String, usize) {
     let mut hidden = 0;
 
@@ -695,6 +803,10 @@ pub fn filter_text(
             && path_str_denied(policy, bases, home, content, false)
         {
             hidden += 1;
+            if let Some(ph) = placeholder {
+                out.push_str(ph);
+                out.push_str(&line[content.len()..]); // keep the line ending
+            }
             continue;
         }
         out.push_str(line);
@@ -767,16 +879,27 @@ pub fn filter_fs_listing(
     }
 }
 
-/// The existing directories `args.path` resolves to (the listing is of one of
-/// them; checking against all is a safe over-approximation).
+/// The existing directories `args.path` resolves to — lexically normalized and
+/// then through the server's Unicode-equivalent resolution, so a `..` or a
+/// no-break-space spelling resolves to the same real directory the server
+/// listed (the listing is of one of them; checking against all is a safe
+/// over-approximation). Empty when nothing resolves to a directory, which
+/// makes the caller fail closed rather than filter against an empty set.
 fn listing_dirs(policy: &PrivacyPolicy, server: &McpServerPaths, args: &Value) -> Vec<PathBuf> {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
         return Vec::new();
     };
-    candidates(path, Role::Plain, policy, server)
-        .into_iter()
-        .filter(|c| c.is_dir())
-        .collect()
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for c in candidates(path, Role::Plain, policy, server) {
+        for (t, definite) in resolved_targets(&c).unwrap_or_default() {
+            // Only a definite resolution is a directory the server really
+            // listed; a fuzzy non-ASCII match is not treated as one.
+            if definite && t.is_dir() && !dirs.contains(&t) {
+                dirs.push(t);
+            }
+        }
+    }
+    dirs
 }
 
 fn name_denied(policy: &PrivacyPolicy, dirs: &[PathBuf], name: &str) -> bool {
@@ -791,6 +914,11 @@ fn filter_list_directory(
     with_sizes: bool,
 ) -> Result<(String, usize), String> {
     let dirs = listing_dirs(policy, server, args);
+    if dirs.is_empty() {
+        // Nothing resolved to a directory, so there is nothing to check the
+        // entries against — fail closed instead of passing the listing through.
+        return Err("could not resolve the listed directory".to_string());
+    }
     // Authoritative entry names for the size variant, whose columns can't be
     // split on whitespace (a name may contain spaces).
     let denied_names: Vec<String> = if with_sizes {
@@ -865,9 +993,14 @@ fn filter_directory_tree(
     let Value::Array(nodes) = tree else {
         return Err("the tree is not a JSON array".to_string());
     };
-    let dir = listing_dirs(policy, server, args).into_iter().next();
+    let dirs = listing_dirs(policy, server, args);
+    if dirs.is_empty() {
+        // Nothing resolved to a directory, so the entries can't be checked —
+        // fail closed instead of returning the tree unpruned.
+        return Err("could not resolve the listed directory".to_string());
+    }
     let mut hidden = 0;
-    let kept = prune_tree(policy, dir.as_deref(), Path::new(""), &nodes, &mut hidden)?;
+    let kept = prune_tree(policy, &dirs, Path::new(""), &nodes, &mut hidden)?;
     let text = serde_json::to_string_pretty(&Value::Array(kept))
         .map_err(|e| format!("can't re-serialize the tree: {e}"))?;
     Ok((text, hidden))
@@ -875,7 +1008,7 @@ fn filter_directory_tree(
 
 fn prune_tree(
     policy: &PrivacyPolicy,
-    dir: Option<&Path>,
+    dirs: &[PathBuf],
     rel: &Path,
     nodes: &[Value],
     hidden: &mut usize,
@@ -892,7 +1025,9 @@ fn prune_tree(
             .and_then(Value::as_str)
             .ok_or("a tree node has no type")?;
         let child_rel = rel.join(name);
-        let denied = dir.is_some_and(|d| policy.check(&d.join(&child_rel)).is_some());
+        let denied = dirs
+            .iter()
+            .any(|d| policy.check(&d.join(&child_rel)).is_some());
         if denied {
             *hidden += 1;
             continue;
@@ -904,7 +1039,7 @@ fn prune_tree(
             let children = children
                 .as_array()
                 .ok_or("a tree node's children is not an array")?;
-            let kept_children = prune_tree(policy, dir, &child_rel, children, hidden)?;
+            let kept_children = prune_tree(policy, dirs, &child_rel, children, hidden)?;
             kept.insert("children".to_string(), Value::Array(kept_children));
         }
         out.push(Value::Object(kept));

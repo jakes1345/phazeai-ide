@@ -647,3 +647,160 @@ async fn server_spellings_of_denied_names_are_refused() {
     // The allowed file still reads.
     assert_eq!(result_json(&requests, 4, "u4")["result"], NOTE_OK);
 }
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn agent_cannot_launder_a_denied_path_through_dotdot() {
+    // The server resolves `..` lexically before opening, even through a
+    // directory that does not exist, so `nonexistent/../private` reaches
+    // `private`. The check must resolve candidates the same way.
+    let (_dir, root) = denied_project();
+    let _active = activate(&root);
+    let calls = vec![
+        (
+            "d1",
+            "mcp__fs__read_text_file",
+            json!({ "path": "nonexistent/../private/plan.md" }),
+        ),
+        (
+            "d2",
+            "mcp__fs__read_text_file",
+            json!({ "path": "nonexistent/../prive\u{301}/plan.txt" }), // NFD é
+        ),
+        (
+            "d3",
+            "mcp__fs__move_file",
+            json!({ "source": "nonexistent/../private", "destination": "public" }),
+        ),
+        (
+            "d4",
+            "mcp__fs__read_text_file",
+            json!({ "path": "notes.txt" }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(outcomes(&response), vec![false, false, false, true]);
+    let seen = format!("{requests:?}");
+    for secret in [PLAN_SECRET, PRIVE_SECRET] {
+        assert!(
+            !seen.contains(secret),
+            "a secret reached the model: {secret}"
+        );
+    }
+    // The denied directory was not moved out of the policy.
+    assert!(
+        root.join("private/plan.md").exists(),
+        "the denied file was moved out through `..`"
+    );
+    assert!(
+        !root.join("public").exists(),
+        "the denied directory was moved"
+    );
+    assert_eq!(result_json(&requests, 4, "d4")["result"], NOTE_OK);
+}
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn agent_cannot_name_denied_files_in_listings_through_unicode_or_dotdot() {
+    let (_dir, root) = denied_project();
+    let _active = activate(&root);
+    let calls = vec![
+        // A no-break-space spelling of a wholly denied directory.
+        (
+            "l1",
+            "mcp__fs__list_directory",
+            json!({ "path": "Client\u{a0}Files" }),
+        ),
+        // `..` through a missing directory onto a denied one.
+        (
+            "l2",
+            "mcp__fs__list_directory",
+            json!({ "path": "nonexistent/../private" }),
+        ),
+        // `..` that resolves the whole tree back to the project root.
+        (
+            "l3",
+            "mcp__fs__directory_tree",
+            json!({ "path": "nonexistent/.." }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    // The two denied-directory listings are refused; the whole-tree listing
+    // succeeds but is pruned.
+    assert_eq!(outcomes(&response), vec![false, false, true]);
+    let tree = serde_json::to_string(&result_json(&requests, 3, "l3")).unwrap();
+    assert!(tree.contains("notes.txt"));
+    for gone in ["\".env\"", "plan.md", "plan.txt", "contract.txt"] {
+        assert!(!tree.contains(gone), "the tree named {gone}: {tree}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn agent_reads_non_ascii_arguments_without_dropping_the_server() {
+    // A multi-byte character straddling byte 5 used to panic the path checker
+    // and the result filter; repeated panics poisoned the client and burned
+    // the server's restarts. Ordinary non-ASCII work must just succeed.
+    let (_dir, root) = denied_project();
+    let jp = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}";
+    std::fs::write(root.join("jp.txt"), jp).unwrap();
+    let _active = activate(&root);
+    let calls = vec![
+        ("j1", "mcp__fs__read_text_file", json!({ "path": "jp.txt" })),
+        (
+            "j2",
+            "mcp__fs__write_file",
+            json!({ "path": "\u{65e5}\u{672c}\u{8a9e}.txt", "content": "x" }),
+        ),
+        ("j3", "mcp__fs__read_text_file", json!({ "path": "jp.txt" })),
+        (
+            "j4",
+            "mcp__fs__read_text_file",
+            json!({ "path": "notes.txt" }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(outcomes(&response), vec![true, true, true, true]);
+    assert_eq!(result_json(&requests, 1, "j1")["result"], jp);
+    // The server was never dropped: the last read still works.
+    assert_eq!(result_json(&requests, 4, "j4")["result"], NOTE_OK);
+}
+
+#[tokio::test]
+#[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
+async fn agent_reads_allowed_file_contents_verbatim() {
+    // An allowed file's contents are never edited, even when a line is itself a
+    // denied absolute path (a `.gitignore` rule `/.env`) — it is a mention, not
+    // the secret, and dropping it would corrupt the file the model reads.
+    let (_dir, root) = denied_project();
+    std::fs::write(root.join(".gitignore"), "/target\n/.env\nnode_modules/\n").unwrap();
+    let _active = activate(&root);
+    let calls = vec![
+        (
+            "g1",
+            "mcp__fs__read_text_file",
+            json!({ "path": ".gitignore" }),
+        ),
+        (
+            "g2",
+            "mcp__fs__read_multiple_files",
+            json!({ "paths": [".gitignore", "notes.txt"] }),
+        ),
+    ];
+    let (response, requests) = run_calls(&root, &calls).await;
+
+    assert_eq!(outcomes(&response), vec![true, true]);
+    let g1 = result_json(&requests, 1, "g1");
+    assert_eq!(g1["result"], "/target\n/.env\nnode_modules/\n");
+    assert!(g1.get("privacy_skipped").is_none(), "{g1}");
+    let g2 = result_json(&requests, 2, "g2");
+    let joined = g2["result"].as_str().unwrap_or_default();
+    assert!(
+        joined.contains("/.env") && joined.contains(NOTE_OK),
+        "read_multiple_files mangled an allowed file: {joined}"
+    );
+    assert!(g2.get("privacy_skipped").is_none(), "{g2}");
+}

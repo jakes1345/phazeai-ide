@@ -1526,8 +1526,12 @@ fn mcp_free_text_remote_urls_and_allowed_paths_pass_untouched() {
     // Free text that merely mentions a denied relative path is not a path.
     ok(serde_json::json!({ "content": "see private/plan.md for the key" }));
     ok(serde_json::json!({ "title": "Rotate the .env secret" }));
-    // A remote URL is skipped.
-    ok(serde_json::json!({ "url": "https://example.com/private/plan.md" }));
+    // A remote URL is skipped — even one whose last segment would be a
+    // built-in-denied name if it were joined to a base as a path (`.env` at any
+    // depth). This pins that `non_file_url` really skips it: drop the skip and
+    // this URL becomes `<base>/https:/example.com/a/.env`, which is refused.
+    ok(serde_json::json!({ "url": "https://example.com/a/.env" }));
+    ok(serde_json::json!({ "endpoint": "ftp://host/x/.ssh/id_rsa" }));
     // Non-path arguments a GitHub-style server takes.
     ok(serde_json::json!({ "owner": "x", "repo": "y", "ref": "main" }));
     // An allowed template that the built-in list exempts.
@@ -1560,6 +1564,200 @@ fn mcp_successful_reads_are_noted_for_the_audit_log() {
 }
 
 #[test]
+fn mcp_dotdot_after_a_missing_dir_resolves_like_the_server() {
+    // The server resolves `..` lexically (path.resolve) before it opens
+    // anything, even through a directory that does not exist. Candidates must
+    // be normalized the same way, or a `..` launders a denied path past the
+    // directory-contents, whole-tree and Unicode checks.
+    let (_d, root) = project(Some("deny = [\"private/**\", \"priv\u{e9}/\"]\n"));
+    write(&root, "private/plan.md", "secret");
+    write(&root, "priv\u{e9}/plan.txt", "secret"); // NFC é
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // A read laundering `..` through a missing directory onto a denied file.
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "nonexistent/../private/plan.md" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "private/**");
+
+    // Listing the denied directory through `..`.
+    let d = mcp_denials(
+        &p,
+        "list_directory",
+        true,
+        serde_json::json!({ "path": "nonexistent/../private" }),
+        &srv,
+    );
+    assert!(
+        d[0].shown.contains("everything inside it"),
+        "{}",
+        d[0].shown
+    );
+
+    // A move source laundered through `..` is still refused (here the whole
+    // directory is denied, so the contents check fires; a partially denied
+    // directory would be caught by the whole-tree check instead).
+    let d = mcp_denials(
+        &p,
+        "move_file",
+        false,
+        serde_json::json!({ "source": "x/../private", "destination": "public" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "private/**");
+    assert!(d[0].shown.starts_with("x/../private"), "{}", d[0].shown);
+
+    // A move source laundered through `..` onto a directory that only *holds* a
+    // denied file is caught by the whole-tree check.
+    write(&root, "mixed/key.pem", "secret"); // built-in
+    write(&root, "mixed/ok.txt", "ok");
+    let d = mcp_denials(
+        &p,
+        "move_file",
+        false,
+        serde_json::json!({ "source": "y/../mixed", "destination": "public" }),
+        &srv,
+    );
+    assert!(
+        d[0].shown.contains("contains mixed/key.pem"),
+        "{}",
+        d[0].shown
+    );
+
+    // `..` plus an NFD spelling of an NFC directory name.
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "x/../prive\u{301}/plan.txt" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "priv\u{e9}/");
+
+    // A `file:` URI whose `..` climbs out of its own path. The filesystem
+    // server treats it as a relative name and resolves it under the root.
+    let d = mcp_denials(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "file:///../private/plan.md" }),
+        &srv,
+    );
+    assert_eq!(d[0].denial.pattern, "private/**");
+}
+
+#[test]
+fn mcp_non_ascii_arguments_and_result_lines_do_not_panic() {
+    use super::mcp::filter_text;
+    // A multi-byte character straddling byte 5 used to panic file_uri_path,
+    // which sliced the string's first five *bytes*.
+    let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
+    write(&root, "notes.txt", "ok");
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // Non-path arguments on servers that take no paths.
+    mcp_passes(
+        &p,
+        "create_issue",
+        false,
+        serde_json::json!({ "title": "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30d0}\u{30b0}" }),
+        &srv,
+    );
+    mcp_passes(
+        &p,
+        "update",
+        false,
+        serde_json::json!({ "name": "Gr\u{f6}\u{df}e" }),
+        &srv,
+    );
+    // A non-ASCII (allowed) path argument.
+    mcp_passes(
+        &p,
+        "read_text_file",
+        true,
+        serde_json::json!({ "path": "\u{65e5}\u{672c}\u{8a9e}.txt" }),
+        &srv,
+    );
+
+    // A non-ASCII result line is filtered without panicking.
+    let (_out, hidden) = filter_text(
+        &p,
+        std::slice::from_ref(&root),
+        None,
+        "Gr\u{f6}\u{df}e\n\u{65e5}\u{672c}\u{8a9e}\n",
+        None,
+    );
+    assert_eq!(hidden, 0);
+}
+
+#[test]
+fn mcp_destructive_tool_names_match_whole_words_not_substrings() {
+    let (_d, root) = project(Some("deny = []\n"));
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+
+    // A delete/trash/rename/move tool naming the project root (which holds the
+    // policy) is protected — such a tool could carry the policy off with it.
+    for tool in ["delete_path", "trash_file", "rename", "mv", "moveItem"] {
+        let d = mcp_denials(&p, tool, false, serde_json::json!({ "path": "." }), &srv);
+        assert!(
+            d[0].shown.contains("privacy.toml"),
+            "{tool}: {}",
+            d[0].shown
+        );
+    }
+
+    // A tool whose name merely *contains* a destructive word as a substring
+    // ("rm" inside format/transform/terraform) is not destructive, so it may
+    // name the project root. A plain write may too.
+    for tool in [
+        "format_files",
+        "terraform_validate",
+        "transform",
+        "write_file",
+    ] {
+        mcp_passes(&p, tool, false, serde_json::json!({ "path": "." }), &srv);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_settings_dir_is_protected_through_a_unicode_respelling() {
+    // The filesystem server maps a Unicode respelling of an allowed-directory
+    // prefix back onto the real directory (respellAllowedDirectoryPrefix), so a
+    // write to "<root-with-NBSP>/.phazeai/privacy.toml" lands on the real
+    // policy file. The check must follow the same resolution.
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().canonicalize().unwrap().join("My Project");
+    std::fs::create_dir_all(root.join(".phazeai")).unwrap();
+    std::fs::write(root.join(POLICY_FILE), "deny = []\n").unwrap();
+    std::fs::write(root.join(".phazeai/mcp.json"), "{}").unwrap();
+    let p = PrivacyPolicy::load(&root).unwrap();
+    let srv = server(vec![root.clone()], None);
+    let base = root.parent().unwrap().display().to_string();
+
+    // The policy file and the MCP server list, reached through a no-break-space
+    // spelling of the "My Project" prefix, are both protected.
+    for name in ["privacy.toml", "mcp.json"] {
+        let respelled = format!("{base}/My\u{a0}Project/.phazeai/{name}");
+        let d = mcp_denials(
+            &p,
+            "write_file",
+            false,
+            serde_json::json!({ "path": respelled }),
+            &srv,
+        );
+        assert_eq!(d[0].denial.source, DenySource::Protected, "{name}");
+    }
+}
+
+#[test]
 fn mcp_text_results_lose_denied_paths_and_diff_sections() {
     use super::mcp::filter_text;
     let (_d, root) = project(Some(r#"deny = ["private/**"]"#));
@@ -1573,7 +1771,7 @@ fn mcp_text_results_lose_denied_paths_and_diff_sections() {
         root.join("notes.txt").display(),
         root.join("private/plan.md").display()
     );
-    let (out, hidden) = filter_text(&p, &bases, None, &listing);
+    let (out, hidden) = filter_text(&p, &bases, None, &listing, None);
     assert!(out.contains("notes.txt"));
     assert!(!out.contains(".env") && !out.contains("plan.md"), "{out}");
     assert_eq!(hidden, 2);
@@ -1582,7 +1780,7 @@ fn mcp_text_results_lose_denied_paths_and_diff_sections() {
     let diff = "On branch main\n\
                 diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-a\n+b\n\
                 diff --git a/.env b/.env\n--- a/.env\n+++ b/.env\n@@ -1 +1 @@\n-K=1\n+K=2\n";
-    let (out, hidden) = filter_text(&p, &bases, None, diff);
+    let (out, hidden) = filter_text(&p, &bases, None, diff, None);
     assert!(out.contains("On branch main") && out.contains("src/main.rs"));
     assert!(!out.contains("K=2"), "{out}");
     assert_eq!(hidden, 1);
@@ -1590,9 +1788,16 @@ fn mcp_text_results_lose_denied_paths_and_diff_sections() {
     // Plain text that happens to contain a `--- .env` line but no `diff --git`
     // is never parsed as a diff.
     let prose = "readme\n--- .env\nnot a diff\n";
-    let (out, hidden) = filter_text(&p, &bases, None, prose);
+    let (out, hidden) = filter_text(&p, &bases, None, prose, None);
     assert_eq!(out, prose);
     assert_eq!(hidden, 0);
+
+    // With a placeholder (unrecognized-server mode), a denied whole-line path
+    // is replaced, not deleted, so content keeps its shape and line count.
+    let doc = format!("line one\n{}\nline three\n", root.join(".env").display());
+    let (out, hidden) = filter_text(&p, &bases, None, &doc, Some("[hidden]"));
+    assert_eq!(out, "line one\n[hidden]\nline three\n");
+    assert_eq!(hidden, 1);
 }
 
 #[test]
