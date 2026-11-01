@@ -138,6 +138,14 @@ writing/executing flags — extend the allowlists there, with a test, never by
 substring matching. CLI `-p` mode uses `--allow read|edit|all` (`oneshot.rs`):
 `edit` permits file tools only; any bash call above read-only needs `all`.
 
+The IDE chat waves `write_file` / `edit_file` through its approval callback and
+gates them with a diff hook (`Agent::with_diff_hook`) instead. The diff is the
+tool's own plan (`Tool::plan_write` → `tools::FileWrite`), and the agent then
+commits that same plan, which writes only if the file still holds the diff's
+"before"; a call the tool would refuse shows no diff. Any preview of an edit
+(the CLI's approval prompt too) uses `tools::apply_edit`: never re-implement
+the edit in a preview.
+
 ### Privacy (`phazeai-core/src/privacy.rs`)
 
 `.phazeai/privacy.toml` (`deny` globs + `local_only`) plus a built-in secrets
