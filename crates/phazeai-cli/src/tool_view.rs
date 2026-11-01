@@ -322,21 +322,17 @@ fn file_change_preview(name: &str, params: &Value) -> Vec<PreviewLine> {
         let Some(before) = existing.clone() else {
             return vec![PreviewLine::Note(format!("{path} does not exist"))];
         };
-        let old = str_param(params, "old_text").unwrap_or("");
-        let new = str_param(params, "new_text").unwrap_or("");
-        let replace_all = params
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if old.is_empty() || !before.contains(old) {
-            return vec![PreviewLine::Note(
-                "old_text not found in file — the edit will fail".into(),
-            )];
-        }
-        let after = if replace_all {
-            before.replace(old, new)
-        } else {
-            before.replacen(old, new, 1)
+        // The edit tool's own computation (`replace_all`, `context`, its
+        // refusals), so the preview is what the tool will write.
+        let after = match phazeai_core::tools::apply_edit(&before, params) {
+            Ok(edited) => edited.content,
+            Err(e) => {
+                let why = match e {
+                    phazeai_core::PhazeError::Tool { message, .. } => message,
+                    other => other.to_string(),
+                };
+                return vec![PreviewLine::Note(format!("the edit will fail: {why}"))];
+            }
         };
         (before, after)
     };
@@ -541,6 +537,43 @@ mod tests {
         );
         assert!(matches!(&lines[0], PreviewLine::Note(n) if n.contains("not found")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_preview_is_what_the_edit_tool_writes() {
+        use phazeai_core::tools::{EditTool, Tool};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.rs");
+        let path = file.display().to_string();
+        let content = "fn a() { todo!() }\nfn b() { todo!() }\nfn c() { todo!() }\n";
+        std::fs::write(&file, content).unwrap();
+
+        // Three occurrences; the context picks the second.
+        let edit = json!({"path": path, "old_text": "todo!()", "new_text": "42",
+                          "context": "fn b() { todo!() }"});
+        let preview = approval_preview("edit_file", &edit);
+        EditTool.execute(edit).await.unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            written,
+            "fn a() { todo!() }\nfn b() { 42 }\nfn c() { todo!() }\n"
+        );
+        assert_eq!(
+            preview,
+            unified_diff(content, &written, 2),
+            "the preview is not what the tool wrote"
+        );
+
+        // Two occurrences and no way to choose: the tool refuses, and the
+        // preview says so instead of showing a change.
+        let ambiguous = json!({"path": path, "old_text": "todo!()", "new_text": "42"});
+        let preview = approval_preview("edit_file", &ambiguous);
+        assert!(
+            matches!(preview.as_slice(), [PreviewLine::Note(n)] if n.contains("matches 2 times")),
+            "{preview:?}"
+        );
+        assert!(EditTool.execute(ambiguous).await.is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
     }
 
     #[test]

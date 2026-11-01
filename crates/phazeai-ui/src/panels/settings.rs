@@ -1,12 +1,12 @@
 use floem::{
-    reactive::{SignalGet, SignalUpdate, SignalWith},
+    reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith},
     views::{container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
 use phazeai_core::{
     llm::{
         key_setup::{check_api_key, key_help},
-        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderId},
+        provider::{keyring_delete, keyring_set, ApiKeySource, ProviderConfig, ProviderId},
     },
     Settings,
 };
@@ -250,6 +250,61 @@ fn stepper_row(
         controls,
     ))
     .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0))
+}
+
+/// A labelled ON/OFF switch bound to `sig`. `note`, when given, is a muted
+/// line under it saying what the setting does.
+fn toggle_row(
+    label_text: &'static str,
+    note: Option<&'static str>,
+    sig: RwSignal<bool>,
+    theme: RwSignal<PhazeTheme>,
+) -> impl IntoView {
+    use floem::reactive::create_rw_signal;
+    let hov = create_rw_signal(false);
+    let switch = container(label(move || if sig.get() { "ON" } else { "OFF" }))
+        .style(move |s| {
+            let p = theme.get().palette;
+            let on = sig.get();
+            s.font_size(font::CAPTION)
+                .padding_horiz(space::MD)
+                .padding_vert(space::XXS + 1.0)
+                .border_radius(radius::SM)
+                .color(p.bg_base)
+                .background(if on { p.success } else { p.bg_elevated })
+                .border(stroke::HAIRLINE)
+                .border_color(if on { p.success } else { p.border })
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
+        })
+        .on_click_stop(move |_| {
+            sig.update(|v| *v = !*v);
+        })
+        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
+            hov.set(true)
+        })
+        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
+            hov.set(false)
+        });
+    let row = container(
+        stack((
+            label(move || label_text).style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(font::BODY).color(p.text_primary).flex_grow(1.0)
+            }),
+            switch,
+        ))
+        .style(|s| s.flex_row().items_center().padding_vert(space::XS)),
+    )
+    .style(|s| s.width_full().padding_horiz(space::XS));
+    let note_line = label(move || note.unwrap_or_default()).style(move |s| {
+        s.font_size(font::CAPTION)
+            .color(theme.get().palette.text_muted)
+            .padding_horiz(space::XS)
+            .margin_bottom(space::XS)
+            .apply_if(note.is_none(), |s| s.display(floem::style::Display::None))
+    });
+    stack((row, note_line)).style(|s| s.flex_col().width_full())
 }
 
 // ─── theme tiles ─────────────────────────────────────────────────────────────
@@ -518,70 +573,28 @@ fn editor_section(state: IdeState) -> impl IntoView {
     let code_lens_vis = state.editor.code_lens_visible;
     let inlay_hints = state.editor.inlay_hints_toggle;
     let relative_ln = state.editor.relative_line_numbers;
-    let theme_as = state.workbench.theme;
-    let as_hov = floem::reactive::create_rw_signal(false);
-    let ww_hov = floem::reactive::create_rw_signal(false);
-    let oi_hov = floem::reactive::create_rw_signal(false);
-    let cl_hov = floem::reactive::create_rw_signal(false);
-    let ih_hov = floem::reactive::create_rw_signal(false);
-    let rln_hov = floem::reactive::create_rw_signal(false);
-
-    let toggle_row =
-        |label_text: &'static str,
-         sig: floem::reactive::RwSignal<bool>,
-         hov: floem::reactive::RwSignal<bool>,
-         theme_sig: floem::reactive::RwSignal<crate::theme::PhazeTheme>| {
-            container(
-                stack((
-                    label(move || label_text).style(move |s| {
-                        let p = theme_sig.get().palette;
-                        s.font_size(12.0).color(p.text_primary).flex_grow(1.0)
-                    }),
-                    container(label(move || if sig.get() { "ON" } else { "OFF" }))
-                        .style(move |s| {
-                            let p = theme_sig.get().palette;
-                            let on = sig.get();
-                            s.font_size(11.0)
-                                .padding_horiz(8.0)
-                                .padding_vert(3.0)
-                                .border_radius(4.0)
-                                .color(p.bg_base)
-                                .background(if on { p.success } else { p.bg_elevated })
-                                .border(1.0)
-                                .border_color(if on { p.success } else { p.border })
-                                .cursor(floem::style::CursorStyle::Pointer)
-                                .apply_if(hov.get() && !on, |s| s.background(p.bg_panel))
-                        })
-                        .on_click_stop(move |_| {
-                            sig.update(|v| *v = !*v);
-                        })
-                        .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
-                            hov.set(true)
-                        })
-                        .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
-                            hov.set(false)
-                        }),
-                ))
-                .style(|s| s.flex_row().items_center().padding_vert(4.0)),
-            )
-            .style(|s| s.width_full().padding_horiz(4.0))
-        };
+    let ai_completions = state.editor.ai_completions;
+    let theme = state.workbench.theme;
 
     stack((
         section_header("EDITOR", state.clone()),
         stepper_row("Font Size", font_size, 8, 48, state.clone()),
         stepper_row("Tab Size", tab_size, 1, 16, state.clone()),
-        toggle_row("Auto Save (1.5 s delay)", auto_save, as_hov, theme_as),
-        toggle_row("Word Wrap  (Alt+Z)", word_wrap, ww_hov, theme_as),
+        toggle_row("Auto Save (1.5 s delay)", None, auto_save, theme),
+        toggle_row("Word Wrap  (Alt+Z)", None, word_wrap, theme),
+        toggle_row("Organize Imports on Save", None, organize_imports, theme),
+        toggle_row("Show Code Lens", None, code_lens_vis, theme),
+        toggle_row("Inlay Hints  (Ctrl+Alt+I)", None, inlay_hints, theme),
+        toggle_row("Relative Line Numbers", None, relative_ln, theme),
         toggle_row(
-            "Organize Imports on Save",
-            organize_imports,
-            oi_hov,
-            theme_as,
+            "AI Completions",
+            Some(
+                "Sends the code around the cursor to your AI provider while you \
+                 edit. Off: nothing is sent.",
+            ),
+            ai_completions,
+            theme,
         ),
-        toggle_row("Show Code Lens", code_lens_vis, cl_hov, theme_as),
-        toggle_row("Inlay Hints  (Ctrl+Alt+I)", inlay_hints, ih_hov, theme_as),
-        toggle_row("Relative Line Numbers", relative_ln, rln_hov, theme_as),
     ))
     .style(|s| s.flex_col().width_full())
 }
@@ -784,6 +797,18 @@ fn ai_section(state: IdeState) -> impl IntoView {
     .style(|s| s.flex_col().width_full())
 }
 
+/// Where the Test button sends the key of `cfg` (from
+/// `settings.build_provider_registry()`): the address its clients use, which
+/// for the active provider is `[llm] base_url` when set. An address the
+/// clients refuse (`Settings::check_base_url`) is refused here too, with
+/// their message, before the key goes anywhere.
+fn key_test_url(settings: &Settings, cfg: &ProviderConfig) -> Result<String, String> {
+    if cfg.id == settings.llm.provider.to_provider_id() {
+        settings.check_base_url().map_err(|e| e.to_string())?;
+    }
+    Ok(cfg.base_url.clone())
+}
+
 /// API key input row — masked text input with Save / Clear buttons. Saves to
 /// the OS keyring under the active provider's `api_key_env` entry name.
 fn api_key_input_row(state: IdeState) -> impl IntoView {
@@ -873,8 +898,14 @@ fn api_key_input_row(state: IdeState) -> impl IntoView {
                 feedback.set("Paste a key first.".into());
                 return;
             }
+            let base_url = match key_test_url(&settings, cfg) {
+                Ok(url) => url,
+                Err(refusal) => {
+                    feedback.set(refusal);
+                    return;
+                }
+            };
             feedback.set("Testing…".into());
-            let base_url = cfg.base_url.clone();
             let send = create_ext_action(Scope::new(), move |msg: String| feedback.set(msg));
             std::thread::spawn(move || {
                 let msg = match tokio::runtime::Builder::new_current_thread()
@@ -1097,8 +1128,24 @@ fn about_section(state: IdeState) -> impl IntoView {
             .spawn();
     });
 
-    stack((section_header("ABOUT", state.clone()), icon_row, link))
-        .style(|s| s.flex_col().width_full())
+    let update_check = toggle_row(
+        "Check for Updates at Start",
+        Some(
+            "Asks GitHub's releases API for a newer version when PhazeAI starts. \
+             Skipped when the folder PhazeAI starts in is local-only. A change \
+             applies at the next start.",
+        ),
+        state.workbench.check_updates_at_start,
+        theme,
+    );
+
+    stack((
+        section_header("ABOUT", state.clone()),
+        icon_row,
+        update_check,
+        link,
+    ))
+    .style(|s| s.flex_col().width_full())
 }
 
 // ─── keybindings reference ───────────────────────────────────────────────────────
@@ -1302,5 +1349,40 @@ mod tests {
         let (next, problem) = theme_after_reload(ember("#ff7a18"), &LoadedThemes::default());
         assert_eq!(next.display_name(), "Ember");
         assert!(problem.unwrap().contains("no longer"));
+    }
+
+    #[test]
+    fn the_key_test_refuses_an_address_the_clients_refuse() {
+        use super::key_test_url;
+        use phazeai_core::{config::LlmProvider, llm::provider::ProviderId, Settings};
+
+        // What an older build left behind: an Ollama on another machine as
+        // base_url, provider since switched to Claude.
+        let mut s = Settings::default();
+        s.llm.provider = LlmProvider::Claude;
+        s.llm.base_url = Some("http://192.0.2.2:11434".into());
+        let registry = s.build_provider_registry();
+        let claude = registry.get_config(&ProviderId::Claude).unwrap();
+        let refusal = key_test_url(&s, claude).expect_err("the key must not be sent there");
+        assert!(
+            refusal.contains("base_url") && refusal.contains("unencrypted"),
+            "{refusal}"
+        );
+
+        // Another provider's key is tested at that provider's own address.
+        let openai = registry.get_config(&ProviderId::OpenAI).unwrap();
+        assert_eq!(
+            key_test_url(&s, openai).unwrap(),
+            ProviderId::OpenAI.default_base_url()
+        );
+
+        // Over https, the configured address is the one tested.
+        s.llm.base_url = Some("https://gateway.example/anthropic".into());
+        let registry = s.build_provider_registry();
+        let claude = registry.get_config(&ProviderId::Claude).unwrap();
+        assert_eq!(
+            key_test_url(&s, claude).unwrap(),
+            "https://gateway.example/anthropic"
+        );
     }
 }

@@ -353,6 +353,13 @@ impl ProviderRegistry {
         self.providers.insert(ProviderId::Custom(name), config);
     }
 
+    /// Point `id` at `base_url` instead of its default address.
+    pub fn set_base_url(&mut self, id: &ProviderId, base_url: impl Into<String>) {
+        if let Some(config) = self.providers.get_mut(id) {
+            config.base_url = base_url.into();
+        }
+    }
+
     /// Build an LLM client for the currently active provider/model.
     pub fn build_active_client(
         &self,
@@ -371,25 +378,29 @@ impl ProviderRegistry {
     ///
     /// Every client is wrapped in [`crate::privacy::GuardedClient`], which
     /// refuses non-local providers when the active project is `local_only`
-    /// and records each request in the privacy audit log.
+    /// and records each request in the privacy audit log. The guard judges
+    /// the address the client is built with ([`request_base_url`]).
     pub fn build_client_for(
         &self,
         config: &ProviderConfig,
         model: &str,
     ) -> Result<Box<dyn super::LlmClient>, crate::error::PhazeError> {
-        crate::privacy::check_provider(&config.id, &config.base_url, model)?;
-        let inner = self.build_unguarded_client(config, model)?;
+        let base_url = request_base_url(config)?;
+        crate::privacy::check_provider(&config.id, &base_url, model)?;
+        let inner = self.build_unguarded_client(config, &base_url, model)?;
         Ok(Box::new(crate::privacy::GuardedClient::new(
             inner,
             config.id.clone(),
             model,
-            config.base_url.clone(),
+            base_url,
         )))
     }
 
+    /// A client for `config` that sends its requests to `base_url`.
     fn build_unguarded_client(
         &self,
         config: &ProviderConfig,
+        base_url: &str,
         model: &str,
     ) -> Result<Box<dyn super::LlmClient>, crate::error::PhazeError> {
         match config.id {
@@ -402,23 +413,16 @@ impl ProviderRegistry {
                 })?;
                 let client = super::ClaudeClient::new(api_key)
                     .with_model(model)
-                    .with_base_url(&config.base_url)
+                    .with_base_url(base_url)
                     .with_max_tokens(8192);
                 Ok(Box::new(client))
             }
             ProviderId::Ollama => {
-                let client = super::OllamaClient::new(model).with_base_url(&config.base_url);
+                let client = super::OllamaClient::new(model).with_base_url(base_url);
                 Ok(Box::new(client))
             }
             ProviderId::BuiltIn => {
                 let local = &crate::local_ai::LOCAL_AI;
-                let base_url = local.base_url().ok_or_else(|| {
-                    crate::error::PhazeError::Config(
-                        "PhazeAI Local isn't running. Start it in Settings → Local AI \
-                         (the `phazeai` CLI starts it by itself when it is the configured provider)."
-                            .to_string(),
-                    )
-                })?;
                 let model = local.running_model().unwrap_or_else(|| model.to_string());
                 let client = super::OpenAIClient::new(String::new())
                     .with_model(model)
@@ -441,7 +445,7 @@ impl ProviderRegistry {
                 };
                 let client = super::OpenAIClient::new(api_key)
                     .with_model(model)
-                    .with_base_url(&config.base_url);
+                    .with_base_url(base_url);
                 Ok(Box::new(client))
             }
         }
@@ -908,6 +912,22 @@ impl ProviderRegistry {
             ProviderId::Custom(_) => vec![],
         }
     }
+}
+
+/// The address a client built from `config` sends its requests to: the
+/// configured base URL, or for the built-in provider the address of the
+/// server PhazeAI started.
+fn request_base_url(config: &ProviderConfig) -> Result<String, crate::error::PhazeError> {
+    if config.id != ProviderId::BuiltIn {
+        return Ok(config.base_url.clone());
+    }
+    crate::local_ai::LOCAL_AI.base_url().ok_or_else(|| {
+        crate::error::PhazeError::Config(
+            "PhazeAI Local isn't running. Start it in Settings → Local AI \
+             (the `phazeai` CLI starts it by itself when it is the configured provider)."
+                .to_string(),
+        )
+    })
 }
 
 fn default_model_for(id: &ProviderId) -> &str {

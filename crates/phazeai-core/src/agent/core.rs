@@ -2,7 +2,7 @@ use crate::agent_event::AgentEvent;
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
-use crate::tools::{ToolDefinition, ToolRegistry};
+use crate::tools::{FileWrite, ToolDefinition, ToolRegistry, ToolResult};
 use futures::StreamExt;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -27,8 +27,14 @@ pub type ApprovalFn = Box<
     dyn Fn(String, serde_json::Value) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync,
 >;
 
-/// Called before a write_file/edit_file executes.
-/// Arguments: (path, before_content, after_content). Returns true to proceed.
+/// Reviews a file write before it happens. With a diff hook, every call of a
+/// tool that writes one file ([`crate::tools::Tool::plan_write`]: `write_file`,
+/// `edit_file`) and would change it is shown here first, as (path, before,
+/// after): the file that will be written (resolved), what it holds now and
+/// exactly what it will hold. Return true to write `after`, which is then
+/// written only if the file still holds `before`; false rejects the call. A
+/// call that would fail, or would change nothing, is not shown (and writes
+/// nothing different).
 pub type DiffHookFn =
     Box<dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
@@ -458,43 +464,58 @@ impl Agent {
                         }
                     }
 
-                    // For file-writing tools, compute before/after and emit FilePatch.
-                    // If a diff_hook is registered it blocks until the user approves.
+                    // With a diff hook, a tool that writes one file first
+                    // shows exactly what it will write, and then only that
+                    // is written (see `DiffHookFn`).
+                    let mut action = Action::Run;
                     if let Some(ref hook) = self.diff_hook {
-                        let params_val = tool_call.parse_arguments().unwrap_or(Value::Null);
-                        if let Some((fp, before, after)) =
-                            compute_file_patch(tool_name, &params_val).await
-                        {
-                            let _ = event_tx.send(AgentEvent::FilePatch {
-                                path: fp.clone(),
-                                before: before.clone(),
-                                after: after.clone(),
-                            });
-                            // As with approval: Stop ends the review.
-                            let answer = self.unless_cancelled((hook)(fp, before, after)).await;
-                            let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
-                                return self.stop_round(&tool_calls[i..], &event_tx).await;
-                            };
-                            if !approved {
-                                let _ = event_tx.send(AgentEvent::ToolResult {
-                                    name: tool_name.clone(),
-                                    success: false,
-                                    summary: "File change rejected by user".to_string(),
+                        match self.compute_file_patch(tool_call).await {
+                            None => {}
+                            // The tool would fail this way, writing nothing:
+                            // report it without running the tool, so no file
+                            // is written that was not reviewed.
+                            Some(Err(e)) => action = Action::Fail(e),
+                            // A write that changes nothing has nothing to review.
+                            Some(Ok(write)) if !write.changes_file() => {
+                                action = Action::Write(write);
+                            }
+                            Some(Ok(write)) => {
+                                let path = write.target().display().to_string();
+                                let before = write.before().into_owned();
+                                let after = write.after().to_string();
+                                let _ = event_tx.send(AgentEvent::FilePatch {
+                                    path: path.clone(),
+                                    before: before.clone(),
+                                    after: after.clone(),
                                 });
-                                {
-                                    let mut conversation = self.conversation.lock().await;
-                                    conversation.add_tool_result(
-                                        &tool_call.id,
-                                        "Error: File change rejected by user",
-                                    );
+                                // As with approval: Stop ends the review.
+                                let answer =
+                                    self.unless_cancelled((hook)(path, before, after)).await;
+                                let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+                                    return self.stop_round(&tool_calls[i..], &event_tx).await;
+                                };
+                                if !approved {
+                                    let _ = event_tx.send(AgentEvent::ToolResult {
+                                        name: tool_name.clone(),
+                                        success: false,
+                                        summary: "File change rejected by user".to_string(),
+                                    });
+                                    {
+                                        let mut conversation = self.conversation.lock().await;
+                                        conversation.add_tool_result(
+                                            &tool_call.id,
+                                            "Error: File change rejected by user",
+                                        );
+                                    }
+                                    tool_executions.push(ToolExecution {
+                                        tool_name: tool_name.clone(),
+                                        params: tool_call.parse_arguments().unwrap_or(Value::Null),
+                                        success: false,
+                                        result_summary: "File change rejected by user".to_string(),
+                                    });
+                                    continue;
                                 }
-                                tool_executions.push(ToolExecution {
-                                    tool_name: tool_name.clone(),
-                                    params: params_val,
-                                    success: false,
-                                    result_summary: "File change rejected by user".to_string(),
-                                });
-                                continue;
+                                action = Action::Write(write);
                             }
                         }
                     }
@@ -511,7 +532,12 @@ impl Agent {
 
                     // If Stop interrupts the tool, the result says so and the
                     // check at the top of the next pass answers the rest.
-                    let (success, result_str) = self.execute_tool(tool_call).await;
+                    let (success, result_str) = match action {
+                        Action::Run => self.execute_tool(tool_call).await,
+                        // What was reviewed, or nothing if the file changed since.
+                        Action::Write(write) => self.tool_outcome(write.commit()).await,
+                        Action::Fail(e) => (false, format!("Error: {e}")),
+                    };
 
                     // Tool result summary sent to the UI/CLI event stream. The
                     // full result goes to the conversation history below
@@ -582,22 +608,43 @@ impl Agent {
         };
 
         if let Some(tool) = self.tools.get(tool_name) {
-            // Stop awaiting the tool as soon as the run is cancelled. Dropping
-            // its future stops what it started: a `bash` child is killed along
-            // with its process group (see `BashTool`), so Stop / Esc / Ctrl+C
-            // end a running `cargo build` instead of leaving it behind.
-            match self.unless_cancelled(tool.execute(params)).await {
-                Some(Ok(value)) => {
-                    let result_str =
-                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-                    (true, result_str)
-                }
-                Some(Err(e)) => (false, format!("Error: {e}")),
-                None => (false, INTERRUPTED.to_string()),
-            }
+            self.tool_outcome(tool.execute(params)).await
         } else {
             (false, format!("Tool '{}' not found", tool_name))
         }
+    }
+
+    /// A tool's work, awaited, as (success, what the model is told). Stop
+    /// ends the wait at once: dropping the future stops what it started (a
+    /// `bash` child is killed along with its process group, see `BashTool`),
+    /// so Stop / Esc / Ctrl+C end a running `cargo build` instead of leaving
+    /// it behind.
+    async fn tool_outcome(&self, work: impl Future<Output = ToolResult>) -> (bool, String) {
+        match self.unless_cancelled(work).await {
+            Some(Ok(value)) => {
+                let result_str =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+                (true, result_str)
+            }
+            Some(Err(e)) => (false, format!("Error: {e}")),
+            None => (false, INTERRUPTED.to_string()),
+        }
+    }
+
+    /// The write a call of a file-writing tool would make, worked out by the
+    /// tool itself ([`crate::tools::Tool::plan_write`]), or the error the call
+    /// would fail with. `None` for any other call, including one to an
+    /// unknown tool or with arguments that do not parse (`execute_tool`
+    /// reports those without running anything).
+    async fn compute_file_patch(
+        &self,
+        tool_call: &ToolCall,
+    ) -> Option<Result<FileWrite, PhazeError>> {
+        let params = tool_call.parse_arguments().ok()?;
+        self.tools
+            .get(&tool_call.function.name)?
+            .plan_write(&params)
+            .await
     }
 
     pub async fn clear_conversation(&self) {
@@ -641,6 +688,17 @@ const NOT_RUN: &str = "Cancelled by the user before this tool started; it did no
 /// The result recorded for a tool call that Stop interrupted.
 const INTERRUPTED: &str = "Interrupted by the user before the tool finished.";
 
+/// How a tool call that was allowed is carried out.
+enum Action {
+    /// Run the tool.
+    Run,
+    /// Commit this write, which the diff hook approved (or which changes
+    /// nothing), instead of running the tool.
+    Write(FileWrite),
+    /// Report the error the tool would fail with, instead of running it.
+    Fail(PhazeError),
+}
+
 /// End a cancelled run the way every Stop path does: an `Error("Cancelled")`
 /// event (which the UIs treat as a normal stop) and `PhazeError::Cancelled`.
 fn cancelled_run<T>(
@@ -648,41 +706,6 @@ fn cancelled_run<T>(
 ) -> Result<T, PhazeError> {
     let _ = event_tx.send(AgentEvent::Error("Cancelled".to_string()));
     Err(PhazeError::Cancelled)
-}
-
-/// Compute (path, before, after) for write_file and edit_file tools so the UI
-/// can show a diff before the write happens. Returns None for all other tools.
-async fn compute_file_patch(tool_name: &str, params: &Value) -> Option<(String, String, String)> {
-    // Denied files are refused by the tool itself; don't show a diff for them.
-    if let Some(path) = params.get("path").and_then(|p| p.as_str()) {
-        let abs = crate::privacy::absolutize(std::path::Path::new(path));
-        if crate::privacy::active().is_denied(&abs) {
-            return None;
-        }
-    }
-    match tool_name {
-        "write_file" => {
-            let path = params.get("path")?.as_str()?;
-            let after = params.get("content")?.as_str()?;
-            let before = tokio::fs::read_to_string(path).await.unwrap_or_default();
-            if before == after {
-                return None; // no change — don't bother the user
-            }
-            Some((path.to_string(), before, after.to_string()))
-        }
-        "edit_file" => {
-            let path = params.get("path")?.as_str()?;
-            let old_text = params.get("old_text")?.as_str()?;
-            let new_text = params.get("new_text")?.as_str()?;
-            let before = tokio::fs::read_to_string(path).await.ok()?;
-            let after = before.replacen(old_text, new_text, 1);
-            if before == after {
-                return None;
-            }
-            Some((path.to_string(), before, after))
-        }
-        _ => None,
-    }
 }
 
 /// Append an explicit "[truncated N chars]" marker
@@ -767,5 +790,115 @@ mod tests {
         let c = conversation.lock().await;
         assert_eq!(c.len(), 13);
         assert_eq!(c.summary(), None);
+    }
+
+    /// Calls `tool` once (no arguments), then says "done".
+    struct OneCall {
+        tool: &'static str,
+        called: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for OneCall {
+        async fn chat(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<crate::llm::LlmResponse, PhazeError> {
+            Ok(crate::llm::LlmResponse {
+                message: Message::assistant("summary"),
+                usage: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<futures::channel::mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
+            let id = || "c1".to_string();
+            let events = if self.called.swap(true, Ordering::SeqCst) {
+                vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done]
+            } else {
+                vec![
+                    StreamEvent::ToolCallStart {
+                        id: id(),
+                        name: self.tool.into(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        id: id(),
+                        arguments_delta: "{}".into(),
+                    },
+                    StreamEvent::ToolCallEnd { id: id() },
+                    StreamEvent::Done,
+                ]
+            };
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            for event in events {
+                tx.unbounded_send(event).unwrap();
+            }
+            Ok(rx)
+        }
+    }
+
+    /// A file-writing tool whose write cannot be planned (say `old_text` is
+    /// missing) but whose `execute` would then succeed: the file changed in
+    /// between. Counts its runs.
+    struct ChangesUnderfoot {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for ChangesUnderfoot {
+        fn name(&self) -> &str {
+            "changes_underfoot"
+        }
+        fn description(&self) -> &str {
+            "writes a file"
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _: Value) -> ToolResult {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"success": true}))
+        }
+        async fn plan_write(&self, _: &Value) -> Option<Result<FileWrite, PhazeError>> {
+            Some(Err(PhazeError::tool(self.name(), "old_text not found")))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_cannot_be_planned_fails_without_running_the_tool() {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reviews = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(ChangesUnderfoot { runs: runs.clone() }));
+        let hook: DiffHookFn = {
+            let reviews = reviews.clone();
+            Box::new(move |_, _, _| {
+                reviews.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { true })
+            })
+        };
+        let llm = OneCall {
+            tool: "changes_underfoot",
+            called: AtomicBool::new(false),
+        };
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_diff_hook(hook);
+
+        let response = agent.run("write it").await.unwrap();
+
+        // Running it anyway could write what nobody reviewed.
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "the tool ran");
+        assert_eq!(reviews.load(Ordering::SeqCst), 0);
+        let call = &response.tool_calls[0];
+        assert!(!call.success, "{call:?}");
+        assert!(
+            call.result_summary.contains("old_text not found"),
+            "{call:?}"
+        );
     }
 }

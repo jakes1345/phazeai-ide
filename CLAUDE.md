@@ -66,6 +66,7 @@ The central execution model is a streaming agentic loop:
 - All cloud providers except Claude use `OpenAIClient` (OpenAI-compatible API)
 - `ModelRouter` (`model_router.rs`) — selects provider/model per task type
 - Local model auto-discovery via `discovery.rs`
+- `[llm] base_url` moves the active provider (never the built-in one) off its default address: `Settings::build_provider_registry` writes it into that provider's `ProviderConfig`, so every client and the `local_only` check use it. `Settings::check_base_url` (run by `build_llm_client` and the Settings › AI key test) refuses one that is not a full http(s) URL, or that is plain http to another machine for a provider that needs a key. It is the old provider's address, so switch providers with `Settings::set_provider`, which drops it (older builds kept it).
 
 Supported providers: Anthropic Claude, OpenAI, Groq, Together.ai, OpenRouter, Gemini, Ollama (local), LM Studio (local).
 
@@ -138,6 +139,14 @@ writing/executing flags — extend the allowlists there, with a test, never by
 substring matching. CLI `-p` mode uses `--allow read|edit|all` (`oneshot.rs`):
 `edit` permits file tools only; any bash call above read-only needs `all`.
 
+The IDE chat waves `write_file` / `edit_file` through its approval callback and
+gates them with a diff hook (`Agent::with_diff_hook`) instead. The diff is the
+tool's own plan (`Tool::plan_write` → `tools::FileWrite`), and the agent then
+commits that same plan, which writes only if the file still holds the diff's
+"before"; a call the tool would refuse shows no diff. Any preview of an edit
+(the CLI's approval prompt too) uses `tools::apply_edit`: never re-implement
+the edit in a preview.
+
 ### Privacy (`phazeai-core/src/privacy.rs`)
 
 `.phazeai/privacy.toml` (`deny` globs + `local_only`) plus a built-in secrets
@@ -149,6 +158,16 @@ and records the audit log (`privacy::audit`, shown in Settings › Privacy). The
 policy file itself is protected from mutating tools. New code that sends
 project content to a model must go through `PrivacyPolicy::check` and note
 attached files in the audit scope.
+
+MCP tool calls are checked in `privacy/mcp.rs` (the bridge in
+`tools/mcp_bridge.rs` calls it): every argument that can name a local file is
+resolved the way the server would (project root, the server's working
+directory and command-line directories, `~`, `file://`, Unicode-equivalent
+directory entries) and run through `PrivacyPolicy::check`; a tool the server
+doesn't mark `readOnlyHint: true` may not touch `.phazeai/`; and results lose
+`git diff` sections, whole-line denied paths, and (for the official filesystem
+server) denied listing entries. This is best-effort — it can't see files a
+server opens on its own, reaches by another name, or sends over the network.
 
 ### Context compaction & budgets (`phazeai-core/src/context/`)
 
