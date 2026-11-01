@@ -39,6 +39,12 @@ impl ClaudeClient {
         self
     }
 
+    /// `<base_url>/v1/messages`. A trailing slash on the base URL is
+    /// tolerated, as `openai_compat_url` tolerates it for the other clients.
+    fn messages_url(&self) -> String {
+        format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+    }
+
     fn build_request_body(
         &self,
         messages: &[Message],
@@ -162,7 +168,7 @@ impl LlmClient for ClaudeClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
-        let url = format!("{}/v1/messages", self.base_url);
+        let url = self.messages_url();
         let request_body = self.build_request_body(messages, tools, false);
 
         let response = crate::llm::retry::send_with_retry("claude", || {
@@ -230,7 +236,7 @@ impl LlmClient for ClaudeClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
-        let url = format!("{}/v1/messages", self.base_url);
+        let url = self.messages_url();
         let request_body = self.build_request_body(messages, tools, true);
 
         // Retry only the request submission; once the SSE stream starts we

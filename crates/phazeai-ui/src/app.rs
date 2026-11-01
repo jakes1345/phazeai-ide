@@ -386,12 +386,10 @@ fn provider_problem(settings: &Settings) -> Option<String> {
     match settings.llm.provider {
         LlmProvider::BuiltIn => phazeai_core::local_ai::readiness_problem(&settings.local_ai),
         LlmProvider::Ollama | LlmProvider::LmStudio => {
+            // The address the client is built for (`Settings::build_provider_registry`).
             let base = settings
                 .llm
-                .base_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
+                .base_url_override()
                 .unwrap_or_else(|| id.default_base_url())
                 .to_string();
             let local = matches!(settings.llm.provider, LlmProvider::Ollama);
@@ -760,7 +758,9 @@ impl IdeState {
                 let Some(provider) = provider_name_to_llm_provider(&provider_name) else {
                     return;
                 };
-                s.llm.provider = provider;
+                // Drops `[llm] base_url` when the provider changes: it is the
+                // old provider's address.
+                s.set_provider(provider);
                 s.llm.model = model;
                 let _ = s.save();
             });
