@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="PhazeAI IDE — An open-source, AI-native code editor built entirely in Rust with egui. Local-first. No cloud. No subscriptions." />
-  <title>PhazeAI IDE — The AI IDE That Runs on Your Machine</title>
+  <meta name="description" content="PhazeAI IDE — An open-source code editor with an AI agent, written in Rust and drawn on the GPU with Floem. Use a local model or your own provider key. Pre-beta, MIT licensed." />
+  <title>PhazeAI IDE — The AI Editor Where You Pick the Model</title>
   <style>
     /* =========================================================
        RESET & BASE
@@ -1158,7 +1158,7 @@
         </li>
       </ul>
       <div class="nav-actions">
-        <a href="#install" class="btn btn-primary">Download</a>
+        <a href="#install" class="btn btn-primary">Build from source</a>
       </div>
     </div>
   </nav>
@@ -1169,23 +1169,24 @@
       <div class="hero-content">
         <div class="hero-badge">
           <span class="hero-badge-dot" aria-hidden="true"></span>
-          Open Source &middot; MIT License
+          Pre-beta &middot; Open Source &middot; MIT License
         </div>
 
         <h1>
-          The AI IDE That Runs<br>
-          <span class="gradient-text">on Your Machine</span>
+          The AI Editor Where<br>
+          <span class="gradient-text">You Pick the Model</span>
         </h1>
 
         <p class="hero-sub">
-          Full egui desktop editor. Local-first. Open source.
-          No cloud. No subscriptions. No data leaving your box.
+          A desktop code editor with an AI agent, written in Rust and drawn on the GPU with Floem.
+          Use a local model and your code isn't sent to a cloud AI provider, or bring your own key for one.
+          No account, no subscription.
         </p>
 
         <div class="hero-actions">
           <a href="#install" class="btn btn-primary btn-lg">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Download for Linux
+            Build from source
           </a>
           <a href="https://github.com/jakes1345/phazeai-ide" target="_blank" rel="noopener" class="btn btn-outline btn-lg">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -1228,7 +1229,7 @@
                 <span class="sidebar-icon"></span>core.rs
               </div>
               <div class="sidebar-item modified">
-                <span class="sidebar-icon"></span>multi_agent.rs
+                <span class="sidebar-icon"></span>mod.rs
               </div>
               <div class="sidebar-item">
                 <span class="sidebar-icon">▾</span>llm
@@ -1288,10 +1289,10 @@
                 </div>
 
                 <div class="code-lines">
-                  <div class="code-line"><span class="cmt">/// Streaming agentic loop. Emits events over mpsc.</span></div>
+                  <div class="code-line"><span class="cmt">/// Streaming agent loop (simplified). Emits events over mpsc.</span></div>
                   <div class="code-line"><span class="attr">#[instrument(skip(self, tx))]</span></div>
                   <div class="code-line"><span class="kw">pub async fn </span><span class="fn">run_with_events</span><span class="pun">(</span></div>
-                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="op">&amp;</span><span class="kw">mut </span><span class="lf">self</span><span class="pun">,</span></div>
+                  <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="op">&amp;</span><span class="lf">self</span><span class="pun">,</span></div>
                   <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="lf">tx</span><span class="pun">: </span><span class="ty">Sender</span><span class="pun">&lt;</span><span class="ty">AgentEvent</span><span class="pun">&gt;,</span></div>
                   <div class="code-line"><span class="pun">) -&gt; </span><span class="ty">Result</span><span class="pun">&lt;()&gt; {</span></div>
                   <div class="code-line"><span class="gutter-bar g-add"></span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">loop </span><span class="pun">{</span></div>
@@ -1354,8 +1355,8 @@
     <div class="container">
       <div class="section-head fade-in">
         <span class="section-label">Features</span>
-        <h2 class="section-title">Everything you expect.<br>Nothing you don't need.</h2>
-        <p class="section-sub">Built from scratch in Rust. No Electron, no web views — just native egui rendering at 60fps.</p>
+        <h2 class="section-title">What works today.</h2>
+        <p class="section-sub">Written in Rust. No Electron and no web view: the UI is drawn on the GPU by Floem, using Vello on wgpu. It's pre-beta, so expect rough edges. The <a href="https://github.com/jakes1345/phazeai-ide#status" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:underline">README</a> lists what is missing.</p>
       </div>
 
       <div class="features-grid fade-in">
@@ -1373,8 +1374,8 @@
               <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
             </svg>
           </div>
-          <h3>Tree-sitter Highlighting</h3>
-          <p>Semantic syntax coloring powered by real AST parsing, not regex. 24 token types mapped to theme colors. Works correctly inside strings, macros, and nested structures.</p>
+          <h3>Editor</h3>
+          <p>Tree-sitter highlighting for Rust, Python, JavaScript, TypeScript, Go, C, C++, Java, Ruby, Bash, JSON, HTML and CSS, with syntect for other files. Multi-cursor, code folding, split editor, regex find and replace, and a Vim mode. Syntax colours are fixed for now; the 12 themes recolour the rest of the UI.</p>
         </div>
 
         <!-- 2 -->
@@ -1390,8 +1391,8 @@
               <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
             </svg>
           </div>
-          <h3>Multi-Tab Terminal</h3>
-          <p>Full VTE terminal emulator with PTY support, 256-color rendering, and 10,000-line scrollback. Multiple sessions in tabs. Agent bash output streams directly into the terminal.</p>
+          <h3>Terminal and Git</h3>
+          <p>A PTY terminal with tabs, a split view and 256 colours. It renders lines rather than a full cell grid, so full-screen terminal apps may not draw correctly. The Git panel covers staging, commits, branches, push and pull, stash, blame and diffs through the git CLI.</p>
         </div>
 
         <!-- 3 -->
@@ -1407,8 +1408,8 @@
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
             </svg>
           </div>
-          <h3>LSP Integration</h3>
-          <p>rust-analyzer, pyright, typescript-language-server — auto-detected and spawned per workspace. Hover types, go-to-definition (F12), find references, autocomplete, and gutter diagnostics.</p>
+          <h3>Language Servers</h3>
+          <p>rust-analyzer, pyright, typescript-language-server, gopls and clangd start when they are on your PATH. You get completions, hover, go to definition (F12), references, code actions and diagnostics. Rename works but has known problems with non-ASCII text and line endings.</p>
         </div>
 
         <!-- 4 -->
@@ -1424,8 +1425,8 @@
               <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
           </div>
-          <h3>AI Modes</h3>
-          <p>Five purpose-built modes: Chat, Ask, Debug, Plan, Edit. Each mode automatically collects the right context — file, selection, terminal output, or full project tree — before sending to the model.</p>
+          <h3>Agent Chat</h3>
+          <p>The chat panel (Ctrl+\) runs a full agent loop: the model can read and edit files and run commands. Attach files with @file, or switch between Chat, Ask, Debug, Plan and Edit modes, which change the instructions sent with your message. Ctrl+K inserts a reply at the cursor and Ctrl+Shift+A explains the selection.</p>
         </div>
 
         <!-- 5 -->
@@ -1441,8 +1442,8 @@
               <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
             </svg>
           </div>
-          <h3>Inline Diff Approval</h3>
-          <p>When the agent edits a file, you see a full unified diff with color-coded hunks. Accept or reject each change individually before anything touches disk. Real control, not blind trust.</p>
+          <h3>Diff Before Write</h3>
+          <p>When the chat agent wants to write or edit a file, it shows you the diff first, and nothing is written until you approve it. You approve or reject the whole edit; per-hunk review is not built yet. Composer, the multi-file agent, has three approval modes, from asking before every call to approving everything.</p>
         </div>
 
         <!-- 6 -->
@@ -1458,8 +1459,8 @@
               <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
             </svg>
           </div>
-          <h3>Works Offline</h3>
-          <p>Ollama and LM Studio supported out of the box. Run any local GGUF model with no API key, no internet, no telemetry. Cloud providers (Claude, OpenAI, Groq) remain optional.</p>
+          <h3>Local Models, Your Rules</h3>
+          <p>Use Ollama, LM Studio, or a built-in model that PhazeAI downloads, checks against a pinned SHA-256 and runs with llama.cpp. Claude, OpenAI, Gemini, Groq, Together.ai and OpenRouter work with your own key. A per-project privacy.toml keeps matching files from being sent to a model and can allow local providers only. Every request is logged.</p>
         </div>
 
       </div><!-- /.features-grid -->
@@ -1471,8 +1472,8 @@
     <div class="container">
       <div class="section-head fade-in">
         <span class="section-label">Install</span>
-        <h2 class="section-title">Get running in seconds.</h2>
-        <p class="section-sub">Pre-built binaries for all major platforms. Or compile from source — it is a standard Cargo workspace.</p>
+        <h2 class="section-title">Build it from source.</h2>
+        <p class="section-sub">There are no prebuilt packages yet. It's a standard Cargo workspace. The first build downloads Floem from git and takes a while, and a debug <span style="font-family:var(--mono)">target/</span> directory ends up around 14 GB. Packages will show up on the <a href="https://github.com/jakes1345/phazeai-ide/releases" target="_blank" rel="noopener" style="color:var(--text-0);text-decoration:underline">GitHub releases page</a> once there is a release.</p>
       </div>
 
       <div class="tab-system fade-in">
@@ -1494,43 +1495,47 @@
             <div class="code-block">
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="# Download latest release
-curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
+                <button class="copy-btn" data-copy="sudo apt install build-essential pkg-config libssl-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-render0-dev \
+  libudev-dev libinput-dev libdbus-1-dev">Copy</button>
               </div>
-              <code><span class="c"># Download latest release</span>
-curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-linux-x86_64.tar.gz | tar xz
-./phazeai-ide</code>
+              <code><span class="c"># System packages on Ubuntu or Debian (the same set CI installs)</span>
+sudo apt install build-essential pkg-config libssl-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-render0-dev \
+  libudev-dev libinput-dev libdbus-1-dev
+
+<span class="c"># Rust: install it with rustup (https://rustup.rs). The repo pins 1.93 in</span>
+<span class="c"># rust-toolchain.toml, and rustup fetches that version on the first build.</span></code>
             </div>
 
-            <div class="install-divider">or install via AppImage</div>
+            <div class="install-divider">then build and run</div>
 
             <div class="code-block">
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/PhazeAI-IDE.AppImage -o PhazeAI-IDE.AppImage
-chmod +x PhazeAI-IDE.AppImage
-./PhazeAI-IDE.AppImage">Copy</button>
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide.git
+cd phazeai-ide
+cargo run -p phazeai-ui">Copy</button>
               </div>
-              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/PhazeAI-IDE.AppImage -o PhazeAI-IDE.AppImage
-chmod +x PhazeAI-IDE.AppImage
-./PhazeAI-IDE.AppImage</code>
+              <code>git clone https://github.com/jakes1345/phazeai-ide.git
+cd phazeai-ide
+cargo run -p phazeai-ui     <span class="c"># desktop IDE</span>
+cargo run -p phazeai-cli    <span class="c"># terminal UI (binary name: phazeai)</span></code>
             </div>
 
-            <div class="install-divider">or build from source</div>
+            <div class="install-divider">or a release build</div>
 
             <div class="code-block">
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
-cd phazeai-ide
-cargo build --release -p phazeai-ide
-./target/release/phazeai-ide">Copy</button>
+                <button class="copy-btn" data-copy="cargo build --release -p phazeai-ui
+./target/release/phazeai-ui">Copy</button>
               </div>
-              <code>git clone https://github.com/jakes1345/phazeai-ide
-cd phazeai-ide
-cargo build --release -p phazeai-ide
-./target/release/phazeai-ide</code>
+              <code>cargo build --release -p phazeai-ui
+./target/release/phazeai-ui
+
+<span class="c"># or install it to ~/.cargo/bin</span>
+cargo install --path crates/phazeai-ui</code>
             </div>
           </div><!-- /#panel-linux -->
 
@@ -1539,39 +1544,15 @@ cargo build --release -p phazeai-ide
             <div class="code-block">
               <div class="code-block-header">
                 <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
-              </div>
-              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-aarch64.tar.gz | tar xz
-./phazeai-ide</code>
-            </div>
-
-            <div class="install-divider">Intel Mac (x86_64)</div>
-
-            <div class="code-block">
-              <div class="code-block-header">
-                <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
-./phazeai-ide">Copy</button>
-              </div>
-              <code>curl -L https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-macos-x86_64.tar.gz | tar xz
-./phazeai-ide</code>
-            </div>
-
-            <div class="install-divider">or build from source</div>
-
-            <div class="code-block">
-              <div class="code-block-header">
-                <span class="code-block-lang">bash</span>
-                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide.git
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-open target/release/phazeai-ide">Copy</button>
+cargo run -p phazeai-ui">Copy</button>
               </div>
-              <code>git clone https://github.com/jakes1345/phazeai-ide
+              <code><span class="c"># macOS isn't tested, and regular CI doesn't build it. Building from source</span>
+<span class="c"># may work: you need Rust from rustup and Xcode's command-line tools.</span>
+git clone https://github.com/jakes1345/phazeai-ide.git
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-open target/release/phazeai-ide</code>
+cargo run -p phazeai-ui</code>
             </div>
           </div><!-- /#panel-macos -->
 
@@ -1579,40 +1560,18 @@ open target/release/phazeai-ide</code>
           <div class="tab-panel" id="panel-windows">
             <div class="code-block">
               <div class="code-block-header">
-                <span class="code-block-lang">text</span>
-                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-windows-x86_64.zip">Copy URL</button>
-              </div>
-              <code><span class="c"># Download the zip from GitHub Releases:</span>
-https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-windows-x86_64.zip
-
-<span class="c"># Extract the archive, then run:</span>
-phazeai-ide.exe</code>
-            </div>
-
-            <div class="install-divider">or install via MSI installer</div>
-
-            <div class="code-block">
-              <div class="code-block-header">
-                <span class="code-block-lang">text</span>
-                <button class="copy-btn" data-copy="https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi">Copy URL</button>
-              </div>
-              <code>https://github.com/jakes1345/phazeai-ide/releases/latest/download/phazeai-ide-setup.msi</code>
-            </div>
-
-            <div class="install-divider">or build from source (PowerShell)</div>
-
-            <div class="code-block">
-              <div class="code-block-header">
                 <span class="code-block-lang">powershell</span>
-                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide
+                <button class="copy-btn" data-copy="git clone https://github.com/jakes1345/phazeai-ide.git
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-.\target\release\phazeai-ide.exe">Copy</button>
+cargo build --release -p phazeai-ui
+.\target\release\phazeai-ui.exe">Copy</button>
               </div>
-              <code>git clone https://github.com/jakes1345/phazeai-ide
+              <code><span class="c"># CI builds Windows binaries but runs no tests on Windows.</span>
+<span class="c"># You need Rust from rustup with the MSVC toolchain.</span>
+git clone https://github.com/jakes1345/phazeai-ide.git
 cd phazeai-ide
-cargo build --release -p phazeai-ide
-.\target\release\phazeai-ide.exe</code>
+cargo build --release -p phazeai-ui
+.\target\release\phazeai-ui.exe</code>
             </div>
           </div><!-- /#panel-windows -->
 
@@ -1627,33 +1586,33 @@ cargo build --release -p phazeai-ide
     <div class="container">
       <div class="section-head fade-in">
         <span class="section-label">Requirements</span>
-        <h2 class="section-title">Lightweight by design.</h2>
-        <p class="section-sub">PhazeAI IDE compiles to a single binary with no system dependencies beyond a GPU driver for rendering.</p>
+        <h2 class="section-title">What you need.</h2>
+        <p class="section-sub">The desktop IDE builds to one binary, <span style="font-family:var(--mono)">phazeai-ui</span>. It renders through wgpu, so it needs a working graphics driver, and on Linux it uses the system libraries from the install step.</p>
       </div>
 
       <div class="req-grid fade-in">
         <div class="req-card">
           <div class="req-title">Rust toolchain</div>
-          <div class="req-value">1.70+</div>
-          <div class="req-note">Required to build from source. Pre-built binaries need nothing.</div>
+          <div class="req-value">1.93</div>
+          <div class="req-note">Pinned in rust-toolchain.toml. Install through rustup so the pin is honoured; a distro cargo ignores it.</div>
         </div>
 
         <div class="req-card">
-          <div class="req-title">RAM</div>
-          <div class="req-value">4 GB min</div>
-          <div class="req-note">8 GB recommended when running local models via Ollama.</div>
+          <div class="req-title">Disk</div>
+          <div class="req-value">About 14 GB</div>
+          <div class="req-note">For a debug target/ directory. Settings › Local AI checks your RAM and disk before it downloads a model.</div>
         </div>
 
         <div class="req-card">
-          <div class="req-title">Local AI</div>
-          <div class="req-value">Ollama (optional)</div>
-          <div class="req-note">LM Studio also supported. Cloud providers need only an API key.</div>
+          <div class="req-title">Network use</div>
+          <div class="req-value">Your provider</div>
+          <div class="req-note">Requests go to the provider you pick. Code completion is on by default and sends the code near your cursor to it. The IDE checks GitHub for updates at start-up unless you set <span style="font-family:var(--mono)">[updates] check_at_start = false</span>. Telemetry is off unless you opt in. The <a href="https://github.com/jakes1345/phazeai-ide#network-use" target="_blank" rel="noopener" style="text-decoration:underline">README</a> lists every request.</div>
         </div>
 
         <div class="req-card">
           <div class="req-title">Platform</div>
-          <div class="req-value">Linux / macOS / Win</div>
-          <div class="req-note">x86_64 and aarch64 targets. Wayland and X11 on Linux.</div>
+          <div class="req-value">Linux</div>
+          <div class="req-note">Where it is developed and tested. CI builds Windows binaries but runs no tests there, and macOS isn't covered.</div>
         </div>
       </div>
     </div>
@@ -1664,14 +1623,14 @@ cargo build --release -p phazeai-ide
     <div class="container footer-inner">
       <div class="footer-left">
         <span class="footer-logo">Phaze<span class="ai">AI</span> IDE</span>
-        <span class="footer-meta">MIT License &mdash; Free and open source</span>
+        <span class="footer-meta">MIT License &mdash; Free and open source &mdash; Pre-beta</span>
       </div>
       <div class="footer-right">
         <a href="https://github.com/jakes1345/phazeai-ide" target="_blank" rel="noopener" class="footer-link">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
           GitHub
         </a>
-        <span class="footer-tech">Built with Rust + egui</span>
+        <span class="footer-tech">Built with Rust + Floem</span>
       </div>
     </div>
   </footer>
