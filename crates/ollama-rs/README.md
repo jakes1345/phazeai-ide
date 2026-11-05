@@ -1,5 +1,9 @@
 # Ollama-rs
 
+> **This is PhazeAI's vendored fork, not the upstream crate.** It is a copy of [ollama-rs](https://github.com/pepperoni21/ollama-rs) 0.2.2 by pepperoni21 (MIT, see `LICENSE.md`), packaged in this workspace as `ollama-rs-phazeai` version `0.2.2-phazeai.1`. The library name is still `ollama_rs`. Compared with upstream 0.2.2, the fork adds native tool calling to chat (`ChatMessageRequest::tools`, `ChatMessage::tool_calls`, `ChatMessage::tool`), re-exports `ChatMessageRequest` from `generation::chat`, and adds `Ollama::without_proxy()` so a local server is never reached through `HTTP(S)_PROXY`. The `stream` and `chat-history` features are upstream's. `phazeai-core` uses the fork for its Ollama client and model discovery.
+>
+> Everything below is the upstream README for 0.2.2. Its `ollama-rs = "0.2.2"` install line and example links point at the upstream crate, which doesn't have these changes. Inside this repository the workspace `Cargo.toml` pulls in the fork by path. Several of the tests need a running Ollama and pull or delete models on it.
+
 ### A simple and easy to use library for interacting with the Ollama API.
 
 It was made following the [Ollama API](https://github.com/jmorganca/ollama/blob/main/docs/api.md) documentation.
