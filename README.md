@@ -244,7 +244,6 @@ crates/
 └── ollama-rs/              vendored fork of the ollama-rs crate
 docs/                       MISSION.md and STATUS.md
 training/, python/training/ model fine-tuning scripts (not used by the editor)
-next-app/                   unused Next.js scaffold
 ```
 
 ## Contributing
