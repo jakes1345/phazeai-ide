@@ -110,8 +110,10 @@ Shortcuts in the desktop IDE. Other commands are in the command palette (Ctrl+Sh
 | Split editor | Ctrl+Alt+\ |
 | Zen mode | Ctrl+Shift+Z |
 | Inline AI edit | Ctrl+K |
+| Explain selection with AI | Ctrl+Shift+A |
 | Select next occurrence | Ctrl+D |
 | Toggle line comment | Ctrl+/ |
+| Uppercase / lowercase / title case | Ctrl+Shift+U / Ctrl+Shift+L / Ctrl+Shift+T |
 | Move line up / down | Alt+Up / Alt+Down |
 | Word wrap | Alt+Z |
 | Font size bigger / smaller / reset | Ctrl+= / Ctrl+- / Ctrl+0 |
