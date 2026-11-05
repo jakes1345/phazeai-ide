@@ -1,89 +1,48 @@
-# PhazeAI Custom Model Training Pipeline
+# Model training scripts
 
-> Train your own coding AI — 100% local, zero cloud dependency.
+Python scripts for fine-tuning a coding model with QLoRA (via Unsloth) and loading the result into Ollama as `phaze-coder-custom`. They're separate from the editor: nothing in the Rust workspace runs them or refers to `phaze-coder-custom`, and PhazeAI doesn't need them. The built-in local model in the IDE uses ready-made GGUF files from a fixed catalog instead.
 
-## Quick Start
+`python/training/` holds a separate, larger set of training experiments with no README. This folder is the shorter pipeline.
+
+## What you need
+
+- An NVIDIA GPU with CUDA. `fine_tune.py` exits if it can't find one. Its own notes say 8 GB of VRAM at minimum and 16 to 24 GB recommended.
+- `pip install unsloth transformers datasets trl peft bitsandbytes`
+- Ollama, if you want the model registered at the end.
+- Network access. The base model and the public datasets come from Hugging Face.
+
+## Steps
 
 ```bash
-# 1. Install Python dependencies
-pip install unsloth transformers datasets trl peft bitsandbytes
+# 1. Collect training data and combine it into training/datasets/combined_train.jsonl
+python training/prepare_data.py ~/my-project ~/another-project
 
-# 2. Prepare training data
-python training/prepare_data.py ~/my-project1 ~/my-project2
+# 2. Optional: add tool-calling examples (tool_calling_train.jsonl, merged into combined_train.jsonl)
+python training/prepare_tool_data.py
 
-# 3. Fine-tune (needs NVIDIA GPU with 8GB+ VRAM)  
+# 3. QLoRA fine-tune; the LoRA adapter goes to training/output/lora_adapter/
 python training/fine_tune.py
 
-# 4. Export to GGUF and register with Ollama
-python training/export_gguf.py
+# 4. Export to GGUF (training/output/gguf/) and run `ollama create phaze-coder-custom`
+python training/export_gguf.py --quant q4_k_m    # or q5_k_m, q8_0, f16
 
-# 5. Test your custom model
-ollama run phaze-coder-custom "Write a Rust function to merge two sorted vectors"
+ollama run phaze-coder-custom
 ```
 
-## Architecture
+`prepare_data.py` reads code from the directories you pass, plus `~/phazeai_ide`, which is hard-coded in the script. It also downloads up to 20,000 samples each from `sahil2801/CodeAlpaca-20k` and `iamtarun/python_code_instructions_18k_alpaca`. Then it merges every `.jsonl` under `training/datasets/` into `combined_train.jsonl`, removes duplicates and shuffles. `prepare_tool_data.py` appends its examples to that combined file when it exists, and its own output is picked up by the next `prepare_data.py` run, so the order of steps 1 and 2 doesn't matter much.
 
-```
-Your Code + Public Datasets
-        ↓
-   prepare_data.py (ChatML JSONL)
-        ↓
-   fine_tune.py (Unsloth QLoRA 4-bit)
-        ↓
-   LoRA Adapter Weights
-        ↓
-   export_gguf.py (GGUF + Ollama registration)
-        ↓
-   ollama run phaze-coder-custom
-```
+## Base model
 
-## Training Data Sources
+`fine_tune.py` defaults to `unsloth/Qwen2.5-Coder-7B-Instruct-bnb-4bit`. Commented-out alternatives in the same file are the Llama 3.2 3B, Qwen2.5-Coder 14B and DeepSeek-Coder-V2-Lite 4-bit builds. `export_gguf.py` sets `BASE_MODEL` separately, so if you change the model, change it in both files.
 
-| Source | Command | Samples |
-|---|---|---|
-| Your codebase | `python prepare_data.py ~/myproject` | Varies |
-| Code Alpaca | Auto-downloaded | 20,000 |
-| Python Instruct | Auto-downloaded | 18,000 |
+Training settings (sequence length 4096, 3 epochs, LoRA rank 32, batch size 2 with 4 accumulation steps) are constants at the top of `fine_tune.py`.
 
-Want more data? Add HuggingFace datasets in `prepare_data.py`:
-- `bigcode/the-stack-v2-train-smol-ids` (The Stack v2)
-- `nvidia/OpenCodeInstruct` (5M samples)
-- `sahil2801/CodeAlpaca-20k` (already included)
-
-## GPU Requirements
-
-| GPU | VRAM | Estimated Training Time |
-|---|---|---|
-| RTX 3060 | 12GB | ~4-6 hours |
-| RTX 4070 Ti | 16GB | ~2-3 hours |
-| RTX 4090 | 24GB | ~1-2 hours |
-| A100 | 80GB | ~30 minutes |
-
-## Base Models
-
-Edit `BASE_MODEL` in `fine_tune.py`:
-
-| Model | Size | Best For |
-|---|---|---|
-| `Qwen2.5-Coder-7B` | 7B | **Default** — great balance |
-| `Qwen2.5-Coder-14B` | 14B | Best quality (needs 16GB+) |
-| `llama-3.2-3b` | 3B | Fast planning model |
-| `deepseek-coder-v2-lite` | 16B | Strong at debugging |
-
-## File Structure
+## Output
 
 ```
 training/
-├── prepare_data.py      # Collect + format training data
-├── fine_tune.py          # QLoRA training with Unsloth
-├── export_gguf.py        # Convert to GGUF for Ollama
-├── README.md             # This file
-├── datasets/             # Training data (generated)
-│   ├── codebase/         # Your project code pairs
-│   ├── code_instruct/    # Public instruction datasets
-│   └── combined_train.jsonl  # Everything combined
-└── output/               # Training output (generated)
-    ├── checkpoints/      # Training checkpoints
-    ├── lora_adapter/     # LoRA weights
-    └── gguf/             # GGUF model files
+├── datasets/   codebase/, code_instruct/, tool_calling_train.jsonl, combined_train.jsonl
+└── output/     checkpoints/, lora_adapter/, gguf/
 ```
+
+Both folders are created when the scripts run.
