@@ -4287,20 +4287,31 @@ impl World {
                     self.rng.pick(DIRS).to_string()
                 };
                 self.ctx.push_str(&format!(" remove_file {rel}"));
-                let below = format!("{rel}/");
-                let affected: Vec<String> = walk_files(&root)
-                    .into_iter()
-                    .filter(|(r, _)| *r == rel || r.starts_with(&below))
-                    .flat_map(|(_, p)| stamps_in(&fs::read(p).unwrap()))
-                    .collect();
-                self.cs.remove_file(&root.join(&rel));
-                for s in affected {
-                    assert!(
-                        find(&self.cs, &s).is_empty(),
-                        "{}: {s} is still served after remove_file({rel})",
-                        self.ctx
-                    );
-                }
+                let p = root.join(&rel);
+                self.cs.remove_file(&p);
+                // Not checked with a search: a search walks the disk again
+                // once about a second has passed, and rightly brings back
+                // the files that are still there, so what it finds would
+                // depend on how fast this machine is. A build of `rel` shows
+                // what is left below it instead: nothing may be unchanged,
+                // updated or removed there, because nothing may be indexed.
+                let st = sync(&self.cs, std::slice::from_ref(&p));
+                assert_eq!(
+                    (st.unchanged, st.updated, st.removed),
+                    (0, 0, 0),
+                    "{}: remove_file({rel}) left files below it in the index: {st:?}",
+                    self.ctx
+                );
+                // Leave the index as remove_file left it: missing what the
+                // build just brought back.
+                let before = self.cs.status().files;
+                self.cs.remove_file(&p);
+                assert_eq!(
+                    self.cs.status().files,
+                    before - st.indexed,
+                    "{}: a second remove_file({rel}) dropped a different number of files: {st:?}",
+                    self.ctx
+                );
             }
             66..=75 => {
                 self.ctx.push_str(" build");
