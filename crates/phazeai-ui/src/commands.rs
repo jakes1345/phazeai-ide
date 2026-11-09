@@ -121,7 +121,6 @@ pub fn match_global_shortcut(key: &Key, modifiers: &Modifiers) -> Option<String>
                 "g" if ctrl && shift && !alt => Some("workbench.action.focusGit".into()),
                 "f" if ctrl && shift && !alt => Some("workbench.action.findInFiles".into()),
                 "i" if ctrl && shift && !alt => Some("editor.action.toggleInlayHints".into()),
-                "l" if ctrl && shift && !alt => Some("editor.action.toggleCodeLens".into()),
                 "m" if ctrl && shift && !alt => Some("editor.action.toggleMinimap".into()),
                 "=" if ctrl && !shift && !alt => Some("editor.action.fontZoomIn".into()),
                 "-" if ctrl && !shift && !alt => Some("editor.action.fontZoomOut".into()),
@@ -180,7 +179,7 @@ pub fn create_default_commands() -> CommandRegistry {
         label: "Toggle Right Panel",
         category: "View",
         description: "Show or hide the AI chat panel",
-        keybinding: Some("Ctrl+Shift+\\"),
+        keybinding: Some("Ctrl+\\"),
         action: Arc::new(|s| {
             s.workbench.show_right_panel.update(|v| *v = !*v);
         }),
@@ -404,7 +403,7 @@ pub fn create_default_commands() -> CommandRegistry {
         label: "Toggle Code Lens",
         category: "Editor",
         description: "Show or hide code lens annotations",
-        keybinding: Some("Ctrl+Shift+L"),
+        keybinding: None,
         action: Arc::new(|s| {
             s.editor.code_lens_visible.update(|v| *v = !*v);
         }),
@@ -494,7 +493,7 @@ pub fn create_default_commands() -> CommandRegistry {
         label: "Transform to Uppercase",
         category: "Editor",
         description: "Convert selected text to UPPERCASE",
-        keybinding: None,
+        keybinding: Some("Ctrl+Shift+U"),
         action: Arc::new(|s| {
             s.editor.transform_upper_nonce.update(|v| *v += 1);
         }),
@@ -505,7 +504,7 @@ pub fn create_default_commands() -> CommandRegistry {
         label: "Transform to Lowercase",
         category: "Editor",
         description: "Convert selected text to lowercase",
-        keybinding: None,
+        keybinding: Some("Ctrl+Shift+L"),
         action: Arc::new(|s| {
             s.editor.transform_lower_nonce.update(|v| *v += 1);
         }),
@@ -516,7 +515,7 @@ pub fn create_default_commands() -> CommandRegistry {
         label: "Transform to Title Case",
         category: "Editor",
         description: "Convert selected text to Title Case",
-        keybinding: None,
+        keybinding: Some("Ctrl+Shift+T"),
         action: Arc::new(|s| {
             s.editor.transform_title_nonce.update(|v| *v += 1);
         }),

@@ -1373,7 +1373,7 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             },
         },
         PaletteCommand {
-            label: "Explain Selection with AI (Ctrl+Shift+E)",
+            label: "Explain Selection with AI (Ctrl+Shift+A)",
             action: |s| send_editor_ai_action(&s, "Explain this code", "Explain the code"),
         },
         PaletteCommand {
@@ -4983,10 +4983,11 @@ pub fn launch_phaze_ide() {
                                     return;
                                 }
 
-                                // Ctrl+Shift+E → Explain Selection with AI (same path as
+                                // Ctrl+Shift+A → Explain Selection with AI (same path as
                                 // the context-menu entry: privacy gate + audit attach only
-                                // when the selection is sent).
-                                if ctrl && shift && !alt && ch.as_str() == "e" {
+                                // when the selection is sent). Not Ctrl+Shift+E: that is
+                                // Focus Explorer in the global shortcut table, which runs first.
+                                if ctrl && shift && !alt && ch.as_str() == "a" {
                                     send_editor_ai_action(
                                         &state,
                                         "Explain this code",
