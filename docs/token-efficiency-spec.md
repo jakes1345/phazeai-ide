@@ -148,11 +148,28 @@ first, then caching is switched on, then the prefix is made smaller.
 - **Moves:** effective cost on Claude (target: down 80% or more).
 
 ### T3b: OpenAI-compatible caching hints
-- OpenAI gets `prompt_cache_key` set to the session id, which raised hit rates
-  from 60% to 87% in OpenAI's own report. xAI gets `x-grok-conv-id`. Streams
-  send `stream_options.include_usage`, only to providers known to accept it,
-  so usage is reported at all. These need the provider factory to pass a
-  session id, so they ship as their own PR.
+- **One cache key per project.** OpenAI, Azure, Cerebras, Fireworks and
+  OpenRouter get `prompt_cache_key`; xAI gets the same key as its
+  `x-grok-conv-id` header. The key is a hash of the project root, so every
+  session and every IDE message of a project (the IDE builds a new agent per
+  message) reaches the server holding the shared prefix that T2 made stable,
+  and the path never leaves the machine. Only providers known to accept the
+  field get it, because strict servers answer an unknown body field with a
+  400. Sources: opencode `packages/ai/src/providers/*.ts` (`promptCacheKey:
+  true` on exactly those five) and `providers/xai.ts:65`; OpenAI's 60% to 87%
+  hit-rate report ([agents-survey.md](research/agents-survey.md) #13); docs.x.ai
+  "Maximizing cache hits". OpenAI caps the key at 64 characters and advises
+  about 15 requests a minute per key, which one person's project stays under.
+- **Streams report usage.** Streams send `stream_options.include_usage`, as
+  opencode does for every OpenAI Chat route (`openai-chat.ts:900`). OpenAI
+  sends no usage in a stream without it (OpenAI's May 2024 announcement), nor
+  does Gemini's compatibility endpoint (Google AI forum); llama-server accepts
+  it (llama.cpp issue 15443). A server that answers 400 or 422 naming
+  `stream_options` is asked once more without it and remembered, so a strict
+  custom server still works. Usage is reported once per stream, the last value
+  seen, because servers differ on which chunk carries it.
+- **Moves:** OpenAI-side cache hits across sessions, and real usage and cache
+  counts from OpenAI streams, which Phaze never had.
 
 ### T4: a lean system prompt and a lean tool set
 - **System prompt.** `TOOL_GUIDELINES` repeats the tool schemas and lists tools
