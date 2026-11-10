@@ -47,12 +47,39 @@ pub type ApprovalFn = Box<
 /// tool that writes one file ([`crate::tools::Tool::plan_write`]: `write_file`,
 /// `edit_file`) and would change it is shown here first, as (path, before,
 /// after): the file that will be written (resolved), what it holds now and
-/// exactly what it will hold. Return true to write `after`, which is then
-/// written only if the file still holds `before`; false rejects the call. A
-/// call that would fail, or would change nothing, is not shown (and writes
-/// nothing different).
-pub type DiffHookFn =
-    Box<dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+/// exactly what it will hold. The answer ([`DiffAnswer`]) writes all of
+/// `after`, none of it, or only some of its hunks ([`crate::review`]); what
+/// is written is written only if the file still holds `before`. A call that
+/// would fail, or would change nothing, is not shown (and writes nothing
+/// different).
+pub type DiffHookFn = Box<
+    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = DiffAnswer> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A reviewer's answer to a proposed file write ([`DiffHookFn`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffAnswer {
+    /// Write the whole change.
+    Approve,
+    /// Write nothing; the call fails as rejected.
+    Reject,
+    /// Write only the hunks marked true, by index in
+    /// [`crate::review::hunks`]`(before, after)`; the rest stay as they are.
+    /// The model is told which parts were not written.
+    Keep(Vec<bool>),
+}
+
+impl From<bool> for DiffAnswer {
+    fn from(approved: bool) -> Self {
+        if approved {
+            Self::Approve
+        } else {
+            Self::Reject
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
@@ -558,10 +585,32 @@ impl Agent {
                                     after: after.clone(),
                                 });
                                 // As with approval: Stop ends the review.
-                                let answer =
-                                    self.unless_cancelled((hook)(path, before, after)).await;
-                                let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+                                let answer = self
+                                    .unless_cancelled((hook)(path, before.clone(), after.clone()))
+                                    .await;
+                                let Some(answer) = answer.filter(|_| !self.is_cancelled()) else {
                                     return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
+                                };
+                                // Some hunks kept: write those, and tell the
+                                // model which parts were not written.
+                                let (approved, write) = match answer {
+                                    DiffAnswer::Approve => (true, write),
+                                    DiffAnswer::Reject => (false, write),
+                                    DiffAnswer::Keep(keep) => {
+                                        let total = crate::review::hunks(&before, &after).len();
+                                        let kept = keep.iter().take(total).filter(|k| **k).count();
+                                        if kept == 0 {
+                                            (false, write)
+                                        } else if kept == total {
+                                            (true, write)
+                                        } else {
+                                            let content =
+                                                crate::review::apply(&before, &after, &keep);
+                                            let note =
+                                                crate::review::partial_note(&before, &after, &keep);
+                                            (true, write.keep_only(content, note))
+                                        }
+                                    }
                                 };
                                 if !approved {
                                     let _ = event_tx.send(AgentEvent::ToolResult {
@@ -1094,7 +1143,7 @@ mod tests {
             let reviews = reviews.clone();
             Box::new(move |_, _, _| {
                 reviews.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { true })
+                Box::pin(async { DiffAnswer::Approve })
             })
         };
         let llm = OneCall {

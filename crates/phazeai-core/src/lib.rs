@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod privacy;
 pub mod process;
 pub mod project;
+pub mod review;
 pub mod search;
 pub mod skills;
 pub mod syntax;
@@ -29,7 +30,7 @@ pub mod updater;
 pub mod debug_ndjson;
 
 // Re-export key types
-pub use agent::{Agent, AgentResponse, ApprovalFn, DiffHookFn, DEFAULT_MAX_ITERATIONS};
+pub use agent::{Agent, AgentResponse, ApprovalFn, DiffAnswer, DiffHookFn, DEFAULT_MAX_ITERATIONS};
 pub use agent_event::AgentEvent;
 pub use config::Settings;
 pub use context::{

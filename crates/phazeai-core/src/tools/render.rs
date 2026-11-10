@@ -31,10 +31,18 @@ pub fn for_model(tool: &str, value: &Value) -> String {
         "code_search" => code_search(value, cwd.as_deref()),
         _ => None,
     };
-    rendered.unwrap_or_else(|| match value {
+    let mut text = rendered.unwrap_or_else(|| match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
-    })
+    });
+    // A write the user kept only part of says which parts were left out.
+    if let Some(review) = value.get("user_review").and_then(Value::as_str) {
+        if !text.contains(review) {
+            text.push('\n');
+            text.push_str(review);
+        }
+    }
+    text
 }
 
 /// `path` relative to `cwd` when it lies under it, else as given.

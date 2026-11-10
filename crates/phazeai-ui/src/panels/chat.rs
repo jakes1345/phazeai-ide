@@ -15,7 +15,7 @@ use phazeai_core::context::system_prompt::{
 use phazeai_core::{
     discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
     CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata, ConversationStore,
-    DiffHookFn, SavedConversation, SavedMessage, Settings, Skill,
+    DiffAnswer, DiffHookFn, SavedConversation, SavedMessage, Settings, Skill,
 };
 
 use crate::{
@@ -99,6 +99,8 @@ pub struct CompactionState {
 
 /// Shared slot for diff approval: carries the oneshot sender for Approve/Reject.
 type DiffApproveSlot = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>;
+/// Resolves a pending file-change review with what to write.
+type DiffAnswerSlot = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<DiffAnswer>>>>;
 
 /// What the background AI thread sends to the Floem UI thread.
 #[derive(Clone, Debug)]
@@ -125,7 +127,7 @@ enum ChatUpdate {
         path: String,
         before: String,
         after: String,
-        slot: DiffApproveSlot,
+        slot: DiffAnswerSlot,
     },
     /// A non-file tool wants user approval before running.
     ToolApprovalNeeded {
@@ -474,7 +476,7 @@ fn send_to_ai(job: SendToAiJob) {
             let diff_hook: DiffHookFn = Box::new(move |path, before, after| {
                 let tx = diff_update_tx.clone();
                 Box::pin(async move {
-                    let (os_tx, os_rx) = tokio::sync::oneshot::channel::<bool>();
+                    let (os_tx, os_rx) = tokio::sync::oneshot::channel::<DiffAnswer>();
                     let slot = Arc::new(std::sync::Mutex::new(Some(os_tx)));
                     let _ = tx.send(ChatUpdate::DiffApprovalNeeded {
                         path,
@@ -482,7 +484,7 @@ fn send_to_ai(job: SendToAiJob) {
                         after,
                         slot,
                     });
-                    os_rx.await.unwrap_or(false)
+                    os_rx.await.unwrap_or(DiffAnswer::Reject)
                 })
             });
 
@@ -838,7 +840,9 @@ pub fn chat_panel(
     let diff_path: RwSignal<String> = create_rw_signal(String::new());
     let diff_before: RwSignal<String> = create_rw_signal(String::new());
     let diff_after: RwSignal<String> = create_rw_signal(String::new());
-    let diff_slot: RwSignal<Option<DiffApproveSlot>> = create_rw_signal(None);
+    let diff_slot: RwSignal<Option<DiffAnswerSlot>> = create_rw_signal(None);
+    // One entry per hunk of the pending change: kept (true) or undone.
+    let diff_keep: RwSignal<Vec<bool>> = create_rw_signal(Vec::new());
 
     // ── Tool approval state ───────────────────────────────────────────────────
     let approval_tool: RwSignal<String> = create_rw_signal(String::new());
@@ -1049,6 +1053,8 @@ pub fn chat_panel(
                     after,
                     slot,
                 } => {
+                    let hunks = phazeai_core::review::hunks(&before, &after).len();
+                    diff_keep.set(vec![true; hunks]);
                     diff_path.set(path);
                     diff_before.set(before);
                     diff_after.set(after);
@@ -1077,6 +1083,7 @@ pub fn chat_panel(
                     diff_before.set(String::new());
                     diff_after.set(String::new());
                     diff_slot.set(None);
+                    diff_keep.set(Vec::new());
                     messages.update(|list| {
                         // Finalise the loading assistant message (may be empty or partial).
                         if let Some(last) = list.last_mut() {
@@ -2106,12 +2113,12 @@ pub fn chat_panel(
     // clicks Approve or Reject.
 
     let diff_overlay = {
-        // Helper: resolve the pending approval with the given bool, then clear.
-        let resolve = move |approved: bool| {
+        // Helper: resolve the pending review with the given answer, then clear.
+        let resolve = move |answer: DiffAnswer| {
             if let Some(slot) = diff_slot.get_untracked() {
                 if let Ok(mut g) = slot.lock() {
                     if let Some(tx) = g.take() {
-                        let _ = tx.send(approved);
+                        let _ = tx.send(answer);
                     }
                 }
             }
@@ -2119,17 +2126,28 @@ pub fn chat_panel(
             diff_before.set(String::new());
             diff_after.set(String::new());
             diff_slot.set(None);
+            diff_keep.set(Vec::new());
         };
+        // Approve writes the hunks still marked kept (all of them, unless
+        // some were undone).
         let resolve_approve = {
             let r = resolve;
-            move || r(true)
+            move || {
+                let keep = diff_keep.get_untracked();
+                r(if keep.iter().all(|k| *k) {
+                    DiffAnswer::Approve
+                } else {
+                    DiffAnswer::Keep(keep)
+                })
+            }
         };
         let resolve_reject = {
             let r = resolve;
-            move || r(false)
+            move || r(DiffAnswer::Reject)
         };
 
-        // Build diff lines from before/after text using the `similar` crate.
+        // The change as rows: unchanged lines (long runs folded) and each
+        // hunk under a header whose button keeps or undoes it.
         let diff_lines_view = dyn_stack(
             move || {
                 let before = diff_before.get();
@@ -2137,45 +2155,91 @@ pub fn chat_panel(
                 if before.is_empty() && after.is_empty() {
                     return vec![];
                 }
-                let diff = similar::TextDiff::from_lines(&before, &after);
-                let mut out: Vec<(char, String)> = Vec::new();
-                for change in diff.iter_all_changes() {
-                    let tag = match change.tag() {
-                        similar::ChangeTag::Delete => '-',
-                        similar::ChangeTag::Insert => '+',
-                        similar::ChangeTag::Equal => ' ',
-                    };
-                    let text = change.value().to_string();
-                    out.push((tag, text));
-                }
-                out
+                diff_view_rows(&before, &after)
             },
-            |(tag, text): &(char, String)| format!("{tag}{text}"),
-            move |(tag, text): (char, String)| {
-                let is_add = tag == '+';
-                let is_del = tag == '-';
-                label(move || format!("{} {}", tag, text.trim_end_matches('\n'))).style(move |s| {
-                    let p = &theme.get().palette;
-                    s.font_family("monospace".to_string())
-                        .font_size(11.0)
-                        .padding_horiz(8.0)
-                        .padding_vert(1.0)
-                        .width_full()
-                        .color(if is_add {
-                            floem::peniko::Color::from_rgb8(130, 220, 130)
-                        } else if is_del {
-                            floem::peniko::Color::from_rgb8(220, 120, 120)
-                        } else {
-                            p.text_muted
+            |row: &DiffViewRow| row.key(),
+            move |row: DiffViewRow| match row {
+                DiffViewRow::Header { hunk, total, .. } => {
+                    let kept = move || diff_keep.get().get(hunk).copied().unwrap_or(true);
+                    stack((
+                        label(move || {
+                            let state = if kept() { "kept" } else { "undone" };
+                            format!("Change {} of {total} · {state}", hunk + 1)
                         })
-                        .background(if is_add {
-                            floem::peniko::Color::from_rgba8(0, 80, 0, 80)
-                        } else if is_del {
-                            floem::peniko::Color::from_rgba8(80, 0, 0, 80)
-                        } else {
-                            floem::peniko::Color::TRANSPARENT
+                        .style(move |s| {
+                            s.font_size(11.0)
+                                .color(theme.get().palette.text_muted)
+                                .flex_grow(1.0)
+                        }),
+                        label(move || if kept() { "Undo" } else { "Keep" })
+                            .style(move |s| {
+                                let p = &theme.get().palette;
+                                s.font_size(11.0)
+                                    .color(p.accent)
+                                    .padding_horiz(8.0)
+                                    .padding_vert(1.0)
+                                    .border(1.0)
+                                    .border_color(p.glass_border)
+                                    .border_radius(4.0)
+                                    .cursor(floem::style::CursorStyle::Pointer)
+                            })
+                            .on_click_stop(move |_| {
+                                diff_keep.update(|keep| {
+                                    if let Some(k) = keep.get_mut(hunk) {
+                                        *k = !*k;
+                                    }
+                                });
+                            }),
+                    ))
+                    .style(move |s| {
+                        let p = &theme.get().palette;
+                        s.flex_row()
+                            .items_center()
+                            .width_full()
+                            .padding_horiz(8.0)
+                            .padding_vert(3.0)
+                            .margin_top(4.0)
+                            .background(p.bg_elevated)
+                    })
+                    .into_any()
+                }
+                DiffViewRow::Line {
+                    tag, text, hunk, ..
+                } => {
+                    let is_add = tag == '+';
+                    let is_del = tag == '-';
+                    // An undone hunk is shown faded: it will not be written.
+                    let undone = move || {
+                        hunk.is_some_and(|h| !diff_keep.get().get(h).copied().unwrap_or(true))
+                    };
+                    label(move || format!("{} {}", tag, text.trim_end_matches('\n')))
+                        .style(move |s| {
+                            let p = &theme.get().palette;
+                            let faded = undone();
+                            s.font_family("monospace".to_string())
+                                .font_size(11.0)
+                                .padding_horiz(8.0)
+                                .padding_vert(1.0)
+                                .width_full()
+                                .color(if is_add && !faded {
+                                    floem::peniko::Color::from_rgb8(130, 220, 130)
+                                } else if is_del && !faded {
+                                    floem::peniko::Color::from_rgb8(220, 120, 120)
+                                } else {
+                                    p.text_muted
+                                })
+                                .background(if faded {
+                                    floem::peniko::Color::TRANSPARENT
+                                } else if is_add {
+                                    floem::peniko::Color::from_rgba8(0, 80, 0, 80)
+                                } else if is_del {
+                                    floem::peniko::Color::from_rgba8(80, 0, 0, 80)
+                                } else {
+                                    floem::peniko::Color::TRANSPARENT
+                                })
                         })
-                })
+                        .into_any()
+                }
             },
         )
         .style(|s| s.flex_col().width_full());
@@ -2183,11 +2247,22 @@ pub fn chat_panel(
         // Approve button
         let approve_btn = {
             let hov = create_rw_signal(false);
-            container(label(|| "✓ Approve").style(move |s| {
-                s.font_size(12.0)
-                    .color(floem::peniko::Color::from_rgb8(40, 180, 40))
-                    .font_weight(floem::text::Weight::MEDIUM)
-            }))
+            container(
+                label(move || {
+                    let keep = diff_keep.get();
+                    let kept = keep.iter().filter(|k| **k).count();
+                    if kept == keep.len() {
+                        "✓ Approve".to_string()
+                    } else {
+                        format!("✓ Apply {kept} of {}", keep.len())
+                    }
+                })
+                .style(move |s| {
+                    s.font_size(12.0)
+                        .color(floem::peniko::Color::from_rgb8(40, 180, 40))
+                        .font_weight(floem::text::Weight::MEDIUM)
+                }),
+            )
             .style(move |s| {
                 let p = &theme.get().palette;
                 s.padding_horiz(14.0)
@@ -2442,12 +2517,109 @@ pub fn chat_panel(
     .style(move |s| s.flex_col().width_full().height_full())
 }
 
+/// One row of the file-change review.
+#[derive(Clone, Debug, PartialEq)]
+enum DiffViewRow {
+    /// The header above a hunk, with its keep/undo button.
+    Header { hunk: usize, total: usize },
+    /// A line: `' '` unchanged (or `'⋯'` for folded unchanged lines), `'-'`
+    /// removed, `'+'` added; `hunk` is the hunk it belongs to.
+    Line {
+        n: usize,
+        tag: char,
+        text: String,
+        hunk: Option<usize>,
+    },
+}
+
+impl DiffViewRow {
+    fn key(&self) -> String {
+        match self {
+            Self::Header { hunk, total } => format!("h{hunk}/{total}"),
+            Self::Line { n, tag, text, .. } => format!("{n}{tag}{text}"),
+        }
+    }
+}
+
+/// Unchanged lines shown on each side of a hunk; longer runs fold.
+const DIFF_CONTEXT: usize = 3;
+
+/// The rows of the review for a change from `before` to `after`.
+fn diff_view_rows(before: &str, after: &str) -> Vec<DiffViewRow> {
+    use phazeai_core::review::Row;
+    let rows = phazeai_core::review::rows(before, after);
+    let total = rows
+        .iter()
+        .filter(|r| matches!(r, Row::Hunk { .. }))
+        .count();
+    let mut out = Vec::new();
+    let mut n = 0;
+    let mut line = |out: &mut Vec<DiffViewRow>, tag: char, text: String, hunk: Option<usize>| {
+        n += 1;
+        out.push(DiffViewRow::Line { n, tag, text, hunk });
+    };
+    let mut i = 0;
+    while i < rows.len() {
+        match &rows[i] {
+            Row::Hunk {
+                index,
+                removed,
+                added,
+            } => {
+                out.push(DiffViewRow::Header {
+                    hunk: *index,
+                    total,
+                });
+                for l in removed {
+                    line(&mut out, '-', l.clone(), Some(*index));
+                }
+                for l in added {
+                    line(&mut out, '+', l.clone(), Some(*index));
+                }
+                i += 1;
+            }
+            Row::Same(_) => {
+                let start = i;
+                while i < rows.len() && matches!(rows[i], Row::Same(_)) {
+                    i += 1;
+                }
+                let run: Vec<&str> = rows[start..i]
+                    .iter()
+                    .map(|r| match r {
+                        Row::Same(t) => t.as_str(),
+                        Row::Hunk { .. } => "",
+                    })
+                    .collect();
+                // Context after the hunk above and before the hunk below.
+                let head = if start == 0 { 0 } else { DIFF_CONTEXT };
+                let tail = if i == rows.len() { 0 } else { DIFF_CONTEXT };
+                if run.len() <= head + tail + 1 {
+                    for t in run {
+                        line(&mut out, ' ', t.to_string(), None);
+                    }
+                } else {
+                    for t in &run[..head] {
+                        line(&mut out, ' ', t.to_string(), None);
+                    }
+                    let folded = run.len() - head - tail;
+                    line(&mut out, '⋯', format!("{folded} unchanged lines"), None);
+                    for t in &run[run.len() - tail..] {
+                        line(&mut out, ' ', t.to_string(), None);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         chat_system_prompt, compaction_after_run, expand_file_mentions, rebuild_history,
         shape_retry_prior_messages, AiMode, ChatMessage, ChatRole, CompactionState,
     };
+    use super::{diff_view_rows, DiffViewRow};
     use phazeai_core::context::system_prompt::instructions_allowance;
 
     #[test]
@@ -2734,5 +2906,46 @@ mod tests {
         assert_eq!(second.origins, vec![3, 6, 7, 8, 9]);
         // The kept part opens with a user turn, as providers require.
         assert_eq!(conv[0].role, phazeai_core::llm::Role::User);
+    }
+
+    #[test]
+    fn the_review_puts_a_header_over_each_hunk_and_folds_long_unchanged_runs() {
+        let before: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        let after = before
+            .replace("line 2\n", "line two\n")
+            .replace("line 18\n", "line 18\nline 18b\n");
+        let rows = diff_view_rows(&before, &after);
+
+        let headers: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                DiffViewRow::Header { hunk, total } => Some((*hunk, *total)),
+                DiffViewRow::Line { .. } => None,
+            })
+            .collect();
+        assert_eq!(headers, [(0, 2), (1, 2)]);
+        let line = |tag: char| {
+            rows.iter()
+                .filter(|r| matches!(r, DiffViewRow::Line { tag: t, .. } if *t == tag))
+                .count()
+        };
+        assert_eq!(line('-'), 1);
+        assert_eq!(line('+'), 2);
+        // Lines 3-18 between the hunks: 3 after the first, a fold, 3 before the second.
+        assert_eq!(line('⋯'), 1);
+        let folded = rows.iter().find_map(|r| match r {
+            DiffViewRow::Line {
+                tag: '⋯', text, ..
+            } => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(folded.as_deref(), Some("10 unchanged lines"));
+        // Line 1 before the first hunk and 19-20 after the last are shown.
+        assert_eq!(line(' '), 1 + 3 + 3 + 2);
+        // Every row has its own key, so the list can tell them apart.
+        let mut keys: Vec<_> = rows.iter().map(DiffViewRow::key).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), rows.len());
     }
 }
