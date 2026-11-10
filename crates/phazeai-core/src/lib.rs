@@ -6,6 +6,7 @@ pub mod companion;
 pub mod config;
 pub mod constants;
 pub mod context;
+pub mod cost;
 pub mod dap;
 pub mod design;
 pub mod error;

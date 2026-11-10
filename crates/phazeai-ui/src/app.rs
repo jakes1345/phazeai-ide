@@ -846,8 +846,7 @@ impl IdeState {
             pending_chat_inject: create_rw_signal(None),
             inline_edit_open: create_rw_signal(false),
             inline_edit_query: create_rw_signal(String::new()),
-            token_usage_input: create_rw_signal(0),
-            token_usage_output: create_rw_signal(0),
+            token_meter: create_rw_signal(phazeai_core::cost::Meter::default()),
         };
 
         let project = ProjectState {
@@ -2263,26 +2262,18 @@ fn status_bar(state: IdeState) -> impl IntoView {
             s.color(state.workbench.theme.get().palette.text_muted)
                 .font_size(11.0)
         }),
-        // Token usage — shown after first AI response
+        // Tokens, cache share and cost of this session's chat calls, live.
         label(move || {
-            let inp = state.ai.token_usage_input.get();
-            let out = state.ai.token_usage_output.get();
-            if inp == 0 && out == 0 {
+            let meter = state.ai.token_meter.get();
+            if meter.input + meter.output == 0 {
                 return String::new();
             }
-            let fmt = |n: u64| {
-                if n >= 1_000 {
-                    format!("{:.1}k", n as f64 / 1_000.0)
-                } else {
-                    n.to_string()
-                }
-            };
-            format!("⬤ {}↑ {}↓  ", fmt(inp), fmt(out))
+            format!("{}  ", meter.summary())
         })
         .style(move |s| {
             let p = state.workbench.theme.get().palette;
-            let visible =
-                state.ai.token_usage_input.get() > 0 || state.ai.token_usage_output.get() > 0;
+            let meter = state.ai.token_meter.get();
+            let visible = meter.input + meter.output > 0;
             s.font_size(10.0)
                 .color(p.text_muted)
                 .apply_if(!visible, |s| s.display(floem::style::Display::None))
@@ -3713,8 +3704,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.workspace_root,
         state.project.code_search_if_enabled(),
         state.workbench.status_toast,
-        state.ai.token_usage_input,
-        state.ai.token_usage_output,
+        state.ai.token_meter,
         state.ai.model,
     );
 

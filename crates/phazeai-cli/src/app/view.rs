@@ -848,22 +848,29 @@ fn draw_hint_bar(f: &mut Frame, area: Rect, state: &AppState) {
 
     let sep = || Span::styled(" · ", Style::default().fg(t.dim));
     let mut right: Vec<Span> = Vec::new();
-    if state.tokens_in + state.tokens_out > 0 {
+    let meter = &state.meter;
+    if meter.input + meter.output > 0 {
+        let cached = if meter.cache_read > 0 {
+            format!(" ({}% cached)", meter.cached_percent())
+        } else {
+            String::new()
+        };
         right.push(Span::styled(
             format!(
-                "↑{} ↓{}",
-                fmt_tokens(state.tokens_in),
-                fmt_tokens(state.tokens_out)
+                "↑{}{cached} ↓{}",
+                fmt_tokens(meter.input),
+                fmt_tokens(meter.output)
             ),
             Style::default().fg(t.muted),
         ));
     }
-    if state.cost > 0.0 {
+    if meter.cost > 0.0 {
         if !right.is_empty() {
             right.push(sep());
         }
+        let more = if meter.unpriced_calls > 0 { "+" } else { "" };
         right.push(Span::styled(
-            format!("${:.4}", state.cost),
+            format!("{}{more}", phazeai_core::cost::dollars(meter.cost)),
             Style::default().fg(t.muted),
         ));
     }

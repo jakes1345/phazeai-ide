@@ -463,6 +463,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::Usage(u) => {
+                        let _ = event_tx.send(AgentEvent::CallUsage(u.clone()));
                         total_input_tokens += u.input_tokens as u64;
                         total_output_tokens += u.output_tokens as u64;
                         total_cache_read_tokens += u.cache_read_tokens as u64;

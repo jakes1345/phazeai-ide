@@ -21,6 +21,17 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+/// The meter's cost for `/status`: "$0.042", "$0.042, plus 2 calls with no
+/// known price", or "unknown" when no call had a price.
+fn cost_line(meter: &phazeai_core::cost::Meter) -> String {
+    let priced = phazeai_core::cost::dollars(meter.cost);
+    match meter.unpriced_calls {
+        0 => priced,
+        n if meter.cost == 0.0 => format!("unknown ({n} calls to a model with no known price)"),
+        n => format!("{priced}, plus {n} calls to a model with no known price"),
+    }
+}
+
 pub(super) fn fmt_tokens(n: u64) -> String {
     format_tokens(n)
 }
@@ -194,7 +205,7 @@ fn status_report(state: &AppState) -> String {
          \n  Git            {}\
          \n\
          \n  Tokens         {} in{} · {} out\
-         \n  Est. cost      ${:.4}\
+         \n  Est. cost      {}\
          \n  Context        {ctx}\
          \n  Conversation   {}",
         provider_id.name(),
@@ -212,14 +223,14 @@ fn status_report(state: &AppState) -> String {
             Some(b) => format!("{b} (clean)"),
             None => "not a repository".into(),
         },
-        format_tokens(state.tokens_in),
-        if state.tokens_cached > 0 {
-            format!(" ({} from cache)", format_tokens(state.tokens_cached))
+        format_tokens(state.meter.input),
+        if state.meter.cache_read > 0 {
+            format!(" ({} from cache)", format_tokens(state.meter.cache_read))
         } else {
             String::new()
         },
-        format_tokens(state.tokens_out),
-        state.cost,
+        format_tokens(state.meter.output),
+        cost_line(&state.meter),
         &state.conversation_id[..8.min(state.conversation_id.len())],
     )
 }
@@ -252,10 +263,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
             }
             state.reset_conversation_view();
             state.conversation_id = ConversationStore::generate_id();
-            state.tokens_in = 0;
-            state.tokens_out = 0;
-            state.tokens_cached = 0;
-            state.cost = 0.0;
+            state.meter = phazeai_core::cost::Meter::default();
             let _ = state.worker_tx.send(WorkerCommand::Clear);
             state.needs_clear = true;
             state.notify("New conversation started");

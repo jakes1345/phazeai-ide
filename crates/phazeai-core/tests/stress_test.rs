@@ -1039,8 +1039,9 @@ async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
         response.tool_calls
     );
 
-    // Each round: Thinking, ToolStart, a successful ToolResult; then the
-    // answer's Thinking, the usage report and Complete.
+    // Each round: Thinking, the call's usage, ToolStart, a successful
+    // ToolResult; then the answer's Thinking and usage, the run's usage
+    // report and Complete.
     let mut shape = Vec::new();
     let mut iterations = Vec::new();
     for event in &run.events {
@@ -1052,6 +1053,7 @@ async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
             AgentEvent::ToolStart { .. } => shape.push("start"),
             AgentEvent::ToolResult { success: true, .. } => shape.push("result"),
             AgentEvent::TextDelta(_) => {}
+            AgentEvent::CallUsage(_) => shape.push("call"),
             AgentEvent::TokenUsage { .. } => shape.push("usage"),
             AgentEvent::Complete { .. } => shape.push("complete"),
             other => panic!("unexpected event {other:?}"),
@@ -1059,9 +1061,9 @@ async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
     }
     let mut expected = Vec::new();
     for _ in 0..ROUNDS {
-        expected.extend(["thinking", "start", "result"]);
+        expected.extend(["thinking", "call", "start", "result"]);
     }
-    expected.extend(["thinking", "usage", "complete"]);
+    expected.extend(["thinking", "call", "usage", "complete"]);
     assert_eq!(shape, expected);
     assert_eq!(iterations, (1..=ROUNDS + 1).collect::<Vec<_>>());
 

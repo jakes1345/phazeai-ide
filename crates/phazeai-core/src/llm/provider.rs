@@ -497,13 +497,14 @@ impl ProviderRegistry {
     pub fn known_models(provider: &ProviderId) -> Vec<ModelInfo> {
         match provider {
             ProviderId::Claude => vec![
+                // Price from platform.claude.com pricing (November 10, 2026).
                 ModelInfo {
                     id: "claude-opus-4-6".into(),
                     name: "Claude Opus 4.6".into(),
                     context_window: 200_000,
                     supports_tools: true,
-                    input_cost_per_m: 15.0,
-                    output_cost_per_m: 75.0,
+                    input_cost_per_m: 5.0,
+                    output_cost_per_m: 25.0,
                 },
                 ModelInfo {
                     id: "claude-sonnet-4-5-20250929".into(),

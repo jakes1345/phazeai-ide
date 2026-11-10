@@ -556,6 +556,15 @@ impl Settings {
         }
     }
 
+    /// The provider and model the agent's requests are billed as, for a cost
+    /// meter. `None` with `[model_routes]`: a call may then go to any of the
+    /// routed models, and its usage does not say which.
+    pub fn billed_model(&self) -> Option<(crate::llm::ProviderId, String)> {
+        self.model_routes
+            .is_empty()
+            .then(|| (self.llm.provider.to_provider_id(), self.llm.model.clone()))
+    }
+
     /// The model side jobs run on: `[llm] small_model` when set; otherwise
     /// the active provider's own cheaper model ([`crate::llm::small_model_for`])
     /// unless the price list shows the main model costs no more; otherwise the
