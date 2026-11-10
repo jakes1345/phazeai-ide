@@ -259,6 +259,11 @@ impl FileWrite {
         self
     }
 
+    /// The file's bytes when the write was planned; `None`: no file.
+    pub fn current(&self) -> Option<&[u8]> {
+        self.current.as_deref()
+    }
+
     /// Whether there is no file yet, so committing creates one.
     pub fn creates_file(&self) -> bool {
         self.current.is_none()

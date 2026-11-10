@@ -14,8 +14,8 @@ use phazeai_core::context::system_prompt::{
 };
 use phazeai_core::{
     discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
-    CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata, ConversationStore,
-    DiffAnswer, DiffHookFn, SavedConversation, SavedMessage, Settings, Skill,
+    Checkpoints, CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata,
+    ConversationStore, DiffAnswer, DiffHookFn, SavedConversation, SavedMessage, Settings, Skill,
 };
 
 use crate::{
@@ -344,6 +344,8 @@ fn compaction_after_run(
     })
 }
 
+type SharedCheckpoints = Arc<std::sync::Mutex<Checkpoints>>;
+
 struct SendToAiJob {
     user_message: String,
     prior_messages: Vec<ChatMessage>,
@@ -358,6 +360,8 @@ struct SendToAiJob {
     skills_menu: String,
     update_tx: std::sync::mpsc::SyncSender<ChatUpdate>,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
+    /// The conversation's record of what each run wrote, for "Undo edits".
+    checkpoints: SharedCheckpoints,
     /// Code search for the agent's `code_search` tools; `None` when it is turned off.
     code_search: Option<CodeSearch>,
     /// Files whose contents are in `user_message` (for the privacy audit log).
@@ -400,6 +404,7 @@ fn send_to_ai(job: SendToAiJob) {
         skills_menu,
         update_tx,
         cancel_token,
+        checkpoints,
         code_search,
         attached_files,
     } = job;
@@ -516,6 +521,7 @@ fn send_to_ai(job: SendToAiJob) {
                 .with_cancel_token(cancel_token)
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)
+                .with_checkpoints(checkpoints)
                 .with_approval(approval_fn);
 
             // Let the agent search the workspace's code.
@@ -835,6 +841,28 @@ pub fn chat_panel(
     // Summary of the oldest messages, carried across sends; reset whenever the
     // message list is replaced, since it refers to a prefix of that list.
     let compaction: RwSignal<Option<CompactionState>> = create_rw_signal(None);
+    // What each run of this conversation wrote, so "Undo edits" can put it
+    // back; `undoable` counts the runs that can be undone, for the button.
+    let checkpoints: SharedCheckpoints = Arc::new(std::sync::Mutex::new(Checkpoints::new()));
+    let undoable = create_rw_signal(0usize);
+    {
+        let checkpoints = checkpoints.clone();
+        create_effect(move |_| {
+            if !is_loading.get() {
+                undoable.set(checkpoints.lock().map_or(0, |c| c.undoable()));
+            }
+        });
+    }
+    // A new or loaded conversation starts with nothing to undo.
+    let forget_checkpoints: Rc<dyn Fn()> = {
+        let checkpoints = checkpoints.clone();
+        Rc::new(move || {
+            if let Ok(mut c) = checkpoints.lock() {
+                *c = Checkpoints::new();
+            }
+            undoable.set(0);
+        })
+    };
 
     // ── Diff review state ─────────────────────────────────────────────────────
     let diff_path: RwSignal<String> = create_rw_signal(String::new());
@@ -891,56 +919,66 @@ pub fn chat_panel(
         is_error: false,
     };
 
-    let new_conv: Rc<dyn Fn()> = Rc::new(move || {
-        if is_loading.get_untracked() {
-            return;
-        }
-        messages.set(vec![welcome_msg()]);
-        compaction.set(None);
-        conversation_id.set(ConversationStore::generate_id());
-        show_history.set(false);
-        active_skill_name.set(None);
-    });
-
-    let load_conv: Rc<dyn Fn(String)> = Rc::new(move |id: String| {
-        if is_loading.get_untracked() {
-            return;
-        }
-        if let Ok(store) = ConversationStore::new() {
-            if let Ok(conv) = store.load(&id) {
-                let new_msgs: Vec<ChatMessage> = conv
-                    .messages
-                    .into_iter()
-                    .map(|m| {
-                        #[allow(clippy::wildcard_in_or_patterns)]
-                        let role = match m.role.as_str() {
-                            "user" => ChatRole::User,
-                            "assistant" => ChatRole::Assistant,
-                            "tool" | "system" | _ => ChatRole::Tool,
-                        };
-                        ChatMessage {
-                            role,
-                            content: m.content,
-                            loading: false,
-                            is_error: false,
-                        }
-                    })
-                    .collect();
-                messages.set(new_msgs);
-                compaction.set(None);
-                conversation_id.set(id);
-                show_history.set(false);
+    let new_conv: Rc<dyn Fn()> = {
+        let forget_checkpoints = forget_checkpoints.clone();
+        Rc::new(move || {
+            if is_loading.get_untracked() {
+                return;
             }
-        }
-    });
+            (forget_checkpoints)();
+            messages.set(vec![welcome_msg()]);
+            compaction.set(None);
+            conversation_id.set(ConversationStore::generate_id());
+            show_history.set(false);
+            active_skill_name.set(None);
+        })
+    };
+
+    let load_conv: Rc<dyn Fn(String)> = {
+        let forget_checkpoints = forget_checkpoints.clone();
+        Rc::new(move |id: String| {
+            if is_loading.get_untracked() {
+                return;
+            }
+            if let Ok(store) = ConversationStore::new() {
+                if let Ok(conv) = store.load(&id) {
+                    (forget_checkpoints)();
+                    let new_msgs: Vec<ChatMessage> = conv
+                        .messages
+                        .into_iter()
+                        .map(|m| {
+                            #[allow(clippy::wildcard_in_or_patterns)]
+                            let role = match m.role.as_str() {
+                                "user" => ChatRole::User,
+                                "assistant" => ChatRole::Assistant,
+                                "tool" | "system" | _ => ChatRole::Tool,
+                            };
+                            ChatMessage {
+                                role,
+                                content: m.content,
+                                loading: false,
+                                is_error: false,
+                            }
+                        })
+                        .collect();
+                    messages.set(new_msgs);
+                    compaction.set(None);
+                    conversation_id.set(id);
+                    show_history.set(false);
+                }
+            }
+        })
+    };
 
     let delete_conv: Rc<dyn Fn(String)> = {
         let refresh = refresh_history.clone();
+        let forget_checkpoints = forget_checkpoints.clone();
         Rc::new(move |id: String| {
             if let Ok(store) = ConversationStore::new() {
                 let _ = store.delete(&id);
             }
             if conversation_id.get_untracked() == id {
+                (forget_checkpoints)();
                 messages.set(vec![welcome_msg()]);
                 compaction.set(None);
                 conversation_id.set(ConversationStore::generate_id());
@@ -1120,6 +1158,7 @@ pub fn chat_panel(
     let do_send: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
         let code_search = code_search.clone();
+        let checkpoints = checkpoints.clone();
         move || {
             let text = input_text.get();
             let trimmed = text.trim().to_string();
@@ -1239,6 +1278,7 @@ pub fn chat_panel(
                 skills_menu: skills_menu_str,
                 update_tx: (*update_tx).clone(),
                 cancel_token: token,
+                checkpoints: checkpoints.clone(),
                 code_search: code_search.clone(),
                 attached_files,
             });
@@ -1598,6 +1638,7 @@ pub fn chat_panel(
     let do_retry: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
         let code_search = code_search.clone();
+        let checkpoints = checkpoints.clone();
         move || {
             if is_loading.get() {
                 // #region agent log
@@ -1680,6 +1721,7 @@ pub fn chat_panel(
                     skills_menu: retry_skills_menu,
                     update_tx: (*update_tx).clone(),
                     cancel_token: token,
+                    checkpoints: checkpoints.clone(),
                     code_search: code_search.clone(),
                     attached_files,
                 });
@@ -1750,6 +1792,42 @@ pub fn chat_panel(
             })
             .on_click_stop(move |_| {
                 (do_retry_btn)();
+            });
+
+            // "Undo edits" on the last AI message: puts back the files the
+            // latest run with edits wrote, except any changed since.
+            let undo_checkpoints = checkpoints.clone();
+            let undo_btn = container(
+                stack((
+                    phaze_icon(icons::UNDO, 11.0, move |p| p.text_secondary, theme),
+                    label(|| " Undo edits").style(move |s| {
+                        s.font_size(11.0).color(theme.get().palette.text_secondary)
+                    }),
+                ))
+                .style(|s| s.items_center()),
+            )
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                let should_show = is_last && !is_user && !is_loading.get() && undoable.get() > 0;
+                s.padding_horiz(6.0)
+                    .padding_vert(3.0)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .hover(|s| s.background(p.bg_elevated))
+                    .apply_if(!should_show, |s| s.display(floem::style::Display::None))
+            })
+            .on_click_stop(move |_| {
+                if is_loading.get_untracked() {
+                    return;
+                }
+                let Ok(mut cp) = undo_checkpoints.lock() else {
+                    return;
+                };
+                if let Some(report) = cp.undo_last() {
+                    crate::app::show_toast(status_toast, report.summary());
+                }
+                undoable.set(cp.undoable());
             });
 
             // ✕ dismiss button — removes this error bubble from the message list.
@@ -1843,7 +1921,8 @@ pub fn chat_panel(
                         ))
                         .style(|s| s.items_center().flex_grow(1.0)),
                         // Retry icon (non-error AI messages) + dismiss ✕ (error messages)
-                        stack((icon_retry_btn, dismiss_btn)).style(|s| s.items_center().gap(2.0)),
+                        stack((undo_btn, icon_retry_btn, dismiss_btn))
+                            .style(|s| s.items_center().gap(2.0)),
                     ))
                     .style(|s| s.items_center().justify_between().width_full()),
                     // Error retry button below the error text (only for error bubbles)
