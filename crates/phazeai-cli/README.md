@@ -21,6 +21,7 @@ Useful flags:
 | `--provider <name>` | `anthropic`, `openai`, `gemini`, `groq`, `together`, `openrouter`, `ollama`, `lmstudio` or `builtin`. |
 | `-m, --model <name>` | Model for this run. |
 | `-c, --continue` / `--resume <id>` | Pick up the last conversation, or one by ID prefix. |
+| `--max-turns <N>` | The most model turns one request may take before the agent stops. Defaults to `[agent] max_iterations` in `config.toml`, which defaults to 200. |
 | `--theme <name>` / `--no-color` | Colour theme, or no colour at all (`NO_COLOR` works too). |
 | `--instructions <file>` | Extra instructions file for the system prompt. |
 

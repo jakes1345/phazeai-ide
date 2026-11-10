@@ -64,6 +64,10 @@ impl Tool for CodeSearchTool {
          (start_line..end_line), a score and a snippet."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

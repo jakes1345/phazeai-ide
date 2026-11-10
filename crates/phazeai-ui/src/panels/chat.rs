@@ -510,6 +510,7 @@ fn send_to_ai(job: SendToAiJob) {
 
             let mut agent = Agent::new(client)
                 .with_context_budget(settings.context_budget())
+                .with_max_iterations(settings.agent.max_iterations())
                 .with_cancel_token(cancel_token)
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)

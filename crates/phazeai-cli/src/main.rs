@@ -49,6 +49,12 @@ struct Cli {
     /// Path to custom instructions file
     #[arg(long)]
     instructions: Option<String>,
+
+    /// The most model turns one request may take before the agent stops
+    /// (default: `[agent] max_iterations` in config.toml, which defaults to
+    /// 200). A turn is one model response and the tools it asked for.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_turns: Option<u32>,
 }
 
 /// In the TUI, log to a file: anything written to stderr would corrupt the
@@ -193,6 +199,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         // So does `[llm] base_url`, which this drops on a change.
         settings.set_provider(p);
+    }
+    if let Some(turns) = cli.max_turns {
+        settings.agent.max_iterations = turns as usize;
     }
     if let Some(ref model) = cli.model {
         settings.llm.model = model.clone();

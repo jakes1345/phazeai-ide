@@ -16,6 +16,10 @@ impl Tool for FindPathTool {
         "Find files and directories by name or regex pattern. Walks the directory tree respecting .gitignore. Use this to locate files when you know part of the filename but not the full path."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

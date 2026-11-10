@@ -420,6 +420,7 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     let mut agent = Agent::new(client)
                         .with_tools(tools)
                         .with_context_budget(settings.context_budget())
+                        .with_max_iterations(settings.agent.max_iterations())
                         .with_cancel_token(token);
 
                     // Let the agent search the workspace's code.

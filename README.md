@@ -48,7 +48,7 @@ With no config file, PhazeAI talks to Ollama at `http://localhost:11434` using `
 
 ### AI
 
-The chat panel runs the full agent loop, so the model can read and edit files and run commands. When it wants to write a file you get a diff to accept or reject first. You can attach files with `@file`, chats are saved to `~/.phazeai/conversations/`, and long conversations are summarised automatically as they get close to the model's context limit.
+The chat panel runs the full agent loop, so the model can read and edit files and run commands. When it wants to write a file you get a diff to accept or reject first. You can attach files with `@file`, chats are saved to `~/.phazeai/conversations/`, and long conversations are summarised automatically as they get close to the model's context limit. One request can take up to 200 model turns (`[agent] max_iterations`), and when the model asks for several reads or searches at once they run together instead of one after another.
 
 Composer is the multi-file version, with three approval modes: auto-approve everything, ask for anything that isn't read-only, or ask for every call. The diff cards it shows at the end come from `git diff HEAD`, so they also include changes you made yourself before the run.
 
@@ -166,6 +166,9 @@ auto_index = true
 
 [updates]
 check_at_start = true
+
+[agent]
+max_iterations = 200      # most model turns one request may take (the CLI's --max-turns overrides it)
 ```
 
 If the file doesn't parse, PhazeAI prints a warning and falls back to the defaults.

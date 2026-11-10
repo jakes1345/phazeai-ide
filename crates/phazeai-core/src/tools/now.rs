@@ -13,6 +13,10 @@ impl Tool for NowTool {
         "Get the current date, time, timezone, and unix timestamp. Useful for time-aware operations, logging, and timestamp generation."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
