@@ -876,6 +876,9 @@ pub fn small_model_for(provider: &ProviderId) -> Option<&'static str> {
         ProviderId::Xai => Some("grok-build-0.1"),
         // Codestral is Mistral's code-completion model.
         ProviderId::Mistral => Some("codestral-latest"),
+        // Flash is DeepSeek's cheaper model, and it takes fill-in-the-middle
+        // requests.
+        ProviderId::DeepSeek => Some("deepseek-flash"),
         _ => None,
     }
 }
@@ -919,7 +922,9 @@ fn cache_key_for(root: &std::path::Path) -> String {
     format!("phaze-{hex}")
 }
 
-fn request_base_url(config: &ProviderConfig) -> Result<String, crate::error::PhazeError> {
+pub(crate) fn request_base_url(
+    config: &ProviderConfig,
+) -> Result<String, crate::error::PhazeError> {
     if config.id != ProviderId::BuiltIn {
         return Ok(config.base_url.clone());
     }

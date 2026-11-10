@@ -5,7 +5,7 @@ pub mod key_setup;
 pub mod model_router;
 mod ollama;
 pub mod ollama_manager;
-mod openai;
+pub(crate) mod openai;
 pub mod provider;
 pub mod retry;
 mod text_only;

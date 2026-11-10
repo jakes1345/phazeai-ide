@@ -159,6 +159,7 @@ max_tokens = 8192
 [editor]
 theme = "Midnight Blue"
 ai_completions = true
+# completion_model = "qwen2.5-coder:1.5b"   # optional: Ollama, DeepSeek or Mistral model for completions
 
 [search]
 enabled = true

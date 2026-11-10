@@ -47,11 +47,7 @@ use syntect::{
     parsing::{ParseState, ScopeStack, SyntaxSet},
 };
 
-use phazeai_core::{
-    llm::Message,
-    syntax::{self, SyntaxLang},
-    Settings,
-};
+use phazeai_core::syntax::{self, SyntaxLang};
 
 use crate::{
     components::icon::{icons, phaze_icon},
@@ -1256,8 +1252,6 @@ pub fn editor_panel(
     close_active_tab_nonce: RwSignal<u64>,
     breakpoints: RwSignal<Vec<(PathBuf, u64)>>,
     debug_stopped_at: RwSignal<Option<(PathBuf, u64)>>,
-    // Channel for FIM (inline AI completion) requests: (path, prefix, suffix, language).
-    fim_req_tx: std::sync::mpsc::SyncSender<(PathBuf, String, String, String)>,
     // `[editor] ai_completions`: while false, no completion request is made.
     ai_completions: RwSignal<bool>,
     selected_text: RwSignal<String>,
@@ -1836,11 +1830,9 @@ pub fn editor_panel(
             let lsp_path = tab.path.clone();
             let lsp_tx = lsp_cmd.clone();
 
-            // ── FIM debounce (per-tab) ─────────────────────────────────────────
-            // Fires 600ms after the last edit when in an active editing position.
+            // ── FIM generation (per-tab) ───────────────────────────────────────
+            // Bumped on every cursor move: a completion for an older one is dropped.
             let fim_gen: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-            let fim_tx_tab = fim_req_tx.clone();
-            let fim_path = tab.path.clone();
 
             // ── Crash-recovery shadow write (per-tab) ─────────────────────────
             // Each tab has its own debounce counter + channel. The recovery write
@@ -4132,19 +4124,28 @@ pub fn editor_panel(
             }
 
             // ── Ghost text / FIM debounce ─────────────────────────────────
-            // Fires on every cursor move for the active tab. Waits 300 ms
-            // then sends a single-turn LLM request for an inline completion.
+            // Every cursor move on the active tab drops the shown suggestion
+            // and cancels one in flight. When the text changed too (you
+            // typed), a completion is asked for 300 ms later unless the
+            // cursor moved again; moving around without typing asks nothing,
+            // so a pause costs one request.
             {
                 let doc_for_fim = doc.clone();
                 let fim_gen2 = Arc::clone(&fim_gen);
                 let fim_tx2 = fim_tx.clone();
                 let fim_file = tab.path.clone();
+                // The text the last request was for (`None`: not seen yet).
+                let fim_seen: Rc<RefCell<Option<u64>>> = Rc::new(RefCell::new(None));
 
                 create_effect(move |_| {
                     if active_idx.get() != Some(i) {
                         return;
                     }
                     let offset = cursor_sig.get().offset();
+                    // Bump generation: in-flight request with old gen is silently discarded.
+                    let my_gen = fim_gen2.fetch_add(1, Ordering::SeqCst) + 1;
+                    // Clear stale suggestion whenever cursor moves.
+                    ghost_text.set(None);
                     // Nothing is sent while AI completions are off or for a denied file.
                     if !phazeai_core::fim::should_request_fim(
                         ai_completions.get_untracked(),
@@ -4153,31 +4154,35 @@ pub fn editor_panel(
                     ) {
                         return;
                     }
-                    let fim_file = fim_file.clone();
-
-                    // Bump generation: in-flight request with old gen is silently discarded.
-                    let my_gen = fim_gen2.fetch_add(1, Ordering::SeqCst) + 1;
-                    // Clear stale suggestion whenever cursor moves.
-                    ghost_text.set(None);
 
                     // Extract prefix and suffix inside the reactive scope (UI thread).
                     let rope = doc_for_fim.rope_text();
                     let len = rope.len();
-                    if len == 0 || offset == 0 {
-                        return;
-                    }
-
+                    let offset = offset.min(len);
                     let prefix = rope.slice_to_cow(0..offset).to_string();
-                    if prefix.trim().is_empty() {
-                        return;
-                    }
-                    // Don't fire FIM when cursor is at start of a line (nothing typed yet on this line)
-                    let current_line_prefix =
-                        prefix.rsplit_once('\n').map(|(_, s)| s).unwrap_or(&prefix);
-                    if current_line_prefix.trim().is_empty() {
-                        return;
-                    }
                     let suffix = rope.slice_to_cow(offset..len).to_string();
+                    let text_hash = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        prefix.hash(&mut h);
+                        suffix.hash(&mut h);
+                        h.finish()
+                    };
+                    // Only typing asks: the first look at a tab, and a cursor
+                    // that moved over unchanged text, don't.
+                    let typed = fim_seen
+                        .borrow_mut()
+                        .replace(text_hash)
+                        .is_some_and(|seen| seen != text_hash);
+                    if !typed || prefix.trim().is_empty() {
+                        return;
+                    }
+                    let fim_file = fim_file.clone();
+                    let lang = fim_file
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("text")
+                        .to_string();
 
                     let gen_check = Arc::clone(&fim_gen2);
                     let tx = fim_tx2.clone();
@@ -4188,17 +4193,6 @@ pub fn editor_panel(
                         if gen_check.load(Ordering::SeqCst) != my_gen {
                             return;
                         }
-
-                        let settings = Settings::load();
-                        // Checked again as the request leaves: AI completions
-                        // may have been turned off during the wait.
-                        if !phazeai_core::fim::should_request_fim(
-                            settings.editor.ai_completions,
-                            &phazeai_core::privacy::active(),
-                            &fim_file,
-                        ) {
-                            return;
-                        }
                         let rt = match tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()
@@ -4206,60 +4200,13 @@ pub fn editor_panel(
                             Ok(rt) => rt,
                             Err(_) => return,
                         };
-
-                        let suggestion = rt.block_on(async move {
-                            let client = match settings.build_small_llm_client() {
-                                Ok(c) => c,
-                                Err(_) => return String::new(),
-                            };
-
-                            // Trim to reasonable context window sizes.
-                            let pre = if prefix.len() > 1500 {
-                                let start = prefix.ceil_char_boundary(prefix.len() - 1500);
-                                prefix[start..].to_string()
-                            } else {
-                                prefix
-                            };
-                            let suf = if suffix.len() > 400 {
-                                let end = suffix.floor_char_boundary(400);
-                                suffix[..end].to_string()
-                            } else {
-                                suffix
-                            };
-
-                            let prompt = format!(
-                                "You are a code completion engine. \
-                                 Complete the code at the <CURSOR> marker. \
-                                 Return ONLY the text to insert at <CURSOR> — \
-                                 no explanation, no markdown, no backticks. \
-                                 Maximum 3 lines.\n\n\
-                                 {pre}<CURSOR>{suf}"
-                            );
-
-                            let msgs = [Message::user(prompt)];
-                            let request = client.chat(&msgs, &[]);
-                            match phazeai_core::privacy::audit::scope(vec![fim_file], request)
-                                .await
-                            {
-                                Ok(resp) => {
-                                    let text = resp
-                                        .message
-                                        .content
-                                        .trim()
-                                        .trim_start_matches("```")
-                                        .trim_end_matches("```")
-                                        .trim()
-                                        .to_string();
-                                    // Discard if suspiciously long (hallucination)
-                                    if text.lines().count() > 6 {
-                                        String::new()
-                                    } else {
-                                        text
-                                    }
-                                }
-                                Err(_) => String::new(),
-                            }
-                        });
+                        // `fim_complete` reads config.toml again, so AI
+                        // completions turned off during the wait send nothing.
+                        let suggestion = rt
+                            .block_on(phazeai_core::fim::fim_complete(
+                                &fim_file, &prefix, &suffix, &lang,
+                            ))
+                            .unwrap_or_default();
 
                         // One last generation check before writing to channel.
                         if gen_check.load(Ordering::SeqCst) == my_gen && !suggestion.is_empty() {
@@ -4518,35 +4465,6 @@ pub fn editor_panel(
                                     }
                                 }
                             }
-                        }
-                        // FIM inline completion: debounce 600ms — send prefix/suffix to the
-                        // worker, which checks again right before sending. Nothing is queued
-                        // while AI completions are off or for a denied file.
-                        if phazeai_core::fim::should_request_fim(
-                            ai_completions.get_untracked(),
-                            &phazeai_core::privacy::active(),
-                            &fim_path,
-                        ) {
-                            let gen = fim_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                            let gen_ref = Arc::clone(&fim_gen);
-                            let tx = fim_tx_tab.clone();
-                            let text2 = text.clone();
-                            let path2 = fim_path.clone();
-                            let offset = cursor_sig.get_untracked().offset();
-                            std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(600));
-                                if gen_ref.load(Ordering::Relaxed) != gen {
-                                    return;
-                                }
-                                let prefix = text2[..offset.min(text2.len())].to_string();
-                                let suffix = text2[offset.min(text2.len())..].to_string();
-                                let lang = path2
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("text")
-                                    .to_string();
-                                let _ = tx.try_send((path2, prefix, suffix, lang));
-                            });
                         }
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.
                         if auto_save.get_untracked() {
@@ -5192,7 +5110,7 @@ pub fn editor_panel(
                 ghost_text
                     .get()
                     .as_deref()
-                    .map(|t| t.lines().next().unwrap_or("").to_string())
+                    .map(ghost_preview)
                     .unwrap_or_default()
             })
             .style(move |s| {
@@ -6298,6 +6216,21 @@ pub fn read_editorconfig(
     }
 }
 
+/// The ghost-text strip's line for a suggestion: its first line with
+/// something on it (a suggestion often starts with the newline that opens a
+/// block), and how many more lines Tab would insert.
+fn ghost_preview(suggestion: &str) -> String {
+    let lines: Vec<&str> = suggestion
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    match lines.as_slice() {
+        [] => String::new(),
+        [only] => only.trim().to_string(),
+        [first, rest @ ..] => format!("{}  (+{} more lines)", first.trim(), rest.len()),
+    }
+}
+
 #[cfg(test)]
 mod tab_tests {
     use super::*;
@@ -6725,5 +6658,15 @@ mod tab_tests {
             .map(|p| crate::crash_recovery::test_support::shadow_exists(p))
             .collect();
         assert_eq!(exists, [true, false, true]);
+    }
+
+    #[test]
+    fn the_ghost_strip_shows_a_block_suggestions_first_real_line() {
+        assert_eq!(ghost_preview("a, b"), "a, b");
+        assert_eq!(
+            ghost_preview("\n    let x = 1;\n    x + 1"),
+            "let x = 1;  (+1 more lines)"
+        );
+        assert_eq!(ghost_preview("\n  \n"), "");
     }
 }
