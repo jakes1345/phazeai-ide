@@ -193,7 +193,7 @@ fn status_report(state: &AppState) -> String {
          \n  Directory      {cwd}\
          \n  Git            {}\
          \n\
-         \n  Tokens         {} in · {} out\
+         \n  Tokens         {} in{} · {} out\
          \n  Est. cost      ${:.4}\
          \n  Context        {ctx}\
          \n  Conversation   {}",
@@ -213,6 +213,11 @@ fn status_report(state: &AppState) -> String {
             None => "not a repository".into(),
         },
         format_tokens(state.tokens_in),
+        if state.tokens_cached > 0 {
+            format!(" ({} from cache)", format_tokens(state.tokens_cached))
+        } else {
+            String::new()
+        },
         format_tokens(state.tokens_out),
         state.cost,
         &state.conversation_id[..8.min(state.conversation_id.len())],
@@ -249,6 +254,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
             state.conversation_id = ConversationStore::generate_id();
             state.tokens_in = 0;
             state.tokens_out = 0;
+            state.tokens_cached = 0;
             state.cost = 0.0;
             let _ = state.worker_tx.send(WorkerCommand::Clear);
             state.needs_clear = true;

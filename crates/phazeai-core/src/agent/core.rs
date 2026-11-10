@@ -18,8 +18,14 @@ pub struct AgentResponse {
     pub tool_calls: Vec<ToolExecution>,
     pub iterations: usize,
     /// Cumulative token usage across all LLM calls in this run.
+    /// `total_input_tokens` counts every prompt token sent, including those
+    /// the provider served from its prompt cache.
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Of `total_input_tokens`, the tokens the provider read from its prompt
+    /// cache, and the tokens it wrote to it (see [`crate::llm::Usage`]).
+    pub total_cache_read_tokens: u64,
+    pub total_cache_write_tokens: u64,
 }
 
 /// Callback invoked before tool execution. Returns true to approve, false to deny.
@@ -258,6 +264,8 @@ impl Agent {
         let mut tool_executions = Vec::new();
         let mut total_input_tokens: u64 = 0;
         let mut total_output_tokens: u64 = 0;
+        let mut total_cache_read_tokens: u64 = 0;
+        let mut total_cache_write_tokens: u64 = 0;
 
         {
             let mut g = self.mcp_event_sink.lock().unwrap();
@@ -391,6 +399,8 @@ impl Agent {
                     StreamEvent::Usage(u) => {
                         total_input_tokens += u.input_tokens as u64;
                         total_output_tokens += u.output_tokens as u64;
+                        total_cache_read_tokens += u.cache_read_tokens as u64;
+                        total_cache_write_tokens += u.cache_write_tokens as u64;
                     }
                     StreamEvent::Done => {
                         break;
@@ -579,6 +589,8 @@ impl Agent {
             let _ = event_tx.send(AgentEvent::TokenUsage {
                 input_tokens: total_input_tokens,
                 output_tokens: total_output_tokens,
+                cache_read_tokens: total_cache_read_tokens,
+                cache_write_tokens: total_cache_write_tokens,
             });
             let _ = event_tx.send(AgentEvent::Complete { iterations });
 
@@ -593,6 +605,8 @@ impl Agent {
                 iterations,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
+                total_cache_write_tokens,
             });
         }
     }

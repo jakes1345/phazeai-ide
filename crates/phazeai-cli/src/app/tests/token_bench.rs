@@ -349,33 +349,186 @@ fn fresh_fixture() -> PathBuf {
     root
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "report, not a check; sets process-wide state (run with --ignored)"]
-async fn token_bench() {
+/// The same scripted turn as Anthropic streams it: a text block, then one
+/// `tool_use` block per call.
+fn claude_reply(turn: &Turn, call_offset: usize) -> String {
+    let mut events = vec![json!({
+        "type": "message_start",
+        "message": { "usage": { "input_tokens": 0, "output_tokens": 0 } },
+    })];
+    let mut index = 0;
+    if !turn.text.is_empty() {
+        events.push(json!({ "type": "content_block_start", "index": index,
+            "content_block": { "type": "text", "text": "" } }));
+        events.push(json!({ "type": "content_block_delta", "index": index,
+            "delta": { "type": "text_delta", "text": turn.text } }));
+        events.push(json!({ "type": "content_block_stop", "index": index }));
+        index += 1;
+    }
+    for (i, (name, args)) in turn.calls.iter().enumerate() {
+        events.push(json!({ "type": "content_block_start", "index": index,
+            "content_block": { "type": "tool_use", "id": format!("toolu_{}", call_offset + i + 1),
+                "name": name, "input": {} } }));
+        events.push(json!({ "type": "content_block_delta", "index": index,
+            "delta": { "type": "input_json_delta", "partial_json": args.to_string() } }));
+        events.push(json!({ "type": "content_block_stop", "index": index }));
+        index += 1;
+    }
+    events.push(
+        json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" },
+        "usage": { "output_tokens": 0 } }),
+    );
+    events.push(json!({ "type": "message_stop" }));
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+        .collect()
+}
+
+fn claude_client(url: &str) -> Box<dyn LlmClient> {
+    Box::new(
+        phazeai_core::llm::ClaudeClient::new("k")
+            .with_base_url(url)
+            .without_proxy(),
+    )
+}
+
+/// An Anthropic request in render order (tools, system, messages) as a list
+/// of blocks: the text each contributes, and whether it carries a
+/// `cache_control` breakpoint.
+fn claude_blocks(body: &Value) -> Vec<(String, bool)> {
+    let marked = |v: &Value| v.get("cache_control").is_some();
+    let mut out = Vec::new();
+    for tool in body["tools"].as_array().into_iter().flatten() {
+        let schema = json!({
+            "name": tool["name"],
+            "description": tool["description"],
+            "input_schema": tool["input_schema"],
+        });
+        out.push((format!("<tool>{schema}\n"), marked(tool)));
+    }
+    for block in body["system"].as_array().into_iter().flatten() {
+        out.push((
+            format!(
+                "<|system|>\n{}\n",
+                block["text"].as_str().unwrap_or_default()
+            ),
+            marked(block),
+        ));
+    }
+    if let Some(text) = body["system"].as_str() {
+        out.push((format!("<|system|>\n{text}\n"), false));
+    }
+    for message in body["messages"].as_array().into_iter().flatten() {
+        let role = message["role"].as_str().unwrap_or_default();
+        if let Some(text) = message["content"].as_str() {
+            out.push((format!("<|{role}|>\n{text}\n"), false));
+            continue;
+        }
+        for (i, block) in message["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let head = if i == 0 {
+                format!("<|{role}|>\n")
+            } else {
+                String::new()
+            };
+            let text = match block["type"].as_str() {
+                Some("text") => block["text"].as_str().unwrap_or_default().to_string(),
+                Some("tool_use") => format!(
+                    "<call>{} {}",
+                    block["name"].as_str().unwrap_or_default(),
+                    block["input"]
+                ),
+                Some("tool_result") => block["content"].as_str().unwrap_or_default().to_string(),
+                _ => block.to_string(),
+            };
+            out.push((format!("{head}{text}\n"), marked(block)));
+        }
+    }
+    out
+}
+
+/// What Anthropic bills for one request, in input tokens.
+#[derive(Default, Clone, Copy)]
+struct Billed {
+    total: usize,
+    read: usize,
+    written: usize,
+    uncached: usize,
+}
+
+impl Billed {
+    /// Input price units: a cache read costs 0.1x and a 5-minute write 1.25x.
+    fn equivalent(&self) -> f64 {
+        self.uncached as f64 + self.written as f64 * 1.25 + self.read as f64 * 0.1
+    }
+}
+
+/// Anthropic's prompt cache, as its documentation describes it: an entry is
+/// written at each breakpoint, holding the exact prefix up to it; a request
+/// reads the longest stored prefix that ends at one of its block boundaries
+/// within 20 blocks before one of its breakpoints. Tokens from there to the
+/// last breakpoint are written, and tokens after it are plain input.
+struct PromptCache {
+    entries: std::collections::HashSet<Vec<u32>>,
+}
+
+impl PromptCache {
+    fn bill(&mut self, bpe: &tiktoken_rs::CoreBPE, body: &Value) -> Billed {
+        let mut tokens: Vec<u32> = Vec::new();
+        let mut ends = Vec::new();
+        let mut marks = Vec::new();
+        for (i, (text, marked)) in claude_blocks(body).into_iter().enumerate() {
+            tokens.extend(bpe.encode_ordinary(&text));
+            ends.push(tokens.len());
+            if marked {
+                marks.push(i);
+            }
+        }
+        let mut read = 0;
+        for &mark in &marks {
+            for k in (mark.saturating_sub(19)..=mark).rev() {
+                if self.entries.contains(&tokens[..ends[k]]) {
+                    read = read.max(ends[k]);
+                    break;
+                }
+            }
+        }
+        let last_mark = marks.last().map(|&m| ends[m]).unwrap_or(0);
+        for &mark in &marks {
+            self.entries.insert(tokens[..ends[mark]].to_vec());
+        }
+        Billed {
+            total: tokens.len(),
+            read,
+            written: last_mark.saturating_sub(read),
+            uncached: tokens.len() - last_mark.max(read),
+        }
+    }
+}
+
+/// One measured session pair on a fresh copy of the fixture: the two-message
+/// session, then a new session's first message on the project as the first
+/// left it apart from `src/config.rs`. Returns the first session's runs and
+/// the request bodies of both sessions.
+async fn capture(
+    settings: &Settings,
+    make_client: fn(&str) -> Box<dyn LlmClient>,
+    replies: Vec<String>,
+    next_session_replies: Vec<String>,
+) -> (Vec<phazeai_core::AgentResponse>, Vec<Value>, Vec<Value>) {
     let root = fresh_fixture();
-    let _home = EnvGuard::set("HOME", &root.parent().unwrap().join("home"));
     // The CLI runs in the project it works on: shell commands and code search
     // start from the working directory.
     let _cwd = CwdGuard::enter(&root);
     phazeai_core::tools::sandbox::set_workspace_root(Some(root.clone()));
 
-    let turns = script(&root);
-    let mut offset = 0;
-    let replies = turns
-        .iter()
-        .map(|t| {
-            let r = reply(t, offset);
-            offset += t.calls.len();
-            r
-        })
-        .collect();
     let (url, bodies) = fake_provider(replies).await;
-
-    let mut settings = Settings::default();
-    settings.llm.provider = phazeai_core::config::LlmProvider::OpenAI;
-    settings.llm.model = "gpt-4.1".into();
-    let agent = single_prompt_agent(&settings, fake_client(&url), &root, None);
-
+    let agent = single_prompt_agent(settings, make_client(&url), &root, None);
     let first = agent.run(FIRST_ASK).await.unwrap();
     let second = agent.run(FOLLOW_UP).await.unwrap();
 
@@ -385,24 +538,58 @@ async fn token_bench() {
     // is the first session's apart from what changed in the project. What
     // the two share is what a provider can still serve from cache across
     // sessions.
-    let (url2, bodies2) = fake_provider(vec![]).await;
+    let (url2, bodies2) = fake_provider(next_session_replies).await;
     std::fs::write(root.join("src/config.rs"), FIXTURE[4].1).unwrap();
-    let again = single_prompt_agent(&settings, fake_client(&url2), &root, None);
+    let again = single_prompt_agent(settings, make_client(&url2), &root, None);
     again.run(FIRST_ASK).await.unwrap();
     phazeai_core::tools::sandbox::set_workspace_root(None);
 
-    // The script ran as written: every call succeeded and the fix landed.
-    for exec in first.tool_calls.iter().chain(&second.tool_calls) {
+    let sent = bodies.lock().unwrap().clone();
+    let next = bodies2.lock().unwrap().clone();
+    (vec![first, second], sent, next)
+}
+
+/// The script ran as written: every call succeeded and the fix landed.
+fn check_script_ran(runs: &[phazeai_core::AgentResponse]) {
+    for exec in runs.iter().flat_map(|r| &r.tool_calls) {
         assert!(
             exec.success,
             "{} failed: {}",
             exec.tool_name, exec.result_summary
         );
     }
-    let fixed = second.tool_calls.last().unwrap();
+    let fixed = runs.last().unwrap().tool_calls.last().unwrap();
     assert_eq!(fixed.tool_name, "edit_file");
+}
 
-    let sent = bodies.lock().unwrap().clone();
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "report, not a check; sets process-wide state (run with --ignored)"]
+async fn token_bench() {
+    // No personal instructions file is read: `HOME` is an empty directory
+    // beside the fixture (which `fresh_fixture` recreates).
+    let _home = EnvGuard::set(
+        "HOME",
+        &std::env::temp_dir().join("phaze-token-bench").join("home"),
+    );
+
+    let turns = script(&fresh_fixture());
+    let scripted = |render: fn(&Turn, usize) -> String| -> Vec<String> {
+        let mut offset = 0;
+        turns
+            .iter()
+            .map(|t| {
+                let r = render(t, offset);
+                offset += t.calls.len();
+                r
+            })
+            .collect()
+    };
+
+    let mut settings = Settings::default();
+    settings.llm.provider = phazeai_core::config::LlmProvider::OpenAI;
+    settings.llm.model = "gpt-4.1".into();
+    let (runs, sent, next) = capture(&settings, fake_client, scripted(reply), vec![]).await;
+    check_script_ran(&runs);
     assert_eq!(sent.len(), turns.len(), "one request per scripted turn");
 
     let bpe = tiktoken_rs::o200k_base().unwrap();
@@ -469,7 +656,7 @@ async fn token_bench() {
         "- **Effective input, reusable part at 0.1x:** {effective:.0} ({:.1}% of sent)",
         100.0 * effective / total as f64
     );
-    let new_session = bpe.encode_ordinary(&render(&bodies2.lock().unwrap()[0]));
+    let new_session = bpe.encode_ordinary(&render(&next[0]));
     let first_tokens = bpe.encode_ordinary(&render(&sent[0]));
     let across = new_session
         .iter()
@@ -481,4 +668,54 @@ async fn token_bench() {
         new_session.len()
     );
     println!("- **Tools offered:** {}", tool_names.join(", "));
+
+    // The same task with Claude: what Anthropic bills, given the cache
+    // breakpoints the requests really carry. Without breakpoints it bills
+    // every input token at full price.
+    let mut settings = Settings::default();
+    settings.llm.provider = phazeai_core::config::LlmProvider::Claude;
+    settings.llm.model = "claude-sonnet-4-6".into();
+    let closing = vec![claude_reply(&turn("Done.", vec![]), 0)];
+    let (runs, sent, next) =
+        capture(&settings, claude_client, scripted(claude_reply), closing).await;
+    check_script_ran(&runs);
+    assert_eq!(sent.len(), turns.len(), "one request per scripted turn");
+
+    let mut cache = PromptCache {
+        entries: Default::default(),
+    };
+    println!("\n### Claude, as Anthropic bills it\n");
+    println!("| # | input tokens | cache read | cache write | uncached |");
+    println!("|--:|--:|--:|--:|--:|");
+    let mut sum = Billed::default();
+    for (i, body) in sent.iter().enumerate() {
+        let b = cache.bill(&bpe, body);
+        println!(
+            "| {} | {} | {} | {} | {} |",
+            i + 1,
+            b.total,
+            b.read,
+            b.written,
+            b.uncached
+        );
+        sum.total += b.total;
+        sum.read += b.read;
+        sum.written += b.written;
+        sum.uncached += b.uncached;
+    }
+    println!("\n- **Input tokens sent:** {}", sum.total);
+    println!(
+        "- **Read from cache:** {} · **written:** {} · **uncached:** {}",
+        sum.read, sum.written, sum.uncached
+    );
+    println!(
+        "- **Billed, in input-token units (read 0.1x, write 1.25x):** {:.0} ({:.1}% of sent)",
+        sum.equivalent(),
+        100.0 * sum.equivalent() / sum.total as f64
+    );
+    let b = cache.bill(&bpe, &next[0]);
+    println!(
+        "- **A new session's first request reads:** {} of {} tokens from cache",
+        b.read, b.total
+    );
 }

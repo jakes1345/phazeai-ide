@@ -125,25 +125,34 @@ first, then caching is switched on, then the prefix is made smaller.
 - **Moves:** new-session prefix reuse (5 tokens to the full static prefix), and the
   IDE chat's per-message cache.
 
-### T3: provider caching and cache measurement
-- **Claude cache breakpoints.** `system` is sent as blocks (the base prompt, then
-  the compaction summary in a block of its own), with `cache_control`
-  breakpoints on the last tool, the end of the base system prompt and the
-  conversation tail (4 at most). Source: Anthropic prompt-caching docs; opencode
-  `cache-policy.ts:5-34`.
-- **Cache usage fields.** `Usage` gains cache-read and cache-write counts,
-  parsed from Anthropic (`cache_read_input_tokens`), OpenAI
-  (`prompt_tokens_details.cached_tokens`), DeepSeek
-  (`prompt_cache_hit_tokens`) and llama-server (`timings.cache_n`). Phaze
-  cannot see a cache hit today
+### T3: Claude caching and cache measurement
+- **Claude cache breakpoints.** `system` is sent as up to two blocks: the shared
+  part (base prompt and project instructions, the same in every session of a
+  project) and the session's own part (git status, then any compaction
+  summary). `cache_control` breakpoints go on the last tool, the end of each
+  system block and the conversation tail, 4 at most. Consecutive tool results
+  are merged into one user message so the tail stays where the cache expects
+  it. Source: Anthropic prompt-caching docs; opencode `cache-policy.ts:5-34`.
+- **Cache usage fields.** `Usage` gains cache-read and cache-write counts, and
+  `input_tokens` now means the whole prompt on every provider. They are parsed
+  from Anthropic (`cache_read_input_tokens`, `cache_creation_input_tokens`,
+  from both the stream's start and delta events), OpenAI and xAI
+  (`prompt_tokens_details.cached_tokens`), DeepSeek (`prompt_cache_hit_tokens`)
+  and llama-server (`timings.cache_n`). Phaze could not see a cache hit before
   ([models-and-local-runtime.md](research/models-and-local-runtime.md) section 0).
-- **OpenAI-compatible providers.** OpenAI gets `prompt_cache_key` set to the session
-  id, which raised hit rates from 60% to 87% in OpenAI's own report. xAI gets
-  `x-grok-conv-id`. Streams send `stream_options.include_usage` so usage is
-  reported at all.
-- **The bench gains a Claude-format run** that reports billed-equivalent tokens
-  from the breakpoints actually sent.
+  The CLI status line shows how much came from cache, and the cost estimate
+  prices Claude's reads at 0.1x and writes at 1.25x.
+- **The bench gains a Claude-format run.** It sends the real Anthropic request
+  bodies to a local server and bills them by the breakpoints actually sent,
+  using Anthropic's prefix and 20-block lookback rules.
 - **Moves:** effective cost on Claude (target: down 80% or more).
+
+### T3b: OpenAI-compatible caching hints
+- OpenAI gets `prompt_cache_key` set to the session id, which raised hit rates
+  from 60% to 87% in OpenAI's own report. xAI gets `x-grok-conv-id`. Streams
+  send `stream_options.include_usage`, only to providers known to accept it,
+  so usage is reported at all. These need the provider factory to pass a
+  session id, so they ship as their own PR.
 
 ### T4: a lean system prompt and a lean tool set
 - **System prompt.** `TOOL_GUIDELINES` repeats the tool schemas and lists tools
@@ -224,6 +233,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 |---|--:|--:|--:|--:|---|
 | Baseline (`fe95cec`) | 122,828 | - | 90.7% | 5 of 3,732 | Claude: nothing cached |
 | T2: stable prefix | 122,884 | +0.05% | 90.7% | 3,695 of 3,736 | Only the uncommitted-files line and the new message differ now. The new git heading adds 4 tokens per request. |
+| T3: Claude caching | 123,156 (Claude run) | +0.27% | 90.7% | 3,709 of 3,764 read from cache | Claude bill, in input-token units: **25,529 (20.7% of sent)**, from 111,666 read, 11,490 written, 0 uncached. The same bench on the T2 commit: 123,206 sent, 0 read, billed 100%. That is a **79.3% cut**, just short of the 80% target. The OpenAI run is unchanged from T2 (122,884). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
