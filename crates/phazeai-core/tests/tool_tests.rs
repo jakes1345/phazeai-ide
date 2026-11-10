@@ -152,9 +152,9 @@ async fn test_read_file_line_numbers() {
         .unwrap();
 
     let content = result["content"].as_str().unwrap();
-    // Check that line numbers are formatted correctly
-    assert!(content.contains("     1\tline 1"));
-    assert!(content.contains("     5\tline 5"));
+    // Each line starts with its number and a tab, without padding.
+    assert!(content.starts_with("1\tline 1\n"));
+    assert!(content.contains("\n5\tline 5"));
 }
 
 #[tokio::test]
@@ -755,4 +755,125 @@ async fn test_list_files_default_recursive() {
 
     // Should not include nested files with default recursive=false
     assert!(!file_names.iter().any(|n| n.contains("nested.txt")));
+}
+
+// ============================================================================
+// Caps that keep one result from filling the context
+// ============================================================================
+
+#[tokio::test]
+async fn a_read_without_a_limit_stops_at_2000_lines_and_says_where() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("big.txt");
+    let text: Vec<String> = (1..=2500).map(|i| format!("row {i}")).collect();
+    tokio::fs::write(&file, text.join("\n")).await.unwrap();
+
+    let out = ReadFileTool
+        .execute(json!({ "path": file.to_string_lossy() }))
+        .await
+        .unwrap();
+    assert_eq!(out["lines_shown"], 2000);
+    assert_eq!(out["total_lines"], 2500);
+    assert_eq!(out["first_line"], 1);
+    assert!(out["content"].as_str().unwrap().ends_with("2000\trow 2000"));
+
+    let told = phazeai_core::tools::render::for_model("read_file", &out);
+    assert!(told.ends_with("[lines 1-2000 of 2500; read on with offset 2001]"));
+
+    // An explicit limit is honoured past the default.
+    let all = ReadFileTool
+        .execute(json!({ "path": file.to_string_lossy(), "limit": 2500 }))
+        .await
+        .unwrap();
+    assert_eq!(all["lines_shown"], 2500);
+}
+
+#[tokio::test]
+async fn a_read_stops_at_50_kib_and_cuts_a_very_long_line() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("wide.txt");
+    let line = "x".repeat(5000);
+    tokio::fs::write(&file, vec![line.as_str(); 100].join("\n"))
+        .await
+        .unwrap();
+
+    let out = ReadFileTool
+        .execute(json!({ "path": file.to_string_lossy() }))
+        .await
+        .unwrap();
+    let content = out["content"].as_str().unwrap();
+    assert!(content.len() <= 50 * 1024, "{}", content.len());
+    assert_eq!(out["long_lines_cut"], true);
+    // Each kept line is its number, a tab and 2000 characters.
+    assert_eq!(content.lines().next().unwrap().len(), "1\t".len() + 2000);
+    let shown = out["lines_shown"].as_u64().unwrap();
+    assert!((20..100).contains(&shown), "{shown}");
+}
+
+#[tokio::test]
+async fn grep_stops_at_100_hits_and_cuts_long_lines() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("many.txt");
+    let mut lines: Vec<String> = (0..150).map(|i| format!("hit {i}")).collect();
+    lines[0] = format!("hit {}", "y".repeat(1000));
+    tokio::fs::write(&file, lines.join("\n")).await.unwrap();
+
+    let out = GrepTool
+        .execute(json!({ "pattern": "hit", "path": temp_dir.path().to_string_lossy() }))
+        .await
+        .unwrap();
+    assert_eq!(out["count"], 100);
+    assert_eq!(out["truncated"], true);
+    let first = out["matches"][0]["content"].as_str().unwrap();
+    assert_eq!(first.chars().count(), 301, "300 characters and an ellipsis");
+
+    let told = phazeai_core::tools::render::for_model("grep", &out);
+    assert!(told.ends_with("[stopped at 100; narrow the search to see the rest]"));
+}
+
+#[tokio::test]
+async fn searches_and_listings_skip_the_git_store() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    tokio::fs::create_dir_all(root.join(".git/objects"))
+        .await
+        .unwrap();
+    tokio::fs::write(root.join(".git/config"), "needle in git")
+        .await
+        .unwrap();
+    tokio::fs::write(root.join("a.txt"), "needle in tree")
+        .await
+        .unwrap();
+    tokio::fs::write(root.join(".env.example"), "hidden but wanted")
+        .await
+        .unwrap();
+    let path = root.to_string_lossy();
+
+    let grep = GrepTool
+        .execute(json!({ "pattern": "needle", "path": path }))
+        .await
+        .unwrap();
+    assert_eq!(grep["count"], 1, "{grep}");
+
+    let listing = ListFilesTool
+        .execute(json!({ "path": path, "recursive": true }))
+        .await
+        .unwrap();
+    let names: Vec<&str> = listing["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.iter().any(|n| n.starts_with(".git")), "{names:?}");
+    // Other hidden files still show.
+    assert!(names.contains(&".env.example"), "{names:?}");
+
+    let globbed = GlobTool
+        .execute(json!({ "pattern": "**/*", "path": path }))
+        .await
+        .unwrap();
+    let found = globbed["matches"].to_string();
+    assert!(!found.contains(".git/"), "{found}");
+    assert!(found.contains("a.txt"), "{found}");
 }

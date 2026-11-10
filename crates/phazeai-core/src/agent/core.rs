@@ -3,7 +3,7 @@ use crate::context::ConversationHistory;
 use crate::error::PhazeError;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
 use crate::tools::{
-    FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
+    render, FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -599,7 +599,7 @@ impl Agent {
                     let (success, result_str) = match action {
                         Action::Run => self.execute_tool(tool_call).await,
                         // What was reviewed, or nothing if the file changed since.
-                        Action::Write(write) => self.tool_outcome(write.commit()).await,
+                        Action::Write(write) => self.tool_outcome(tool_name, write.commit()).await,
                         Action::Fail(e) => (false, format!("Error: {e}")),
                     };
 
@@ -781,7 +781,7 @@ impl Agent {
         }
 
         if let Some(tool) = self.tools.get(tool_name) {
-            self.tool_outcome(tool.execute(params)).await
+            self.tool_outcome(tool_name, tool.execute(params)).await
         } else {
             (false, format!("Tool '{}' not found", tool_name))
         }
@@ -792,13 +792,17 @@ impl Agent {
     /// `bash` child is killed along with its process group, see `BashTool`),
     /// so Stop / Esc / Ctrl+C end a running `cargo build` instead of leaving
     /// it behind.
-    async fn tool_outcome(&self, work: impl Future<Output = ToolResult>) -> (bool, String) {
+    ///
+    /// A result is told as plain text ([`render::for_model`]), not as the
+    /// tool's JSON: it stays in the conversation and is paid for again on
+    /// every later request.
+    async fn tool_outcome(
+        &self,
+        tool: &str,
+        work: impl Future<Output = ToolResult>,
+    ) -> (bool, String) {
         match self.unless_cancelled(work).await {
-            Some(Ok(value)) => {
-                let result_str =
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-                (true, result_str)
-            }
+            Some(Ok(value)) => (true, render::for_model(tool, &value)),
             Some(Err(e)) => (false, format!("Error: {e}")),
             None => (false, INTERRUPTED.to_string()),
         }
@@ -1335,7 +1339,8 @@ mod tests {
             .filter(|m| m.tool_call_id.is_some())
             .map(|m| m.content.as_str())
             .collect();
-        assert_eq!(results, ["\"read_a\"", "\"read_b\"", "\"read_c\""]);
+        // A tool that returns a string is told as that string, not as JSON.
+        assert_eq!(results, ["read_a", "read_b", "read_c"]);
     }
 
     #[tokio::test]

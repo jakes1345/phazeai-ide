@@ -6,6 +6,13 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+/// Lines a read without a `limit` returns at most.
+const READ_MAX_LINES: usize = 2000;
+/// Bytes a read returns at most (line numbers included).
+const READ_MAX_BYTES: usize = 50 * 1024;
+/// Characters of one line a read keeps.
+const READ_MAX_LINE_CHARS: usize = 2000;
+
 pub struct ReadFileTool;
 
 #[async_trait::async_trait]
@@ -15,7 +22,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Supports optional line range with offset and limit parameters."
+        "Read a file, with line numbers. Returns at most 2000 lines; use offset and limit for the rest."
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -70,20 +77,44 @@ impl Tool for ReadFileTool {
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 
-        let selected: Vec<String> = lines
-            .into_iter()
-            .skip(offset)
-            .take(limit.unwrap_or(usize::MAX))
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
-            .collect();
+        // Without a limit, a read stops at READ_MAX_LINES lines or
+        // READ_MAX_BYTES bytes, whichever comes first, and says where to
+        // read on: one read of a generated file or a log must not fill the
+        // context. A line past READ_MAX_LINE_CHARS is cut.
+        let limit = limit.unwrap_or(READ_MAX_LINES);
+        let mut selected = String::new();
+        let mut shown = 0usize;
+        let mut long_lines_cut = false;
+        for (i, line) in lines.iter().enumerate().skip(offset).take(limit) {
+            let line = match line.char_indices().nth(READ_MAX_LINE_CHARS) {
+                Some((at, _)) => {
+                    long_lines_cut = true;
+                    &line[..at]
+                }
+                None => line,
+            };
+            let numbered = format!("{}\t{}", i + 1, line);
+            if shown > 0 && selected.len() + numbered.len() + 1 > READ_MAX_BYTES {
+                break;
+            }
+            if shown > 0 {
+                selected.push('\n');
+            }
+            selected.push_str(&numbered);
+            shown += 1;
+        }
 
-        Ok(serde_json::json!({
-            "content": selected.join("\n"),
+        let mut out = serde_json::json!({
+            "content": selected,
             "path": path,
             "total_lines": total_lines,
-            "lines_shown": selected.len(),
-        }))
+            "lines_shown": shown,
+            "first_line": offset + 1,
+        });
+        if long_lines_cut {
+            out["long_lines_cut"] = Value::Bool(true);
+        }
+        Ok(out)
     }
 }
 

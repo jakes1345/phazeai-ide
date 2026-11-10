@@ -4,6 +4,9 @@ use globset::{Glob as GlobPattern, GlobSetBuilder};
 use ignore::WalkBuilder;
 use serde_json::Value;
 
+/// Paths a glob returns at most; the result says when it stopped there.
+const MAX_MATCHES: usize = 500;
+
 pub struct GlobTool;
 
 #[async_trait::async_trait]
@@ -61,7 +64,10 @@ impl Tool for GlobTool {
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
-            .filter_entry(move |e| !policy.is_denied(&crate::privacy::absolutize(e.path())))
+            .filter_entry(move |e| {
+                !crate::tools::render::is_vcs_dir(e)
+                    && !policy.is_denied(&crate::privacy::absolutize(e.path()))
+            })
             .build();
 
         for entry in walker.flatten() {
@@ -76,15 +82,23 @@ impl Tool for GlobTool {
                 matches.push(entry_path.to_string_lossy().to_string());
             }
 
-            if matches.len() >= 1000 {
+            if matches.len() > MAX_MATCHES {
                 break;
             }
         }
 
-        Ok(serde_json::json!({
+        // One match past the cap was kept only to tell that there are more.
+        let truncated = matches.len() > MAX_MATCHES;
+        matches.truncate(MAX_MATCHES);
+        let mut out = serde_json::json!({
             "matches": matches,
             "count": matches.len(),
             "pattern": pattern,
-        }))
+        });
+        if truncated {
+            out["truncated"] = Value::Bool(true);
+            out["limit"] = Value::from(MAX_MATCHES);
+        }
+        Ok(out)
     }
 }
