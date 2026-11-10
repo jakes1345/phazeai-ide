@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use phazeai_core::mcp::{McpClient, McpManager, McpServerConfig, McpToolResult};
+use phazeai_core::tools::MORE_TOOLS;
 use phazeai_core::{
     Agent, LlmClient, LlmResponse, Message, PhazeError, StreamEvent, ToolDefinition,
 };
@@ -251,9 +252,20 @@ async fn agent_runs_the_servers_tools_through_the_bridge() {
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = ScriptedModel {
+        // A server's tools sit behind `more_tools`: the model asks for the
+        // schema, then runs the tool through it.
         turns: Mutex::new(VecDeque::from([
-            tool_call("call_1", READ, json!({ "path": note })),
-            tool_call("call_2", READ, json!({ "path": secret })),
+            tool_call("call_0", MORE_TOOLS, json!({ "name": READ })),
+            tool_call(
+                "call_1",
+                MORE_TOOLS,
+                json!({ "name": READ, "arguments": { "path": note } }),
+            ),
+            tool_call(
+                "call_2",
+                MORE_TOOLS,
+                json!({ "name": READ, "arguments": { "path": secret } }),
+            ),
             vec![
                 StreamEvent::TextDelta("done".to_string()),
                 StreamEvent::Done,
@@ -268,30 +280,42 @@ async fn agent_runs_the_servers_tools_through_the_bridge() {
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.len(),
-        3,
+        4,
         "one model turn per tool call, then the answer"
     );
 
-    // The model is offered the server's tool with the server's own schema.
-    let offered = requests[0]
-        .1
+    // The server's tool is a line in `more_tools`, not a schema on every
+    // request, and asking for it gives the server's own schema.
+    let offered = &requests[0].1;
+    assert!(
+        offered.iter().all(|t| t.name != READ),
+        "{READ} was sent as a full schema"
+    );
+    let more = offered
         .iter()
-        .find(|t| t.name == READ)
-        .unwrap_or_else(|| panic!("{READ} was not offered to the model"));
+        .find(|t| t.name == MORE_TOOLS)
+        .unwrap_or_else(|| panic!("{MORE_TOOLS} was not offered to the model"));
+    assert!(
+        more.description.contains(&format!("\n- {READ}: ")),
+        "{READ} is not listed in {MORE_TOOLS}: {}",
+        more.description
+    );
+    let described: Value = serde_json::from_str(tool_result(&requests[1].0, "call_0"))
+        .expect("the schema comes back as JSON");
+    assert_eq!(described["name"], READ);
     assert_eq!(
-        offered.parameters["properties"]["path"]["type"], "string",
-        "{READ} reached the model without its schema: {:?}",
-        offered.parameters
+        described["parameters"]["properties"]["path"]["type"], "string",
+        "{READ} came back without the server's schema: {described}"
     );
 
     // Inside the sandbox the model gets the file's exact text back.
-    let first = tool_result(&requests[1].0, "call_1");
+    let first = tool_result(&requests[2].0, "call_1");
     let value: Value = serde_json::from_str(first)
         .unwrap_or_else(|e| panic!("tool result is not the bridge's JSON ({e}): {first}"));
     assert_eq!(value["result"], NOTE, "{first}");
 
     // Outside it the server's refusal reaches the model as a failed call.
-    let second = tool_result(&requests[2].0, "call_2");
+    let second = tool_result(&requests[3].0, "call_2");
     assert!(second.contains("Access denied"), "{second}");
     assert!(!second.contains(SECRET), "leaked the file: {second}");
     let outcomes: Vec<(&str, bool)> = response
@@ -299,7 +323,8 @@ async fn agent_runs_the_servers_tools_through_the_bridge() {
         .iter()
         .map(|t| (t.tool_name.as_str(), t.success))
         .collect();
-    assert_eq!(outcomes, [(READ, true), (READ, false)]);
+    // The calls run, and are recorded, as the server's tool.
+    assert_eq!(outcomes, [(MORE_TOOLS, true), (READ, true), (READ, false)]);
     assert_eq!(response.content, "done");
 }
 

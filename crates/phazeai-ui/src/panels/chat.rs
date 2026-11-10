@@ -519,7 +519,7 @@ fn send_to_ai(job: SendToAiJob) {
             // Let the agent search the workspace's code.
             if let Some(search) = code_search {
                 agent.register_tool(Box::new(CodeSearchTool::new(search.clone())));
-                agent.register_tool(Box::new(BuildIndexTool::new(search)));
+                agent.register_deferred_tool(Box::new(BuildIndexTool::new(search)));
             }
 
             // Connect to MCP servers

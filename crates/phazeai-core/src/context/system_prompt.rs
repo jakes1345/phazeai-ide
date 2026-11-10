@@ -6,9 +6,10 @@ use crate::llm::context_budget::MIN_BUDGET;
 /// an active skill) may take in a system prompt.
 ///
 /// A quarter, because the rest of the budget has to carry everything else a
-/// request holds: the fixed part of the prompt (identity, tool guide, safety
-/// rules: about 1.5k tokens, over a third of the ~4k budget a local Ollama or
-/// LM Studio model gets), the question, and tool calls with their results.
+/// request holds: the fixed part of the prompt (identity, how to work, safety
+/// rules: about 260 tokens), the tool definitions (about 1.2k tokens, over a
+/// quarter of the ~4k budget a local Ollama or LM Studio model gets), the
+/// question, and tool calls with their results.
 /// Compaction keeps 40% of the budget as recent messages and lets its summary
 /// take 15% (`context::compaction`), which leaves 45% for the whole system
 /// prompt: a quarter for instructions and the rest for the fixed part, on
@@ -194,7 +195,7 @@ fn tools_can_read(path: &Path) -> bool {
 }
 
 /// Builds the system prompt for the AI coding assistant.
-/// Incorporates project context, available tools, and user instructions.
+/// Incorporates project context and user instructions.
 ///
 /// The prompt is sized to the model's context budget
 /// ([`Self::with_context_budget`]): instructions take at most
@@ -208,7 +209,6 @@ pub struct SystemPromptBuilder {
     git_branch: Option<String>,
     git_dirty_files: Vec<String>,
     instructions: Vec<Instructions>,
-    tool_names: Vec<String>,
     model_name: String,
     provider_name: String,
     context_budget: usize,
@@ -308,7 +308,6 @@ impl SystemPromptBuilder {
             git_branch: None,
             git_dirty_files: Vec::new(),
             instructions: Vec::new(),
-            tool_names: Vec::new(),
             model_name: String::new(),
             provider_name: String::new(),
             context_budget: MIN_BUDGET,
@@ -338,11 +337,6 @@ impl SystemPromptBuilder {
 
     pub fn with_custom_instructions(mut self, instructions: String) -> Self {
         self.instructions = vec![Instructions::new(instructions)];
-        self
-    }
-
-    pub fn with_tools(mut self, tool_names: Vec<String>) -> Self {
-        self.tool_names = tool_names;
         self
     }
 
@@ -441,33 +435,16 @@ impl SystemPromptBuilder {
     pub fn build(&self) -> String {
         let mut prompt = String::with_capacity(4096);
 
-        // Core identity
-        prompt.push_str(CORE_IDENTITY);
+        prompt.push_str(CORE_PROMPT);
 
         // Project context
         if let Some(ref root) = self.project_root {
-            prompt.push_str("\n\n## Project Context\n");
+            prompt.push_str("\n\n## Project\n");
             prompt.push_str(&format!("- Working directory: {}\n", root.display()));
             if let Some(ref pt) = self.project_type {
                 prompt.push_str(&format!("- Project type: {}\n", pt.name()));
             }
         }
-
-        // Available tools
-        if !self.tool_names.is_empty() {
-            prompt.push_str("\n\n## Available Tools\n");
-            prompt.push_str("You have the following tools available. Use them to help the user:\n");
-            for name in &self.tool_names {
-                prompt.push_str(&format!("- {}\n", name));
-            }
-        }
-
-        // Tool usage guidelines
-        prompt.push_str(PLANNING_GUIDELINES);
-        prompt.push_str(TOOL_GUIDELINES);
-
-        // Safety rules
-        prompt.push_str(SAFETY_RULES);
 
         // Custom project instructions, heading included, within their share
         // of the context budget.
@@ -511,101 +488,29 @@ impl Default for SystemPromptBuilder {
     }
 }
 
-const CORE_IDENTITY: &str = "\
-You are PhazeAI, an elite AI coding assistant. You are embedded deep within a developer's IDE, \
-possessing full read/write access to the codebase and the ability to execute terminal commands. \
-Your goal is to be the ultimate pair programmer: efficient, proactive, and technically flawless.
+/// The fixed part of every system prompt: who the agent is, how it works,
+/// and its safety rules. Kept short on purpose: it is sent with every request,
+/// and the tools describe themselves in their own definitions, so the prompt
+/// neither lists them nor shows how to call them (see
+/// `docs/token-efficiency-spec.md`, T4).
+const CORE_PROMPT: &str = "\
+You are PhazeAI, a coding agent in the user's IDE. You can read and change the project's files \
+and run commands. Do the task; don't just describe it.
 
-## Personality & Tone
-- **Direct & Technical**: Use professional engineering terminology. Avoid fluff.
-- **Concise**: If 10 words do the job, don't use 20.
-- **High Agency**: Don't just suggest; do. If a task requires 5 steps, plan and execute them.
-- **Flawless Code**: Write clean, idiomatic code. Respect existing patterns.
+## How to work
+- Find code with `grep` and `glob`, and read a file with `read_file` before you edit it.
+- Make the smallest change that does the job, in the style of the code around it.
+- Use `edit_file` for existing files; `write_file` is for new ones.
+- Make independent reads and searches in the same turn.
+- After a change, run the build or tests that cover it with `bash` and fix what fails.
+- For a task of several steps, give a short plan first.
+- Reply briefly: what you did and what is left.
 
-## Performance Principles
-- **Read First**: Always read a file before modifying it.
-- **Minimal Changes**: Don't refactor code that doesn't need to be touched.
-- **Verification**: After a change, verify it with `cargo check` or relevant tests.
-- **Error Handling**: Anticipate and handle edge cases in your code.";
-
-const PLANNING_GUIDELINES: &str = "\n\n## Multi-Turn Planning
-Before tackling complex tasks, outline your plan. Follow this workflow:
-1. **Analyze**: Use `grep`, `glob`, and `read_file` to understand the architecture.
-2. **Plan**: Describe the steps you will take.
-3. **Execute**: Modify files one by one, verifying as you go.
-4. **Finalize**: Run tests/builds and summarize your accomplishments.";
-
-const TOOL_GUIDELINES: &str = "\n\n## The PhazeAI Arsenal
-You have a powerful toolbox at your disposal (the exact list for this session is given above):
-
-### File System
-- `read_file`: Read contents (supports offset/limit for large files).
-- `write_file`: Create or overwrite files. Creates parent dirs automatically.
-- `edit_file`: Targeted search-and-replace for minimal diffs.
-- `find_path`: Regex-based file search (like `find` or `fd`).
-- `glob`: Search files using glob patterns.
-- `copy_path` / `move_path` / `delete_path`: Manage file lifecycle.
-- `create_directory`: Recursive directory creation.
-
-### Research & Analysis
-- `grep`: Fast text search within files (regex supported).
-- `list_files`: Non-recursive list of a directory.
-- `diagnostics`: Run `cargo check` or linters and parse structured errors.
-- `now`: Get current time/date for context.
-
-### Execution & External
-- `bash`: Run any terminal command. Use for builds, tests, and env setup.
-- `fetch`: Make HTTP requests to external APIs or documentation.
-- `web_search`: Search the internet via DuckDuckGo for docs and solutions.
-- `open`: Open a file or URL in the user's host environment.
-
-## Critical Tool Rules
-- **Prefer `edit_file`** over `write_file` for existing files to keep diffs tiny.
-- **Always verify** using `bash` after significant changes.
-- **Truncate large outputs**: If a tool returns too much data, summarize it.
-
-## Tool Call Examples
-
-### Example 1: Read → Edit → Verify workflow
-User: \"Fix the typo in main.rs on line 5\"
-
-Step 1 — Read the file first:
-Tool call: read_file({\"path\": \"src/main.rs\", \"offset\": 0, \"limit\": 50})
-
-Step 2 — Make the targeted edit:
-Tool call: edit_file({\"path\": \"src/main.rs\", \"old_text\": \"let messge = \", \"new_text\": \"let message = \"})
-
-Step 3 — Verify the fix compiles:
-Tool call: bash({\"command\": \"cargo check 2>&1 | head -20\"})
-
-### Example 2: Multi-file investigation
-User: \"Where is the database connection handled?\"
-
-Tool call: grep({\"pattern\": \"connection|connect|pool|database\", \"path\": \"src/\"})
-Then read relevant files based on results.
-
-### Example 3: Create a new module
-User: \"Add a caching module\"
-
-Step 1 — Check existing structure:
-Tool call: list_files({\"path\": \"src/\"})
-
-Step 2 — Write the new file:
-Tool call: write_file({\"path\": \"src/cache.rs\", \"content\": \"use std::collections::HashMap;\\n...\"})
-
-Step 3 — Update mod.rs:
-Tool call: edit_file({\"path\": \"src/lib.rs\", \"old_text\": \"mod utils;\", \"new_text\": \"mod cache;\\nmod utils;\"})
-
-Step 4 — Verify:
-Tool call: bash({\"command\": \"cargo check 2>&1\"})
-
-Always follow this pattern: Read → Plan → Execute → Verify.";
-
-const SAFETY_RULES: &str = "\n\n## Safety Rules
-- **Safe Deletion**: Refuse to delete critical system paths or huge chunks of the project without confirmation.
-- **Destructive Commands**: Always ask before running `rm -rf /`, `DROP DATABASE`, or force pushes.
-- **Secrets**: NEVER read or write `.env` files or hardcode API keys.
-- **Infinite Loops**: Monitor your own iteration count. If stuck, ask the user for a hint.";
+## Safety
+- Ask before deleting large parts of the project or running destructive commands \
+(`rm -rf`, `DROP`, force-push).
+- Never read, print or write secrets such as `.env` files or API keys.
+- If you are stuck after a few tries, stop and ask the user.";
 
 /// Collect git info for the system prompt.
 ///
@@ -658,35 +563,27 @@ pub fn collect_git_info(root: &Path) -> (Option<String>, Vec<String>) {
 pub(crate) mod tests {
 
     #[test]
-    fn every_tool_call_example_uses_the_tools_real_parameters() {
-        // Models copy these examples, so a parameter the tool does not take
-        // turns into a failed call (edit_file once showed search/replace).
+    fn every_tool_the_prompt_names_is_one_the_agent_has() {
+        // A name the model can't call turns into a failed call.
         let tools = crate::tools::ToolRegistry::default();
-        let mut checked = 0;
-        for line in TOOL_GUIDELINES.lines() {
-            let Some(call) = line.trim().strip_prefix("Tool call: ") else {
-                continue;
-            };
-            let (name, rest) = call.split_once('(').expect("name(args)");
-            let args: serde_json::Value =
-                serde_json::from_str(rest.strip_suffix(')').expect("ends with )"))
-                    .unwrap_or_else(|e| panic!("{line}: {e}"));
-            let tool = tools
-                .get(name)
-                .unwrap_or_else(|| panic!("example names unknown tool {name}"));
-            let schema = tool.parameters_schema();
-            let props = schema["properties"].as_object().expect("properties");
-            for key in args.as_object().expect("object").keys() {
-                assert!(
-                    props.contains_key(key),
-                    "{name} has no parameter `{key}` (it takes {:?})",
-                    props.keys().collect::<Vec<_>>()
-                );
-            }
-            checked += 1;
+        let named: Vec<&str> = CORE_PROMPT
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|w| w.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+        assert!(named.len() >= 6, "{named:?}");
+        for name in named {
+            assert!(tools.get(name).is_some(), "the prompt names `{name}`");
         }
-        assert!(checked >= 8, "only {checked} examples found");
     }
+
+    #[test]
+    fn the_fixed_part_of_the_prompt_stays_small() {
+        // Sent with every request: about 300 tokens at ~4 bytes a token.
+        assert!(CORE_PROMPT.len() <= 1_300, "{} bytes", CORE_PROMPT.len());
+    }
+
     use super::*;
 
     fn git(root: &Path, args: &[&str]) {
@@ -769,7 +666,6 @@ pub(crate) mod tests {
         let builder = |dirty: Vec<String>| {
             SystemPromptBuilder::new()
                 .with_project_root(PathBuf::from("/work/app"))
-                .with_tools(vec!["read_file".into(), "edit_file".into()])
                 .with_additional_instructions("Run cargo fmt before committing.".into())
                 .with_git_info(Some("main".into()), dirty)
                 .build()

@@ -172,18 +172,25 @@ first, then caching is switched on, then the prefix is made smaller.
   counts from OpenAI streams, which Phaze never had.
 
 ### T4: a lean system prompt and a lean tool set
-- **System prompt.** `TOOL_GUIDELINES` repeats the tool schemas and lists tools
-  that are not registered; it is cut to about 1 KB of rules. opencode's base
-  prompt is 756 bytes (`system.txt`). Source:
-  [token-saving.md](research/token-saving.md) C6, D8.
+- **System prompt.** `TOOL_GUIDELINES` repeated the tool schemas, listed tools
+  that were not registered and showed worked tool calls; the "Available Tools"
+  list repeated the tool definitions sent with the request. Both are gone. The
+  fixed part is now one block of rules, about 1 KB, which names only tools the
+  agent has (a test checks this). opencode's base prompt is 756 bytes
+  (`system.txt`). Source: [token-saving.md](research/token-saving.md) C6, D8.
 - **Tool set.** A coding session offers its core tools: read, write, edit, bash,
-  grep, glob, list and code search. Rare tools sit behind one `tool_search` call
-  that appends a tool's schema when it is first needed, so the prefix only ever
-  grows at the end. Sources: Anthropic tool search (77K to 8.7K upfront tokens,
-  accuracy 49% to 74%); Cursor (46.9% fewer tokens on MCP runs); opencode Code
-  Mode catalog budget (`codemode/catalog.ts:50-57`).
+  grep, glob, list and code search. The rest (web, file management, memory,
+  diagnostics, screenshots, the index rebuild, and every MCP tool) are held
+  back behind one `more_tools` tool, whose description gives each a line.
+  The model calls it with a name to get that tool's parameters (they come
+  back as a tool result, so the prefix only ever grows at the end), then with
+  the name and `arguments` to run it. The agent treats that second call as a
+  call of the tool itself: approval, diff review, events and the record all
+  see the real tool name and arguments. Sources: Anthropic tool search (77K to
+  8.7K upfront tokens, accuracy 49% to 74%); Cursor (46.9% fewer tokens on MCP
+  runs); opencode Code Mode catalog budget (`codemode/catalog.ts:50-57`).
 - **Moves:** raw input. This is the largest single cut on this task, because
-  tools plus prompt are 51% of all input.
+  tools plus prompt were 51% of all input.
 
 ### T5: compact tool results and bounded output
 - **Plain-text results.** Tool results go back as text, not pretty-printed JSON
@@ -251,6 +258,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | Baseline (`fe95cec`) | 122,828 | - | 90.7% | 5 of 3,732 | Claude: nothing cached |
 | T2: stable prefix | 122,884 | +0.05% | 90.7% | 3,695 of 3,736 | Only the uncommitted-files line and the new message differ now. The new git heading adds 4 tokens per request. |
 | T3: Claude caching | 123,156 (Claude run) | +0.27% | 90.7% | 3,709 of 3,764 read from cache | Claude bill, in input-token units: **25,529 (20.7% of sent)**, from 111,666 read, 11,490 written, 0 uncached. The same bench on the T2 commit: 123,206 sent, 0 read, billed 100%. That is a **79.3% cut**, just short of the 80% target. The OpenAI run is unchanged from T2 (122,884). |
+| T4: lean prompt and tools | 91,678 | -25.4% | 89.9% | 1,466 of 1,507 | Per request, the system prompt fell from 1,134 to 257 tokens and the tools from 23 schemas (2,557 tokens) to 8 schemas plus `more_tools` (1,205). Claude bill: **19,809 (21.6% of sent)** from 82,507 read and 9,247 written, an **83.9% cut** from the T2 commit's 123,206, past the 80% target. The raw target (61,000 or less) is not met yet: T5 is next. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

@@ -102,41 +102,39 @@ async fn test_model_router_drop_in_llm_client() {
 }
 
 #[test]
-fn test_system_prompt_contains_all_tools() {
+fn test_every_tool_is_offered_or_listed_in_more_tools() {
+    // Every tool the agent can call must reach the model: its definition is
+    // sent, or it has a line in `more_tools` (a hard-coded count went stale
+    // as tools were added).
     let registry = ToolRegistry::default();
-    let names: Vec<String> = registry
-        .list()
+    let defs = registry.definitions();
+    let more = defs
         .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-
-    let builder = SystemPromptBuilder::new().with_tools(names);
-
-    let prompt = builder.build();
-
-    // Verify specific tools from each category
-    assert!(prompt.contains("read_file"), "Should contain read_file");
-    assert!(prompt.contains("find_path"), "Should contain find_path");
-    assert!(prompt.contains("diagnostics"), "Should contain diagnostics");
-    assert!(prompt.contains("web_search"), "Should contain web_search");
-    assert!(prompt.contains("open"), "Should contain open");
-
-    // Verify count and workflow sections
-    // Every tool the agent can actually call must be documented in the prompt
-    // (a hard-coded count went stale as tools were added).
+        .find(|d| d.name == phazeai_core::tools::MORE_TOOLS)
+        .expect("held-back tools are listed in more_tools");
     for tool in registry.list() {
+        let name = tool.name();
+        let offered = defs.iter().any(|d| d.name == name);
+        let listed = more.description.contains(&format!("\n- {name}: "));
         assert!(
-            prompt.contains(tool.name()),
-            "System prompt does not mention registered tool `{}`",
-            tool.name()
+            offered != listed,
+            "`{name}` must be either offered or listed, once"
         );
     }
+    for core in [
+        "read_file",
+        "edit_file",
+        "write_file",
+        "grep",
+        "glob",
+        "bash",
+    ] {
+        assert!(defs.iter().any(|d| d.name == core), "{core} is not offered");
+    }
+
+    let prompt = SystemPromptBuilder::new().build();
     assert!(
-        prompt.contains("Multi-Turn Planning"),
-        "Should contain planning section"
-    );
-    assert!(
-        prompt.contains("Safety Rules"),
+        prompt.contains("## Safety"),
         "Should contain safety section"
     );
 }

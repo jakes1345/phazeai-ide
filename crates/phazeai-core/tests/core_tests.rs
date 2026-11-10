@@ -239,20 +239,14 @@ fn test_system_prompt_builder_with_git_info_includes_branch() {
 }
 
 #[test]
-fn test_system_prompt_builder_with_tools_lists_them() {
-    let tools = vec![
-        "read_file".to_string(),
-        "write_file".to_string(),
-        "grep".to_string(),
-    ];
-
-    let builder = SystemPromptBuilder::new().with_tools(tools);
-    let prompt = builder.build();
-
-    assert!(prompt.contains("Available Tools"));
-    assert!(prompt.contains("read_file"));
-    assert!(prompt.contains("write_file"));
-    assert!(prompt.contains("grep"));
+fn test_system_prompt_leaves_the_tools_to_their_definitions() {
+    // The tool definitions sent with each request describe the tools; a
+    // second list in the prompt only costs tokens.
+    let prompt = SystemPromptBuilder::new().build();
+    assert!(!prompt.contains("Available Tools"));
+    assert!(!prompt.contains("Tool call:"));
+    assert!(prompt.contains("edit_file"));
+    assert!(prompt.contains("## Safety"));
 }
 
 #[test]

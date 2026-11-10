@@ -867,16 +867,6 @@ pub(crate) fn apply_mode_prefix(mode: &str, input: &str) -> String {
 fn system_prompt_builder(root: &Path, extra_instructions: Option<&str>) -> SystemPromptBuilder {
     let mut builder = SystemPromptBuilder::new()
         .with_project_root(root.to_path_buf())
-        .with_tools(vec![
-            "read_file".into(),
-            "write_file".into(),
-            "edit_file".into(),
-            "bash".into(),
-            "grep".into(),
-            "glob".into(),
-            "list_files".into(),
-            "memory".into(),
-        ])
         .load_project_instructions();
 
     let (branch, dirty) = collect_git_info(root);
@@ -924,10 +914,11 @@ pub(crate) fn code_search(settings: &Settings) -> Option<CodeSearch> {
     Some(CodeSearch::new(root))
 }
 
-/// Give the agent the `code_search` and `build_search_index` tools.
+/// Give the agent `code_search`, and `build_search_index` behind `more_tools`
+/// (the index builds itself on the first search; a rebuild is rarely needed).
 pub(crate) fn register_code_search(agent: &mut Agent, search: &CodeSearch) {
     agent.register_tool(Box::new(CodeSearchTool::new(search.clone())));
-    agent.register_tool(Box::new(BuildIndexTool::new(search.clone())));
+    agent.register_deferred_tool(Box::new(BuildIndexTool::new(search.clone())));
 }
 
 #[cfg(test)]
