@@ -59,66 +59,21 @@ impl ClaudeClient {
         tools: &[ToolDefinition],
         stream: bool,
     ) -> Value {
-        // Separate system messages from conversation messages
-        let system_prompt: String = messages
+        let system: Vec<Value> = messages
             .iter()
             .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let conv_messages: Vec<Value> = messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .map(|m| {
-                if let Some(ref tool_call_id) = m.tool_call_id {
-                    serde_json::json!({
-                        "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": tool_call_id,
-                            "content": m.content,
-                        }]
-                    })
-                } else if let Some(ref tool_calls) = m.tool_calls {
-                    let mut content: Vec<Value> = Vec::new();
-                    if !m.content.is_empty() {
-                        content.push(serde_json::json!({
-                            "type": "text",
-                            "text": m.content,
-                        }));
-                    }
-                    for tc in tool_calls {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(Value::Object(Default::default()));
-                        content.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.function.name,
-                            "input": args,
-                        }));
-                    }
-                    serde_json::json!({
-                        "role": "assistant",
-                        "content": content,
-                    })
-                } else {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                    })
-                }
-            })
+            .flat_map(|m| system_blocks(&m.content))
             .collect();
+        let conversation = conversation_messages(messages);
 
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "messages": conv_messages,
+            "messages": conversation,
         });
 
-        if !system_prompt.is_empty() {
-            body["system"] = Value::String(system_prompt);
+        if !system.is_empty() {
+            body["system"] = Value::Array(system);
         }
 
         if !tools.is_empty() {
@@ -139,14 +94,204 @@ impl ClaudeClient {
             body["stream"] = Value::Bool(true);
         }
 
+        place_cache_breakpoints(&mut body);
         body
     }
+}
+
+/// Anthropic caches a prompt prefix only up to a `cache_control` breakpoint,
+/// and takes at most four per request.
+const MAX_BREAKPOINTS: usize = 4;
+
+fn ephemeral() -> Value {
+    serde_json::json!({ "type": "ephemeral" })
+}
+
+/// A system message as content blocks: the part every session shares (the
+/// base prompt and the project's instructions), then the part that is this
+/// session's own (its git state and the summary of compacted history), each in
+/// a block of its own so a breakpoint can sit between them. Empty blocks are
+/// left out, as the API refuses them.
+fn system_blocks(text: &str) -> Vec<Value> {
+    let summary = format!("\n\n{}", crate::context::SUMMARY_HEADING);
+    let split = if text.starts_with(crate::context::SUMMARY_HEADING) {
+        0
+    } else {
+        [
+            text.find(crate::context::system_prompt::GIT_HEADING),
+            text.find(&summary),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(text.len())
+    };
+    let (shared, own) = text.split_at(split);
+    [shared, own.trim_start_matches('\n')]
+        .into_iter()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| serde_json::json!({ "type": "text", "text": t }))
+        .collect()
+}
+
+/// The conversation in Anthropic's shape. The results of one turn's tool calls
+/// go back in a single user message, as the API documents for parallel calls
+/// (sending each in a message of its own teaches the model to stop calling
+/// tools in parallel).
+fn conversation_messages(messages: &[Message]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for m in messages.iter().filter(|m| m.role != Role::System) {
+        if let Some(ref tool_call_id) = m.tool_call_id {
+            let result = serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_call_id,
+                "content": m.content,
+            });
+            let previous_is_results = out.last().is_some_and(|prev: &Value| {
+                prev["role"] == "user"
+                    && prev["content"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().all(|b| b["type"] == "tool_result"))
+            });
+            if previous_is_results {
+                if let Some(content) = out
+                    .last_mut()
+                    .and_then(|prev| prev["content"].as_array_mut())
+                {
+                    content.push(result);
+                }
+            } else {
+                out.push(serde_json::json!({ "role": "user", "content": [result] }));
+            }
+        } else if let Some(ref tool_calls) = m.tool_calls {
+            let mut content: Vec<Value> = Vec::new();
+            if !m.content.is_empty() {
+                content.push(serde_json::json!({
+                    "type": "text",
+                    "text": m.content,
+                }));
+            }
+            for tc in tool_calls {
+                let args: Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(Value::Object(Default::default()));
+                content.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": args,
+                }));
+            }
+            out.push(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            }));
+        } else {
+            out.push(serde_json::json!({
+                "role": m.role,
+                "content": m.content,
+            }));
+        }
+    }
+    out
+}
+
+/// Mark the prefixes worth caching, in render order (tools, then system, then
+/// messages): the last tool definition (the tool schemas, the same for every
+/// session), the first and last system blocks (the shared base prompt, then
+/// this session's own part) and the conversation tail, which moves forward
+/// after each tool result so every request reads what the one before it
+/// wrote. This is the placement opencode uses by default
+/// (`packages/ai/src/cache-policy.ts`).
+fn place_cache_breakpoints(body: &mut Value) {
+    let mut placed = 0;
+    if let Some(last_tool) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+    {
+        last_tool["cache_control"] = ephemeral();
+        placed += 1;
+    }
+    if let Some(system) = body.get_mut("system").and_then(Value::as_array_mut) {
+        let last = system.len().saturating_sub(1);
+        for i in [0, last] {
+            if let Some(block) = system.get_mut(i) {
+                if block.get("cache_control").is_none() {
+                    block["cache_control"] = ephemeral();
+                    placed += 1;
+                }
+            }
+        }
+    }
+    if placed < MAX_BREAKPOINTS {
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            mark_conversation_tail(messages);
+        }
+    }
+}
+
+/// Put a breakpoint on the last block of the conversation that can carry one.
+/// A plain string content becomes a text block, since only blocks take
+/// `cache_control`; an empty text (which the API refuses as a block) is passed
+/// over for the message before it.
+fn mark_conversation_tail(messages: &mut [Value]) {
+    for message in messages.iter_mut().rev() {
+        let content = &mut message["content"];
+        if let Some(text) = content.as_str() {
+            if text.is_empty() {
+                continue;
+            }
+            *content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": ephemeral(),
+            }]);
+            return;
+        }
+        let block = content.as_array_mut().and_then(|blocks| {
+            blocks
+                .iter_mut()
+                .rev()
+                .find(|b| b["type"] != "text" || b["text"].as_str().is_some_and(|t| !t.is_empty()))
+        });
+        if let Some(block) = block {
+            block["cache_control"] = ephemeral();
+            return;
+        }
+    }
+}
+
+/// Anthropic's token counts as a [`Usage`]. Its `input_tokens` is only the
+/// part of the prompt after the last cache breakpoint that was neither read
+/// from nor written to the cache, so the whole prompt is the sum of the three.
+///
+/// A stream reports the counts in two events: `message_start` carries the
+/// input side and `message_delta` the output (and, from newer API versions,
+/// the input side again, cumulatively). Fields in `delta` win over `start`.
+fn claude_usage(start: Option<&Value>, delta: Option<&Value>) -> Option<Usage> {
+    let field = |key: &str| -> u32 {
+        delta
+            .and_then(|d| d.get(key))
+            .and_then(Value::as_u64)
+            .or_else(|| start.and_then(|s| s.get(key)).and_then(Value::as_u64))
+            .unwrap_or(0) as u32
+    };
+    let uncached = field("input_tokens");
+    let read = field("cache_read_input_tokens");
+    let written = field("cache_creation_input_tokens");
+    let usage = Usage {
+        input_tokens: uncached + read + written,
+        output_tokens: field("output_tokens"),
+        cache_read_tokens: read,
+        cache_write_tokens: written,
+    };
+    (usage.input_tokens > 0 || usage.output_tokens > 0).then_some(usage)
 }
 
 #[derive(Debug, Deserialize)]
 struct ClaudeApiResponse {
     content: Vec<ClaudeContent>,
-    usage: Option<ClaudeUsage>,
+    usage: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,12 +306,6 @@ struct ClaudeContent {
     name: Option<String>,
     #[serde(default)]
     input: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeUsage {
-    input_tokens: u32,
-    output_tokens: u32,
 }
 
 #[async_trait::async_trait]
@@ -232,10 +371,7 @@ impl LlmClient for ClaudeClient {
 
         Ok(LlmResponse {
             message,
-            usage: api_response.usage.map(|u| Usage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-            }),
+            usage: claude_usage(None, api_response.usage.as_ref()),
         })
     }
 
@@ -278,6 +414,10 @@ impl LlmClient for ClaudeClient {
             // Maps content_block index → tool_use id, so delta events can find their tool call
             let mut tool_block_ids: std::collections::HashMap<u64, String> =
                 std::collections::HashMap::new();
+            // The input-side counts arrive in `message_start`, the output in
+            // `message_delta`; one Usage event is sent from the two.
+            let mut start_usage: Option<Value> = None;
+            let mut usage_sent = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -375,30 +515,23 @@ impl LlmClient for ClaudeClient {
                                     let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
                                 }
                             }
+                            Some("message_start") => {
+                                start_usage = event.pointer("/message/usage").cloned();
+                            }
                             Some("message_delta") => {
-                                // Claude emits usage in message_delta at the end
-                                if let Some(usage) = event.get("usage") {
-                                    let input = usage
-                                        .get("input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let output = usage
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    if input > 0 || output > 0 {
-                                        let _ = tx.unbounded_send(StreamEvent::Usage(
-                                            crate::llm::Usage {
-                                                input_tokens: input,
-                                                output_tokens: output,
-                                            },
-                                        ));
-                                    }
+                                if let Some(usage) =
+                                    claude_usage(start_usage.as_ref(), event.get("usage"))
+                                {
+                                    usage_sent = true;
+                                    let _ = tx.unbounded_send(StreamEvent::Usage(usage));
                                 }
                             }
                             Some("message_stop") => {
+                                if !usage_sent {
+                                    if let Some(usage) = claude_usage(start_usage.as_ref(), None) {
+                                        let _ = tx.unbounded_send(StreamEvent::Usage(usage));
+                                    }
+                                }
                                 let _ = tx.unbounded_send(StreamEvent::Done);
                                 return;
                             }
@@ -412,5 +545,242 @@ impl LlmClient for ClaudeClient {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::system_prompt::GIT_HEADING;
+    use crate::context::SUMMARY_HEADING;
+    use serde_json::json;
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.into(),
+            description: format!("{name} things"),
+            parameters: json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: "{}".into(),
+            },
+        }
+    }
+
+    fn breakpoints(body: &Value) -> Vec<String> {
+        let mut found = Vec::new();
+        for (i, t) in body["tools"].as_array().into_iter().flatten().enumerate() {
+            if t.get("cache_control").is_some() {
+                found.push(format!("tools[{i}]"));
+            }
+        }
+        for (i, b) in body["system"].as_array().into_iter().flatten().enumerate() {
+            if b.get("cache_control").is_some() {
+                found.push(format!("system[{i}]"));
+            }
+        }
+        for (i, m) in body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for (j, b) in m["content"].as_array().into_iter().flatten().enumerate() {
+                if b.get("cache_control").is_some() {
+                    found.push(format!("messages[{i}][{j}]"));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_shared_prompt_the_sessions_own_part_and_the_tail_are_cached() {
+        let base = "You are Phaze.\n\n## Project-Specific Instructions\nUse tabs.";
+        let system =
+            format!("{base}{GIT_HEADING}- Git branch: main\n\n{SUMMARY_HEADING}\nFixed the port.");
+        let messages = [
+            Message::system(system),
+            Message::user("Add a test"),
+            Message::assistant_with_tools("", vec![call("c1", "read_file"), call("c2", "grep")]),
+            Message::tool_result("c1", "fn main() {}"),
+            Message::tool_result("c2", "src/main.rs:1"),
+        ];
+        let client = ClaudeClient::new("k");
+        let body = client.build_request_body(&messages, &[tool("grep"), tool("read_file")], true);
+
+        // The base prompt is a block of its own, so its breakpoint is shared
+        // by every session; the git state and summary follow it.
+        assert_eq!(body["system"][0]["text"], base);
+        assert_eq!(
+            body["system"][1]["text"],
+            format!("## Git Status\n- Git branch: main\n\n{SUMMARY_HEADING}\nFixed the port.")
+        );
+        // Both tool results go back in one user message.
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(body["messages"][2]["role"], "user");
+        assert_eq!(body["messages"][2]["content"][1]["tool_use_id"], "c2");
+        assert_eq!(
+            breakpoints(&body),
+            ["tools[1]", "system[0]", "system[1]", "messages[2][1]"]
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_nothing_session_specific_has_one_system_block() {
+        let messages = [Message::system("You are Phaze."), Message::user("hi")];
+        let body = ClaudeClient::new("k").build_request_body(&messages, &[], false);
+        assert_eq!(body["system"].as_array().unwrap().len(), 1);
+        // A string message becomes a text block so it can carry the marker.
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{ "type": "text", "text": "hi", "cache_control": { "type": "ephemeral" } }])
+        );
+        assert_eq!(breakpoints(&body), ["system[0]", "messages[0][0]"]);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn a_summary_without_a_system_prompt_is_the_only_block() {
+        let summary = format!("{SUMMARY_HEADING}\nEarlier work.");
+        let blocks = system_blocks(&summary);
+        assert_eq!(blocks, vec![json!({ "type": "text", "text": summary })]);
+    }
+
+    #[test]
+    fn the_tail_marker_skips_an_empty_reply() {
+        let messages = [Message::user("hi"), Message::assistant("")];
+        let body = ClaudeClient::new("k").build_request_body(&messages, &[], false);
+        assert_eq!(breakpoints(&body), ["messages[0][0]"]);
+        assert_eq!(body["messages"][1]["content"], "");
+    }
+
+    #[test]
+    fn no_request_has_more_than_four_breakpoints() {
+        let messages = [
+            Message::system(format!("Base{GIT_HEADING}- Git branch: x")),
+            Message::user("go"),
+        ];
+        let tools: Vec<ToolDefinition> = (0..30).map(|i| tool(&format!("t{i:02}"))).collect();
+        let body = ClaudeClient::new("k").build_request_body(&messages, &tools, true);
+        assert_eq!(breakpoints(&body).len(), MAX_BREAKPOINTS);
+    }
+
+    #[test]
+    fn usage_counts_the_whole_prompt_with_its_cached_parts() {
+        let start = json!({
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 300,
+            "cache_read_input_tokens": 4000,
+            "output_tokens": 1,
+        });
+        let delta = json!({ "output_tokens": 57 });
+        assert_eq!(
+            claude_usage(Some(&start), Some(&delta)),
+            Some(Usage {
+                input_tokens: 4312,
+                output_tokens: 57,
+                cache_read_tokens: 4000,
+                cache_write_tokens: 300,
+            })
+        );
+        // A delta that repeats the input side (newer API versions) wins.
+        let delta =
+            json!({ "input_tokens": 12, "cache_read_input_tokens": 4100, "output_tokens": 9 });
+        let usage = claude_usage(Some(&start), Some(&delta)).unwrap();
+        assert_eq!((usage.input_tokens, usage.cache_read_tokens), (4412, 4100));
+        assert_eq!(claude_usage(None, None), None);
+    }
+
+    /// Serve one SSE response on a local port and return its base URL.
+    async fn serve_once(body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len: usize = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(response.as_bytes()).await.unwrap();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_stream_reports_one_usage_from_its_start_and_delta_events() {
+        let events = [
+            json!({ "type": "message_start", "message": { "usage": {
+                "input_tokens": 20, "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 3700, "output_tokens": 1 } } }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Done." } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 3 } }),
+            json!({ "type": "message_stop" }),
+        ];
+        let body: String = events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+            .collect();
+        let url = serve_once(body).await;
+        let client = ClaudeClient::new("k").with_base_url(url).without_proxy();
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        let mut usages = Vec::new();
+        let mut text = String::new();
+        while let Some(event) = rx.next().await {
+            match event {
+                StreamEvent::Usage(u) => usages.push(u),
+                StreamEvent::TextDelta(t) => text.push_str(&t),
+                StreamEvent::Done => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(text, "Done.");
+        assert_eq!(
+            usages,
+            [Usage {
+                input_tokens: 3720,
+                output_tokens: 3,
+                cache_read_tokens: 3700,
+                cache_write_tokens: 0,
+            }]
+        );
     }
 }

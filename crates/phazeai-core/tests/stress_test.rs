@@ -447,9 +447,13 @@ impl LlmClient for ScriptedModel {
         }
         send(
             &tx,
+            // As a caching provider reports it: all but the newest message
+            // read from the cache, the newest written to it.
             StreamEvent::Usage(Usage {
                 input_tokens: messages.len() as u32,
                 output_tokens: 1,
+                cache_read_tokens: messages.len() as u32 - 1,
+                cache_write_tokens: 1,
             }),
         );
         send(&tx, StreamEvent::Done);
@@ -1053,10 +1057,16 @@ async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
     let input: u64 = requests.iter().map(|r| r.len() as u64).sum();
     assert_eq!(response.total_input_tokens, input);
     assert_eq!(response.total_output_tokens, (ROUNDS + 1) as u64);
+    let calls = (ROUNDS + 1) as u64;
+    assert_eq!(response.total_cache_read_tokens, input - calls);
+    assert_eq!(response.total_cache_write_tokens, calls);
     assert!(run.events.iter().any(|e| matches!(
         e,
-        AgentEvent::TokenUsage { input_tokens, output_tokens }
-            if *input_tokens == input && *output_tokens == (ROUNDS + 1) as u64
+        AgentEvent::TokenUsage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }
+            if *input_tokens == input
+                && *output_tokens == calls
+                && *cache_read_tokens == input - calls
+                && *cache_write_tokens == calls
     )));
 
     let history = agent.get_conversation_history().await;

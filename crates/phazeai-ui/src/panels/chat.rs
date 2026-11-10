@@ -583,6 +583,7 @@ fn send_to_ai(job: SendToAiJob) {
                         AgentEvent::TokenUsage {
                             input_tokens,
                             output_tokens,
+                            ..
                         } => {
                             let _ = update_tx.send(ChatUpdate::TokenUsage {
                                 input: input_tokens,

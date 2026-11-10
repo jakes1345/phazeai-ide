@@ -93,10 +93,21 @@ pub struct LlmResponse {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Token counts for one request.
+///
+/// `input_tokens` is the whole prompt, whether or not the provider served part
+/// of it from its prompt cache. `cache_read_tokens` is the part it read from
+/// that cache (billed at a fraction of the input price) and
+/// `cache_write_tokens` the part it wrote to it (Anthropic bills a write above
+/// the input price; the other providers cache for free and report none).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 /// Events emitted during streaming LLM responses.

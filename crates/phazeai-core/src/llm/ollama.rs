@@ -162,10 +162,13 @@ impl LlmClient for OllamaClient {
             Message::assistant_with_tools(content, tool_calls)
         };
 
-        // Extract usage from final_data
+        // Extract usage from final_data. Ollama reports no cache count:
+        // `prompt_eval_count` is the prompt tokens it evaluated, so a prefix it
+        // kept from the previous request is simply not counted.
         let usage = response.final_data.map(|fd| Usage {
             input_tokens: fd.prompt_eval_count as u32,
             output_tokens: fd.eval_count as u32,
+            ..Usage::default()
         });
 
         Ok(LlmResponse { message, usage })

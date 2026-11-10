@@ -206,6 +206,8 @@ pub(crate) struct AppState {
     queued: VecDeque<String>,
     tokens_in: u64,
     tokens_out: u64,
+    /// Of `tokens_in`, the tokens the provider served from its prompt cache.
+    tokens_cached: u64,
     cost: f64,
     context_tokens: Option<usize>,
     /// Conversation tokens the agent may send before compacting.
@@ -608,14 +610,21 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::TokenUsage {
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         } => {
             state.tokens_in += input_tokens;
             state.tokens_out += output_tokens;
-            state.cost += setup::estimate_cost(
+            state.tokens_cached += cache_read_tokens;
+            state.cost += setup::estimate_cached_cost(
                 &state.settings.llm.provider,
                 &state.settings.llm.model,
-                input_tokens,
-                output_tokens,
+                setup::RunTokens {
+                    input: input_tokens,
+                    output: output_tokens,
+                    cache_read: cache_read_tokens,
+                    cache_write: cache_write_tokens,
+                },
             );
         }
         AgentEvent::Complete { .. } => {
@@ -694,6 +703,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         queued: VecDeque::new(),
         tokens_in: 0,
         tokens_out: 0,
+        tokens_cached: 0,
         cost: 0.0,
         context_tokens: None,
         context_budget,
@@ -1000,6 +1010,7 @@ mod tests {
             queued: VecDeque::new(),
             tokens_in: 0,
             tokens_out: 0,
+            tokens_cached: 0,
             cost: 0.0,
             context_tokens: None,
             context_budget,

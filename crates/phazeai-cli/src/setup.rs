@@ -163,6 +163,35 @@ pub fn estimate_cost(p: &LlmProvider, model: &str, input: u64, output: u64) -> f
     (input as f64 * inp + output as f64 * out) / 1_000_000.0
 }
 
+/// A run's token counts, as the agent reports them: `input` is every prompt
+/// token, including the `cache_read` tokens served from the provider's prompt
+/// cache and the `cache_write` tokens written to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+/// [`estimate_cost`] with the prompt cache priced in. Anthropic publishes its
+/// cache prices as multiples of the input price: a read costs 0.1x and a
+/// 5-minute write 1.25x (newer models read for less, so this is an upper
+/// bound). Other providers' cached price differs by model and is not in the
+/// model table, so their cache reads are charged at the full input price,
+/// which again errs high.
+pub fn estimate_cached_cost(p: &LlmProvider, model: &str, tokens: RunTokens) -> f64 {
+    if !matches!(p, LlmProvider::Claude) {
+        return estimate_cost(p, model, tokens.input, tokens.output);
+    }
+    let read = tokens.cache_read.min(tokens.input);
+    let write = tokens.cache_write.min(tokens.input - read);
+    let full_price = tokens.input - read - write;
+    let one_input_token = estimate_cost(p, model, 1_000_000, 0) / 1_000_000.0;
+    estimate_cost(p, model, full_price, tokens.output)
+        + one_input_token * (read as f64 * 0.1 + write as f64 * 1.25)
+}
+
 fn config_path_display() -> String {
     let p = Settings::config_path();
     let s = p.display().to_string();
@@ -398,6 +427,36 @@ mod tests {
         assert_eq!(c, 0.0);
         let c = estimate_cost(&LlmProvider::Claude, "claude-unknown-sonnet", 0, 1_000_000);
         assert!((c - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn claude_cache_reads_and_writes_are_priced_from_the_input_price() {
+        // claude-opus-4-6 is $15 per million input tokens and $75 output.
+        let model = "claude-opus-4-6";
+        let all_fresh = RunTokens {
+            input: 1_000_000,
+            ..RunTokens::default()
+        };
+        let c = estimate_cached_cost(&LlmProvider::Claude, model, all_fresh);
+        assert!((c - 15.0).abs() < 1e-9);
+
+        // 800k read at 0.1x, 100k written at 1.25x, 100k fresh, 10k out.
+        let cached = RunTokens {
+            input: 1_000_000,
+            output: 10_000,
+            cache_read: 800_000,
+            cache_write: 100_000,
+        };
+        let c = estimate_cached_cost(&LlmProvider::Claude, model, cached);
+        let expected = 0.8 * 15.0 * 0.1 + 0.1 * 15.0 * 1.25 + 0.1 * 15.0 + 0.01 * 75.0;
+        assert!((c - expected).abs() < 1e-9, "{c} vs {expected}");
+
+        // Elsewhere a cache read is charged at the full input price.
+        let c = estimate_cached_cost(&LlmProvider::OpenAI, "gpt-unknown", cached);
+        assert!(
+            (c - estimate_cost(&LlmProvider::OpenAI, "gpt-unknown", 1_000_000, 10_000)).abs()
+                < 1e-9
+        );
     }
 
     #[test]

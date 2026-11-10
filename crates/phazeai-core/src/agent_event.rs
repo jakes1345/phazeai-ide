@@ -24,9 +24,14 @@ pub enum AgentEvent {
     Complete {
         iterations: usize,
     },
+    /// The run's token counts. `input_tokens` includes the prompt tokens the
+    /// provider served from its cache (`cache_read_tokens`) or wrote to it
+    /// (`cache_write_tokens`).
     TokenUsage {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
     },
     Error(String),
     /// Older messages were summarised to stay within the context budget.

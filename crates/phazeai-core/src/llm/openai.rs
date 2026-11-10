@@ -38,6 +38,39 @@ fn is_version_segment(seg: &str) -> bool {
     digits > 0 && matches!(&rest[digits..], "" | "beta" | "alpha")
 }
 
+/// The token counts in an OpenAI-compatible response or final stream chunk,
+/// or `None` when it carries none.
+///
+/// How much of the prompt came from the provider's cache is reported three
+/// ways: `usage.prompt_tokens_details.cached_tokens` (OpenAI, xAI, and most
+/// compatible servers), `usage.prompt_cache_hit_tokens` (DeepSeek, whose
+/// `prompt_tokens` is the hit plus the miss count) and `timings` (llama.cpp's
+/// llama-server: `cache_n` tokens reused and `prompt_n` tokens processed, which
+/// together are the prompt). llama-server's `timings` is preferred because its
+/// documentation calls `cache_n` the number reused from cache.
+pub(crate) fn parse_usage(body: &Value) -> Option<Usage> {
+    let count = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).map(|n| n as u32);
+    let usage = body.get("usage").filter(|u| u.is_object());
+    let timings = body.get("timings").filter(|t| t.is_object());
+    let mut out = Usage::default();
+    if let Some(u) = usage {
+        out.input_tokens = count(u, "prompt_tokens").unwrap_or(0);
+        out.output_tokens = count(u, "completion_tokens").unwrap_or(0);
+        out.cache_read_tokens = u
+            .get("prompt_tokens_details")
+            .and_then(|d| count(d, "cached_tokens"))
+            .or_else(|| count(u, "prompt_cache_hit_tokens"))
+            .unwrap_or(0);
+    }
+    if let Some(t) = timings {
+        if let (Some(processed), Some(reused)) = (count(t, "prompt_n"), count(t, "cache_n")) {
+            out.input_tokens = processed + reused;
+            out.cache_read_tokens = reused;
+        }
+    }
+    (out.input_tokens > 0 || out.output_tokens > 0).then_some(out)
+}
+
 impl OpenAIClient {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
@@ -87,7 +120,6 @@ impl OpenAIClient {
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
-    usage: Option<OpenAIUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,12 +146,6 @@ struct OpenAIToolCall {
 struct OpenAIFunction {
     name: String,
     arguments: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAIUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,7 +234,10 @@ impl LlmClient for OpenAIClient {
             )));
         }
 
-        let api_response: OpenAIResponse = serde_json::from_str(&response_text)
+        let raw: Value = serde_json::from_str(&response_text)
+            .map_err(|e| PhazeError::Llm(format!("Failed to parse response: {e}")))?;
+        let usage = parse_usage(&raw);
+        let api_response: OpenAIResponse = serde_json::from_value(raw)
             .map_err(|e| PhazeError::Llm(format!("Failed to parse response: {e}")))?;
 
         let choice = api_response
@@ -238,13 +267,7 @@ impl LlmClient for OpenAIClient {
             Message::assistant_with_tools(content, tool_calls)
         };
 
-        Ok(LlmResponse {
-            message,
-            usage: api_response.usage.map(|u| Usage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
-            }),
-        })
+        Ok(LlmResponse { message, usage })
     }
 
     async fn chat_stream(
@@ -371,21 +394,8 @@ impl LlmClient for OpenAIClient {
                     if let Ok(event) = serde_json::from_str::<Value>(data) {
                         // OpenAI stream_options: { include_usage: true } emits usage
                         // on the final chunk (choices=[]) — capture it here.
-                        if let Some(usage) = event.get("usage") {
-                            let input = usage
-                                .get("prompt_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32;
-                            let output = usage
-                                .get("completion_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32;
-                            if input > 0 || output > 0 {
-                                let _ = tx.unbounded_send(StreamEvent::Usage(crate::llm::Usage {
-                                    input_tokens: input,
-                                    output_tokens: output,
-                                }));
-                            }
+                        if let Some(usage) = parse_usage(&event) {
+                            let _ = tx.unbounded_send(StreamEvent::Usage(usage));
                         }
 
                         if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
@@ -603,5 +613,71 @@ mod stream_tests {
         }
         assert_eq!(ended, vec!["call_a", "call_b"]);
         assert!(done);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn openai_and_xai_report_cached_tokens_in_the_prompt_details() {
+        let body = json!({ "usage": {
+            "prompt_tokens": 3000,
+            "completion_tokens": 40,
+            "prompt_tokens_details": { "cached_tokens": 2560 },
+        }});
+        let usage = parse_usage(&body).unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 3000,
+                output_tokens: 40,
+                cache_read_tokens: 2560,
+                cache_write_tokens: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn deepseek_reports_its_cache_hits_beside_the_prompt_total() {
+        let body = json!({ "usage": {
+            "prompt_tokens": 1200,
+            "completion_tokens": 7,
+            "prompt_cache_hit_tokens": 1024,
+            "prompt_cache_miss_tokens": 176,
+        }});
+        let usage = parse_usage(&body).unwrap();
+        assert_eq!((usage.input_tokens, usage.cache_read_tokens), (1200, 1024));
+    }
+
+    #[test]
+    fn llama_server_timings_give_the_reused_and_processed_prompt_tokens() {
+        // `usage` alone says nothing was cached; `timings` says 236 tokens
+        // were reused and 12 processed, so the prompt was 248 tokens.
+        let body = json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 30,
+                "prompt_tokens_details": { "cached_tokens": 0 },
+            },
+            "timings": { "prompt_n": 12, "cache_n": 236 },
+        });
+        let usage = parse_usage(&body).unwrap();
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens
+            ),
+            (248, 30, 236)
+        );
+    }
+
+    #[test]
+    fn a_body_without_counts_has_no_usage() {
+        assert_eq!(parse_usage(&json!({ "choices": [] })), None);
+        assert_eq!(parse_usage(&json!({ "usage": null })), None);
     }
 }
