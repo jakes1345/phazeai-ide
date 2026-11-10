@@ -921,6 +921,8 @@ pub(crate) fn register_code_search(agent: &mut Agent, search: &CodeSearch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod token_bench;
     use phazeai_core::context::system_prompt::instructions_allowance;
     use phazeai_core::llm::OpenAIClient;
     use serde_json::{json, Value};

@@ -1,0 +1,8 @@
+[package]
+name = "tally"
+version = "0.3.1"
+edition = "2021"
+description = "A small counter service: named counters over HTTP, kept in memory."
+license = "MIT"
+
+[dependencies]
