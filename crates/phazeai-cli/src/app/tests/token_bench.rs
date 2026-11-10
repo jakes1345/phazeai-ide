@@ -736,3 +736,201 @@ async fn token_bench() {
         b.read, b.total
     );
 }
+
+/// The questions of the long session, one per user message.
+const LONG_ASKS: &[&str] = &[
+    "Walk me through how a request reaches the store.",
+    "Where is the port read, and what happens when it is missing?",
+    "How does logging work, and where is it called from?",
+    "Which routes exist, and which of them write to the store?",
+    "What do the tests cover today, and what is missing?",
+    "How does the server shut down, and could it lose writes?",
+    "Summarise the main types and who owns them.",
+    "Which functions are public, and which of them have no test?",
+];
+
+/// The model's side of the long session: for each question, two files
+/// read together, a search, a third file, then the answer. The files rotate
+/// through the project, so the conversation keeps growing until it has to be
+/// compacted.
+fn long_script(root: &Path) -> Vec<Turn> {
+    let p = |rel: &str| root.join(rel).display().to_string();
+    let files = [
+        "src/config.rs",
+        "src/server.rs",
+        "src/routes.rs",
+        "src/store.rs",
+        "src/log.rs",
+        "src/main.rs",
+        "tests/config.rs",
+        "README.md",
+        "src/lib.rs",
+    ];
+    let searches = [
+        "pub fn",
+        "impl ",
+        "use ",
+        "struct ",
+        "#\\[test\\]",
+        "fn main",
+        "Store",
+        "warn",
+    ];
+    let mut turns = Vec::new();
+    for (k, _) in LONG_ASKS.iter().enumerate() {
+        let f = |i: usize| p(files[(k * 3 + i) % files.len()]);
+        turns.push(turn(
+            "",
+            vec![
+                ("read_file", json!({ "path": f(0) })),
+                ("read_file", json!({ "path": f(1) })),
+            ],
+        ));
+        turns.push(turn(
+            "",
+            vec![(
+                "grep",
+                json!({ "pattern": searches[k % searches.len()], "path": p("src") }),
+            )],
+        ));
+        turns.push(turn("", vec![("read_file", json!({ "path": f(2) }))]));
+        turns.push(turn(
+            "Here is what I found: the code paths are as described in the files above.",
+            vec![],
+        ));
+    }
+    turns
+}
+
+/// The summary the model writes when the conversation is compacted, as a
+/// whole (not streamed) Anthropic response. Its length is fixed so every
+/// run bills the same.
+fn claude_summary() -> String {
+    let text = "**Goal**: answer questions about the tally service.\n\
+                **Work done**: read the config, server, routes, store and log modules; \
+                searched for public functions, impls, structs and tests.\n\
+                **Findings**: requests go from routes to the store; the port comes \
+                from PORT with a default; logging is a thin wrapper used by config.\n\
+                **Open items**: none.";
+    json!({
+        "id": "msg_summary",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [{ "type": "text", "text": text }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 0, "output_tokens": 0 },
+    })
+    .to_string()
+}
+
+/// A long session with a small context budget, so it has to be compacted
+/// more than once: what it sends, and what Anthropic bills for it given the
+/// cache breakpoints the requests carry. Compaction and trimming are where a
+/// long session loses its cache, which the short bench never reaches.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "report, not a check; sets process-wide state (run with --ignored)"]
+async fn long_session_bench() {
+    let _home = EnvGuard::set(
+        "HOME",
+        &std::env::temp_dir().join("phaze-token-bench").join("home"),
+    );
+    let root = fresh_fixture();
+    let turns = long_script(&root);
+    let mut offset = 0;
+    let replies: Vec<String> = turns
+        .iter()
+        .map(|t| {
+            let r = claude_reply(t, offset);
+            offset += t.calls.len();
+            r
+        })
+        .collect();
+
+    let mut settings = Settings::default();
+    settings.llm.provider = phazeai_core::config::LlmProvider::Claude;
+    settings.llm.model = "claude-sonnet-4-6".into();
+    settings.llm.context_tokens = Some(BUDGET);
+    const BUDGET: usize = 8_000;
+
+    let _cwd = CwdGuard::enter(&root);
+    phazeai_core::tools::sandbox::set_workspace_root(Some(root.clone()));
+    let (url, bodies) = fake_provider_answering(replies, Some(claude_summary())).await;
+    let agent = single_prompt_agent(&settings, claude_client(&url), &root, None);
+    let mut runs = Vec::new();
+    for ask in LONG_ASKS {
+        runs.push(agent.run(*ask).await.unwrap());
+    }
+    phazeai_core::tools::sandbox::set_workspace_root(None);
+    check_long_script_ran(&runs);
+
+    let sent = bodies.lock().unwrap().clone();
+    let compactions = sent.iter().filter(|b| b["stream"] != json!(true)).count();
+    let bpe = tiktoken_rs::o200k_base().unwrap();
+    let mut cache = PromptCache {
+        entries: Default::default(),
+    };
+    println!("\n## Long session bench\n");
+    println!(
+        "{} questions, {} requests ({} of them compaction summaries), context budget {BUDGET} tokens.\n",
+        LONG_ASKS.len(),
+        sent.len(),
+        compactions
+    );
+    println!("| # | kind | input tokens | cache read | cache write | uncached |");
+    println!("|--:|--|--:|--:|--:|--:|");
+    let mut sum = Billed::default();
+    let mut summaries = Billed::default();
+    for (i, body) in sent.iter().enumerate() {
+        let b = cache.bill(&bpe, body);
+        let kind = if body["stream"] == json!(true) {
+            "turn"
+        } else {
+            "summary"
+        };
+        println!(
+            "| {} | {kind} | {} | {} | {} | {} |",
+            i + 1,
+            b.total,
+            b.read,
+            b.written,
+            b.uncached
+        );
+        for s in [&mut sum]
+            .into_iter()
+            .chain((kind == "summary").then_some(&mut summaries))
+        {
+            s.total += b.total;
+            s.read += b.read;
+            s.written += b.written;
+            s.uncached += b.uncached;
+        }
+    }
+    println!("\n- **Input tokens sent:** {}", sum.total);
+    println!(
+        "- **Read from cache:** {} · **written:** {} · **uncached:** {}",
+        sum.read, sum.written, sum.uncached
+    );
+    println!(
+        "- **Billed, in input-token units (read 0.1x, write 1.25x):** {:.0} ({:.1}% of sent)",
+        sum.equivalent(),
+        100.0 * sum.equivalent() / sum.total as f64
+    );
+    println!(
+        "- **Of which compaction summaries:** {} sent, billed {:.0}",
+        summaries.total,
+        summaries.equivalent()
+    );
+}
+
+/// Every scripted call of the long session succeeded.
+fn check_long_script_ran(runs: &[phazeai_core::AgentResponse]) {
+    for exec in runs.iter().flat_map(|r| &r.tool_calls) {
+        assert!(
+            exec.success,
+            "{} failed: {}",
+            exec.tool_name, exec.result_summary
+        );
+    }
+    assert_eq!(runs.len(), LONG_ASKS.len());
+}

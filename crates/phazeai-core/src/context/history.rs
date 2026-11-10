@@ -17,7 +17,10 @@ impl ConversationHistory {
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
-            max_messages: 100,
+            // No count cap by default: the token budget bounds the history,
+            // and dropping a message per new one would change the start of
+            // every request, so no prefix cache could serve it.
+            max_messages: usize::MAX,
             system_prompt: None,
             summary: None,
             folded: 0,
