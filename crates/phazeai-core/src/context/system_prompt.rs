@@ -194,6 +194,63 @@ fn tools_can_read(path: &Path) -> bool {
     crate::tools::sandbox::resolve_within_workspace("read_file", &path.to_string_lossy()).is_ok()
 }
 
+/// Every instruction block for the project at `root`, in prompt order:
+/// its rules ([`super::rules`]: the main rules file and what goes with it),
+/// `CLAUDE.md` and `AGENTS.md` files in the directories above it (up to the
+/// home directory), the user's global `~/.phazeai/instructions.md`, and last
+/// the menu of rules read on demand. A block whose text another block
+/// already holds is left out.
+pub fn project_instructions(root: &Path) -> Vec<Instructions> {
+    let rules = super::rules::discover(root);
+    let menu = rules.menu();
+    let mut blocks = rules.inline;
+    let mut seen: std::collections::HashSet<String> =
+        blocks.iter().map(|b| b.text.trim().to_string()).collect();
+    let mut push = |blocks: &mut Vec<Instructions>, block: Instructions| {
+        if seen.insert(block.text.trim().to_string()) {
+            blocks.push(block);
+        }
+    };
+
+    // CLAUDE.md and AGENTS.md in the directories above the project.
+    let policy = crate::privacy::policy_for(root);
+    let home = dirs::home_dir();
+    for dir in root.ancestors().skip(1).take(6) {
+        for file in ["CLAUDE.md", "AGENTS.md"] {
+            let path = dir.join(file);
+            if path.is_file() && !policy.is_denied(&path) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    push(
+                        &mut blocks,
+                        Instructions::from_file(&path, 1, content)
+                            .with_heading(format!("# From {}\n", dir.display())),
+                    );
+                }
+            }
+        }
+        if home.as_deref() == Some(dir) {
+            break;
+        }
+    }
+
+    // The user's own instructions for every project.
+    if let Some(home) = home {
+        let global = home.join(".phazeai").join("instructions.md");
+        if let Ok(content) = std::fs::read_to_string(&global) {
+            push(
+                &mut blocks,
+                Instructions::from_file(&global, 1, content)
+                    .with_heading("# Global instructions\n"),
+            );
+        }
+    }
+
+    if let Some(menu) = menu {
+        blocks.push(Instructions::new(menu));
+    }
+    blocks
+}
+
 /// Builds the system prompt for the AI coding assistant.
 /// Incorporates project context and user instructions.
 ///
@@ -346,79 +403,12 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Load custom instructions from CLAUDE.md or .phazeai/instructions.md
-    /// (replacing any set before, when a file is found). How much of them
-    /// the prompt carries depends on the context budget.
+    /// Load the project's rules ([`project_instructions`]), replacing any
+    /// instructions set before when there are some. How much of them the
+    /// prompt carries depends on the context budget.
     pub fn load_project_instructions(mut self) -> Self {
         if let Some(ref root) = self.project_root {
-            let mut instructions = Vec::new();
-
-            // Check project root first (highest priority)
-            let root_candidates = [
-                root.join(".phazerules"),
-                root.join(".cursorrules"),
-                root.join("CLAUDE.md"),
-                root.join("AGENTS.md"),
-                root.join(".phazeai").join("instructions.md"),
-                root.join(".phazeai").join("config.md"),
-                root.join(".ai").join("instructions.md"),
-            ];
-
-            // Instruction files listed in the project's privacy deny list are skipped.
-            let policy = crate::privacy::policy_for(root);
-            for path in &root_candidates {
-                if path.exists() && !policy.is_denied(path) {
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        instructions.push(Instructions::from_file(path, 1, content));
-                        break; // Only take the first match at project root
-                    }
-                }
-            }
-
-            // Walk up parent directories for additional CLAUDE.md/AGENTS.md files
-            let mut current = root.parent();
-            let mut depth = 0;
-            while let Some(dir) = current {
-                if depth > 5 {
-                    break;
-                } // Don't walk up too far
-
-                for file in ["CLAUDE.md", "AGENTS.md"] {
-                    let parent_file = dir.join(file);
-                    if parent_file.exists() && !policy.is_denied(&parent_file) {
-                        if let Ok(content) = std::fs::read_to_string(&parent_file) {
-                            instructions.push(
-                                Instructions::from_file(&parent_file, 1, content)
-                                    .with_heading(format!("# From {}\n", dir.display())),
-                            );
-                        }
-                    }
-                }
-
-                // Stop at home dir or filesystem root
-                if let Some(home) = dirs::home_dir() {
-                    if dir == home {
-                        break;
-                    }
-                }
-
-                current = dir.parent();
-                depth += 1;
-            }
-
-            // Also check ~/.phazeai/instructions.md for global user instructions
-            if let Some(home) = dirs::home_dir() {
-                let global_instructions = home.join(".phazeai").join("instructions.md");
-                if global_instructions.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&global_instructions) {
-                        instructions.push(
-                            Instructions::from_file(&global_instructions, 1, content)
-                                .with_heading("# Global instructions\n"),
-                        );
-                    }
-                }
-            }
-
+            let instructions = project_instructions(root);
             if !instructions.is_empty() {
                 self.instructions = instructions;
             }
@@ -478,6 +468,10 @@ impl SystemPromptBuilder {
 }
 
 const INSTRUCTIONS_HEADING: &str = "\n\n## Project-Specific Instructions\n";
+
+/// Title of the project's instructions in a system prompt (as above, without
+/// the blank lines that separate it from the section before).
+pub const INSTRUCTIONS_TITLE: &str = "## Project-Specific Instructions\n";
 
 /// Heading of the git state, the last section of the system prompt.
 pub const GIT_HEADING: &str = "\n\n## Git Status\n";

@@ -10,7 +10,8 @@ use floem::{
     IntoView,
 };
 use phazeai_core::context::system_prompt::{
-    fit_instructions, instructions_allowance, Instructions,
+    fit_instructions, instructions_allowance, project_instructions, Instructions,
+    INSTRUCTIONS_TITLE,
 };
 use phazeai_core::{
     discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
@@ -372,23 +373,33 @@ struct SendToAiJob {
     attached_files: Vec<std::path::PathBuf>,
 }
 
-/// The chat's system prompt: the active skill (if any), the mode hint, and,
-/// with no skill active, the menu of skills. The skill or the menu takes at
-/// most the instructions' share of the model's context budget
-/// (`fit_instructions`), so a long skill file can't push a small local
-/// model's requests over budget, where the trim would cut every tool result
-/// down to a bare marker.
+/// The chat's system prompt: the project's rules (`project_instructions`:
+/// its rules files, whichever tool they were written for, and the menu of
+/// those read on demand) with the active skill (if any), the mode hint, and,
+/// with no skill active, the menu of skills. The rules and skill together,
+/// and the skills menu, each take at most the instructions' share of the
+/// model's context budget (`fit_instructions`), so a long rules or skill file
+/// can't push a small local model's requests over budget, where the trim
+/// would cut every tool result down to a bare marker. The rules come first:
+/// they stay the same from request to request, and a provider's prompt
+/// cache reuses the part of a prompt before its first difference.
 fn chat_system_prompt(
+    project_rules: &[Instructions],
     active_skill: Option<&Skill>,
     mode_hint: &str,
     skills_menu: &str,
     context_budget: usize,
 ) -> String {
     let room = instructions_allowance(context_budget);
-    let skill = active_skill.map(|s| fit_instructions(&[s.instructions()], room));
+    let mut blocks = project_rules.to_vec();
+    if let Some(first) = blocks.first_mut() {
+        first.heading = format!("{INSTRUCTIONS_TITLE}{}", first.heading);
+    }
+    blocks.extend(active_skill.map(Skill::instructions));
+    let instructions = (!blocks.is_empty()).then(|| fit_instructions(&blocks, room));
     let menu = (active_skill.is_none() && !skills_menu.is_empty())
         .then(|| fit_instructions(&[Instructions::new(skills_menu)], room));
-    [skill.as_deref(), Some(mode_hint), menu.as_deref()]
+    [instructions.as_deref(), Some(mode_hint), menu.as_deref()]
         .into_iter()
         .flatten()
         .filter(|part| !part.is_empty())
@@ -448,7 +459,9 @@ fn send_to_ai(job: SendToAiJob) {
                     return;
                 }
             };
+            let project_rules = project_instructions(&workspace_root);
             let system_prompt = chat_system_prompt(
+                &project_rules,
                 active_skill.as_ref(),
                 mode_hint,
                 &skills_menu,
@@ -2723,7 +2736,7 @@ mod tests {
 
         // A cloud model's budget: exactly the prompt the chat sent before.
         assert_eq!(
-            chat_system_prompt(Some(skill), hint, "ignored menu", 200_000),
+            chat_system_prompt(&[], Some(skill), hint, "ignored menu", 200_000),
             format!(
                 "# Active Expert Skill: reviewer\n\n{}\n\n\n{hint}",
                 skill.body
@@ -2733,7 +2746,7 @@ mod tests {
         // A local model's budget: the skill takes at most its share, cut at a
         // line, and the marker gives the skill file's own line numbers.
         let budget = 4_096;
-        let prompt = chat_system_prompt(Some(skill), "", "", budget);
+        let prompt = chat_system_prompt(&[], Some(skill), "", "", budget);
         assert!(
             prompt.len() <= instructions_allowance(budget),
             "{} bytes",
@@ -2764,7 +2777,7 @@ mod tests {
         let menu: String = (0..500)
             .map(|i| format!("- **skill-{i}** (project) — does task number {i}\n"))
             .collect();
-        let prompt = chat_system_prompt(None, hint, &menu, budget);
+        let prompt = chat_system_prompt(&[], None, hint, &menu, budget);
         let menu_part = prompt.strip_prefix(&format!("{hint}\n\n")).unwrap();
         assert!(menu_part.len() <= instructions_allowance(budget));
         assert!(menu.starts_with(menu_part.split("[... ").next().unwrap()));
@@ -2772,6 +2785,48 @@ mod tests {
             menu_part.ends_with("of them are not shown.]"),
             "{menu_part}"
         );
+    }
+
+    #[test]
+    fn the_chat_carries_the_projects_rules_before_the_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("AGENTS.md", "Run the tests before saying a change works.\n");
+        write("GEMINI.md", "Prefer small functions.\n");
+        write(
+            ".phazeai/skills/reviewer.md",
+            "---\nname: reviewer\ndescription: Reviews changes\n---\n\nCheck the spec.\n",
+        );
+        let skills = phazeai_core::discover_skills(Some(&root));
+        let skill = phazeai_core::find_skill(&skills, "reviewer").unwrap();
+        let rules = phazeai_core::context::system_prompt::project_instructions(&root);
+        let hint = AiMode::Plan.system_hint();
+
+        let prompt = super::chat_system_prompt(&rules, Some(skill), hint, "", 200_000);
+        let menu = format!(
+            "# More project rules\nNot loaded. Before work one covers, read it with \
+             read_file.\n- {}: rules written for Gemini CLI; may repeat the rules above\n",
+            root.join("GEMINI.md").display()
+        );
+        assert!(
+            prompt.starts_with(&format!(
+                "## Project-Specific Instructions\nRun the tests before saying a change \
+                 works.\n\n\n---\n\n{menu}\n\n---\n\n# Active Expert Skill: reviewer\n\n\
+                 Check the spec.\n"
+            )),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with(hint), "{prompt}");
+
+        // A small model's budget holds the rules and the skill to one share.
+        let budget = 4_096;
+        let prompt = super::chat_system_prompt(&rules, Some(skill), "", "", budget);
+        assert!(prompt.len() <= instructions_allowance(budget));
     }
 
     #[test]

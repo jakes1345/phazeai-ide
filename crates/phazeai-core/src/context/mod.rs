@@ -3,6 +3,7 @@ pub mod compaction;
 mod history;
 pub mod persistence;
 pub mod repo_map;
+pub mod rules;
 pub mod system_prompt;
 
 pub use builder::ContextBuilder;
