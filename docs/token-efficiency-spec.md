@@ -223,6 +223,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | After | Input tokens sent | vs baseline | Reusable in session | New-session prefix shared | Notes |
 |---|--:|--:|--:|--:|---|
 | Baseline (`fe95cec`) | 122,828 | - | 90.7% | 5 of 3,732 | Claude: nothing cached |
+| T2: stable prefix | 122,884 | +0.05% | 90.7% | 3,695 of 3,736 | Only the uncommitted-files line and the new message differ now. The new git heading adds 4 tokens per request. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

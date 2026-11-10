@@ -1241,12 +1241,17 @@ mod tests {
         request["messages"][0]["content"].as_str().unwrap()
     }
 
-    /// The instructions section of a system prompt (it comes last).
+    /// The instructions section of a system prompt (only the git state comes
+    /// after it).
     fn instructions_section(system_prompt: &str) -> &str {
         let at = system_prompt
             .find("\n\n## Project-Specific Instructions\n")
             .expect("an instructions section");
-        &system_prompt[at..]
+        let rest = &system_prompt[at..];
+        let end = rest
+            .find(phazeai_core::context::system_prompt::GIT_HEADING)
+            .unwrap_or(rest.len());
+        &rest[..end]
     }
 
     #[tokio::test]

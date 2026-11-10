@@ -451,15 +451,6 @@ impl SystemPromptBuilder {
             if let Some(ref pt) = self.project_type {
                 prompt.push_str(&format!("- Project type: {}\n", pt.name()));
             }
-            if let Some(ref branch) = self.git_branch {
-                prompt.push_str(&format!("- Git branch: {}\n", branch));
-            }
-            if !self.git_dirty_files.is_empty() {
-                prompt.push_str(&format!(
-                    "- Modified files: {}\n",
-                    self.git_dirty_files.join(", ")
-                ));
-            }
         }
 
         // Available tools
@@ -487,11 +478,32 @@ impl SystemPromptBuilder {
             prompt.push_str(&fit_instructions(&self.instructions, room));
         }
 
+        // Git state last. It changes as files are edited and committed, while
+        // everything above stays the same for the project, and a provider's
+        // prompt cache only reuses the part before the first difference.
+        if self.project_root.is_some()
+            && (self.git_branch.is_some() || !self.git_dirty_files.is_empty())
+        {
+            prompt.push_str(GIT_HEADING);
+            if let Some(ref branch) = self.git_branch {
+                prompt.push_str(&format!("- Git branch: {}\n", branch));
+            }
+            if !self.git_dirty_files.is_empty() {
+                prompt.push_str(&format!(
+                    "- Modified files: {}\n",
+                    self.git_dirty_files.join(", ")
+                ));
+            }
+        }
+
         prompt
     }
 }
 
 const INSTRUCTIONS_HEADING: &str = "\n\n## Project-Specific Instructions\n";
+
+/// Heading of the git state, the last section of the system prompt.
+pub const GIT_HEADING: &str = "\n\n## Git Status\n";
 
 impl Default for SystemPromptBuilder {
     fn default() -> Self {
@@ -750,6 +762,38 @@ pub(crate) mod tests {
             !line.contains(".env") && !line.contains("private"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn git_state_comes_after_everything_that_does_not_change() {
+        let builder = |dirty: Vec<String>| {
+            SystemPromptBuilder::new()
+                .with_project_root(PathBuf::from("/work/app"))
+                .with_tools(vec!["read_file".into(), "edit_file".into()])
+                .with_additional_instructions("Run cargo fmt before committing.".into())
+                .with_git_info(Some("main".into()), dirty)
+                .build()
+        };
+        let clean = builder(vec![]);
+        let edited = builder(vec!["src/lib.rs".into(), "tests/a.rs".into()]);
+
+        // The prompt is the same up to the git section, which ends it.
+        let at = clean.find(GIT_HEADING).expect("a git section");
+        assert_eq!(edited.find(GIT_HEADING), Some(at));
+        assert_eq!(clean[..at], edited[..at]);
+        assert!(clean[..at].contains("Run cargo fmt before committing."));
+        assert!(clean[..at].contains("- Working directory: /work/app"));
+        assert_eq!(&clean[at..], "\n\n## Git Status\n- Git branch: main\n");
+        assert_eq!(
+            &edited[at..],
+            "\n\n## Git Status\n- Git branch: main\n- Modified files: src/lib.rs, tests/a.rs\n"
+        );
+
+        // No git, no section.
+        let no_git = SystemPromptBuilder::new()
+            .with_project_root(PathBuf::from("/work/app"))
+            .build();
+        assert!(!no_git.contains(GIT_HEADING));
     }
 
     // ── Instructions sized to the context budget ────────────────────────────

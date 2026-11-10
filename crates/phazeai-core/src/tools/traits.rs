@@ -2,7 +2,7 @@ use super::file::FileWrite;
 use crate::error::PhazeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub type ToolResult = Result<Value, PhazeError>;
 
@@ -43,14 +43,18 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// The tools an agent offers, kept in name order: [`ToolRegistry::definitions`]
+/// lists the same set the same way every time, so the tools part of a request
+/// is byte-identical across requests, agents and sessions, which is what a
+/// provider's prompt cache needs to reuse it.
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
         }
     }
 
@@ -140,5 +144,43 @@ impl ToolRegistry {
     /// Total number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(defs: &[ToolDefinition]) -> Vec<&str> {
+        defs.iter().map(|d| d.name.as_str()).collect()
+    }
+
+    #[test]
+    fn definitions_come_in_name_order_whatever_the_registration_order() {
+        let mut forward = ToolRegistry::new();
+        forward.register(Box::new(super::super::ReadFileTool));
+        forward.register(Box::new(super::super::GrepTool));
+        forward.register(Box::new(super::super::BashTool::default()));
+        let mut backward = ToolRegistry::new();
+        backward.register(Box::new(super::super::BashTool::default()));
+        backward.register(Box::new(super::super::GrepTool));
+        backward.register(Box::new(super::super::ReadFileTool));
+
+        assert_eq!(names(&forward.definitions()), ["bash", "grep", "read_file"]);
+        let json = |r: &ToolRegistry| serde_json::to_string(&r.definitions()).unwrap();
+        assert_eq!(json(&forward), json(&backward));
+    }
+
+    #[test]
+    fn every_new_agent_offers_the_default_tools_identically() {
+        let first = serde_json::to_string(&ToolRegistry::default().definitions()).unwrap();
+        for _ in 0..8 {
+            let again = serde_json::to_string(&ToolRegistry::default().definitions()).unwrap();
+            assert_eq!(first, again);
+        }
+        let defs = ToolRegistry::default().definitions();
+        let mut sorted = names(&defs);
+        sorted.sort_unstable();
+        assert_eq!(names(&defs), sorted);
     }
 }
