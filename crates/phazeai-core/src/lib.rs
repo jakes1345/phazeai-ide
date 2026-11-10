@@ -13,10 +13,12 @@ pub mod error;
 pub mod ext_host;
 pub mod fim;
 pub mod git;
+pub mod hooks;
 pub mod llm;
 pub mod local_ai;
 pub mod lsp;
 pub mod mcp;
+pub mod permissions;
 pub mod privacy;
 pub mod process;
 pub mod project;
@@ -49,6 +51,7 @@ pub use llm::{
     StreamEvent, UsageTracker,
 };
 pub use lsp::{LspClient, LspEvent, LspManager};
+pub use permissions::{Decision, Permissions};
 pub use search::{BuildIndexTool, CodeSearch, CodeSearchTool};
 pub use skills::{discover_skills, find_skill, skills_menu_block, Skill, SkillSource};
 pub use tools::{Tool, ToolDefinition, ToolRegistry, ToolResult};

@@ -742,6 +742,10 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let permissions = Arc::new(state.settings.permissions(Some(&cwd)));
+    for warning in permissions.warnings() {
+        state.error(format!("Permission rules: {warning}"));
+    }
     let _worker = worker::spawn(
         WorkerConfig {
             llm,
@@ -754,6 +758,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             max_iterations: state.settings.agent.max_iterations(),
             code_search: code_search(&state.settings),
             subagents: Some(state.settings.subagent_config(Some(&cwd))),
+            permissions: Some(permissions),
         },
         worker_rx,
         ui_tx,
@@ -880,10 +885,15 @@ fn single_prompt_agent(
     let system_prompt = system_prompt_builder(root, extra_instructions)
         .with_context_budget(context_budget)
         .build();
+    let permissions = settings.permissions(Some(root));
+    for warning in permissions.warnings() {
+        eprintln!("  ! permission rules: {warning}");
+    }
     let mut agent = Agent::new(llm)
         .with_system_prompt(system_prompt)
         .with_context_budget(context_budget)
         .with_max_iterations(settings.agent.max_iterations())
+        .with_permissions(Arc::new(permissions))
         .with_subagents(settings.subagent_config(Some(root)));
     if let Some(search) = code_search(settings) {
         register_code_search(&mut agent, &search);
@@ -1359,6 +1369,7 @@ mod tests {
                 max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
                 code_search: None,
                 subagents: None,
+                permissions: None,
             },
             worker_rx,
             ui_tx,

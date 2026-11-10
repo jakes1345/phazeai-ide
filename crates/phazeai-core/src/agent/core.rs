@@ -2,7 +2,9 @@ use crate::agent_event::AgentEvent;
 use crate::checkpoint::Checkpoints;
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
+use crate::hooks::HookOutcome;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
+use crate::permissions::{Decision, Permissions};
 use crate::tools::{
     render, FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
 };
@@ -106,7 +108,13 @@ pub struct Agent {
     system_prompt: Option<String>,
     /// Records each run's file writes so they can be undone.
     checkpoints: Option<Arc<StdMutex<Checkpoints>>>,
+    /// Permission rules and hooks (see [`crate::permissions`]). Shared with
+    /// `subagent` helpers, so it may be set before or after them.
+    permissions: PermissionsSlot,
 }
+
+/// Where an agent keeps its permission rules, shared with its helpers.
+pub(crate) type PermissionsSlot = Arc<StdMutex<Option<Arc<Permissions>>>>;
 
 struct McpEventSinkGuard(Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>);
 
@@ -132,6 +140,7 @@ impl Agent {
             mcp_event_sink: Arc::new(StdMutex::new(None)),
             system_prompt: None,
             checkpoints: None,
+            permissions: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -278,7 +287,29 @@ impl Agent {
             .register_deferred(Box::new(super::SubagentTool::new(
                 config,
                 self.mcp_event_sink.clone(),
+                self.permissions.clone(),
             )));
+    }
+
+    /// Apply permission rules and run hooks around every tool call (see
+    /// [`crate::permissions`] and [`crate::hooks`]). A denied call never
+    /// reaches the approval callback; an allowed one skips it; an `ask` one
+    /// reaches it with [`crate::permissions::rule_says_ask`] set. `subagent`
+    /// helpers follow the same rules.
+    pub fn with_permissions(self, permissions: Arc<Permissions>) -> Self {
+        self.set_permissions(permissions);
+        self
+    }
+
+    pub fn set_permissions(&self, permissions: Arc<Permissions>) {
+        *self.permissions.lock().unwrap_or_else(|e| e.into_inner()) = Some(permissions);
+    }
+
+    fn permissions(&self) -> Option<Arc<Permissions>> {
+        self.permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn with_subagents(mut self, config: super::SubagentConfig) -> Self {
@@ -552,7 +583,45 @@ impl Agent {
                             not_run.extend_from_slice(&tool_calls[run_end..]);
                             return self.stop_round(&not_run, &event_tx).await;
                         }
-                        for &k in &approved {
+                        // The user's pre_tool hooks, one call at a time.
+                        let mut runnable: Vec<(usize, Vec<String>)> = Vec::new();
+                        for (n, &k) in approved.iter().enumerate() {
+                            match self.pre_hooks(&tool_calls[k]).await {
+                                PreHooks::Run(notes) => runnable.push((k, notes)),
+                                PreHooks::Blocked(why) => {
+                                    let params =
+                                        tool_calls[k].parse_arguments().unwrap_or(Value::Null);
+                                    self.refuse(
+                                        &tool_calls[k],
+                                        params,
+                                        why,
+                                        &event_tx,
+                                        &mut tool_executions,
+                                    )
+                                    .await;
+                                }
+                                PreHooks::Stopped => {
+                                    let mut not_run: Vec<ToolCall> = runnable
+                                        .iter()
+                                        .map(|(a, _)| tool_calls[*a].clone())
+                                        .collect();
+                                    not_run.extend(
+                                        approved[n..].iter().map(|&a| tool_calls[a].clone()),
+                                    );
+                                    not_run.extend_from_slice(&tool_calls[run_end..]);
+                                    return self.stop_round(&not_run, &event_tx).await;
+                                }
+                            }
+                        }
+                        if self.is_cancelled() {
+                            let mut not_run: Vec<ToolCall> = runnable
+                                .iter()
+                                .map(|(a, _)| tool_calls[*a].clone())
+                                .collect();
+                            not_run.extend_from_slice(&tool_calls[run_end..]);
+                            return self.stop_round(&not_run, &event_tx).await;
+                        }
+                        for &(k, _) in &runnable {
                             let _ = event_tx.send(AgentEvent::ToolStart {
                                 name: tool_calls[k].function.name.clone(),
                             });
@@ -562,10 +631,17 @@ impl Agent {
                         // each call (`tool_outcome`), and the check at the top
                         // of the next pass answers the rest.
                         let outcomes = futures::future::join_all(
-                            approved.iter().map(|&k| self.execute_tool(&tool_calls[k])),
+                            runnable
+                                .iter()
+                                .map(|(k, _)| self.execute_tool(&tool_calls[*k])),
                         )
                         .await;
-                        for (&k, (success, result_str)) in approved.iter().zip(outcomes) {
+                        for ((k, notes), (success, result_str)) in
+                            runnable.into_iter().zip(outcomes)
+                        {
+                            let result_str = self
+                                .post_hooks(&tool_calls[k], success, result_str, notes)
+                                .await;
                             self.record_outcome(
                                 &tool_calls[k],
                                 success,
@@ -593,6 +669,18 @@ impl Agent {
                             return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
                         }
                     }
+                    let hook_notes = match self.pre_hooks(tool_call).await {
+                        PreHooks::Run(notes) => notes,
+                        PreHooks::Blocked(why) => {
+                            let params = tool_call.parse_arguments().unwrap_or(Value::Null);
+                            self.refuse(tool_call, params, why, &event_tx, &mut tool_executions)
+                                .await;
+                            continue;
+                        }
+                        PreHooks::Stopped => {
+                            return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
+                        }
+                    };
 
                     // With a diff hook, a tool that writes one file first
                     // shows exactly what it will write, and then only that
@@ -726,6 +814,9 @@ impl Agent {
                         }
                         Action::Fail(e) => (false, format!("Error: {e}")),
                     };
+                    let result_str = self
+                        .post_hooks(tool_call, success, result_str, hook_notes)
+                        .await;
 
                     self.record_outcome(
                         tool_call,
@@ -785,26 +876,55 @@ impl Agent {
             .map_or(calls.len(), |offset| start + offset)
     }
 
-    /// Ask the approval callback, if there is one, about `tool_call`. A
-    /// denial is recorded (in the conversation, so the model knows, and in
-    /// `executions`) before `Gate::Deny` is returned. `Gate::Stop` when the
-    /// run was stopped while waiting, or before the answer could be used; the
-    /// caller then ends the round without recording this call.
+    /// Decide whether `tool_call` runs: the permission rules first, then the
+    /// approval callback, if there is one. A refusal is recorded (in the
+    /// conversation, so the model knows, and in `executions`) before
+    /// `Gate::Deny` is returned. `Gate::Stop` when the run was stopped while
+    /// waiting, or before the answer could be used; the caller then ends the
+    /// round without recording this call.
     async fn approve(
         &self,
         tool_call: &ToolCall,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         executions: &mut Vec<ToolExecution>,
     ) -> Gate {
-        let Some(ref approval_fn) = self.approval_fn else {
-            return Gate::Allow;
-        };
         // Asking for a tool's parameters changes nothing and runs nothing.
         if tool_call.function.name == MORE_TOOLS {
             return Gate::Allow;
         }
         let tool_name = &tool_call.function.name;
         let params = tool_call.parse_arguments().unwrap_or(Value::Null);
+
+        let decision = self
+            .permissions()
+            .map_or(Decision::Default, |p| p.decide(tool_name, &params));
+        let ask_rule = match decision {
+            Decision::Allow(_) => return Gate::Allow,
+            Decision::Deny(rule) => {
+                let why = format!(
+                    "Blocked by the permission rule `{rule}`; it did not run. Don't try to reach \
+                     the same result another way; tell the user if it is needed."
+                );
+                self.refuse(tool_call, params, why, event_tx, executions)
+                    .await;
+                return Gate::Deny;
+            }
+            Decision::Ask(rule) => Some(rule),
+            Decision::Default => None,
+        };
+
+        let Some(ref approval_fn) = self.approval_fn else {
+            if let Some(rule) = ask_rule {
+                let why = format!(
+                    "The permission rule `{rule}` needs the user's approval for this call, and \
+                     there is no one to ask here; it did not run."
+                );
+                self.refuse(tool_call, params, why, event_tx, executions)
+                    .await;
+                return Gate::Deny;
+            }
+            return Gate::Allow;
+        };
 
         let _ = event_tx.send(AgentEvent::ToolApprovalRequest {
             name: tool_name.clone(),
@@ -814,31 +934,141 @@ impl Agent {
         // Stop ends the wait for an answer, and an answer given after Stop
         // (a prompt that Stop closed reads as "no") does not run the tool
         // either.
-        let answer = self
-            .unless_cancelled((approval_fn)(tool_name.clone(), params.clone()))
-            .await;
+        let ask = crate::permissions::with_rule_asks(ask_rule.is_some(), async {
+            (approval_fn)(tool_name.clone(), params.clone()).await
+        });
+        let answer = self.unless_cancelled(ask).await;
         let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
             return Gate::Stop;
         };
         if approved {
             return Gate::Allow;
         }
+        self.refuse(
+            tool_call,
+            params,
+            "Tool execution denied by user".to_string(),
+            event_tx,
+            executions,
+        )
+        .await;
+        Gate::Deny
+    }
+
+    /// Record that `tool_call` did not run, and why: the UI gets `why`, the
+    /// model `Error: {why}`.
+    async fn refuse(
+        &self,
+        tool_call: &ToolCall,
+        params: Value,
+        why: String,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        executions: &mut Vec<ToolExecution>,
+    ) {
         let _ = event_tx.send(AgentEvent::ToolResult {
-            name: tool_name.clone(),
+            name: tool_call.function.name.clone(),
             success: false,
-            summary: "Tool execution denied by user".to_string(),
+            summary: why.clone(),
         });
         {
             let mut conversation = self.conversation.lock().await;
-            conversation.add_tool_result(&tool_call.id, "Error: Tool execution denied by user");
+            conversation.add_tool_result(&tool_call.id, format!("Error: {why}"));
         }
         executions.push(ToolExecution {
-            tool_name: tool_name.clone(),
+            tool_name: tool_call.function.name.clone(),
             params,
             success: false,
-            result_summary: "Tool execution denied by user".to_string(),
+            result_summary: why,
         });
-        Gate::Deny
+    }
+
+    /// Runs the user's `pre_tool` hooks that apply to `tool_call`, in order,
+    /// until one says no.
+    async fn pre_hooks(&self, tool_call: &ToolCall) -> PreHooks {
+        let Some(permissions) = self.permissions() else {
+            return PreHooks::Run(Vec::new());
+        };
+        if permissions.pre_tool.is_empty() || tool_call.function.name == MORE_TOOLS {
+            return PreHooks::Run(Vec::new());
+        }
+        let tool = &tool_call.function.name;
+        let params = tool_call.parse_arguments().unwrap_or(Value::Null);
+        let root = permissions.root();
+        let mut notes = Vec::new();
+        for hook in permissions
+            .pre_tool
+            .iter()
+            .filter(|h| h.applies(tool, &params, root))
+        {
+            let outcome = hook.run("pre_tool", tool, &params, root, None);
+            match self.unless_cancelled(outcome).await {
+                None => return PreHooks::Stopped,
+                Some(HookOutcome::Ok) => {}
+                Some(HookOutcome::Objects(message)) => {
+                    let why = if message.is_empty() {
+                        format!(
+                            "Blocked by the user's hook `{}`; it did not run.",
+                            hook.command()
+                        )
+                    } else {
+                        format!(
+                            "Blocked by the user's hook `{}`; it did not run. The hook says: {message}",
+                            hook.command()
+                        )
+                    };
+                    return PreHooks::Blocked(why);
+                }
+                Some(HookOutcome::Failed(how)) => notes.push(format!(
+                    "[the pre_tool hook `{}` {how}; the call ran anyway]",
+                    hook.command()
+                )),
+            }
+        }
+        PreHooks::Run(notes)
+    }
+
+    /// `result` with the notes of the `pre_tool` hooks and what the
+    /// `post_tool` hooks that apply have to say added (those run only after a
+    /// call that succeeded).
+    async fn post_hooks(
+        &self,
+        tool_call: &ToolCall,
+        success: bool,
+        mut result: String,
+        notes: Vec<String>,
+    ) -> String {
+        let mut notes = notes;
+        if let Some(permissions) = self.permissions() {
+            let tool = &tool_call.function.name;
+            if success && tool != MORE_TOOLS && !permissions.post_tool.is_empty() {
+                let params = tool_call.parse_arguments().unwrap_or(Value::Null);
+                let root = permissions.root();
+                for hook in permissions
+                    .post_tool
+                    .iter()
+                    .filter(|h| h.applies(tool, &params, root))
+                {
+                    let outcome =
+                        hook.run("post_tool", tool, &params, root, Some((success, &result)));
+                    match self.unless_cancelled(outcome).await {
+                        None => break,
+                        Some(HookOutcome::Ok) => {}
+                        Some(HookOutcome::Objects(message)) if !message.is_empty() => notes.push(
+                            format!("[the user's hook `{}` says:]\n{message}", hook.command()),
+                        ),
+                        Some(HookOutcome::Objects(_)) => {}
+                        Some(HookOutcome::Failed(how)) => {
+                            notes.push(format!("[the post_tool hook `{}` {how}]", hook.command()))
+                        }
+                    }
+                }
+            }
+        }
+        if !notes.is_empty() {
+            result.push_str("\n\n");
+            result.push_str(&notes.join("\n"));
+        }
+        result
     }
 
     /// Report a finished call to the UI/CLI and record it: the event stream
@@ -988,6 +1218,16 @@ async fn cancelled(token: &AtomicBool) {
 const NOT_RUN: &str = "Cancelled by the user before this tool started; it did not run.";
 /// The result recorded for a tool call that Stop interrupted.
 const INTERRUPTED: &str = "Interrupted by the user before the tool finished.";
+
+/// What the `pre_tool` hooks said about one call.
+enum PreHooks {
+    /// Run it; lines about hooks that failed, for the result.
+    Run(Vec<String>),
+    /// A hook said no: what the model is told.
+    Blocked(String),
+    /// The run was stopped while a hook ran.
+    Stopped,
+}
 
 /// The approval callback's answer about one call.
 enum Gate {

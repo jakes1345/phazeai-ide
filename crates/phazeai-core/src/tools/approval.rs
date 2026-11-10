@@ -158,9 +158,8 @@ impl ToolApprovalManager {
             // Read-only tools. The code-search pair only reads workspace
             // files the privacy policy allows into an in-memory index, and
             // refuses paths outside the workspace root.
-            "read_file" | "grep" | "glob" | "list_files" | "code_search" | "build_search_index" => {
-                ToolPermission::ReadOnly
-            }
+            "read_file" | "grep" | "glob" | "list_files" | "find_path" | "code_search"
+            | "build_search_index" => ToolPermission::ReadOnly,
             // `todo` only echoes the list it is given; `subagent` runs a
             // helper whose only tools read files (through the same sandbox
             // and privacy checks).

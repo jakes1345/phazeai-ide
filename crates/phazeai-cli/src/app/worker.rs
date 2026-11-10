@@ -74,6 +74,8 @@ pub struct WorkerConfig {
     pub code_search: Option<CodeSearch>,
     /// How `subagent` helpers run; `None` offers no `subagent` tool.
     pub subagents: Option<phazeai_core::SubagentConfig>,
+    /// Permission rules and hooks for every agent the worker builds.
+    pub permissions: Option<Arc<phazeai_core::Permissions>>,
 }
 
 fn build_approval_fn(
@@ -85,6 +87,7 @@ fn build_approval_fn(
         let manager = manager.clone();
         let policy = policy.clone();
         let approval_tx = approval_tx.clone();
+        let must_ask = phazeai_core::permissions::rule_says_ask();
         Box::pin(async move {
             let (needs, risk) = {
                 let m = manager.lock().unwrap_or_else(|e| e.into_inner());
@@ -97,7 +100,9 @@ fn build_approval_fn(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .allows(&name, &params);
-            if !needs || allowed_by_rule {
+            // An `ask` rule in the user's or project's permissions asks even
+            // where the mode or a rule for this session would not.
+            if !must_ask && (!needs || allowed_by_rule) {
                 return true;
             }
 
@@ -164,6 +169,9 @@ fn build_agent(
 
     if let Some(search) = &cfg.code_search {
         super::register_code_search(&mut agent, search);
+    }
+    if let Some(permissions) = &cfg.permissions {
+        agent.set_permissions(permissions.clone());
     }
     if let Some(subagents) = &cfg.subagents {
         agent.register_subagents(subagents.clone());

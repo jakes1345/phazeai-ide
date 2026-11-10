@@ -110,20 +110,38 @@ fn helper_tools() -> ToolRegistry {
 pub struct SubagentTool {
     config: SubagentConfig,
     events: EventSink,
+    /// The owner's permission rules and hooks, which helpers follow too.
+    permissions: super::core::PermissionsSlot,
 }
 
 impl SubagentTool {
-    pub(crate) fn new(config: SubagentConfig, events: EventSink) -> Self {
-        Self { config, events }
+    pub(crate) fn new(
+        config: SubagentConfig,
+        events: EventSink,
+        permissions: super::core::PermissionsSlot,
+    ) -> Self {
+        Self {
+            config,
+            events,
+            permissions,
+        }
     }
 
     async fn answer(&self, question: &str) -> Result<String, PhazeError> {
         let llm = (self.config.make_llm)()?;
-        let helper = Agent::new(llm)
+        let mut helper = Agent::new(llm)
             .with_tools(helper_tools())
             .with_system_prompt(self.config.system_prompt())
             .with_context_budget(self.config.context_budget)
             .with_max_iterations(self.config.max_iterations);
+        let permissions = self
+            .permissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(permissions) = permissions {
+            helper = helper.with_permissions(permissions);
+        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = self.events.lock().ok().and_then(|g| g.clone());
         let model = self.config.model.clone();
