@@ -232,23 +232,40 @@ Source: opencode `tool-output.ts:13-120`, `read.ts`, `grep.ts`,
 ([agents-survey.md](research/agents-survey.md) #12).
 
 ### T6: context that stays cached
-- **No in-place rewrites.** Overflow handling stops editing earlier messages
-  (the `STEPS_REMOVED_NOTE` rewrite in `context/history.rs`).
-- **Send unchanged until a ceiling, then compact once.** This replaces trimming
-  before every request and the 100-message cap. The ceiling is the window minus
-  max(15%, 16k). Source: opencode `compaction.ts:1163-1171`; OpenAI: "avoid
-  truncation".
-- **Compaction reuses the cache.** It appends the summary request to the
-  unchanged conversation instead of re-sending the transcript as fresh text.
-  Source: opencode `compaction.ts:495-530`; Claude Code and Cline do the same.
-- **Old tool results are cleared in batches, never per step.** On Claude this
-  uses `clear_tool_uses` with `clear_at_least`. Anthropic reports 84% fewer
-  tokens and 29% better results. Source:
-  [agents-survey.md](research/agents-survey.md) section 6.
-- **After compaction, re-inject** the instruction files, the plan and recently
-  edited files.
-- **Moves:** long sessions. The bench task is short, so a long-session variant is
-  added here.
+Built:
+- **Compaction reuses the cache.** The summary request is now the conversation
+  exactly as the last turn sent it, with the same tools, plus one message that
+  names the first message to keep (by quoting its start) and asks for the
+  summary (`compaction::in_place_request`). A prefix cache serves everything
+  but that message. Source: opencode `compaction.ts:495-530`; Claude Code and
+  Cline do the same.
+- **Fallback to the transcript request.** If the in-place request fails, or the
+  model answers with a tool call or nothing, the summary is asked for the old
+  way, from a plain transcript of the part to fold. The transcript request is
+  also used when the conversation plus the ask would pass the context budget,
+  because a local server can cut the start of an over-long prompt without
+  saying so.
+- **No message-count cap.** The 100-message default cap is gone (the token
+  budget bounds the history). Past 100 messages, the cap dropped one old
+  message per new one, which changed the start of every request, so no prefix
+  cache could serve it.
+- **Long-session bench** (`long_session_bench` in
+  `phazeai-cli/src/app/tests/token_bench.rs`): 8 questions, 4 tool steps each,
+  an 8,000-token budget, so it compacts 4 times. Each request is billed as
+  Claude would bill it.
+
+Already true, so not changed: requests go out unchanged until the budget.
+`trim_to_token_budget` (with its `STEPS_REMOVED_NOTE` rewrite) only acts when
+a request would pass the budget, which after compaction means a single turn
+too large to fit.
+
+Not done here:
+- **Clearing old tool results in batches** (Claude's `clear_tool_uses`). It is
+  a beta server-side feature that the test servers here can't check; it needs a
+  run against the live API first.
+- **Re-injecting the plan and recently edited files after compaction.** The
+  instruction files are already kept (they are in the system prompt). Phaze has
+  no plan or to-do state yet; this comes with the to-do work.
 
 ### T7: side jobs on a cheap model, and local-model settings
 - **Cheap models for side jobs only.** Compaction summaries, titles and commit
@@ -282,6 +299,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T3: Claude caching | 123,156 (Claude run) | +0.27% | 90.7% | 3,709 of 3,764 read from cache | Claude bill, in input-token units: **25,529 (20.7% of sent)**, from 111,666 read, 11,490 written, 0 uncached. The same bench on the T2 commit: 123,206 sent, 0 read, billed 100%. That is a **79.3% cut**, just short of the 80% target. The OpenAI run is unchanged from T2 (122,884). |
 | T4: lean prompt and tools | 91,678 | -25.4% | 89.9% | 1,466 of 1,507 | Per request, the system prompt fell from 1,134 to 257 tokens and the tools from 23 schemas (2,557 tokens) to 8 schemas plus `more_tools` (1,205). Claude bill: **19,809 (21.6% of sent)** from 82,507 read and 9,247 written, an **83.9% cut** from the T2 commit's 123,206, past the 80% target. The raw target (61,000 or less) is not met yet: T5 is next. |
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
+| T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

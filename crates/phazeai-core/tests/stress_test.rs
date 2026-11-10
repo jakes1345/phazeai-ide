@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use phazeai_core::config::LlmProvider;
 use phazeai_core::context::compaction;
+use phazeai_core::context::SUMMARY_HEADING;
 use phazeai_core::llm::Usage;
 use phazeai_core::privacy::audit::{self, AuditKind};
 use phazeai_core::privacy::GuardedClient;
@@ -342,19 +343,61 @@ fn send(tx: &UnboundedSender<StreamEvent>, event: StreamEvent) {
 
 #[async_trait::async_trait]
 impl LlmClient for ScriptedModel {
-    /// The agent calls `chat` only to have compaction's summary written.
+    /// The agent calls `chat` only to have compaction's summary written,
+    /// either in place (the conversation, then the ask) or from a transcript.
     async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
-        let request = match messages {
+        let (previous, folded) = match messages {
             [system, user]
                 if system.role == Role::System
                     && system.content == compaction::SYSTEM_PROMPT
                     && tools.is_empty() =>
             {
-                user.content.as_str()
+                let request = user.content.as_str();
+                let previous = between(request, "<previous_summary>\n", "\n</previous_summary>")
+                    .map(str::to_string);
+                let transcript =
+                    between(request, "<transcript>\n", "</transcript>").unwrap_or_default();
+                let folded: Vec<u32> = transcript
+                    .split("[User]\n")
+                    .skip(1)
+                    .filter_map(turn_of)
+                    .collect();
+                (previous, folded)
+            }
+            [system, conversation @ .., ask]
+                if system.role == Role::System
+                    && ask.role == Role::User
+                    && ask.content.contains("is about to be shortened") =>
+            {
+                let previous = system
+                    .content
+                    .split_once(&format!("{}\n", SUMMARY_HEADING))
+                    .map(|(_, summary)| summary.to_string());
+                // Everything before the message the ask quotes is folded.
+                let quote = between(&ask.content, "begins \"", "\" will be")
+                    .expect("the ask quotes the first kept message");
+                let quote = quote.trim_end_matches('…');
+                let kept = conversation
+                    .iter()
+                    .position(|m| {
+                        is_plain_user(m)
+                            && m.content
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .starts_with(quote)
+                    })
+                    .expect("the quoted message is in the conversation");
+                let folded: Vec<u32> = conversation[..kept]
+                    .iter()
+                    .filter(|m| is_plain_user(m))
+                    .filter_map(|m| turn_of(&m.content))
+                    .collect();
+                (previous, folded)
             }
             _ => {
                 return Err(PhazeError::Llm(format!(
@@ -362,14 +405,6 @@ impl LlmClient for ScriptedModel {
                 )))
             }
         };
-        let previous =
-            between(request, "<previous_summary>\n", "\n</previous_summary>").map(str::to_string);
-        let transcript = between(request, "<transcript>\n", "</transcript>").unwrap_or_default();
-        let folded: Vec<u32> = transcript
-            .split("[User]\n")
-            .skip(1)
-            .filter_map(turn_of)
-            .collect();
         // Merge as a model would: the old summary's turns plus the new ones.
         let mut turns: BTreeSet<u32> = previous
             .as_deref()
@@ -947,8 +982,8 @@ async fn long_session_under_context_pressure_compacts_repeatedly_and_loses_no_tu
 /// One run of forty-five tool rounds (three times the default cap, which this
 /// test raises) through three real tools: every result reaches the model, the
 /// loop's events, history and token accounting stay exact, and the answer
-/// arrives. Forty-five rounds (93 messages) stay under `ConversationHistory`'s
-/// 100-message cap.
+/// arrives. `ConversationHistory` has no message-count cap, so all 93
+/// messages stay.
 #[tokio::test]
 async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
     const ROUNDS: usize = 45;

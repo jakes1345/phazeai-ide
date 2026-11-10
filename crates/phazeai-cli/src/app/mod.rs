@@ -1185,6 +1185,16 @@ mod tests {
     /// request with the next of `replies` (then "ok") and keeps the JSON body
     /// of every request, i.e. exactly what a provider is sent.
     async fn fake_provider(replies: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        fake_provider_answering(replies, None).await
+    }
+
+    /// [`fake_provider`], answering a request that does not ask for a stream
+    /// (a compaction summary) with `whole`, a complete JSON response body,
+    /// instead of the next scripted reply.
+    async fn fake_provider_answering(
+        replies: Vec<String>,
+        whole: Option<String>,
+    ) -> (String, Arc<Mutex<Vec<Value>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1219,13 +1229,20 @@ mod tests {
                 let Some((start, len)) = body_len else {
                     continue;
                 };
-                let body = serde_json::from_slice(&request[start..start + len]).unwrap();
+                let body: Value = serde_json::from_slice(&request[start..start + len]).unwrap();
+                let streamed = body["stream"] == json!(true);
                 seen.lock().unwrap().push(body);
-                let reply = replies
-                    .pop_front()
-                    .unwrap_or_else(|| sse(json!({ "content": "ok" })));
+                let (kind, reply) = match &whole {
+                    Some(whole) if !streamed => ("application/json", whole.clone()),
+                    _ => (
+                        "text/event-stream",
+                        replies
+                            .pop_front()
+                            .unwrap_or_else(|| sse(json!({ "content": "ok" }))),
+                    ),
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                    "HTTP/1.1 200 OK\r\ncontent-type: {kind}\r\n\
                      content-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
                 );

@@ -327,6 +327,7 @@ impl Agent {
                 &self.conversation,
                 self.llm.as_ref(),
                 self.max_context_tokens,
+                &self.tools.definitions(),
                 self.cancel_token.as_deref(),
             )
             .await
