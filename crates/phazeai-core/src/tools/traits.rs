@@ -263,6 +263,7 @@ impl Default for ToolRegistry {
         registry.register_deferred(Box::new(super::BrowseTool));
         registry.register_deferred(Box::new(super::DownloadTool));
         registry.register_deferred(Box::new(super::ScreenshotTool));
+        registry.register_deferred(Box::new(super::TodoTool));
         registry
     }
 }
@@ -300,6 +301,7 @@ impl ToolRegistry {
         registry.register_deferred(Box::new(super::BrowseTool));
         registry.register_deferred(Box::new(super::DownloadTool));
         registry.register_deferred(Box::new(super::ScreenshotTool));
+        registry.register_deferred(Box::new(super::TodoTool));
         registry
     }
 

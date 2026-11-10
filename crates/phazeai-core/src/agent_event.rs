@@ -28,6 +28,12 @@ pub enum AgentEvent {
     /// them, so a meter can count a run as it goes (and a run that stops or
     /// fails early). `TokenUsage` at the end has the run's totals.
     CallUsage(crate::llm::Usage),
+    /// One model call of a `subagent` helper, on its own (cheaper) model,
+    /// so a meter prices it at that model's rates. Not part of `TokenUsage`.
+    SubagentUsage {
+        model: String,
+        usage: crate::llm::Usage,
+    },
     /// The run's token counts. `input_tokens` includes the prompt tokens the
     /// provider served from its cache (`cache_read_tokens`) or wrote to it
     /// (`cache_write_tokens`).

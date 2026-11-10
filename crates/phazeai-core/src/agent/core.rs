@@ -268,6 +268,24 @@ impl Agent {
         self.tools.register_deferred(tool);
     }
 
+    /// Offer the `subagent` tool, behind `more_tools`: the model can hand a
+    /// self-contained question to a helper run as `config` says, and gets
+    /// back only its answer (see [`crate::agent::SubagentTool`]). The
+    /// helper's model calls come through this agent's events as
+    /// [`AgentEvent::SubagentUsage`]. Calling it again replaces the config.
+    pub fn register_subagents(&mut self, config: super::SubagentConfig) {
+        self.tools
+            .register_deferred(Box::new(super::SubagentTool::new(
+                config,
+                self.mcp_event_sink.clone(),
+            )));
+    }
+
+    pub fn with_subagents(mut self, config: super::SubagentConfig) -> Self {
+        self.register_subagents(config);
+        self
+    }
+
     pub fn register_mcp_tools(
         &mut self,
         manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,

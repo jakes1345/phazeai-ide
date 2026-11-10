@@ -32,7 +32,10 @@ pub mod updater;
 pub mod debug_ndjson;
 
 // Re-export key types
-pub use agent::{Agent, AgentResponse, ApprovalFn, DiffAnswer, DiffHookFn, DEFAULT_MAX_ITERATIONS};
+pub use agent::{
+    Agent, AgentResponse, ApprovalFn, DiffAnswer, DiffHookFn, SubagentConfig,
+    DEFAULT_MAX_ITERATIONS,
+};
 pub use agent_event::AgentEvent;
 pub use checkpoint::{Checkpoints, UndoReport};
 pub use config::Settings;

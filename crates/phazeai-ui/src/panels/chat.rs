@@ -515,7 +515,8 @@ fn send_to_ai(job: SendToAiJob) {
             // go through the diff hook above which already gates the write).
             let approval_update_tx = update_tx.clone();
             let approval_fn: ApprovalFn = Box::new(move |name, params| {
-                if matches!(name.as_str(), "write_file" | "edit_file") {
+                // `todo` only shows its list back; nothing to approve.
+                if matches!(name.as_str(), "write_file" | "edit_file" | "todo") {
                     return Box::pin(async { true });
                 }
                 let tx = approval_update_tx.clone();
@@ -540,7 +541,8 @@ fn send_to_ai(job: SendToAiJob) {
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)
                 .with_checkpoints(checkpoints)
-                .with_approval(approval_fn);
+                .with_approval(approval_fn)
+                .with_subagents(settings.subagent_config(Some(&workspace_root)));
 
             // Let the agent search the workspace's code.
             if let Some(search) = code_search {
@@ -611,6 +613,13 @@ fn send_to_ai(job: SendToAiJob) {
                             let _ = update_tx.send(ChatUpdate::CallUsage {
                                 usage,
                                 billed: billed_model.clone(),
+                            });
+                        }
+                        // A helper's call: same provider, its own model.
+                        AgentEvent::SubagentUsage { model, usage } => {
+                            let _ = update_tx.send(ChatUpdate::CallUsage {
+                                usage,
+                                billed: Some((settings.llm.provider.to_provider_id(), model)),
                             });
                         }
                         AgentEvent::Complete { .. } => {
