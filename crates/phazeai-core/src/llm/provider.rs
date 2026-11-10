@@ -478,6 +478,11 @@ impl ProviderRegistry {
                     .with_model(model)
                     .with_base_url(base_url)
                     .with_cache_hints(cache_hints_for(&config.id, project_cache_key()));
+                let client = if echoes_reasoning(&config.id) {
+                    client.with_reasoning_echo()
+                } else {
+                    client
+                };
                 let client = if direct {
                     client.without_proxy()
                 } else {
@@ -671,22 +676,17 @@ impl ProviderRegistry {
                     output_cost_per_m: 0.30,
                 },
             ],
+            // Mistral Large 4 from docs.mistral.ai (November 2026). Codestral,
+            // which serves inline completions (`small_model_for`), keeps its
+            // earlier entry.
             ProviderId::Mistral => vec![
                 ModelInfo {
-                    id: "mistral-large-latest".into(),
-                    name: "Mistral Large".into(),
-                    context_window: 128_000,
+                    id: "mistral-large-4".into(),
+                    name: "Mistral Large 4".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
-                    input_cost_per_m: 2.0,
-                    output_cost_per_m: 6.0,
-                },
-                ModelInfo {
-                    id: "mistral-small-latest".into(),
-                    name: "Mistral Small".into(),
-                    context_window: 32_000,
-                    supports_tools: true,
-                    input_cost_per_m: 0.10,
-                    output_cost_per_m: 0.30,
+                    input_cost_per_m: 0.70,
+                    output_cost_per_m: 2.10,
                 },
                 ModelInfo {
                     id: "codestral-latest".into(),
@@ -696,85 +696,61 @@ impl ProviderRegistry {
                     input_cost_per_m: 0.30,
                     output_cost_per_m: 0.90,
                 },
-                ModelInfo {
-                    id: "mistral-nemo".into(),
-                    name: "Mistral Nemo 12B".into(),
-                    context_window: 128_000,
-                    supports_tools: true,
-                    input_cost_per_m: 0.10,
-                    output_cost_per_m: 0.10,
-                },
             ],
+            // From DeepSeek's price page (November 2026). Both think by
+            // default; prices are the peak-hour rates, twice the off-peak.
             ProviderId::DeepSeek => vec![
                 ModelInfo {
-                    id: "deepseek-chat".into(),
-                    name: "DeepSeek V3".into(),
-                    context_window: 64_000,
-                    supports_tools: true,
-                    input_cost_per_m: 0.27,
-                    output_cost_per_m: 1.10,
-                },
-                ModelInfo {
-                    id: "deepseek-reasoner".into(),
-                    name: "DeepSeek R1 (reasoning)".into(),
-                    context_window: 64_000,
-                    supports_tools: false,
-                    input_cost_per_m: 0.55,
-                    output_cost_per_m: 2.19,
-                },
-            ],
-            ProviderId::Xai => vec![
-                ModelInfo {
-                    id: "grok-3".into(),
-                    name: "Grok 3".into(),
-                    context_window: 131_072,
-                    supports_tools: true,
-                    input_cost_per_m: 3.0,
-                    output_cost_per_m: 15.0,
-                },
-                ModelInfo {
-                    id: "grok-3-mini".into(),
-                    name: "Grok 3 Mini (thinking)".into(),
-                    context_window: 131_072,
+                    id: "deepseek-flash".into(),
+                    name: "DeepSeek V4.1 Flash".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
                     input_cost_per_m: 0.30,
-                    output_cost_per_m: 0.50,
+                    output_cost_per_m: 1.20,
                 },
                 ModelInfo {
-                    id: "grok-2-1212".into(),
-                    name: "Grok 2".into(),
-                    context_window: 131_072,
+                    id: "deepseek-v4-pro".into(),
+                    name: "DeepSeek V4 Pro".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
-                    input_cost_per_m: 2.0,
-                    output_cost_per_m: 10.0,
+                    input_cost_per_m: 1.32,
+                    output_cost_per_m: 3.96,
                 },
             ],
-            ProviderId::Cohere => vec![
+            // From docs.x.ai (November 2026). grok-build-0.1 is xAI's agentic
+            // coding model; grok-3, grok-4-fast and grok-code-fast-1 were
+            // retired on May 15, 2026.
+            ProviderId::Xai => vec![
                 ModelInfo {
-                    id: "command-r-plus-08-2024".into(),
-                    name: "Command R+".into(),
-                    context_window: 128_000,
-                    supports_tools: true,
-                    input_cost_per_m: 2.50,
-                    output_cost_per_m: 10.0,
-                },
-                ModelInfo {
-                    id: "command-r-08-2024".into(),
-                    name: "Command R".into(),
-                    context_window: 128_000,
-                    supports_tools: true,
-                    input_cost_per_m: 0.15,
-                    output_cost_per_m: 0.60,
-                },
-                ModelInfo {
-                    id: "command-a-03-2025".into(),
-                    name: "Command A".into(),
+                    id: "grok-build-0.1".into(),
+                    name: "Grok Build 0.1".into(),
                     context_window: 256_000,
                     supports_tools: true,
-                    input_cost_per_m: 2.50,
-                    output_cost_per_m: 10.0,
+                    input_cost_per_m: 1.0,
+                    output_cost_per_m: 2.0,
+                },
+                ModelInfo {
+                    id: "grok-4.7".into(),
+                    name: "Grok 4.7".into(),
+                    context_window: 500_000,
+                    supports_tools: true,
+                    input_cost_per_m: 2.0,
+                    output_cost_per_m: 6.0,
+                },
+                ModelInfo {
+                    id: "grok-4.3".into(),
+                    name: "Grok 4.3".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 1.25,
+                    output_cost_per_m: 2.50,
                 },
             ],
+            // Cohere, Cerebras, Fireworks and SambaNova change their model
+            // lines often and publish no context sizes or prices that could be
+            // checked here, so they get no list: the budget falls back to a
+            // conservative window and the default comes from `constants`.
+            ProviderId::Cohere => vec![],
             ProviderId::Perplexity => vec![
                 ModelInfo {
                     id: "sonar-pro".into(),
@@ -819,84 +795,9 @@ impl ProviderRegistry {
                     output_cost_per_m: 0.60,
                 },
             ],
-            ProviderId::Cerebras => vec![
-                ModelInfo {
-                    id: "llama3.1-70b".into(),
-                    name: "Llama 3.1 70B (ultra-fast)".into(),
-                    context_window: 8_192,
-                    supports_tools: true,
-                    input_cost_per_m: 0.59,
-                    output_cost_per_m: 0.59,
-                },
-                ModelInfo {
-                    id: "llama3.1-8b".into(),
-                    name: "Llama 3.1 8B (ultra-fast)".into(),
-                    context_window: 8_192,
-                    supports_tools: true,
-                    input_cost_per_m: 0.10,
-                    output_cost_per_m: 0.10,
-                },
-                ModelInfo {
-                    id: "llama-4-scout-17b-16e-instruct".into(),
-                    name: "Llama 4 Scout 17B".into(),
-                    context_window: 131_072,
-                    supports_tools: true,
-                    input_cost_per_m: 0.27,
-                    output_cost_per_m: 0.85,
-                },
-            ],
-            ProviderId::Fireworks => vec![
-                ModelInfo {
-                    id: "accounts/fireworks/models/llama-v3p1-70b-instruct".into(),
-                    name: "Llama 3.1 70B".into(),
-                    context_window: 131_072,
-                    supports_tools: true,
-                    input_cost_per_m: 0.90,
-                    output_cost_per_m: 0.90,
-                },
-                ModelInfo {
-                    id: "accounts/fireworks/models/deepseek-v3".into(),
-                    name: "DeepSeek V3".into(),
-                    context_window: 64_000,
-                    supports_tools: true,
-                    input_cost_per_m: 0.90,
-                    output_cost_per_m: 0.90,
-                },
-                ModelInfo {
-                    id: "accounts/fireworks/models/qwen2p5-coder-32b-instruct".into(),
-                    name: "Qwen 2.5 Coder 32B".into(),
-                    context_window: 32_768,
-                    supports_tools: true,
-                    input_cost_per_m: 0.90,
-                    output_cost_per_m: 0.90,
-                },
-            ],
-            ProviderId::SambaNova => vec![
-                ModelInfo {
-                    id: "Meta-Llama-3.1-405B-Instruct".into(),
-                    name: "Llama 3.1 405B".into(),
-                    context_window: 16_384,
-                    supports_tools: true,
-                    input_cost_per_m: 5.0,
-                    output_cost_per_m: 10.0,
-                },
-                ModelInfo {
-                    id: "Meta-Llama-3.3-70B-Instruct".into(),
-                    name: "Llama 3.3 70B".into(),
-                    context_window: 131_072,
-                    supports_tools: true,
-                    input_cost_per_m: 0.60,
-                    output_cost_per_m: 1.20,
-                },
-                ModelInfo {
-                    id: "DeepSeek-R1".into(),
-                    name: "DeepSeek R1 (reasoning)".into(),
-                    context_window: 32_768,
-                    supports_tools: false,
-                    input_cost_per_m: 5.0,
-                    output_cost_per_m: 10.0,
-                },
-            ],
+            ProviderId::Cerebras => vec![],
+            ProviderId::Fireworks => vec![],
+            ProviderId::SambaNova => vec![],
             ProviderId::GithubModels => vec![
                 ModelInfo {
                     id: "gpt-4o".into(),
@@ -971,10 +872,10 @@ pub fn small_model_for(provider: &ProviderId) -> Option<&'static str> {
         ProviderId::Claude => Some("claude-haiku-4-5-20251001"),
         ProviderId::OpenAI | ProviderId::Azure => Some("gpt-4o-mini"),
         ProviderId::Gemini => Some("gemini-2.5-flash"),
-        ProviderId::Xai => Some("grok-3-mini"),
+        // xAI's cheapest current model, built for agentic coding.
+        ProviderId::Xai => Some("grok-build-0.1"),
         // Codestral is Mistral's code-completion model.
         ProviderId::Mistral => Some("codestral-latest"),
-        ProviderId::Cohere => Some("command-r-08-2024"),
         _ => None,
     }
 }
@@ -991,6 +892,13 @@ pub(crate) fn cache_hints_for(id: &ProviderId, key: Option<String>) -> super::Ca
         _ => {}
     }
     hints
+}
+
+/// Providers whose reasoning models must be sent their earlier reasoning
+/// back. DeepSeek thinks by default and answers a request with tools whose
+/// earlier assistant turns leave out `reasoning_content` with a 400.
+pub(crate) fn echoes_reasoning(id: &ProviderId) -> bool {
+    matches!(id, ProviderId::DeepSeek)
 }
 
 /// A cache key for the current project: the same for every session and

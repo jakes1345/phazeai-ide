@@ -395,7 +395,7 @@ const MIN_MESSAGES_TO_COMPACT: usize = 4;
 const TRANSCRIPT_MESSAGE_LIMIT: usize = 4000;
 
 /// Rough token cost of one message (~3 characters per token for code-heavy
-/// text), including tool-call arguments.
+/// text), including tool-call arguments and the reasoning sent back with it.
 fn message_tokens(m: &Message) -> usize {
     let calls: usize = m
         .tool_calls
@@ -403,7 +403,8 @@ fn message_tokens(m: &Message) -> usize {
         .flatten()
         .map(|c| c.function.name.len() + c.function.arguments.len())
         .sum();
-    (m.content.len() + calls).div_ceil(3)
+    let reasoning = m.reasoning.as_ref().map_or(0, String::len);
+    (m.content.len() + calls + reasoning).div_ceil(3)
 }
 
 /// Appended to the question when trimming removes steps of its turn, so the

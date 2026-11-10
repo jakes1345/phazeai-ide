@@ -112,9 +112,44 @@ pub enum LlmProvider {
     /// PhazeAI's own llama.cpp server (`[local_ai]` section).
     #[serde(rename = "builtin")]
     BuiltIn,
+    #[serde(alias = "grok")]
+    Xai,
+    DeepSeek,
+    Mistral,
+    Cohere,
+    /// Azure OpenAI: `[llm] base_url` names the resource
+    /// (`https://<resource>.openai.azure.com/openai/v1`) and `model` the
+    /// deployment.
+    Azure,
+    Cerebras,
+    Fireworks,
+    SambaNova,
 }
 
 impl LlmProvider {
+    /// Every provider, in the order pickers list them. Perplexity's Sonar
+    /// Chat Completions (ended September 27, 2026) and GitHub Models
+    /// (retired July 30, 2026) are gone, so they are not offered.
+    pub const ALL: [LlmProvider; 17] = [
+        LlmProvider::Claude,
+        LlmProvider::OpenAI,
+        LlmProvider::Gemini,
+        LlmProvider::Xai,
+        LlmProvider::DeepSeek,
+        LlmProvider::Mistral,
+        LlmProvider::Groq,
+        LlmProvider::Cerebras,
+        LlmProvider::Together,
+        LlmProvider::Fireworks,
+        LlmProvider::SambaNova,
+        LlmProvider::OpenRouter,
+        LlmProvider::Cohere,
+        LlmProvider::Azure,
+        LlmProvider::BuiltIn,
+        LlmProvider::Ollama,
+        LlmProvider::LmStudio,
+    ];
+
     pub fn to_provider_id(&self) -> ProviderId {
         match self {
             LlmProvider::Claude => ProviderId::Claude,
@@ -126,6 +161,89 @@ impl LlmProvider {
             LlmProvider::LmStudio => ProviderId::LmStudio,
             LlmProvider::Gemini => ProviderId::Gemini,
             LlmProvider::BuiltIn => ProviderId::BuiltIn,
+            LlmProvider::Xai => ProviderId::Xai,
+            LlmProvider::DeepSeek => ProviderId::DeepSeek,
+            LlmProvider::Mistral => ProviderId::Mistral,
+            LlmProvider::Cohere => ProviderId::Cohere,
+            LlmProvider::Azure => ProviderId::Azure,
+            LlmProvider::Cerebras => ProviderId::Cerebras,
+            LlmProvider::Fireworks => ProviderId::Fireworks,
+            LlmProvider::SambaNova => ProviderId::SambaNova,
+        }
+    }
+
+    /// The provider a [`ProviderId`] stands for; `None` for a custom one.
+    pub fn from_provider_id(id: &ProviderId) -> Option<LlmProvider> {
+        Self::ALL.into_iter().find(|p| &p.to_provider_id() == id)
+    }
+
+    /// The name pickers show, the same as [`ProviderId::name`].
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "Claude (Anthropic)",
+            LlmProvider::OpenAI => "OpenAI",
+            LlmProvider::Ollama => "Ollama (Local)",
+            LlmProvider::Groq => "Groq",
+            LlmProvider::Together => "Together.ai",
+            LlmProvider::OpenRouter => "OpenRouter",
+            LlmProvider::LmStudio => "LM Studio (Local)",
+            LlmProvider::Gemini => "Google Gemini",
+            LlmProvider::BuiltIn => "PhazeAI Local (built-in)",
+            LlmProvider::Xai => "xAI (Grok)",
+            LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::Mistral => "Mistral AI",
+            LlmProvider::Cohere => "Cohere",
+            LlmProvider::Azure => "Azure OpenAI",
+            LlmProvider::Cerebras => "Cerebras",
+            LlmProvider::Fireworks => "Fireworks AI",
+            LlmProvider::SambaNova => "SambaNova",
+        }
+    }
+
+    /// The provider whose display name ([`Self::display_name`]) is `name`.
+    pub fn from_display_name(name: &str) -> Option<LlmProvider> {
+        Self::ALL.into_iter().find(|p| p.display_name() == name)
+    }
+
+    /// The model to use after switching to this provider from `model`:
+    /// `model` itself when it is one of this provider's known models,
+    /// otherwise the provider's default. Another provider's model name would
+    /// only get the request refused.
+    pub fn model_after_switch(&self, model: &str) -> String {
+        let id = self.to_provider_id();
+        if crate::llm::ProviderRegistry::known_models(&id)
+            .iter()
+            .any(|m| m.id == model)
+        {
+            return model.to_string();
+        }
+        crate::llm::ProviderRegistry::new()
+            .get_config(&id)
+            .map(|c| c.default_model.clone())
+            .unwrap_or_else(|| model.to_string())
+    }
+
+    /// The name `config.toml` stores (`provider = "xai"`), which `--provider`
+    /// also takes.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "claude",
+            LlmProvider::OpenAI => "openai",
+            LlmProvider::Ollama => "ollama",
+            LlmProvider::Groq => "groq",
+            LlmProvider::Together => "together",
+            LlmProvider::OpenRouter => "openrouter",
+            LlmProvider::LmStudio => "lmstudio",
+            LlmProvider::Gemini => "gemini",
+            LlmProvider::BuiltIn => "builtin",
+            LlmProvider::Xai => "xai",
+            LlmProvider::DeepSeek => "deepseek",
+            LlmProvider::Mistral => "mistral",
+            LlmProvider::Cohere => "cohere",
+            LlmProvider::Azure => "azure",
+            LlmProvider::Cerebras => "cerebras",
+            LlmProvider::Fireworks => "fireworks",
+            LlmProvider::SambaNova => "sambanova",
         }
     }
 }
@@ -488,11 +606,24 @@ impl Settings {
     ///   the key and the prompts would cross the network unencrypted. Older
     ///   builds kept `base_url` when the provider changed, so an Ollama or LM
     ///   Studio address left behind looks exactly like this.
+    /// - None, for Azure OpenAI with no `[[providers]]` address either: it
+    ///   has no address of its own, as each resource has its own host.
     pub fn check_base_url(&self) -> Result<(), crate::error::PhazeError> {
+        let id = self.llm.provider.to_provider_id();
         let Some(url) = self.llm.base_url_override() else {
+            let registry = self.build_provider_registry();
+            let address = registry.active_config().map(|c| c.base_url.trim());
+            if id != ProviderId::BuiltIn && address.is_none_or(str::is_empty) {
+                return Err(crate::error::PhazeError::Config(format!(
+                    "{} has no address of its own. Set [llm] base_url in config.toml to your \
+                     resource's address, for example \
+                     https://<resource>.openai.azure.com/openai/v1, and [llm] model to your \
+                     deployment's name.",
+                    id.name()
+                )));
+            }
             return Ok(());
         };
-        let id = self.llm.provider.to_provider_id();
         if id == ProviderId::BuiltIn {
             return Ok(());
         }
@@ -647,17 +778,7 @@ auto_start = false
     // scripted server, in tests/llm_base_url.rs.
 
     /// Every `[llm] provider` value.
-    const PROVIDERS: [LlmProvider; 9] = [
-        LlmProvider::Claude,
-        LlmProvider::OpenAI,
-        LlmProvider::Ollama,
-        LlmProvider::Groq,
-        LlmProvider::Together,
-        LlmProvider::OpenRouter,
-        LlmProvider::LmStudio,
-        LlmProvider::Gemini,
-        LlmProvider::BuiltIn,
-    ];
+    const PROVIDERS: [LlmProvider; 17] = LlmProvider::ALL;
 
     fn llm(provider: LlmProvider, base_url: Option<&str>) -> Settings {
         let mut s = Settings::default();
@@ -698,6 +819,93 @@ auto_start = false
         assert_eq!(chosen.small_model(), "tiny");
         let blank = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", Some(" "));
         assert_eq!(blank.small_model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn grok_side_jobs_use_xais_coding_model() {
+        let grok = with_model(LlmProvider::Xai, "grok-4.7", None);
+        assert_eq!(grok.small_model(), "grok-build-0.1");
+        // grok-4.3 costs more than grok-build-0.1 too.
+        let big = with_model(LlmProvider::Xai, "grok-4.3", None);
+        assert_eq!(big.small_model(), "grok-build-0.1");
+    }
+
+    #[test]
+    fn every_provider_is_stored_under_its_slug_and_read_back() {
+        for provider in LlmProvider::ALL {
+            let s = llm(provider.clone(), None);
+            let text = toml::to_string(&s).unwrap();
+            assert!(
+                text.contains(&format!("provider = \"{}\"", provider.slug())),
+                "{provider:?}: {text}"
+            );
+            let back: Settings = toml::from_str(&text).unwrap();
+            assert_eq!(back.llm.provider, provider);
+        }
+        // What `[[providers]]` entries already accept for xAI.
+        let grok: Settings = toml::from_str(
+            &toml::to_string(&llm(LlmProvider::Claude, None))
+                .unwrap()
+                .replace("provider = \"claude\"", "provider = \"grok\""),
+        )
+        .unwrap();
+        assert_eq!(grok.llm.provider, LlmProvider::Xai);
+    }
+
+    #[test]
+    fn pickers_name_each_provider_as_the_registry_does() {
+        for provider in LlmProvider::ALL {
+            let id = provider.to_provider_id();
+            assert_eq!(provider.display_name(), id.name());
+            assert_eq!(
+                LlmProvider::from_display_name(id.name()),
+                Some(provider.clone())
+            );
+            assert_eq!(LlmProvider::from_provider_id(&id), Some(provider));
+        }
+        // Gone from the pickers: both services have shut down.
+        assert_eq!(LlmProvider::from_provider_id(&ProviderId::Perplexity), None);
+        assert_eq!(
+            LlmProvider::from_provider_id(&ProviderId::GithubModels),
+            None
+        );
+    }
+
+    #[test]
+    fn switching_provider_drops_a_model_the_new_one_does_not_serve() {
+        // A Claude model would only be refused by xAI.
+        assert_eq!(
+            LlmProvider::Xai.model_after_switch("claude-sonnet-4-5-20250929"),
+            "grok-build-0.1"
+        );
+        // One of xAI's own models stays.
+        assert_eq!(LlmProvider::Xai.model_after_switch("grok-4.3"), "grok-4.3");
+        assert_eq!(
+            LlmProvider::DeepSeek.model_after_switch("gpt-4o"),
+            "deepseek-flash"
+        );
+    }
+
+    #[test]
+    fn azure_needs_its_resource_address() {
+        let mut s = llm(LlmProvider::Azure, None);
+        let err = s.check_base_url().unwrap_err().to_string();
+        assert!(
+            err.contains("base_url") && err.contains("openai.azure.com"),
+            "{err}"
+        );
+        assert!(!err.to_lowercase().contains("api key"), "{err}");
+        s.llm.base_url = Some("https://my-res.openai.azure.com/openai/v1".into());
+        assert!(s.check_base_url().is_ok());
+        // Every other provider has an address of its own.
+        for provider in LlmProvider::ALL {
+            if provider != LlmProvider::Azure {
+                assert!(
+                    llm(provider.clone(), None).check_base_url().is_ok(),
+                    "{provider:?}"
+                );
+            }
+        }
     }
 
     #[test]

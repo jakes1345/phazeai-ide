@@ -37,23 +37,24 @@ pub mod models {
     pub const GEMINI_EMBEDDING_MODEL: &str = "text-embedding-004";
 
     /// Mistral AI
-    pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-large-latest";
+    pub const DEFAULT_MISTRAL_MODEL: &str = "mistral-large-4";
     /// DeepSeek (direct API, cheaper than via Together/OpenRouter)
-    pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
-    /// xAI Grok
-    pub const DEFAULT_XAI_MODEL: &str = "grok-3";
+    pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-flash";
+    /// xAI Grok: grok-build-0.1, xAI's agentic coding model
+    pub const DEFAULT_XAI_MODEL: &str = "grok-build-0.1";
     /// Cohere Command
-    pub const DEFAULT_COHERE_MODEL: &str = "command-r-plus-08-2024";
+    pub const DEFAULT_COHERE_MODEL: &str = "command-a-plus-05-2026";
     /// Perplexity Sonar (web-grounded)
     pub const DEFAULT_PERPLEXITY_MODEL: &str = "sonar-pro";
     /// Azure OpenAI — deployment name set by user in base URL
     pub const DEFAULT_AZURE_MODEL: &str = "gpt-4o";
-    /// Cerebras (fast Llama inference)
-    pub const DEFAULT_CEREBRAS_MODEL: &str = "llama3.1-70b";
+    /// Cerebras (fast inference). Cerebras documents its models one page at
+    /// a time; gpt-oss-120b is on the lists that cite those pages.
+    pub const DEFAULT_CEREBRAS_MODEL: &str = "gpt-oss-120b";
     /// Fireworks AI
-    pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/llama-v3p1-70b-instruct";
+    pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4p1-flash";
     /// SambaNova Cloud
-    pub const DEFAULT_SAMBANOVA_MODEL: &str = "Meta-Llama-3.1-405B-Instruct";
+    pub const DEFAULT_SAMBANOVA_MODEL: &str = "DeepSeek-V3.1";
     /// GitHub Models (Azure-hosted OSS + OpenAI models, free with GitHub token)
     pub const DEFAULT_GITHUB_MODELS_MODEL: &str = "gpt-4o";
 }
@@ -80,13 +81,13 @@ pub mod endpoints {
     pub const MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1";
     pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
     pub const XAI_BASE_URL: &str = "https://api.x.ai/v1";
-    pub const COHERE_BASE_URL: &str = "https://api.cohere.com/compatibility/v1";
+    pub const COHERE_BASE_URL: &str = "https://api.cohere.ai/compatibility/v1";
     pub const PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
-    /// Azure OpenAI: user must set base_url = https://{resource}.openai.azure.com/openai/deployments/{deployment}
+    /// Azure OpenAI: user must set base_url = https://{resource}.openai.azure.com/openai/v1
     pub const AZURE_BASE_URL: &str = "";
     pub const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
     pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
-    pub const SAMBANOVA_BASE_URL: &str = "https://fast-api.snova.ai/v1";
+    pub const SAMBANOVA_BASE_URL: &str = "https://api.sambanova.ai/v1";
     /// GitHub Models — free OSS + OpenAI models via GitHub token
     pub const GITHUB_MODELS_BASE_URL: &str = "https://models.inference.ai.azure.com";
 }

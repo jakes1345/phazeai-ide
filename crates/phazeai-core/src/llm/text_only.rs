@@ -38,8 +38,10 @@ pub async fn text_only_reply(client: &dyn LlmClient, prompt: &str) -> TextReply 
                 reply.error = Some(e);
                 break;
             }
-            // No tools were offered, so there is nothing to call; usage is not text.
-            StreamEvent::ToolCallStart { .. }
+            // No tools were offered, so there is nothing to call; usage and
+            // the model's reasoning are not the reply.
+            StreamEvent::ReasoningDelta(_)
+            | StreamEvent::ToolCallStart { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::ToolCallEnd { .. }
             | StreamEvent::Usage(_) => {}

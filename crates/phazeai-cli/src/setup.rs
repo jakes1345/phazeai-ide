@@ -12,9 +12,17 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "anthropic",
     "openai",
     "gemini",
+    "xai",
+    "deepseek",
+    "mistral",
     "groq",
+    "cerebras",
     "together",
+    "fireworks",
+    "sambanova",
     "openrouter",
+    "cohere",
+    "azure",
     "ollama",
     "lmstudio",
     "builtin",
@@ -32,6 +40,14 @@ pub fn parse_provider(name: &str) -> Option<LlmProvider> {
         "lmstudio" | "lm-studio" | "lm_studio" => LlmProvider::LmStudio,
         "gemini" | "google" => LlmProvider::Gemini,
         "builtin" | "built-in" | "phazeai" | "phazeai-local" => LlmProvider::BuiltIn,
+        "xai" | "grok" | "x.ai" => LlmProvider::Xai,
+        "deepseek" => LlmProvider::DeepSeek,
+        "mistral" | "mistral.ai" => LlmProvider::Mistral,
+        "cohere" => LlmProvider::Cohere,
+        "azure" | "azure-openai" | "azure_openai" => LlmProvider::Azure,
+        "cerebras" => LlmProvider::Cerebras,
+        "fireworks" | "fireworks.ai" => LlmProvider::Fireworks,
+        "sambanova" | "samba" => LlmProvider::SambaNova,
         _ => return None,
     })
 }
@@ -40,14 +56,7 @@ pub fn parse_provider(name: &str) -> Option<LlmProvider> {
 pub fn provider_slug(p: &LlmProvider) -> &'static str {
     match p {
         LlmProvider::Claude => "anthropic",
-        LlmProvider::OpenAI => "openai",
-        LlmProvider::Ollama => "ollama",
-        LlmProvider::Groq => "groq",
-        LlmProvider::Together => "together",
-        LlmProvider::OpenRouter => "openrouter",
-        LlmProvider::LmStudio => "lmstudio",
-        LlmProvider::Gemini => "gemini",
-        LlmProvider::BuiltIn => "builtin",
+        other => other.slug(),
     }
 }
 
@@ -368,6 +377,15 @@ mod tests {
         assert_eq!(parse_provider("bogus"), None);
         for name in PROVIDER_NAMES {
             assert!(parse_provider(name).is_some(), "{name}");
+        }
+        assert_eq!(parse_provider("grok"), Some(LlmProvider::Xai));
+        assert_eq!(parse_provider("xAI"), Some(LlmProvider::Xai));
+        assert_eq!(parse_provider("deepseek"), Some(LlmProvider::DeepSeek));
+        // Every provider can be picked, under the name config.toml stores.
+        for provider in LlmProvider::ALL {
+            assert_eq!(parse_provider(provider.slug()), Some(provider.clone()));
+            let slug = provider_slug(&provider);
+            assert!(PROVIDER_NAMES.contains(&slug), "{slug} not listed");
         }
     }
 
