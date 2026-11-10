@@ -2,15 +2,35 @@ use crate::error::PhazeError;
 use crate::llm::traits::*;
 use crate::tools::ToolDefinition;
 use futures::channel::mpsc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct OpenAIClient {
     client: reqwest::Client,
     api_key: String,
     model: String,
     base_url: String,
+    cache_hints: CacheHints,
+    /// Ask for usage at the end of a stream (`stream_options.include_usage`).
+    /// Cleared for good if the server rejects the field.
+    stream_usage: AtomicBool,
 }
+
+/// What an OpenAI-compatible server is told so that requests sharing a
+/// prefix reach the same cache. Each is sent only where the provider is known
+/// to accept it: strict servers reject unknown body fields with a 400.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CacheHints {
+    /// Body field `prompt_cache_key` (OpenAI and the providers that copy it).
+    pub prompt_cache_key: Option<String>,
+    /// Header `x-grok-conv-id` (xAI Chat Completions), which routes a
+    /// conversation to the server holding its cache.
+    pub grok_conv_id: Option<String>,
+}
+
+/// OpenAI caps `prompt_cache_key` at 64 characters.
+const PROMPT_CACHE_KEY_MAX: usize = 64;
 
 /// Build `<base_url>/<path>` for an OpenAI-compatible API.
 ///
@@ -78,7 +98,20 @@ impl OpenAIClient {
             api_key: api_key.into(),
             model: crate::constants::models::DEFAULT_OPENAI_MODEL.to_string(),
             base_url: crate::constants::endpoints::OPENAI_BASE_URL.to_string(),
+            cache_hints: CacheHints::default(),
+            stream_usage: AtomicBool::new(true),
         }
+    }
+
+    /// Send these cache-routing hints with every request.
+    pub fn with_cache_hints(mut self, mut hints: CacheHints) -> Self {
+        if let Some(key) = hints.prompt_cache_key.as_mut() {
+            if let Some((cut, _)) = key.char_indices().nth(PROMPT_CACHE_KEY_MAX) {
+                key.truncate(cut);
+            }
+        }
+        self.cache_hints = hints;
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -148,14 +181,85 @@ struct OpenAIFunction {
     arguments: String,
 }
 
-#[derive(Debug, Serialize)]
-struct OpenAIRequest {
-    model: String,
-    messages: Vec<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
+/// One message in Chat Completions form.
+fn chat_message(m: &Message) -> Value {
+    if let Some(ref tool_call_id) = m.tool_call_id {
+        serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": m.content,
+        })
+    } else if let Some(ref tool_calls) = m.tool_calls {
+        let tcs: Vec<Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    }
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "role": "assistant",
+            "content": m.content,
+            "tool_calls": tcs,
+        })
+    } else {
+        serde_json::json!({
+            "role": m.role,
+            "content": m.content,
+        })
+    }
+}
+
+/// Whether an error body is a server refusing `stream_options`.
+fn rejects_stream_options(status: reqwest::StatusCode, body: &str) -> bool {
+    (status == reqwest::StatusCode::BAD_REQUEST
+        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY)
+        && body.contains("stream_options")
+}
+
+impl OpenAIClient {
+    /// The request body. A stream asks for usage at its end while the server
+    /// is not known to refuse that.
+    fn request_body(&self, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages.iter().map(chat_message).collect::<Vec<_>>(),
+        });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(self.build_tool_defs(tools));
+        }
+        if stream {
+            body["stream"] = Value::Bool(true);
+            if self.stream_usage.load(Ordering::Relaxed) {
+                body["stream_options"] = serde_json::json!({ "include_usage": true });
+            }
+        }
+        if let Some(ref key) = self.cache_hints.prompt_cache_key {
+            body["prompt_cache_key"] = Value::String(key.clone());
+        }
+        body
+    }
+
+    async fn post(&self, url: &str, body: &Value) -> Result<reqwest::Response, PhazeError> {
+        crate::llm::retry::send_with_retry("openai", || {
+            let mut request = self
+                .client
+                .post(url)
+                .header("Authorization", format!("Bearer {}", self.api_key));
+            if let Some(ref conv) = self.cache_hints.grok_conv_id {
+                request = request.header("x-grok-conv-id", conv);
+            }
+            request.json(body).send()
+        })
+        .await
+        .map_err(PhazeError::from)
+    }
 }
 
 #[async_trait::async_trait]
@@ -166,63 +270,8 @@ impl LlmClient for OpenAIClient {
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
         let url = openai_compat_url(&self.base_url, "chat/completions");
-
-        let oai_messages: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                if let Some(ref tool_call_id) = m.tool_call_id {
-                    serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": m.content,
-                    })
-                } else if let Some(ref tool_calls) = m.tool_calls {
-                    let tcs: Vec<Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                }
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({
-                        "role": "assistant",
-                        "content": m.content,
-                        "tool_calls": tcs,
-                    })
-                } else {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                    })
-                }
-            })
-            .collect();
-
-        let request_body = OpenAIRequest {
-            model: self.model.clone(),
-            messages: oai_messages,
-            tools: if tools.is_empty() {
-                None
-            } else {
-                Some(self.build_tool_defs(tools))
-            },
-            stream: None,
-        };
-
-        let response = crate::llm::retry::send_with_retry("openai", || {
-            self.client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&request_body)
-                .send()
-        })
-        .await?;
+        let request_body = self.request_body(messages, tools, false);
+        let response = self.post(&url, &request_body).await?;
 
         let status = response.status();
         let response_text = response.text().await?;
@@ -277,72 +326,39 @@ impl LlmClient for OpenAIClient {
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
         let url = openai_compat_url(&self.base_url, "chat/completions");
 
-        let oai_messages: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                if let Some(ref tool_call_id) = m.tool_call_id {
-                    serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": m.content,
-                    })
-                } else if let Some(ref tool_calls) = m.tool_calls {
-                    let tcs: Vec<Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                }
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({
-                        "role": "assistant",
-                        "content": m.content,
-                        "tool_calls": tcs,
-                    })
-                } else {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                    })
-                }
-            })
-            .collect();
-
-        let request_body = OpenAIRequest {
-            model: self.model.clone(),
-            messages: oai_messages,
-            tools: if tools.is_empty() {
-                None
-            } else {
-                Some(self.build_tool_defs(tools))
-            },
-            stream: Some(true),
-        };
-
         // Retry only the request submission; once the SSE stream begins we
         // can't safely re-issue without duplicating tokens to the consumer.
-        let response = crate::llm::retry::send_with_retry("openai", || {
-            self.client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&request_body)
-                .send()
-        })
-        .await?;
-
+        let mut response = self
+            .post(&url, &self.request_body(messages, tools, true))
+            .await?;
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(PhazeError::Llm(format!(
-                "OpenAI API error ({}): {}",
-                status, text
-            )));
+            if !(self.stream_usage.load(Ordering::Relaxed) && rejects_stream_options(status, &text))
+            {
+                return Err(PhazeError::Llm(format!(
+                    "OpenAI API error ({}): {}",
+                    status, text
+                )));
+            }
+            // A server that refuses `stream_options` still streams; it just
+            // reports no usage. Ask once more without it, and never again.
+            tracing::debug!(
+                "{} refused stream_options; streaming without usage",
+                self.base_url
+            );
+            self.stream_usage.store(false, Ordering::Relaxed);
+            response = self
+                .post(&url, &self.request_body(messages, tools, true))
+                .await?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(PhazeError::Llm(format!(
+                    "OpenAI API error ({}): {}",
+                    status, text
+                )));
+            }
         }
 
         let (tx, rx) = mpsc::unbounded();
@@ -356,6 +372,10 @@ impl LlmClient for OpenAIClient {
             // in the order the model wrote them.
             let mut tool_call_ids: std::collections::BTreeMap<u64, String> =
                 std::collections::BTreeMap::new();
+            // Servers differ on where usage goes (its own last chunk, the
+            // chunk with `finish_reason`, or every chunk with running
+            // totals), so keep the latest and report it once, at the end.
+            let mut usage: Option<Usage> = None;
             let finish_tool_calls =
                 |ids: &mut std::collections::BTreeMap<u64, String>,
                  tx: &mpsc::UnboundedSender<StreamEvent>| {
@@ -387,15 +407,16 @@ impl LlmClient for OpenAIClient {
                     if data == "[DONE]" {
                         // Finalize any tool calls that didn't get an explicit end event
                         finish_tool_calls(&mut tool_call_ids, &tx);
+                        if let Some(usage) = usage.take() {
+                            let _ = tx.unbounded_send(StreamEvent::Usage(usage));
+                        }
                         let _ = tx.unbounded_send(StreamEvent::Done);
                         return;
                     }
 
                     if let Ok(event) = serde_json::from_str::<Value>(data) {
-                        // OpenAI stream_options: { include_usage: true } emits usage
-                        // on the final chunk (choices=[]) — capture it here.
-                        if let Some(usage) = parse_usage(&event) {
-                            let _ = tx.unbounded_send(StreamEvent::Usage(usage));
+                        if let Some(latest) = parse_usage(&event) {
+                            usage = Some(latest);
                         }
 
                         if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
@@ -456,8 +477,11 @@ impl LlmClient for OpenAIClient {
             }
 
             // Some servers close the stream without `[DONE]`; don't lose the
-            // tool calls they streamed.
+            // tool calls or usage they streamed.
             finish_tool_calls(&mut tool_call_ids, &tx);
+            if let Some(usage) = usage.take() {
+                let _ = tx.unbounded_send(StreamEvent::Usage(usage));
+            }
             let _ = tx.unbounded_send(StreamEvent::Done);
         });
 
@@ -613,6 +637,240 @@ mod stream_tests {
         }
         assert_eq!(ended, vec!["call_a", "call_b"]);
         assert!(done);
+    }
+
+    /// One request as the server saw it: header lines and the JSON body.
+    struct Seen {
+        head: String,
+        body: serde_json::Value,
+    }
+
+    /// Serve `replies` (status line, body) to successive connections,
+    /// recording each request.
+    async fn serve_seq(
+        replies: Vec<(&'static str, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Seen>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            for (status, body) in replies {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut raw = Vec::new();
+                let mut buf = vec![0u8; 64 * 1024];
+                // Read the head, then as much body as Content-Length says.
+                let (head, body_start, len) = loop {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let head = text[..end].to_string();
+                        let len = head
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        break (head, end + 4, len);
+                    }
+                };
+                while raw.len() < body_start + len {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                let request = serde_json::from_slice(&raw[body_start..body_start + len])
+                    .unwrap_or(serde_json::Value::Null);
+                log.lock().unwrap().push(Seen {
+                    head,
+                    body: request,
+                });
+                let kind = if status.starts_with("200") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(reply.as_bytes()).await.unwrap();
+                sock.shutdown().await.unwrap();
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    async fn drain(mut rx: mpsc::UnboundedReceiver<StreamEvent>) -> (String, Vec<Usage>) {
+        let (mut text, mut usage) = (String::new(), Vec::new());
+        while let Some(ev) = rx.next().await {
+            match ev {
+                StreamEvent::TextDelta(t) => text.push_str(&t),
+                StreamEvent::Usage(u) => usage.push(u),
+                StreamEvent::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        (text, usage)
+    }
+
+    fn text_chunk(t: &str) -> String {
+        chunk(serde_json::json!({"choices": [{"delta": {"content": t}}]}))
+    }
+
+    #[tokio::test]
+    async fn a_stream_asks_for_usage_and_sends_the_cache_hints() {
+        let body = [
+            text_chunk("ok"),
+            chunk(serde_json::json!({"choices": [], "usage": {
+                "prompt_tokens": 2006, "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 1920}}})),
+            "data: [DONE]\n\n".to_string(),
+        ]
+        .concat();
+        let (base, seen) = serve_seq(vec![("200 OK", body)]).await;
+        let client = OpenAIClient::new("k")
+            .with_base_url(base)
+            .with_cache_hints(CacheHints {
+                prompt_cache_key: Some("phaze-abc".into()),
+                grok_conv_id: Some("phaze-abc".into()),
+            });
+        let rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let (text, usage) = drain(rx).await;
+        assert_eq!(text, "ok");
+        assert_eq!(
+            usage,
+            vec![Usage {
+                input_tokens: 2006,
+                output_tokens: 3,
+                cache_read_tokens: 1920,
+                cache_write_tokens: 0,
+            }]
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0].body["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+        assert_eq!(seen[0].body["prompt_cache_key"], "phaze-abc");
+        assert!(seen[0]
+            .head
+            .lines()
+            .any(|l| l.eq_ignore_ascii_case("x-grok-conv-id: phaze-abc")));
+    }
+
+    #[tokio::test]
+    async fn a_request_without_hints_carries_neither() {
+        let (base, seen) = serve_seq(vec![("200 OK", "data: [DONE]\n\n".into())]).await;
+        let client = OpenAIClient::new("k").with_base_url(base);
+        drain(
+            client
+                .chat_stream(&[Message::user("hi")], &[])
+                .await
+                .unwrap(),
+        )
+        .await;
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].body.get("prompt_cache_key").is_none());
+        assert!(!seen[0].head.to_ascii_lowercase().contains("x-grok-conv-id"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_stream_options_is_asked_again_without_them() {
+        let refusal =
+            r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#;
+        let (base, seen) = serve_seq(vec![
+            ("400 Bad Request", refusal.into()),
+            (
+                "200 OK",
+                [text_chunk("first"), "data: [DONE]\n\n".into()].concat(),
+            ),
+            (
+                "200 OK",
+                [text_chunk("second"), "data: [DONE]\n\n".into()].concat(),
+            ),
+        ])
+        .await;
+        let client = OpenAIClient::new("k").with_base_url(base);
+        let (text, _) = drain(
+            client
+                .chat_stream(&[Message::user("hi")], &[])
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(text, "first");
+        let (text, _) = drain(
+            client
+                .chat_stream(&[Message::user("hi")], &[])
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(text, "second");
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].body.get("stream_options").is_some());
+        assert!(seen[1].body.get("stream_options").is_none());
+        assert!(seen[2].body.get("stream_options").is_none(), "remembered");
+    }
+
+    #[tokio::test]
+    async fn any_other_error_is_reported_not_retried() {
+        let (base, seen) = serve_seq(vec![(
+            "400 Bad Request",
+            r#"{"error":{"message":"model not found"}}"#.into(),
+        )])
+        .await;
+        let client = OpenAIClient::new("k").with_base_url(base);
+        let Err(err) = client.chat_stream(&[Message::user("hi")], &[]).await else {
+            panic!("a 400 that is not about stream_options must fail");
+        };
+        assert!(err.to_string().contains("model not found"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn running_totals_are_reported_once_with_the_last_value() {
+        let usage = |p: u32, c: u32| {
+            chunk(serde_json::json!({"choices": [{"delta": {"content": "x"}}],
+                "usage": {"prompt_tokens": p, "completion_tokens": c}}))
+        };
+        // Closes without [DONE].
+        let body = [usage(500, 1), usage(500, 2), usage(500, 3)].concat();
+        let (base, _) = serve_seq(vec![("200 OK", body)]).await;
+        let client = OpenAIClient::new("k").with_base_url(base);
+        let (_, usage) = drain(
+            client
+                .chat_stream(&[Message::user("hi")], &[])
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(usage.len(), 1);
+        assert_eq!((usage[0].input_tokens, usage[0].output_tokens), (500, 3));
+    }
+
+    #[test]
+    fn a_long_cache_key_is_cut_to_openais_limit() {
+        let client = OpenAIClient::new("k").with_cache_hints(CacheHints {
+            prompt_cache_key: Some("é".repeat(80)),
+            grok_conv_id: None,
+        });
+        let body = client.request_body(&[Message::user("hi")], &[], false);
+        assert_eq!(
+            body["prompt_cache_key"].as_str().unwrap().chars().count(),
+            64
+        );
+        assert!(
+            body.get("stream_options").is_none(),
+            "only streams ask for usage"
+        );
+        assert!(body.get("stream").is_none());
     }
 }
 

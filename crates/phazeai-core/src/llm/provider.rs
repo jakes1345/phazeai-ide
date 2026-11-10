@@ -459,7 +459,8 @@ impl ProviderRegistry {
                 };
                 let client = super::OpenAIClient::new(api_key)
                     .with_model(model)
-                    .with_base_url(base_url);
+                    .with_base_url(base_url)
+                    .with_cache_hints(cache_hints_for(&config.id, project_cache_key()));
                 let client = if direct {
                     client.without_proxy()
                 } else {
@@ -936,6 +937,45 @@ impl ProviderRegistry {
 /// The address a client built from `config` sends its requests to: the
 /// configured base URL, or for the built-in provider the address of the
 /// server PhazeAI started.
+/// The cache-routing hints a provider accepts, given the key to send.
+///
+/// `prompt_cache_key` goes only to the providers opencode lists as accepting
+/// it (`packages/ai/src/providers/{openai,azure,cerebras,fireworks,openrouter}.ts`
+/// set `promptCacheKey: true`); strict servers answer an unknown body field
+/// with a 400. xAI takes the same key as its `x-grok-conv-id` header
+/// (docs.x.ai, "Maximizing cache hits").
+pub(crate) fn cache_hints_for(id: &ProviderId, key: Option<String>) -> super::CacheHints {
+    let mut hints = super::CacheHints::default();
+    match id {
+        ProviderId::OpenAI
+        | ProviderId::Azure
+        | ProviderId::Cerebras
+        | ProviderId::Fireworks
+        | ProviderId::OpenRouter => hints.prompt_cache_key = key,
+        ProviderId::Xai => hints.grok_conv_id = key,
+        _ => {}
+    }
+    hints
+}
+
+/// A cache key for the current project: the same for every session and
+/// every IDE message in one project, so they reach the server that holds the
+/// shared prefix (tools and base prompt, which T2 made byte-stable), and
+/// different between projects. It is a hash, so the path never leaves the
+/// machine.
+pub(crate) fn project_cache_key() -> Option<String> {
+    let root = crate::tools::sandbox::workspace_root()
+        .or_else(|| std::env::current_dir().ok()?.canonicalize().ok())?;
+    Some(cache_key_for(&root))
+}
+
+fn cache_key_for(root: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(root.to_string_lossy().as_bytes());
+    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("phaze-{hex}")
+}
+
 fn request_base_url(config: &ProviderConfig) -> Result<String, crate::error::PhazeError> {
     if config.id != ProviderId::BuiltIn {
         return Ok(config.base_url.clone());
@@ -998,5 +1038,53 @@ impl UsageTracker {
 
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod cache_hint_tests {
+    use super::*;
+
+    #[test]
+    fn only_providers_that_accept_the_key_get_it() {
+        let key = || Some("phaze-k".to_string());
+        for id in [
+            ProviderId::OpenAI,
+            ProviderId::Azure,
+            ProviderId::Cerebras,
+            ProviderId::Fireworks,
+            ProviderId::OpenRouter,
+        ] {
+            let hints = cache_hints_for(&id, key());
+            assert_eq!(hints.prompt_cache_key.as_deref(), Some("phaze-k"), "{id:?}");
+            assert_eq!(hints.grok_conv_id, None, "{id:?}");
+        }
+        let xai = cache_hints_for(&ProviderId::Xai, key());
+        assert_eq!(xai.grok_conv_id.as_deref(), Some("phaze-k"));
+        assert_eq!(xai.prompt_cache_key, None);
+        for id in [
+            ProviderId::DeepSeek,
+            ProviderId::Groq,
+            ProviderId::Mistral,
+            ProviderId::Gemini,
+            ProviderId::LmStudio,
+            ProviderId::Together,
+            ProviderId::Custom("mine".into()),
+        ] {
+            assert_eq!(
+                cache_hints_for(&id, key()),
+                crate::llm::CacheHints::default(),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_is_stable_per_project_and_hides_the_path() {
+        let a = cache_key_for(std::path::Path::new("/work/app"));
+        assert_eq!(a, cache_key_for(std::path::Path::new("/work/app")));
+        assert_ne!(a, cache_key_for(std::path::Path::new("/work/other")));
+        assert!(!a.contains("work"));
+        assert_eq!(a.len(), "phaze-".len() + 32);
     }
 }
