@@ -264,6 +264,7 @@ fn connect_mcp(pidfile: &Path, sleep_secs: &str) -> (McpClient, Proc) {
             sleep_secs,
         ),
         env: HashMap::new(),
+        ..Default::default()
     };
     let client = McpClient::connect(&config).expect("connect to the stand-in server");
     let server = Proc::new(recorded_pid(pidfile));

@@ -10,6 +10,7 @@ pub mod companion;
 pub mod input;
 pub mod markdown;
 pub mod oneshot;
+pub mod output;
 pub mod setup;
 pub mod term;
 pub mod text;

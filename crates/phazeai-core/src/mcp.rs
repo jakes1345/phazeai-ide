@@ -22,6 +22,8 @@ const MAX_RESTARTS_PER_WINDOW: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+mod http;
+
 /// `serverInfo.name` of the official `@modelcontextprotocol/server-filesystem`,
 /// whose listing output the privacy filter understands.
 pub const FS_SERVER_NAME: &str = "secure-filesystem-server";
@@ -118,12 +120,14 @@ pub struct McpServerInfo {
     pub version: String,
 }
 
-/// Configuration for an MCP server connection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Configuration for an MCP server connection: a command to run (stdio), or
+/// the `url` of a remote server (Streamable HTTP).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Display name for this server
     pub name: String,
     /// Command to launch the server (e.g., "npx", "python3", "node")
+    #[serde(default)]
     pub command: String,
     /// Arguments to pass to the command
     #[serde(default)]
@@ -131,6 +135,15 @@ pub struct McpServerConfig {
     /// Environment variables to set
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// A remote server's MCP endpoint (`https://…/mcp`), spoken to with the
+    /// Streamable HTTP transport instead of running `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Headers sent with every request to `url` (an API key, say). `${VAR}`
+    /// in a value is replaced with that environment variable, so the key
+    /// itself need not be written in the file.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
 }
 
 impl McpServerConfig {
@@ -194,11 +207,21 @@ pub struct McpBridgeSpec {
     pub fs_listings: bool,
 }
 
-/// An active connection to a single MCP server over stdio.
+/// How messages reach the server.
+enum Transport {
+    /// A child process: one JSON message per line on its stdin and stdout.
+    Stdio {
+        process: ChildSlot,
+        stdin: Arc<Mutex<Box<dyn Write + Send>>>,
+    },
+    /// A remote server: each message is an HTTP POST (see [`http`]).
+    Http(http::HttpTransport),
+}
+
+/// An active connection to a single MCP server, over stdio or HTTP.
 pub struct McpClient {
     name: String,
-    process: ChildSlot,
-    stdin: Arc<Mutex<Box<dyn Write + Send>>>,
+    transport: Transport,
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
     server_info: Option<McpServerInfo>,
@@ -209,8 +232,23 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Connect to an MCP server by spawning the process and initializing.
+    /// Connect to an MCP server: spawn its process (or reach its `url`) and
+    /// initialize.
     pub fn connect(config: &McpServerConfig) -> Result<Self, String> {
+        if let Some(url) = config
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        {
+            return Self::connect_http(config, url);
+        }
+        if config.command.trim().is_empty() {
+            return Err(format!(
+                "MCP server '{}' needs a `command` to run or a `url` to reach",
+                config.name
+            ));
+        }
         let mut cmd = crate::process::std_command(&config.command);
         cmd.args(&config.args);
         cmd.stdin(Stdio::piped());
@@ -278,8 +316,7 @@ impl McpClient {
 
         let mut client = Self {
             name: config.name.clone(),
-            process,
-            stdin,
+            transport: Transport::Stdio { process, stdin },
             next_id: AtomicU64::new(1),
             pending,
             server_info: None,
@@ -293,12 +330,71 @@ impl McpClient {
         Ok(client)
     }
 
+    /// Reach a remote server at `url` with the Streamable HTTP transport.
+    fn connect_http(config: &McpServerConfig, url: &str) -> Result<Self, String> {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| format!("MCP server '{}': `{url}` is not a URL: {e}", config.name))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(format!(
+                "MCP server '{}': only http and https URLs are supported",
+                config.name
+            ));
+        }
+        let host = parsed.host_str().unwrap_or_default().to_string();
+        let local = crate::privacy::is_loopback_host(&host);
+        if !local && crate::privacy::active().local_only() {
+            return Err(format!(
+                "MCP server '{}' at {host} is not on this machine, and this project's \
+                 privacy policy is local-only",
+                config.name
+            ));
+        }
+        if !local && parsed.scheme() == "http" && !config.headers.is_empty() {
+            return Err(format!(
+                "MCP server '{}': its headers would be sent unencrypted to {host}; use https",
+                config.name
+            ));
+        }
+        let mut headers = Vec::new();
+        for (name, value) in &config.headers {
+            let value = http::expand_env(value).map_err(|var| {
+                format!(
+                    "MCP server '{}': header `{name}` uses ${{{var}}}, which is not set",
+                    config.name
+                )
+            })?;
+            headers.push((name.clone(), value));
+        }
+        let alive = Arc::new(AtomicBool::new(true));
+        let transport =
+            http::HttpTransport::start(&config.name, parsed, headers, local, alive.clone())?;
+        let mut client = Self {
+            name: config.name.clone(),
+            transport: Transport::Http(transport),
+            next_id: AtomicU64::new(1),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            server_info: None,
+            tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
+            alive,
+        };
+        client.initialize()?;
+        Ok(client)
+    }
+
     /// Send the MCP initialize handshake
     fn initialize(&mut self) -> Result<(), String> {
+        // Streamable HTTP came with 2025-03-26; stdio servers keep the
+        // version they have always been sent.
+        let version = match self.transport {
+            Transport::Http(_) => http::PROTOCOL_VERSION,
+            Transport::Stdio { .. } => "2024-11-05",
+        };
         let result = self.send_request(
             "initialize",
             serde_json::json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": version,
                 // None: this client answers no server-to-client requests, so it
                 // must not offer `roots`. A server offered roots asks for them
                 // with `roots/list`, and the official filesystem server holds
@@ -313,6 +409,11 @@ impl McpClient {
 
         if let Some(info) = result.get("serverInfo") {
             self.server_info = serde_json::from_value(info.clone()).ok();
+        }
+        if let Transport::Http(http) = &self.transport {
+            if let Some(v) = result.get("protocolVersion").and_then(|v| v.as_str()) {
+                http.set_protocol_version(v);
+            }
         }
 
         // Send initialized notification
@@ -470,6 +571,13 @@ impl McpClient {
             "params": params,
         });
 
+        if let Transport::Http(http) = &self.transport {
+            let response = http
+                .request(request, id)
+                .map_err(|e| format!("MCP server '{}' while calling '{method}': {e}", self.name))?;
+            return Self::result_of(response);
+        }
+
         let (tx, rx) = mpsc::channel();
 
         {
@@ -502,7 +610,11 @@ impl McpClient {
             )
         })?;
 
-        // Check for JSON-RPC error
+        Self::result_of(response)
+    }
+
+    /// A JSON-RPC response's `result`, or its `error` as a message.
+    fn result_of(response: serde_json::Value) -> Result<serde_json::Value, String> {
         if let Some(error) = response.get("error") {
             let message = error
                 .get("message")
@@ -533,14 +645,15 @@ impl McpClient {
     /// LSP's Content-Length framing: a server reads up to `\n`, so a header
     /// is a parse error and an unterminated body is never read at all.
     fn send_raw(&self, message: &serde_json::Value) -> Result<(), String> {
+        let stdin = match &self.transport {
+            Transport::Http(http) => return http.notify(message.clone()),
+            Transport::Stdio { stdin, .. } => stdin,
+        };
         let mut line = serde_json::to_string(message)
             .map_err(|e| format!("Failed to serialize message: {e}"))?;
         line.push('\n');
 
-        let mut stdin = self
-            .stdin
-            .lock()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let mut stdin = stdin.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         stdin
             .write_all(line.as_bytes())
             .map_err(|e| format!("Failed to write to MCP server: {e}"))?;
@@ -600,7 +713,11 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        self.process.end();
+        // An HTTP transport ends its session when its thread sees the
+        // channel close.
+        if let Transport::Stdio { process, .. } = &self.transport {
+            process.end();
+        }
     }
 }
 

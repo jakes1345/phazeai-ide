@@ -65,6 +65,7 @@ fn fs_server(allowed: &Path) -> McpServerConfig {
         command: server_executable(),
         args: vec![allowed.to_str().expect("UTF-8 temp path").to_string()],
         env: HashMap::new(),
+        ..Default::default()
     }
 }
 

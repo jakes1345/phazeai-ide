@@ -73,7 +73,7 @@ Also in the IDE:
 - Code completion, shown in a strip under the editor and inserted with Tab. It's on by default and sends the code around your cursor to the active provider. Turn it off with `[editor] ai_completions = false`, or "Toggle AI Completions" in the command palette.
 - Code search for the agent: BM25 keyword search over the workspace, run in-process with nothing extra to install. It matches words, not meaning.
 - Skills, which are Markdown files in `~/.config/phazeai/skills/` or `<project>/.phazeai/skills/` that the chat can switch into.
-- MCP servers over stdio, listed in `<project>/.phazeai/mcp.json` as `{"servers": [{"name", "command", "args", "env"}]}`. CI tests this against the official filesystem server.
+- MCP servers, listed in `<project>/.phazeai/mcp.json` as `{"servers": [...]}`. A local server is `{"name", "command", "args", "env"}` and runs over stdio; CI tests this against the official filesystem server. A remote one is `{"name", "url", "headers"}` and is reached over MCP's Streamable HTTP transport, with `${VAR}` in a header value filled in from the environment, so a key needn't sit in the file. Headers only go to another machine over https, and a local-only project refuses remote servers.
 - A Design panel that turns a prompt into a self-contained HTML prototype in `.phazeai/designs/`, following `.phazeai/design-system.md` if you have one.
 
 The built-in local model lives in Settings › Local AI. It checks your RAM and disk, downloads one of five Apache-2.0 GGUF models (from 1.5B up to a 35B mixture-of-experts), verifies the size and SHA-256, and runs it with llama.cpp's `llama-server`. The smallest one writes tool calls as plain text, so the agent can't reliably act through it.
@@ -103,7 +103,7 @@ MCP tool calls are checked too, but only on a best-effort basis: a server can op
 
 ### Terminal UI
 
-`phazeai` is the same agent in a terminal: streaming Markdown, tool cards, an approval prompt with a diff preview, slash commands, saved sessions and seven colour themes. `phazeai -p "explain main.rs"` runs one prompt and prints the answer, and `--allow read|edit|all` decides what it may do without asking. See [crates/phazeai-cli/README.md](crates/phazeai-cli/README.md).
+`phazeai` is the same agent in a terminal: streaming Markdown, tool cards, an approval prompt with a diff preview, slash commands, saved sessions and seven colour themes. `phazeai -p "explain main.rs"` runs one prompt and prints the answer, and `--allow read|edit|all` decides what it may do without asking. For scripts and CI, `--output-format json` prints one JSON object with the answer, token counts and cost, and `stream-json` prints one line per event as the run goes; the fields follow Claude Code's `-p` output. See [crates/phazeai-cli/README.md](crates/phazeai-cli/README.md).
 
 ## Keybindings
 
@@ -212,6 +212,7 @@ Besides calls to the AI provider you configured, PhazeAI can make these requests
 - Model and llama.cpp downloads from Hugging Face and GitHub, when you start one from Settings › Local AI.
 - The GitHub Actions panel fetches run status while it's open.
 - Your provider's model list, when you run `/models` or press Models in Settings. It goes to the same address and with the same key as your chats.
+- Remote MCP servers you list by `url` in `.phazeai/mcp.json`, with the headers you give them.
 
 ## Building
 

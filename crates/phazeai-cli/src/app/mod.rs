@@ -45,15 +45,46 @@ pub async fn run_single_prompt(
     color: ColorMode,
     allow: crate::oneshot::Allow,
     can_ask: bool,
+    format: crate::output::OutputFormat,
 ) -> Result<()> {
-    let llm = settings.build_llm_client().map_err(|e| {
-        anyhow::anyhow!(setup::explain_build_error(
-            settings,
-            &e.to_string(),
-            setup::Surface::OneShot
-        ))
-    })?;
+    use crate::output::{self, OutputFormat, RunOutcome};
+    let started = Instant::now();
+    let provider_slug = settings.llm.provider.slug();
+    let model = settings.llm.model.clone();
+    let machine = format != OutputFormat::Text;
+    // A JSON line or object on stdout, one per line.
+    let emit = |value: &serde_json::Value| {
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "{value}");
+        let _ = out.flush();
+    };
+
+    let llm = match settings.build_llm_client() {
+        Ok(llm) => llm,
+        Err(e) => {
+            let msg = setup::explain_build_error(settings, &e.to_string(), setup::Surface::OneShot);
+            if machine {
+                emit(&output::result_object(&RunOutcome {
+                    result: Err(&msg),
+                    num_turns: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    provider: provider_slug,
+                    model: &model,
+                    meter: &phazeai_core::cost::Meter::default(),
+                    denials: &[],
+                }));
+            }
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if format == OutputFormat::StreamJson {
+        emit(&output::init_event(
+            provider_slug,
+            &model,
+            &cwd.display().to_string(),
+        ));
+    }
 
     let refusals = crate::oneshot::Refusals::default();
     // Ctrl+C stops the run instead of killing this process outright: the
@@ -100,7 +131,31 @@ pub async fn run_single_prompt(
 
     let mut last_error: Option<String> = None;
     let mut stdout = io::stdout();
+    let billed = settings.billed_model();
+    let mut meter = phazeai_core::cost::Meter::default();
     while let Some(event) = event_rx.recv().await {
+        match &event {
+            AgentEvent::CallUsage(usage) => {
+                meter.add(billed.as_ref().map(|(p, m)| (p, m.as_str())), usage)
+            }
+            AgentEvent::SubagentUsage { model, usage } => {
+                let provider = settings.llm.provider.to_provider_id();
+                meter.add(Some((&provider, model)), usage)
+            }
+            _ => {}
+        }
+        if machine {
+            match event {
+                AgentEvent::Error(e) => last_error = Some(e),
+                event if format == OutputFormat::StreamJson => {
+                    if let Some(line) = output::stream_event(&event) {
+                        emit(&line);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         match event {
             AgentEvent::TextDelta(text) => {
                 print!("{text}");
@@ -145,16 +200,39 @@ pub async fn run_single_prompt(
     if let Some(note) = crate::oneshot::refusal_summary(&refused) {
         eprintln!("\n{}", paint("33", &note));
     }
-    match result {
-        Ok(_) => Ok(()),
+    let outcome = match &result {
+        Ok(response) => Ok(response),
         Err(e) => {
-            let raw = last_error.unwrap_or_else(|| e.to_string());
-            let msg = match setup::explain_runtime_error(settings, &raw, setup::Surface::OneShot) {
-                Some(hint) => format!("{hint}\n\n({raw})"),
-                None => raw,
-            };
-            Err(anyhow::anyhow!(msg))
+            let raw = last_error.clone().unwrap_or_else(|| e.to_string());
+            Err(
+                match setup::explain_runtime_error(settings, &raw, setup::Surface::OneShot) {
+                    Some(hint) => format!("{hint}\n\n({raw})"),
+                    None => raw,
+                },
+            )
         }
+    };
+    if machine {
+        let denials: Vec<(String, &'static str)> = refused
+            .iter()
+            .map(|(call, needed)| (call.clone(), needed.flag()))
+            .collect();
+        emit(&output::result_object(&RunOutcome {
+            result: match &outcome {
+                Ok(response) => Ok(response.content.as_str()),
+                Err(msg) => Err(msg.as_str()),
+            },
+            num_turns: outcome.as_ref().map_or(0, |r| r.iterations),
+            duration_ms: started.elapsed().as_millis(),
+            provider: provider_slug,
+            model: &model,
+            meter: &meter,
+            denials: &denials,
+        }));
+    }
+    match outcome {
+        Ok(_) => Ok(()),
+        Err(msg) => Err(anyhow::anyhow!(msg)),
     }
 }
 
