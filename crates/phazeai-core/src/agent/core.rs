@@ -2,7 +2,9 @@ use crate::agent_event::AgentEvent;
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
-use crate::tools::{FileWrite, ToolDefinition, ToolRegistry, ToolResult};
+use crate::tools::{
+    FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
+};
 use futures::StreamExt;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -221,6 +223,12 @@ impl Agent {
         self.tools.register(tool);
     }
 
+    /// Add a tool the model reaches through `more_tools` instead of seeing
+    /// its schema on every request (see [`ToolRegistry`]).
+    pub fn register_deferred_tool(&mut self, tool: Box<dyn crate::tools::Tool>) {
+        self.tools.register_deferred(tool);
+    }
+
     pub fn register_mcp_tools(
         &mut self,
         manager: std::sync::Arc<std::sync::Mutex<crate::mcp::McpManager>>,
@@ -228,8 +236,10 @@ impl Agent {
         use crate::tools::mcp_bridge::create_mcp_tool_bridges;
         let bridges = create_mcp_tool_bridges(manager, Some(self.mcp_event_sink.clone()));
         let count = bridges.len();
+        // Held back: a server can bring dozens of tools, each schema sent
+        // with every request otherwise; a line apiece is enough to find them.
         for bridge in bridges {
-            self.tools.register(bridge);
+            self.tools.register_deferred(bridge);
         }
         if count > 0 {
             tracing::info!("Registered {count} MCP tools into tool registry");
@@ -431,6 +441,12 @@ impl Agent {
                         tool_calls.clone(),
                     ));
                 }
+                // A call that runs a held-back tool through `more_tools` is
+                // from here on a call of that tool (same id, so its result
+                // answers the model's call): approval, review, events and
+                // execution all see the tool that really runs.
+                let tool_calls: Vec<ToolCall> =
+                    tool_calls.into_iter().map(resolve_more_tools).collect();
 
                 // Execute the tool calls in the order the model gave them. A
                 // run of two or more calls to tools that only read
@@ -635,10 +651,12 @@ impl Agent {
         calls[start..]
             .iter()
             .position(|call| {
-                !self
-                    .tools
-                    .get(&call.function.name)
-                    .is_some_and(|tool| tool.is_concurrency_safe())
+                // A `more_tools` call left as one only reads a schema.
+                !(call.function.name == MORE_TOOLS
+                    || self
+                        .tools
+                        .get(&call.function.name)
+                        .is_some_and(|tool| tool.is_concurrency_safe()))
             })
             .map_or(calls.len(), |offset| start + offset)
     }
@@ -657,6 +675,10 @@ impl Agent {
         let Some(ref approval_fn) = self.approval_fn else {
             return Gate::Allow;
         };
+        // Asking for a tool's parameters changes nothing and runs nothing.
+        if tool_call.function.name == MORE_TOOLS {
+            return Gate::Allow;
+        }
         let tool_name = &tool_call.function.name;
         let params = tool_call.parse_arguments().unwrap_or(Value::Null);
 
@@ -741,6 +763,22 @@ impl Agent {
                 return (false, format!("Failed to parse tool arguments: {e}"));
             }
         };
+
+        if tool_name == MORE_TOOLS {
+            // Left as a `more_tools` call by `resolve_more_tools`: a request
+            // for a tool's parameters, or arguments that did not parse.
+            return match MoreToolsCall::parse(&params) {
+                Ok(MoreToolsCall::Describe(name)) => match self.tools.describe(&name) {
+                    Ok(schema) => (
+                        true,
+                        serde_json::to_string(&schema).unwrap_or_else(|_| schema.to_string()),
+                    ),
+                    Err(e) => (false, format!("Error: {e}")),
+                },
+                Ok(MoreToolsCall::Run { name, .. }) => (false, format!("Tool '{name}' not found")),
+                Err(e) => (false, format!("Error: {e}")),
+            };
+        }
 
         if let Some(tool) = self.tools.get(tool_name) {
             self.tool_outcome(tool.execute(params)).await
@@ -858,6 +896,30 @@ fn cancelled_run<T>(
 /// was hidden. This only shortens the UI summary: what the model gets is the
 /// result as `ConversationHistory::add_tool_result` stores it (capped there)
 /// and as trimming later cuts it to fit the context budget.
+/// `call` itself, or, when it runs a tool through `more_tools`, a call of
+/// that tool with the given arguments and the same id. A `more_tools` call
+/// that only asks for a tool's parameters, or whose arguments do not parse,
+/// is left as it is (`execute_tool` answers it).
+fn resolve_more_tools(call: ToolCall) -> ToolCall {
+    if call.function.name != MORE_TOOLS {
+        return call;
+    }
+    let Ok(params) = call.parse_arguments() else {
+        return call;
+    };
+    match MoreToolsCall::parse(&params) {
+        Ok(MoreToolsCall::Run { name, arguments }) => ToolCall {
+            id: call.id,
+            call_type: call.call_type,
+            function: FunctionCall {
+                name,
+                arguments: arguments.to_string(),
+            },
+        },
+        _ => call,
+    }
+}
+
 fn truncate_str_annotated(s: &str, max_len: usize) -> String {
     let total = s.chars().count();
     if total <= max_len {
@@ -1435,5 +1497,174 @@ mod tests {
             .map(|m| m.content.as_str())
             .collect();
         assert_eq!(results, [NOT_RUN, NOT_RUN, NOT_RUN]);
+    }
+
+    /// Answers each request with the next scripted round of calls, each a
+    /// tool name and its arguments, then with plain text; records the tool
+    /// names each request offered.
+    struct Script {
+        rounds: StdMutex<std::collections::VecDeque<Vec<(&'static str, Value)>>>,
+        offered: Arc<StdMutex<Vec<Vec<String>>>>,
+    }
+
+    impl Script {
+        fn new(rounds: Vec<Vec<(&'static str, Value)>>) -> Self {
+            Self {
+                rounds: StdMutex::new(rounds.into()),
+                offered: Arc::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for Script {
+        async fn chat(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<crate::llm::LlmResponse, PhazeError> {
+            Ok(crate::llm::LlmResponse {
+                message: Message::assistant("summary"),
+                usage: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<futures::channel::mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
+            let mut offered = self.offered.lock().unwrap();
+            let n = offered.len();
+            offered.push(tools.iter().map(|t| t.name.clone()).collect());
+            let mut events = Vec::new();
+            match self.rounds.lock().unwrap().pop_front() {
+                Some(calls) => {
+                    for (k, (name, args)) in calls.into_iter().enumerate() {
+                        let id = format!("r{n}c{k}");
+                        events.push(StreamEvent::ToolCallStart {
+                            id: id.clone(),
+                            name: name.into(),
+                        });
+                        events.push(StreamEvent::ToolCallDelta {
+                            id: id.clone(),
+                            arguments_delta: args.to_string(),
+                        });
+                        events.push(StreamEvent::ToolCallEnd { id });
+                    }
+                }
+                None => events.push(StreamEvent::TextDelta("done".into())),
+            }
+            events.push(StreamEvent::Done);
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            for event in events {
+                tx.unbounded_send(event).unwrap();
+            }
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_back_tool_is_described_then_run_under_its_own_name() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(counters.tool("read_a", true, 1));
+        tools.register_deferred(counters.tool("rare", false, 1));
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let approval: ApprovalFn = {
+            let asked = asked.clone();
+            Box::new(move |name, params| {
+                asked.lock().unwrap().push((name, params));
+                Box::pin(async { true })
+            })
+        };
+        let llm = Script::new(vec![
+            vec![(MORE_TOOLS, serde_json::json!({"name": "rare"}))],
+            vec![(
+                MORE_TOOLS,
+                serde_json::json!({"name": "rare", "arguments": {"x": 1}}),
+            )],
+        ]);
+        let offered = llm.offered.clone();
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_approval(approval);
+
+        let response = agent.run("use the rare tool").await.unwrap();
+
+        // Only its line is sent, never its schema.
+        for names in offered.lock().unwrap().iter() {
+            assert_eq!(names, &["read_a", MORE_TOOLS]);
+        }
+        // Asking for the schema needs no approval; running the tool is
+        // approved as that tool, with its own arguments.
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [("rare".to_string(), serde_json::json!({"x": 1}))]
+        );
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 1);
+        let names: Vec<&str> = response
+            .tool_calls
+            .iter()
+            .map(|t| t.tool_name.as_str())
+            .collect();
+        assert_eq!(names, [MORE_TOOLS, "rare"]);
+        assert!(response.tool_calls.iter().all(|t| t.success));
+        assert!(response.tool_calls[0].result_summary.contains("parameters"));
+        assert_every_call_answered_in_order(&agent.get_conversation_history().await);
+    }
+
+    #[tokio::test]
+    async fn a_denied_held_back_tool_does_not_run() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register_deferred(counters.tool("rare", false, 1));
+        let approval: ApprovalFn = Box::new(|_, _| Box::pin(async { false }));
+        let llm = Script::new(vec![vec![(
+            MORE_TOOLS,
+            serde_json::json!({"name": "rare", "arguments": {}}),
+        )]]);
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_approval(approval);
+
+        let response = agent.run("go").await.unwrap();
+
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 0);
+        assert_eq!(response.tool_calls[0].tool_name, "rare");
+        assert!(!response.tool_calls[0].success);
+    }
+
+    #[tokio::test]
+    async fn more_tools_reports_an_unknown_tool_or_bad_arguments() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register_deferred(counters.tool("rare", false, 1));
+        let llm = Script::new(vec![vec![
+            (MORE_TOOLS, serde_json::json!({"name": "nope"})),
+            (
+                MORE_TOOLS,
+                serde_json::json!({"name": "nope", "arguments": {}}),
+            ),
+            (
+                MORE_TOOLS,
+                serde_json::json!({"name": "rare", "arguments": "{bad"}),
+            ),
+        ]]);
+        let agent = Agent::new(Box::new(llm)).with_tools(tools);
+
+        let response = agent.run("go").await.unwrap();
+
+        let calls = &response.tool_calls;
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|t| !t.success), "{calls:?}");
+        assert!(calls[0].result_summary.contains("rare"), "{calls:?}");
+        assert!(calls[1].result_summary.contains("not found"), "{calls:?}");
+        assert!(
+            calls[2].result_summary.contains("not valid JSON"),
+            "{calls:?}"
+        );
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 0);
+        assert_every_call_answered_in_order(&agent.get_conversation_history().await);
     }
 }

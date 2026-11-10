@@ -17,7 +17,7 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use phazeai_core::config::LlmProvider;
 use phazeai_core::{
     Agent, ConversationHistory, LlmClient, LlmResponse, Message, PhazeError, Role, Settings,
-    StreamEvent, SystemPromptBuilder, ToolDefinition, ToolRegistry,
+    StreamEvent, SystemPromptBuilder, ToolDefinition,
 };
 use serde_json::{json, Value};
 
@@ -153,15 +153,8 @@ async fn a_small_budget_with_a_long_instructions_file_still_delivers_tool_result
         "expected a small local budget, got {budget}"
     );
 
-    let mut tool_names: Vec<String> = ToolRegistry::default()
-        .list()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-    tool_names.sort();
     let system_prompt = SystemPromptBuilder::new()
         .with_project_root(root.clone())
-        .with_tools(tool_names)
         .load_project_instructions()
         .with_context_budget(budget)
         .build();

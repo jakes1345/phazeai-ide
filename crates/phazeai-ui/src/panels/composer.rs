@@ -428,7 +428,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         agent.register_tool(Box::new(phazeai_core::CodeSearchTool::new(
                             search.clone(),
                         )));
-                        agent.register_tool(Box::new(phazeai_core::BuildIndexTool::new(search)));
+                        agent.register_deferred_tool(Box::new(phazeai_core::BuildIndexTool::new(
+                            search,
+                        )));
                     }
 
                     // Connect MCP servers

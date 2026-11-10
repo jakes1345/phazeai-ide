@@ -662,15 +662,9 @@ fn cloud_budget() -> usize {
     settings.context_budget()
 }
 
-/// The production system prompt for the default tool set.
+/// The production system prompt.
 fn system_prompt() -> String {
-    let mut names: Vec<String> = ToolRegistry::default()
-        .list()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-    names.sort();
-    SystemPromptBuilder::new().with_tools(names).build()
+    SystemPromptBuilder::new().build()
 }
 
 /// An agent wired the way the IDE chat and the CLI wire theirs: a tool set, a
@@ -1126,7 +1120,10 @@ async fn a_model_that_never_stops_calling_tools_is_cut_off_at_the_default_cap() 
 #[tokio::test]
 async fn stop_while_a_shell_command_runs_deep_in_a_long_turn() {
     let budget = local_model_budget();
-    let ws = Workspace::new("files", 9, lines_for(budget, FILE_SHARE));
+    // Larger files than the other sessions read: the first two turns alone
+    // have to fill the budget, so that the session has compacted before
+    // Stop, and the system prompt and tools take little of it.
+    let ws = Workspace::new("files", 9, lines_for(budget, 0.12));
     let small = Workspace::new("small", 26, 3);
     let mut script = reading_session(&ws, 2, None, None);
     // Turn 3: twenty reads, two per message, then `sleep 30`, then three more

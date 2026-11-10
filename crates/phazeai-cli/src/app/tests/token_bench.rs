@@ -667,7 +667,24 @@ async fn token_bench() {
         "- **A new session's first request shares:** {across} of {} tokens with this one's",
         new_session.len()
     );
-    println!("- **Tools offered:** {}", tool_names.join(", "));
+    let mut per_tool: Vec<(usize, &str)> = first_body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            (
+                bpe.encode_ordinary(&format!("<tool>{}\n", t["function"]))
+                    .len(),
+                t["function"]["name"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    per_tool.sort_by(|a, b| b.cmp(a));
+    let per_tool: Vec<String> = per_tool
+        .iter()
+        .map(|(n, name)| format!("{name} {n}"))
+        .collect();
+    println!("- **Tools offered, tokens each:** {}", per_tool.join(", "));
 
     // The same task with Claude: what Anthropic bills, given the cache
     // breakpoints the requests really carry. Without breakpoints it bills
