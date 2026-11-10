@@ -193,21 +193,43 @@ first, then caching is switched on, then the prefix is made smaller.
   tools plus prompt were 51% of all input.
 
 ### T5: compact tool results and bounded output
-- **Plain-text results.** Tool results go back as text, not pretty-printed JSON
-  (`agent/core.rs`): read as numbered lines, grep grouped by file, bash as
-  stdout, stderr and exit code. opencode's formats measured 2.4x fewer bytes on
-  grep and 1.11x on read. Source: opencode `to-llm-message.ts:114-128`,
-  `read.ts`, `grep.ts`.
-- **Default caps, with the full output spilled to a file whose path is in the
-  marker:**
-  - read_file: 2,000 lines / 50 KiB (it has no default cap today)
-  - bash: tail-biased 50 KiB
-  - grep: 100 matches
-  - list_files: skip `.git` and other VCS directories
 
-  Source: opencode `tool-output.ts:13-120`; Claude Code and Codex do the same
-  ([agents-survey.md](research/agents-survey.md) #12).
-- **Moves:** raw input (the message half of every request).
+Built:
+
+- **Plain-text results** (`tools/render.rs`, called from `tool_outcome` in
+  `agent/core.rs`). Tools still return JSON, which the UI, the CLI and the
+  tests read; only what the model is told changes. Before, it got the JSON
+  pretty-printed, so every file read was one escaped string and every grep hit
+  repeated its keys and path. Now:
+  - read_file: the numbered lines (`12\tcode`, no padding), and when the read
+    stops early, `[lines 1-2000 of 2500; read on with offset 2001]`
+  - bash: stdout, then `[stderr]` and stderr if any, then `[exit code N]` only
+    when the command failed
+  - grep: hits grouped under their file, as `rg --heading` shows them
+  - glob, list_files: one path per line, directories ending in `/`
+  - write_file, edit_file: one line (`Edited src/a.rs (1 replacement)`)
+  - code_search: each snippet under `file:start-end`
+  - anything else (MCP tools, web): compact JSON, or the string itself
+  - paths under the current directory are shown relative to it; the tools
+    resolve relative paths against it, so they round-trip
+- **Default caps:**
+  - read_file: 2,000 lines, 50 KiB and 2,000 characters a line when no
+    `limit` is given (it had no cap); the result says where to read on
+  - grep: 100 hits (was 500), each line cut at 300 characters
+  - glob: 500 paths (was 1,000); list_files: 1,000 entries
+  - every capped listing says it stopped and that narrowing the search shows
+    the rest
+  - grep, glob and list_files skip `.git`, `.hg`, `.svn` and `.jj` (they walk
+    hidden files, so a recursive listing went through every git object)
+
+Not done, on purpose: spilling cut output to a file. A cut read already says
+how to read on, and a capped search can be narrowed. For bash, the tools can
+only read inside the workspace, so a spill file would have to be written into
+the project; bash keeps its 30,000-byte head-and-tail cut per stream.
+
+Source: opencode `tool-output.ts:13-120`, `read.ts`, `grep.ts`,
+`to-llm-message.ts:114-128`; Claude Code and Codex cap the same way
+([agents-survey.md](research/agents-survey.md) #12).
 
 ### T6: context that stays cached
 - **No in-place rewrites.** Overflow handling stops editing earlier messages
@@ -259,6 +281,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T2: stable prefix | 122,884 | +0.05% | 90.7% | 3,695 of 3,736 | Only the uncommitted-files line and the new message differ now. The new git heading adds 4 tokens per request. |
 | T3: Claude caching | 123,156 (Claude run) | +0.27% | 90.7% | 3,709 of 3,764 read from cache | Claude bill, in input-token units: **25,529 (20.7% of sent)**, from 111,666 read, 11,490 written, 0 uncached. The same bench on the T2 commit: 123,206 sent, 0 read, billed 100%. That is a **79.3% cut**, just short of the 80% target. The OpenAI run is unchanged from T2 (122,884). |
 | T4: lean prompt and tools | 91,678 | -25.4% | 89.9% | 1,466 of 1,507 | Per request, the system prompt fell from 1,134 to 257 tokens and the tools from 23 schemas (2,557 tokens) to 8 schemas plus `more_tools` (1,205). Claude bill: **19,809 (21.6% of sent)** from 82,507 read and 9,247 written, an **83.9% cut** from the T2 commit's 123,206, past the 80% target. The raw target (61,000 or less) is not met yet: T5 is next. |
+| T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

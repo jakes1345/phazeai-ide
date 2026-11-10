@@ -113,11 +113,9 @@ fn result_for<'a>(request: &'a [Message], id: &str) -> &'a str {
         .as_str()
 }
 
-/// `line` as `read_file` numbers it, escaped the way it appears inside the
-/// tool result's JSON.
+/// `line` as `read_file` numbers it in the result the model gets.
 fn numbered(n: usize, line: &str) -> String {
-    let quoted = serde_json::to_string(&format!("{n:>6}\t{line}")).unwrap();
-    quoted[1..quoted.len() - 1].to_string()
+    format!("{n}\t{line}")
 }
 
 #[tokio::test]

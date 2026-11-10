@@ -2,6 +2,9 @@ use crate::tools::traits::{Tool, ToolResult};
 use ignore::WalkBuilder;
 use serde_json::Value;
 
+/// Entries a listing returns at most; the result says when it stopped there.
+const MAX_ENTRIES: usize = 1000;
+
 pub struct ListFilesTool;
 
 #[async_trait::async_trait]
@@ -51,7 +54,9 @@ impl Tool for ListFilesTool {
         builder.hidden(false).git_ignore(true).git_global(true);
         let policy = crate::privacy::active();
         builder.filter_entry(move |e| {
-            e.depth() == 0 || !policy.is_denied(&crate::privacy::absolutize(e.path()))
+            e.depth() == 0
+                || (!crate::tools::render::is_vcs_dir(e)
+                    && !policy.is_denied(&crate::privacy::absolutize(e.path())))
         });
 
         if let Some(depth) = max_depth {
@@ -73,15 +78,23 @@ impl Tool for ListFilesTool {
                 "type": if is_dir { "directory" } else { "file" },
             }));
 
-            if files.len() >= 1000 {
+            if files.len() > MAX_ENTRIES {
                 break;
             }
         }
 
-        Ok(serde_json::json!({
+        // One entry past the cap was kept only to tell that there are more.
+        let truncated = files.len() > MAX_ENTRIES;
+        files.truncate(MAX_ENTRIES);
+        let mut out = serde_json::json!({
             "files": files,
             "path": path,
             "count": files.len(),
-        }))
+        });
+        if truncated {
+            out["truncated"] = Value::Bool(true);
+            out["limit"] = Value::from(MAX_ENTRIES);
+        }
+        Ok(out)
     }
 }

@@ -676,7 +676,7 @@ async fn oversized_tool_results_are_cut_to_fit_and_the_question_stays() {
         assert_eq!(out.len(), 1, "{id}");
         // The model is told, and still sees how the output starts.
         assert!(out[0].contains(CUT_SUFFIX), "{id} was cut silently");
-        assert!(out[0].starts_with("\"BEGIN"), "{id}: {:?}", &out[0][..40]);
+        assert!(out[0].starts_with("BEGIN"), "{id}: {:?}", &out[0][..40]);
     }
     assert_eq!(response.unwrap().content, "the build failed in step 2");
 }

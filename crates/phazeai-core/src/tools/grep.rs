@@ -7,6 +7,20 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+/// Hits a search returns at most; the result says when it stopped there.
+const MAX_MATCHES: usize = 100;
+/// Characters of a matching line that are kept (minified code and data
+/// files have lines of many kilobytes).
+const MAX_LINE_CHARS: usize = 300;
+
+fn hit(file: &str, line_num: usize, line: &str) -> Value {
+    let content = match line.char_indices().nth(MAX_LINE_CHARS) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_string(),
+    };
+    serde_json::json!({ "file": file, "line": line_num + 1, "content": content })
+}
+
 pub struct GrepTool;
 
 #[async_trait::async_trait]
@@ -16,7 +30,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regex pattern in files. Respects .gitignore. Returns matching lines with file paths and line numbers."
+        "Search files for a regex. Respects .gitignore. Returns at most 100 matching lines, grouped by file, with line numbers."
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -67,11 +81,10 @@ impl Tool for GrepTool {
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 for (line_num, line) in content.lines().enumerate() {
                     if regex.is_match(line) {
-                        matches.push(serde_json::json!({
-                            "file": search_path,
-                            "line": line_num + 1,
-                            "content": line,
-                        }));
+                        matches.push(hit(search_path, line_num, line));
+                        if matches.len() > MAX_MATCHES {
+                            break;
+                        }
                     }
                 }
                 if !matches.is_empty() {
@@ -85,6 +98,9 @@ impl Tool for GrepTool {
                 let policy = crate::privacy::active();
                 let skipped = skipped.clone();
                 builder.filter_entry(move |e| {
+                    if crate::tools::render::is_vcs_dir(e) {
+                        return false;
+                    }
                     let denied =
                         e.depth() > 0 && policy.is_denied(&crate::privacy::absolutize(e.path()));
                     if denied {
@@ -115,11 +131,10 @@ impl Tool for GrepTool {
                     let before = matches.len();
                     for (line_num, line) in content.lines().enumerate() {
                         if regex.is_match(line) {
-                            matches.push(serde_json::json!({
-                                "file": file_str.as_ref(),
-                                "line": line_num + 1,
-                                "content": line,
-                            }));
+                            matches.push(hit(&file_str, line_num, line));
+                            if matches.len() > MAX_MATCHES {
+                                break;
+                            }
                         }
                     }
                     if matches.len() > before {
@@ -127,17 +142,24 @@ impl Tool for GrepTool {
                     }
                 }
 
-                if matches.len() >= 500 {
+                if matches.len() > MAX_MATCHES {
                     break;
                 }
             }
         }
 
+        // One hit past the cap was kept only to tell that there are more.
+        let truncated = matches.len() > MAX_MATCHES;
+        matches.truncate(MAX_MATCHES);
         let mut out = serde_json::json!({
             "matches": matches,
             "count": matches.len(),
             "pattern": pattern,
         });
+        if truncated {
+            out["truncated"] = Value::Bool(true);
+            out["limit"] = Value::from(MAX_MATCHES);
+        }
         let skipped = skipped.load(Ordering::Relaxed);
         if skipped > 0 {
             out["privacy_skipped"] = serde_json::json!(skipped);
