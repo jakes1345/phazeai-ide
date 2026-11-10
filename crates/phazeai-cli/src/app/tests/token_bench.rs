@@ -2,8 +2,8 @@
 //! tokens, measured on the requests the CLI agent really sends.
 //!
 //! The task is a two-message session on a small Rust service (the fixture in
-//! `tests/fixtures/token_bench`): find and fix a startup crash, add tests,
-//! then a follow-up change. The model's side is scripted, so every run makes
+//! `tests/fixtures/token_bench`, set up as a git repository): find and fix a
+//! startup crash, add tests, then a follow-up change. The model's side is scripted, so every run makes
 //! the same tool calls with the same arguments; everything Phaze controls
 //! (system prompt, tool schemas, how history and tool results are sent) is
 //! the real code. A local server stands in for an OpenAI-compatible provider
@@ -319,6 +319,33 @@ fn fresh_fixture() -> PathBuf {
         std::fs::write(path, text).unwrap();
     }
     std::fs::create_dir_all(base.join("home")).unwrap();
+    // A git repository with everything committed, as a real project is: the
+    // system prompt reports the branch and any uncommitted files.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=bench", "-c", "user.email=bench@localhost"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            // A fixed date gives the same commit, so the same `.git`, every run.
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "tally 0.3.1"]);
     root
 }
 
@@ -353,9 +380,11 @@ async fn token_bench() {
     let second = agent.run(FOLLOW_UP).await.unwrap();
 
     // A second session started the same way (a new `phazeai -p`, or the IDE
-    // chat, which builds a new agent for every message). What its first
-    // request shares with the first session's is what a provider can still
-    // serve from cache across sessions.
+    // chat, which builds a new agent for every message), on the project as the
+    // first session left it except for `src/config.rs`, so its first request
+    // is the first session's apart from what changed in the project. What
+    // the two share is what a provider can still serve from cache across
+    // sessions.
     let (url2, bodies2) = fake_provider(vec![]).await;
     std::fs::write(root.join("src/config.rs"), FIXTURE[4].1).unwrap();
     let again = single_prompt_agent(&settings, fake_client(&url2), &root, None);

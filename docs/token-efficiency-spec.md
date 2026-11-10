@@ -23,7 +23,8 @@ results table below.
 (`crates/phazeai-cli/src/app/tests/token_bench.rs`).
 
 - **The task.** One fixed two-message session on a small Rust service (fixture
-  in `crates/phazeai-cli/tests/fixtures/token_bench`, about 500 lines).
+  in `crates/phazeai-cli/tests/fixtures/token_bench`, about 500 lines, set up
+  as a git repository with a fixed commit, as a real project would be).
   - First message: find why the server crashes when `PORT` is set but empty, fix
     it, add tests.
   - Follow-up: log a warning when the default port is used.
@@ -46,7 +47,8 @@ results table below.
   on the provider (see the next section).
 
 Absolute counts differ a little from any one provider's bill (each wraps
-messages in its own template). The comparison that matters is before vs after
+messages in its own template), and slightly from machine to machine (the
+fixture's `.git` holds the local git version's sample hooks). The comparison that matters is before vs after
 on the same harness.
 
 ## 2. Baseline: `main` at `fe95cec`
@@ -54,39 +56,47 @@ on the same harness.
 | Measure | Value |
 |---|--:|
 | Model requests | 14 |
-| Input tokens sent, whole task | **100,228** |
+| Input tokens sent, whole task | **122,828** |
 | Tool schemas offered per request | 23 tools, 2,557 tokens |
-| System prompt per request | 1,124 tokens |
-| Share of all input that is tool schemas (2,557 x 14) | 35.7% |
-| Share that is the system prompt (1,124 x 14) | 15.7% |
-| Reusable by a prefix cache within the session | 90,498 (90.3%) |
-| Effective input if that part were cached at 0.1x | 18,780 (18.7%) |
-| First request of a new session sharing a prefix with the last one | **5 of 3,717 tokens** |
+| System prompt per request | 1,130 tokens |
+| Share of all input that is tool schemas (2,557 x 14) | 29.1% |
+| Share that is the system prompt (1,130 x 14) | 12.9% |
+| `.git` internals in the one `list_files` result, resent in the 12 requests after it | about 1,740 tokens each time |
+| Reusable by a prefix cache within the session | 111,360 (90.7%) |
+| Effective input if that part were cached at 0.1x | 22,604 (18.4%) |
+| First request of a new session sharing a prefix with the last one | **5 of 3,732 tokens** |
 
 What the baseline means:
 
-1. **On Claude, Phaze pays full price for all 100,228 tokens.** The Claude client
+1. **On Claude, Phaze pays full price for all 122,828 tokens.** The Claude client
    sends no `cache_control` (`llm/claude.rs`), so Anthropic caches nothing
    ([token-saving.md](research/token-saving.md) C1). The 90% that could be
    reused is billed in full.
 2. **Across sessions, nothing is reusable on any provider.** Tool definitions come
    from a `HashMap`, so every new agent sends them in a new random order and a
-   new session shares 5 tokens with the last. The IDE chat builds a new agent
+   new session shares 5 tokens with the last. Even with a fixed order, the
+   system prompt lists the uncommitted files near its top, so a session that
+   starts after edits differs from there on. The IDE chat builds a new agent
    for every message (`phazeai-ui/src/panels/chat.rs`), so in the IDE every
    message starts with a cold cache, even on OpenAI and DeepSeek, which cache
    automatically.
-3. **Half of every request is fixed overhead.** Of the 23 tools offered, the system
+3. **Over 40% of every request is fixed overhead.** Of the 23 tools offered, the system
    prompt describes 8. The rest (`screenshot`, `browse`, `download`, `open`,
    `now`, `copy_path`, `move_path`, `delete_path`, `create_directory`,
    `web_search`, `fetch`, `diagnostics`, `find_path`, `build_search_index`,
    `code_search`) ride along on every request of a coding task.
+4. **`list_files` lists `.git`.** It walks hidden files and `.gitignore` does not
+   exclude `.git`, so a recursive listing returns git's object store and hooks
+   (`tools/list.rs`). Measured by running the bench with and without a git
+   repository: the listing's request grew from 845 to 2,581 new tokens, and
+   that result is resent in every later request.
 
 ## 3. Targets
 
-- **Raw input tokens:** 100,228 down to 50,000 or less on the same task. This cuts
+- **Raw input tokens:** 122,828 down to 61,000 or less on the same task. This cuts
   cost on every provider, including local models, where it is speed rather than
   money.
-- **Effective cost on Claude:** at least 80% below today's full-price 100,228.
+- **Effective cost on Claude:** at least 80% below today's full-price 122,828.
   This comes from caching once the prefix is stable.
 - **New-session prefix reuse:** from 5 tokens to the whole static prefix (tools plus
   base system prompt).
@@ -107,15 +117,17 @@ first, then caching is switched on, then the prefix is made smaller.
 - **Tool order.** Tool definitions are sorted by name, so the same tool set always
   serialises the same way (`tools/traits.rs`). Source: opencode `tool.ts:299`;
   OpenAI's caching guide counts tool order as part of the prefix.
-- **Compaction summary.** It gets its own system block after the base prompt
-  instead of being spliced into it (`context/history.rs`).
-- **No in-place rewrites.** Earlier messages are no longer edited (the
-  `STEPS_REMOVED_NOTE` rewrite).
+- **Volatile facts last.** The git branch and uncommitted files move from the top
+  of the system prompt to its end, after the static rules and instructions,
+  so they no longer invalidate everything after them. Source: Claude Code and
+  Codex keep changing state out of the cached prefix
+  ([agents-survey.md](research/agents-survey.md) section 8 #1).
 - **Moves:** new-session prefix reuse (5 tokens to the full static prefix), and the
   IDE chat's per-message cache.
 
 ### T3: provider caching and cache measurement
-- **Claude cache breakpoints.** `system` is sent as blocks, with `cache_control`
+- **Claude cache breakpoints.** `system` is sent as blocks (the base prompt, then
+  the compaction summary in a block of its own), with `cache_control`
   breakpoints on the last tool, the end of the base system prompt and the
   conversation tail (4 at most). Source: Anthropic prompt-caching docs; opencode
   `cache-policy.ts:5-34`.
@@ -158,12 +170,15 @@ first, then caching is switched on, then the prefix is made smaller.
   - read_file: 2,000 lines / 50 KiB (it has no default cap today)
   - bash: tail-biased 50 KiB
   - grep: 100 matches
+  - list_files: skip `.git` and other VCS directories
 
   Source: opencode `tool-output.ts:13-120`; Claude Code and Codex do the same
   ([agents-survey.md](research/agents-survey.md) #12).
 - **Moves:** raw input (the message half of every request).
 
 ### T6: context that stays cached
+- **No in-place rewrites.** Overflow handling stops editing earlier messages
+  (the `STEPS_REMOVED_NOTE` rewrite in `context/history.rs`).
 - **Send unchanged until a ceiling, then compact once.** This replaces trimming
   before every request and the 100-message cap. The ceiling is the window minus
   max(15%, 16k). Source: opencode `compaction.ts:1163-1171`; OpenAI: "avoid
@@ -207,7 +222,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 
 | After | Input tokens sent | vs baseline | Reusable in session | New-session prefix shared | Notes |
 |---|--:|--:|--:|--:|---|
-| Baseline (`fe95cec`) | 100,228 | - | 90.3% | 5 tokens | Claude: nothing cached |
+| Baseline (`fe95cec`) | 122,828 | - | 90.7% | 5 of 3,732 | Claude: nothing cached |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
