@@ -103,7 +103,7 @@ MCP tool calls are checked too, but only on a best-effort basis: a server can op
 
 ### Terminal UI
 
-`phazeai` is the same agent in a terminal: streaming Markdown, tool cards, an approval prompt with a diff preview, slash commands, saved sessions and seven colour themes. `phazeai -p "explain main.rs"` runs one prompt and prints the answer, and `--allow read|edit|all` decides what it may do without asking. For scripts and CI, `--output-format json` prints one JSON object with the answer, token counts and cost, and `stream-json` prints one line per event as the run goes; the fields follow Claude Code's `-p` output. See [crates/phazeai-cli/README.md](crates/phazeai-cli/README.md).
+`phazeai` is the same agent in a terminal: streaming Markdown, tool cards, an approval prompt with a diff preview, slash commands, saved sessions and seven colour themes. `phazeai -p "explain main.rs"` runs one prompt and prints the answer, and `--allow read|edit|all` decides what it may do without asking. For scripts and CI, `--output-format json` prints one JSON object with the answer, token counts and cost, and `stream-json` prints one line per event as the run goes; the fields follow Claude Code's `-p` output. `phazeai eval` runs the coding tasks in [evals/](evals/) against Phaze, Claude Code or any other agent, grades each with hidden tests and reports how many it solved, the tokens and the cost. See [crates/phazeai-cli/README.md](crates/phazeai-cli/README.md).
 
 ## Keybindings
 

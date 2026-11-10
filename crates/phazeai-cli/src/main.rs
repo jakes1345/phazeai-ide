@@ -12,6 +12,9 @@ use phazeai_cli::theme::{ColorMode, Theme};
 #[command(about = "PhazeAI - AI-powered coding assistant")]
 #[command(version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Run a single prompt and exit (stdin, if piped, is appended as context)
     #[arg(short, long)]
     prompt: Option<String>,
@@ -63,6 +66,13 @@ struct Cli {
     /// 200). A turn is one model response and the tools it asked for.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     max_turns: Option<u32>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Run coding tasks against an agent (this one, Claude Code, or any
+    /// other) and report how many it solved and what that cost.
+    Eval(phazeai_cli::eval::EvalArgs),
 }
 
 /// In the TUI, log to a file: anything written to stderr would corrupt the
@@ -150,6 +160,10 @@ async fn start_local_ai_if_selected(
 
 async fn run(cli: Cli) -> Result<()> {
     use std::io::{IsTerminal, Read};
+    if let Some(Command::Eval(args)) = cli.command {
+        init_tracing(false);
+        return phazeai_cli::eval::run(args).await;
+    }
     let stdin_piped = !std::io::stdin().is_terminal();
     let tui = cli.prompt.is_none() && !stdin_piped;
     init_tracing(tui);

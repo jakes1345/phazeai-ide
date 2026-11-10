@@ -1,0 +1,4 @@
+about = "Rename a function across a project without changing behaviour"
+prompt = "Rename the function getUsr to getUser everywhere in this project, including where it's called and exported. Don't change what it does."
+check = "node check_hidden.js"
+timeout_secs = 600

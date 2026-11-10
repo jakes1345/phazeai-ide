@@ -1,0 +1,4 @@
+about = "Fix two related off-by-one bugs in Rust from a bug report"
+prompt = "Users report two pagination bugs: the last page of results is missing, and page 1 shows what should be on page 2. Fix them in src/lib.rs. Pages count from 1."
+check = "cargo test --quiet --offline"
+timeout_secs = 900

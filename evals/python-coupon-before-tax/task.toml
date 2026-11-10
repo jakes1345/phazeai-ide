@@ -1,0 +1,4 @@
+about = "Find and fix a bug from a customer's description, across two modules"
+prompt = "A customer says coupons are applied after sales tax, so they pay tax on money the coupon took off. Coupons should come off before tax. Fix it, and keep the existing tests passing."
+check = "python3 -m unittest discover -q -s tests -t ."
+timeout_secs = 600
