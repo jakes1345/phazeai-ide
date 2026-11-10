@@ -759,14 +759,205 @@ fn ai_section(state: IdeState) -> impl IntoView {
     .style(|s| s.flex_row().items_center().width_full().padding_vert(4.0));
 
     let api_key_row = api_key_input_row(state.clone());
+    let models = model_picker(state.clone());
 
     stack((
         section_header("AI", state.clone()),
         provider_section,
         model_row,
+        models,
         api_key_row,
     ))
     .style(|s| s.flex_col().width_full())
+}
+
+/// The most model chips shown at once; typing in the model box narrows them.
+const MODEL_CHIPS: usize = 30;
+
+/// The chips under the model box: the provider's models whose id or name
+/// holds what is typed (all of them while it is empty or a whole id), active
+/// first and then in the list's order, as (id, tooltip-like label).
+fn model_chips(
+    rows: &[phazeai_core::llm::model_list::ListedModel],
+    typed: &str,
+) -> Vec<(String, String)> {
+    let typed = typed.trim().to_lowercase();
+    let whole_id = rows.iter().any(|r| r.id.to_lowercase() == typed);
+    let mut chips: Vec<(String, String)> = rows
+        .iter()
+        .filter(|r| r.offered)
+        .filter(|r| {
+            typed.is_empty()
+                || whole_id
+                || r.id.to_lowercase().contains(&typed)
+                || r.name.to_lowercase().contains(&typed)
+        })
+        .map(|r| {
+            let mut label = r.id.clone();
+            if let Some(ctx) = r.context_window {
+                label.push_str(&format!(" · {}k", ctx / 1000));
+            }
+            if let Some((input, output)) = r.price_per_m {
+                label.push_str(&format!(" · ${input}/${output}"));
+            }
+            (r.id.clone(), label)
+        })
+        .collect();
+    if let Some(pos) = chips.iter().position(|(id, _)| id.to_lowercase() == typed) {
+        let active = chips.remove(pos);
+        chips.insert(0, active);
+    }
+    chips.truncate(MODEL_CHIPS);
+    chips
+}
+
+/// "Models" reads the provider's own model list (a day-old copy is reused;
+/// "Refresh" reads it again) and shows its models as chips that fill in the
+/// model box. A model Phaze knows that the list no longer has is named under
+/// them.
+fn model_picker(state: IdeState) -> impl IntoView {
+    use floem::{ext_event::create_ext_action, reactive::create_effect, reactive::Scope};
+    use phazeai_core::llm::model_list::{cached, merge, ListedModel, ModelList};
+
+    let theme = state.workbench.theme;
+    let ai_provider = state.ai.provider;
+    let ai_model = state.ai.model;
+    let rows: RwSignal<Vec<ListedModel>> = RwSignal::new(Vec::new());
+    let note: RwSignal<String> = RwSignal::new(String::new());
+
+    // A list read earlier is shown straight away; another provider's isn't.
+    create_effect(move |_| {
+        let name = ai_provider.get();
+        let Some(id) = provider_name_to_id(&name) else {
+            rows.set(Vec::new());
+            note.set(String::new());
+            return;
+        };
+        match cached(&id) {
+            Some(list) => {
+                note.set(String::new());
+                rows.set(merge(&id, Some(&list)));
+            }
+            None => {
+                rows.set(Vec::new());
+                note.set(String::new());
+            }
+        }
+    });
+
+    let fetch = move |refresh: bool| {
+        let name = ai_provider.get_untracked();
+        let Some(provider) = LlmProvider::from_display_name(&name) else {
+            note.set("Unknown provider.".into());
+            return;
+        };
+        let id = provider.to_provider_id();
+        let mut settings = Settings::load();
+        settings.set_provider(provider);
+        note.set(format!("Reading {}'s model list…", id.name()));
+        let done = create_ext_action(
+            Scope::new(),
+            move |(asked, result): (String, Result<ModelList, String>)| {
+                // The provider changed while the list was being read.
+                if ai_provider.get_untracked() != asked {
+                    return;
+                }
+                let Some(id) = provider_name_to_id(&asked) else {
+                    return;
+                };
+                match result {
+                    Ok(list) => {
+                        let merged = merge(&id, Some(&list));
+                        let gone: Vec<String> = merged
+                            .iter()
+                            .filter(|r| !r.offered)
+                            .map(|r| r.id.clone())
+                            .collect();
+                        note.set(if gone.is_empty() {
+                            format!("{} models from {}.", list.models.len(), id.name())
+                        } else {
+                            format!(
+                                "{} models from {}. Not in its list for your key: {}.",
+                                list.models.len(),
+                                id.name(),
+                                gone.join(", ")
+                            )
+                        });
+                        rows.set(merged);
+                    }
+                    Err(e) => {
+                        note.set(e);
+                        rows.set(merge(&id, None));
+                    }
+                }
+            },
+        );
+        std::thread::spawn(move || {
+            let result = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt
+                    .block_on(settings.live_models(refresh))
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(format!("Could not start the request: {e}")),
+            };
+            done((name, result));
+        });
+    };
+
+    let buttons = stack((
+        phaze_button("Models", ButtonVariant::Secondary, theme, move || {
+            fetch(false)
+        }),
+        phaze_button("Refresh", ButtonVariant::Ghost, theme, move || fetch(true)),
+        label(move || note.get()).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            s.font_size(11.0)
+                .color(p.text_muted)
+                .flex_grow(1.0)
+                .min_width(0.0)
+                .line_height(1.3)
+        }),
+    ))
+    .style(|s| s.flex_row().items_center().gap(6.0).width_full());
+
+    let chips = dyn_stack(
+        move || model_chips(&rows.get(), &ai_model.get()),
+        |(id, label)| format!("{id}\u{0}{label}"),
+        move |(id, text)| {
+            let chosen = id.clone();
+            container(label(move || text.clone()))
+                .style(move |s| {
+                    let t = theme.get();
+                    let p = &t.palette;
+                    let active = ai_model.get() == id;
+                    s.padding_horiz(8.0)
+                        .padding_vert(3.0)
+                        .font_size(11.0)
+                        .color(if active {
+                            p.text_primary
+                        } else {
+                            p.text_secondary
+                        })
+                        .background(if active { p.accent_dim } else { p.bg_surface })
+                        .border(1.0)
+                        .border_color(if active { p.accent } else { p.border })
+                        .border_radius(4.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                })
+                .on_click_stop(move |_| ai_model.set(chosen.clone()))
+        },
+    )
+    .style(|s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(4.0)
+            .width_full()
+    });
+
+    stack((buttons, chips)).style(|s| s.flex_col().gap(6.0).width_full().padding_vert(4.0))
 }
 
 /// Where the Test button sends the key of `cfg` (from
@@ -1267,6 +1458,45 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
             .height_full()
             .background(p.bg_panel)
     })
+}
+
+#[cfg(test)]
+mod model_chip_tests {
+    use super::model_chips;
+    use phazeai_core::llm::model_list::ListedModel;
+
+    fn row(id: &str, name: &str, offered: bool) -> ListedModel {
+        ListedModel {
+            id: id.into(),
+            name: name.into(),
+            context_window: Some(200_000),
+            price_per_m: Some((1.0, 5.0)),
+            offered,
+        }
+    }
+
+    #[test]
+    fn typing_narrows_the_chips_and_a_whole_id_shows_them_all() {
+        let rows = vec![
+            row("claude-opus-5-5", "Claude Opus 5.5", true),
+            row("claude-haiku-4-5", "Claude Haiku 4.5", true),
+            row("claude-opus-4-6", "Claude Opus 4.6", false),
+        ];
+        let ids = |typed: &str| -> Vec<String> {
+            model_chips(&rows, typed).into_iter().map(|c| c.0).collect()
+        };
+        assert_eq!(ids(""), ["claude-opus-5-5", "claude-haiku-4-5"]);
+        assert_eq!(ids("HAIKU"), ["claude-haiku-4-5"]);
+        // The whole id of a listed model: every chip, that one first.
+        assert_eq!(
+            ids("claude-haiku-4-5"),
+            ["claude-haiku-4-5", "claude-opus-5-5"]
+        );
+        assert_eq!(
+            model_chips(&rows, "haiku")[0].1,
+            "claude-haiku-4-5 · 200k · $1/$5"
+        );
+    }
 }
 
 #[cfg(test)]

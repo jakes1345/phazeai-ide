@@ -545,7 +545,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
         }
         CommandResult::SearchFiles(pattern) => search_files(state, &pattern),
         CommandResult::Grep(pattern) => grep(state, &pattern),
-        CommandResult::ListModels => list_models(state),
+        CommandResult::ListModels { refresh, filter } => list_models(state, refresh, filter),
         CommandResult::DiscoverModels => discover_models(state),
         CommandResult::ShowContext => show_context(state),
 
@@ -764,40 +764,149 @@ fn grep(state: &mut AppState, pattern: &str) {
     }
 }
 
-fn list_models(state: &mut AppState) {
+/// The most rows `/models` shows without a filter.
+const MODELS_SHOWN: usize = 60;
+
+/// `/models`: asks the provider for its list off the main loop; the answer
+/// comes back as [`super::worker::UiEvent::Models`] and is shown by
+/// [`show_models`]. A list read in the last day is reused unless `refresh`.
+fn list_models(state: &mut AppState, refresh: bool, filter: String) {
     let provider = state.settings.llm.provider.to_provider_id();
-    let models = ProviderRegistry::known_models(&provider);
-    if models.is_empty() {
-        state.system(format!(
-            "{} has no built-in model list. Use /discover to see local models, then /model <name>.",
-            provider.name()
-        ));
+    let fresh = phazeai_core::llm::model_list::cached(&provider).is_some_and(|l| l.is_fresh());
+    if refresh || !fresh {
+        state.system(format!("Reading {}'s model list…", provider.name()));
+    }
+    let settings = state.settings.clone();
+    let ui_tx = state.ui_tx.clone();
+    tokio::spawn(async move {
+        let result = settings
+            .live_models(refresh)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = ui_tx.send(super::worker::UiEvent::Models {
+            provider,
+            filter,
+            result,
+        });
+    });
+}
+
+/// Shows a model list read for `/models`, or the built-in table and why the
+/// list couldn't be read.
+pub(super) fn show_models(
+    state: &mut AppState,
+    provider: &phazeai_core::ProviderId,
+    filter: &str,
+    result: Result<phazeai_core::llm::model_list::ModelList, String>,
+) {
+    // The user switched provider while the list was being read.
+    if *provider != state.settings.llm.provider.to_provider_id() {
         return;
     }
-    let width = models.iter().map(|m| m.id.len()).max().unwrap_or(10) + 2;
-    let mut msg = format!("Models for {}\n", provider.name());
-    for m in &models {
-        let active = if m.id == state.settings.llm.model {
-            "  ← active"
-        } else {
-            ""
-        };
-        let price = if m.input_cost_per_m > 0.0 {
-            format!("  ${}/{} per M", m.input_cost_per_m, m.output_cost_per_m)
-        } else {
-            String::new()
-        };
+    let text = models_text(provider, &state.settings.llm.model, filter, result.as_ref());
+    state.system(text);
+}
+
+fn models_text(
+    provider: &phazeai_core::ProviderId,
+    active: &str,
+    filter: &str,
+    list: Result<&phazeai_core::llm::model_list::ModelList, &String>,
+) -> String {
+    use phazeai_core::llm::model_list::merge;
+    let rows = merge(provider, list.ok());
+    let needle = filter.trim().to_lowercase();
+    let matches = |id: &str, name: &str| {
+        needle.is_empty()
+            || id.to_lowercase().contains(&needle)
+            || name.to_lowercase().contains(&needle)
+    };
+    let offered: Vec<_> = rows
+        .iter()
+        .filter(|r| r.offered && matches(&r.id, &r.name))
+        .collect();
+    let gone: Vec<_> = rows
+        .iter()
+        .filter(|r| !r.offered && matches(&r.id, &r.name))
+        .collect();
+
+    let mut msg = match list {
+        Ok(l) => format!(
+            "{} lists {} models{}",
+            provider.name(),
+            l.models.len(),
+            if needle.is_empty() {
+                String::new()
+            } else {
+                format!(", {} matching \"{}\"", offered.len(), filter.trim())
+            }
+        ),
+        Err(e) => format!(
+            "Couldn't read {}'s model list: {e}\nBuilt-in models instead:",
+            provider.name()
+        ),
+    };
+    if rows.is_empty() {
         msg.push_str(&format!(
-            "\n  {:<width$}{}  ctx {}{}{}{active}",
-            m.id,
-            m.name,
-            format_tokens(m.context_window as u64),
-            if m.supports_tools { "" } else { "  (no tools)" },
-            price,
+            "\n\n{} has no built-in model list. Use /discover for local models, then /model <name>.",
+            provider.name()
+        ));
+        return msg;
+    }
+    if offered.is_empty() && !needle.is_empty() {
+        msg.push_str("\n\nNo model matches that.");
+    }
+    let shown = if needle.is_empty() {
+        offered.len().min(MODELS_SHOWN)
+    } else {
+        offered.len()
+    };
+    let width = offered[..shown]
+        .iter()
+        .map(|m| m.id.len())
+        .max()
+        .unwrap_or(10)
+        + 2;
+    if shown > 0 {
+        msg.push('\n');
+    }
+    for m in &offered[..shown] {
+        let mut line = format!("\n  {:<width$}", m.id);
+        if m.name != m.id {
+            line.push_str(&m.name);
+        }
+        if let Some(ctx) = m.context_window {
+            line.push_str(&format!("  ctx {}", format_tokens(ctx as u64)));
+        }
+        if let Some((input, output)) = m.price_per_m {
+            line.push_str(&format!("  ${input}/${output} per M"));
+        }
+        if m.id == active {
+            line.push_str("  ← active");
+        }
+        msg.push_str(&line);
+    }
+    if shown < offered.len() {
+        msg.push_str(&format!(
+            "\n  … {} more. Narrow the list with /models <text>.",
+            offered.len() - shown
         ));
     }
-    msg.push_str("\n\nSwitch with /model <id>.");
-    state.system(msg);
+    if !gone.is_empty() {
+        let ids: Vec<&str> = gone.iter().map(|m| m.id.as_str()).collect();
+        msg.push_str(&format!(
+            "\n\nBuilt in, but not in {}'s list for your key: {}",
+            provider.name(),
+            ids.join(", ")
+        ));
+    }
+    if list.is_ok() && !rows.iter().any(|r| r.offered && r.id == active) && !active.is_empty() {
+        msg.push_str(&format!(
+            "\n\nThe active model, {active}, isn't in the list."
+        ));
+    }
+    msg.push_str("\n\nSwitch with /model <id>. /models refresh reads the list again.");
+    msg
 }
 
 fn discover_models(state: &mut AppState) {
@@ -1101,6 +1210,48 @@ fn revert_tracked_changes(root: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod leftover_tests {
     use super::*;
+
+    #[test]
+    fn models_shows_the_providers_list_and_what_it_dropped() {
+        use phazeai_core::llm::model_list::{LiveModel, ModelList};
+        let list = ModelList {
+            base_url: "https://api.anthropic.com".into(),
+            fetched_at: 0,
+            models: vec![
+                LiveModel {
+                    id: "claude-opus-5-5".into(),
+                    name: Some("Claude Opus 5.5".into()),
+                    context_window: Some(1_000_000),
+                    price_per_m: None,
+                },
+                LiveModel {
+                    id: "claude-haiku-4-5-20251001".into(),
+                    name: Some("Claude Haiku 4.5".into()),
+                    context_window: Some(200_000),
+                    price_per_m: None,
+                },
+            ],
+        };
+        let claude = phazeai_core::ProviderId::Claude;
+        let text = models_text(&claude, "claude-opus-5-5", "", Ok(&list));
+        assert!(text.contains("lists 2 models"), "{text}");
+        assert!(text.contains("claude-opus-5-5"));
+        assert!(text.contains("ctx 1.0M"));
+        assert!(text.contains("← active"));
+        assert!(text.contains("$1/$5 per M"), "{text}");
+        assert!(text.contains("not in"), "{text}");
+        assert!(text.contains("claude-opus-4-6"));
+
+        let only = models_text(&claude, "x", "haiku", Ok(&list));
+        assert!(only.contains("1 matching \"haiku\""), "{only}");
+        assert!(!only.contains("claude-opus-5-5"));
+        assert!(only.contains("isn't in the list"));
+
+        let failed = models_text(&claude, "x", "", Err(&"no key".to_string()));
+        assert!(failed.starts_with("Couldn't read"), "{failed}");
+        assert!(failed.contains("claude-opus-4-6"));
+        assert!(!failed.contains("not in"));
+    }
 
     #[test]
     fn editor_text_loses_crlf_and_trailing_whitespace() {

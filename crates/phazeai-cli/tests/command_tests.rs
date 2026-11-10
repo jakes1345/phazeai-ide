@@ -176,7 +176,20 @@ fn test_model_command_without_name() {
 #[test]
 fn test_models_command() {
     let result = handle_command("/models");
-    assert!(matches!(result, CommandResult::ListModels));
+    assert!(matches!(
+        result,
+        CommandResult::ListModels { refresh: false, ref filter } if filter.is_empty()
+    ));
+    let result = handle_command("/models refresh");
+    assert!(matches!(
+        result,
+        CommandResult::ListModels { refresh: true, ref filter } if filter.is_empty()
+    ));
+    let result = handle_command("/models sonnet");
+    assert!(matches!(
+        result,
+        CommandResult::ListModels { refresh: false, ref filter } if filter == "sonnet"
+    ));
 }
 
 #[test]

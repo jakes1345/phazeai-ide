@@ -159,6 +159,8 @@ These can be the active provider:
 
 Keys are read from the OS keyring first (service name `phazeai`), then from the environment variable. A key you paste into Settings goes to the keyring, never into `config.toml`. Mistral, DeepSeek, xAI, Cohere, Perplexity, Azure OpenAI, Cerebras, Fireworks, SambaNova and GitHub Models only work through `[model_routes]` for now.
 
+`/models` in the terminal, and the Models button under the model box in Settings, read the provider's own list of models for your key (with each model's context window where the provider gives one, and prices on OpenRouter), so new models show up without a Phaze release and retired ones are named. `/models <text>` narrows the list; `/models refresh` reads it again. A list is kept for a day in your cache folder (`~/.cache/phazeai/models` on Linux), and its context windows size the conversation for models Phaze has no built-in entry for.
+
 ## Configuration
 
 Settings live in `~/.config/phazeai/config.toml`. If the file doesn't exist PhazeAI uses defaults, and Settings writes it when you change something. A hand-written one needs at least the `[llm]` and `[editor]` tables:
@@ -209,6 +211,7 @@ Besides calls to the AI provider you configured, PhazeAI can make these requests
 - An anonymous launch ping, only if you opt in with `PHAZEAI_TELEMETRY=1` or `telemetry = true` in `~/.config/phazeai/telemetry.toml`. It sends the app name, version, OS, CPU architecture and a random ID made fresh for each launch. No code or prompts.
 - Model and llama.cpp downloads from Hugging Face and GitHub, when you start one from Settings › Local AI.
 - The GitHub Actions panel fetches run status while it's open.
+- Your provider's model list, when you run `/models` or press Models in Settings. It goes to the same address and with the same key as your chats.
 
 ## Building
 

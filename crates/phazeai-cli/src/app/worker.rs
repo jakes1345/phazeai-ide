@@ -54,6 +54,12 @@ pub enum UiEvent {
     RunFinished {
         cancelled: bool,
     },
+    /// A provider's model list, read for `/models`.
+    Models {
+        provider: phazeai_core::ProviderId,
+        filter: String,
+        result: Result<phazeai_core::llm::model_list::ModelList, String>,
+    },
 }
 
 pub struct WorkerConfig {
