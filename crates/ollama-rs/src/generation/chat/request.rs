@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::generation::{options::GenerationOptions, parameters::FormatType};
+use crate::generation::{
+    options::GenerationOptions,
+    parameters::{FormatType, KeepAlive},
+};
 
 use super::ChatMessage;
 
@@ -17,6 +20,10 @@ pub struct ChatMessageRequest {
     /// Tool definitions for function calling (Ollama API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
+    /// How long the model stays loaded after this request (Ollama's
+    /// default: 5 minutes).
+    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub keep_alive: Option<KeepAlive>,
     pub(crate) stream: bool,
 }
 
@@ -29,6 +36,7 @@ impl ChatMessageRequest {
             template: None,
             format: None,
             tools: None,
+            keep_alive: None,
             // Stream value will be overwritten by Ollama::send_chat_messages_stream() and Ollama::send_chat_messages() methods
             stream: false,
         }
@@ -49,6 +57,12 @@ impl ChatMessageRequest {
     // The format to return a response in. Currently the only accepted value is `json`
     pub fn format(mut self, format: FormatType) -> Self {
         self.format = Some(format);
+        self
+    }
+
+    /// How long the model stays loaded after this request.
+    pub fn keep_alive(mut self, keep_alive: KeepAlive) -> Self {
+        self.keep_alive = Some(keep_alive);
         self
     }
 

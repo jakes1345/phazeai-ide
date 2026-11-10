@@ -41,7 +41,7 @@ pub async fn fim_complete(
 ) -> Result<String, String> {
     let settings = Settings::load();
     let policy = crate::privacy::active();
-    let client = || settings.build_llm_client().map_err(|e| e.to_string());
+    let client = || settings.build_small_llm_client().map_err(|e| e.to_string());
     fim_complete_with(
         settings.editor.ai_completions,
         &policy,

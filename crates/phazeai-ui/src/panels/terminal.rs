@@ -2114,7 +2114,7 @@ pub fn terminal_panel(
                             let tx = ai_cmd_tx_bar.clone();
                             std::thread::spawn(move || {
                                 let settings = Settings::load();
-                                let client = match settings.build_llm_client() {
+                                let client = match settings.build_small_llm_client() {
                                     Ok(c) => c,
                                     Err(e) => { let _ = tx.send(Err(format!("LLM: {e}"))); return; }
                                 };

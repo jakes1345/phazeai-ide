@@ -80,6 +80,11 @@ pub struct LlmSettings {
     /// window (see `llm::context_budget`).
     #[serde(default)]
     pub context_tokens: Option<usize>,
+    /// The model for side jobs (inline completions), on the same provider.
+    /// Unset: the provider's own cheaper model where Phaze knows one (see
+    /// [`crate::llm::small_model_for`]), otherwise `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
 }
 
 impl LlmSettings {
@@ -253,6 +258,7 @@ impl Default for Settings {
                 base_url: None,
                 max_tokens: defaults::MAX_TOKENS,
                 context_tokens: None,
+                small_model: None,
             },
             editor: EditorSettings::default(),
             search: SearchSettings::default(),
@@ -361,6 +367,15 @@ impl Settings {
             registry.add_custom_provider(entry.name.clone(), config);
         }
 
+        // `[llm] context_tokens` fixes the budget; a local server must then
+        // be run with a window that holds it.
+        if let Some(budget) = self.llm.context_tokens {
+            registry.set_local_window(crate::llm::context_budget::window_for_budget(
+                budget.max(crate::llm::context_budget::MIN_BUDGET),
+                self.llm.max_tokens as usize,
+            ));
+        }
+
         // Set active provider from legacy settings. `[llm] base_url` moves it
         // off its default address; the built-in provider's address is the
         // port its server was started on.
@@ -413,6 +428,54 @@ impl Settings {
             let router = ModelRouter::new(&self.model_routes, &registry, default_client);
             Ok(Box::new(router))
         }
+    }
+
+    /// The model side jobs run on: `[llm] small_model` when set; otherwise
+    /// the active provider's own cheaper model ([`crate::llm::small_model_for`])
+    /// unless the price list shows the main model costs no more; otherwise the
+    /// main model. A side job never moves to another provider, so it goes
+    /// where the main model's requests go.
+    pub fn small_model(&self) -> String {
+        if let Some(model) = self
+            .llm
+            .small_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            return model.to_string();
+        }
+        let provider = self.llm.provider.to_provider_id();
+        let Some(small) = crate::llm::small_model_for(&provider) else {
+            return self.llm.model.clone();
+        };
+        let price = |model: &str| {
+            crate::llm::ProviderRegistry::known_models(&provider)
+                .into_iter()
+                .find(|m| m.id == model)
+                .map(|m| m.input_cost_per_m)
+        };
+        match (price(&self.llm.model), price(small)) {
+            (Some(main), Some(cheap)) if main <= cheap => self.llm.model.clone(),
+            _ => small.to_string(),
+        }
+    }
+
+    /// A client for side jobs: the active provider at the same address as
+    /// [`Self::build_llm_client`], with [`Self::small_model`], and never
+    /// through `[model_routes]` (those route the agent's own requests).
+    pub fn build_small_llm_client(
+        &self,
+    ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
+        self.check_base_url()?;
+        let registry = self.build_provider_registry();
+        let config = registry.active_config().ok_or_else(|| {
+            crate::error::PhazeError::Config(format!(
+                "Provider {:?} not configured",
+                self.llm.provider.to_provider_id()
+            ))
+        })?;
+        registry.build_client_for(config, &self.small_model())
     }
 
     /// Refuse a `[llm] base_url` the clients must not use. Anything that sends
@@ -601,6 +664,52 @@ auto_start = false
         s.llm.provider = provider;
         s.llm.base_url = base_url.map(str::to_string);
         s
+    }
+
+    fn with_model(provider: LlmProvider, model: &str, small: Option<&str>) -> Settings {
+        let mut s = llm(provider, None);
+        s.llm.model = model.to_string();
+        s.llm.small_model = small.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn side_jobs_use_the_providers_cheaper_model() {
+        // The family's small model when the main one costs more.
+        let sonnet = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", None);
+        assert_eq!(sonnet.small_model(), "claude-haiku-4-5-20251001");
+        let gpt = with_model(LlmProvider::OpenAI, "gpt-4o", None);
+        assert_eq!(gpt.small_model(), "gpt-4o-mini");
+        // A main model Phaze has no price for: the small one.
+        let newer = with_model(LlmProvider::Claude, "claude-opus-9", None);
+        assert_eq!(newer.small_model(), "claude-haiku-4-5-20251001");
+        // Already the small model, or no dearer than it: unchanged.
+        let haiku = with_model(LlmProvider::Claude, "claude-haiku-4-5-20251001", None);
+        assert_eq!(haiku.small_model(), "claude-haiku-4-5-20251001");
+        let flash = with_model(LlmProvider::Gemini, "gemini-2.0-flash-lite", None);
+        assert_eq!(flash.small_model(), "gemini-2.0-flash-lite");
+        // Local servers and multi-vendor hosts keep the main model.
+        let local = with_model(LlmProvider::Ollama, "qwen2.5-coder:7b", None);
+        assert_eq!(local.small_model(), "qwen2.5-coder:7b");
+        let routed = with_model(LlmProvider::OpenRouter, "anthropic/claude-sonnet-4-5", None);
+        assert_eq!(routed.small_model(), "anthropic/claude-sonnet-4-5");
+        // `[llm] small_model` wins; blank means unset.
+        let chosen = with_model(LlmProvider::Ollama, "big", Some(" tiny "));
+        assert_eq!(chosen.small_model(), "tiny");
+        let blank = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", Some(" "));
+        assert_eq!(blank.small_model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn small_model_round_trips_and_stays_out_of_config_when_unset() {
+        let unset = toml::to_string(&with_model(LlmProvider::Claude, "m", None)).unwrap();
+        assert!(!unset.contains("small_model"), "{unset}");
+        let set = with_model(LlmProvider::Claude, "m", Some("claude-haiku-4-5-20251001"));
+        let back: Settings = toml::from_str(&toml::to_string(&set).unwrap()).unwrap();
+        assert_eq!(
+            back.llm.small_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
     }
 
     /// The address the active provider's client is built for.

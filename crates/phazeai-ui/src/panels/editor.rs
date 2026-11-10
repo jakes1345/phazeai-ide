@@ -4208,7 +4208,7 @@ pub fn editor_panel(
                         };
 
                         let suggestion = rt.block_on(async move {
-                            let client = match settings.build_llm_client() {
+                            let client = match settings.build_small_llm_client() {
                                 Ok(c) => c,
                                 Err(_) => return String::new(),
                             };
