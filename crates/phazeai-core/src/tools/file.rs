@@ -18,6 +18,10 @@ impl Tool for ReadFileTool {
         "Read the contents of a file. Supports optional line range with offset and limit parameters."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

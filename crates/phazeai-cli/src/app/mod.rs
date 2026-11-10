@@ -764,6 +764,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             policy,
             cancel,
             context_budget: state.context_budget,
+            max_iterations: state.settings.agent.max_iterations(),
             code_search: code_search(&state.settings),
         },
         worker_rx,
@@ -903,7 +904,8 @@ fn single_prompt_agent(
         .build();
     let mut agent = Agent::new(llm)
         .with_system_prompt(system_prompt)
-        .with_context_budget(context_budget);
+        .with_context_budget(context_budget)
+        .with_max_iterations(settings.agent.max_iterations());
     if let Some(search) = code_search(settings) {
         register_code_search(&mut agent, &search);
     }
@@ -1360,6 +1362,7 @@ mod tests {
                 policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
                 cancel: Arc::new(AtomicBool::new(false)),
                 context_budget: 60_000,
+                max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
                 code_search: None,
             },
             worker_rx,

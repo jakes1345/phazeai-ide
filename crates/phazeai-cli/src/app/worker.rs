@@ -66,6 +66,8 @@ pub struct WorkerConfig {
     /// Conversation tokens the agent may send before compacting, for the
     /// current model.
     pub context_budget: usize,
+    /// The most model turns one request may take (`[agent] max_iterations`).
+    pub max_iterations: usize,
     /// Shared by every agent the worker builds; `None` when search is off.
     pub code_search: Option<CodeSearch>,
 }
@@ -144,6 +146,7 @@ fn build_agent(
         .with_system_prompt(system_prompt(cfg))
         .with_shared_conversation(conversation)
         .with_context_budget(cfg.context_budget)
+        .with_max_iterations(cfg.max_iterations)
         .with_approval(approval)
         .with_cancel_token(cfg.cancel.clone());
 

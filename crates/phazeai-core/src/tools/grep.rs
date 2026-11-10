@@ -19,6 +19,10 @@ impl Tool for GrepTool {
         "Search for a regex pattern in files. Respects .gitignore. Returns matching lines with file paths and line numbers."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

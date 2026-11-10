@@ -17,6 +17,7 @@ pub struct Settings {
     pub model_routes: HashMap<TaskType, ModelRoute>,
     pub local_ai: crate::local_ai::LocalAiSettings,
     pub updates: UpdateSettings,
+    pub agent: AgentSettings,
 }
 
 /// `config.toml` as it is read. Not a field alias: serde refuses a file that
@@ -41,6 +42,8 @@ struct RawSettings {
     local_ai: crate::local_ai::LocalAiSettings,
     #[serde(default)]
     updates: UpdateSettings,
+    #[serde(default)]
+    agent: AgentSettings,
 }
 
 impl From<RawSettings> for Settings {
@@ -53,6 +56,7 @@ impl From<RawSettings> for Settings {
             model_routes: raw.model_routes,
             local_ai: raw.local_ai,
             updates: raw.updates,
+            agent: raw.agent,
         }
     }
 }
@@ -187,6 +191,31 @@ impl Default for UpdateSettings {
     }
 }
 
+/// The `[agent]` table: how the AI agent runs (chat, Composer and the CLI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    /// The most model turns one request may take before the agent stops
+    /// with an error. A turn is one model response and the tools it asked
+    /// for. Values below 1 count as 1.
+    pub max_iterations: usize,
+}
+
+impl AgentSettings {
+    /// [`Self::max_iterations`], never below 1.
+    pub fn max_iterations(&self) -> usize {
+        self.max_iterations.max(1)
+    }
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            max_iterations: crate::agent::DEFAULT_MAX_ITERATIONS,
+        }
+    }
+}
+
 /// The `[search]` table: the in-process code search (`crate::search`).
 ///
 /// Unknown keys are ignored, so the `python_path` of an old `[sidecar]` table
@@ -231,6 +260,7 @@ impl Default for Settings {
             model_routes: HashMap::new(),
             local_ai: Default::default(),
             updates: UpdateSettings::default(),
+            agent: AgentSettings::default(),
         }
     }
 }
@@ -739,6 +769,26 @@ auto_start = false
         // An `[updates]` table without the key is the default too.
         let s: Settings = toml::from_str(&format!("{OLD_CONFIG}\n[updates]\n")).unwrap();
         assert!(s.updates.check_at_start);
+    }
+
+    #[test]
+    fn the_agent_turn_limit_defaults_to_the_agent_default_and_round_trips() {
+        let s: Settings = toml::from_str(OLD_CONFIG).unwrap();
+        assert_eq!(
+            s.agent.max_iterations(),
+            crate::agent::DEFAULT_MAX_ITERATIONS
+        );
+
+        let s: Settings =
+            toml::from_str(&format!("{OLD_CONFIG}\n[agent]\nmax_iterations = 50\n")).unwrap();
+        assert_eq!(s.agent.max_iterations(), 50);
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.agent.max_iterations(), 50);
+
+        // Zero would stop every request before it starts.
+        let s: Settings =
+            toml::from_str(&format!("{OLD_CONFIG}\n[agent]\nmax_iterations = 0\n")).unwrap();
+        assert_eq!(s.agent.max_iterations(), 1);
     }
 
     #[test]

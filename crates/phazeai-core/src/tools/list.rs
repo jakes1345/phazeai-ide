@@ -14,6 +14,10 @@ impl Tool for ListFilesTool {
         "List files and directories. Respects .gitignore. Supports recursive listing."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

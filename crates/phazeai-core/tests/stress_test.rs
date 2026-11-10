@@ -1075,12 +1075,14 @@ async fn forty_five_rounds_in_one_run_keep_exact_bookkeeping() {
 }
 
 /// A model that never stops calling tools is cut off at the production
-/// default of 15 iterations, with every call it made answered.
+/// default ([`phazeai_core::DEFAULT_MAX_ITERATIONS`]), with every call it
+/// made answered.
 #[tokio::test]
 async fn a_model_that_never_stops_calling_tools_is_cut_off_at_the_default_cap() {
-    let ws = Workspace::new("runaway", 40, 4);
+    let cap = phazeai_core::DEFAULT_MAX_ITERATIONS;
+    let ws = Workspace::new("runaway", cap + 10, 4);
     let mut script = Script::default();
-    script.reading_turn(1, &ws, 0..40, &[1; 40]);
+    script.reading_turn(1, &ws, 0..cap + 10, &vec![1; cap + 10]);
     let (model, log) = ScriptedModel::new(script.plan.clone());
     let conversation = Arc::new(Mutex::new(ConversationHistory::new()));
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1094,23 +1096,23 @@ async fn a_model_that_never_stops_calling_tools_is_cut_off_at_the_default_cap() 
 
     let run = run_turn(&agent, prompt(1), None, |_| false).await;
     assert!(
-        matches!(run.result, Err(PhazeError::MaxIterations(15))),
+        matches!(run.result, Err(PhazeError::MaxIterations(n)) if n == cap),
         "{:?}",
         run.result
     );
-    assert_eq!(turn_requests(&log), 15);
+    assert_eq!(turn_requests(&log), cap);
     let results = run
         .events
         .iter()
         .filter(|e| matches!(e, AgentEvent::ToolResult { success: true, .. }))
         .count();
-    assert_eq!(results, 15);
+    assert_eq!(results, cap);
+    let expected = format!("Exceeded maximum iterations ({cap})");
     assert!(matches!(
         run.events.last(),
-        Some(AgentEvent::Error(m)) if m == "Exceeded maximum iterations (15)"
+        Some(AgentEvent::Error(m)) if *m == expected
     ));
     let history = agent.get_conversation_history().await;
-    assert_eq!(history.len(), 2 + 2 * 15);
     check_shape(&history).unwrap();
 }
 

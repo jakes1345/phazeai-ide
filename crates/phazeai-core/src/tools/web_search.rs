@@ -14,6 +14,10 @@ impl Tool for WebSearchTool {
         "Search the internet using DuckDuckGo. Returns a list of results with titles, URLs, and snippets. Use this to find documentation, solutions, or information online."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

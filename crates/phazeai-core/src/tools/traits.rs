@@ -34,6 +34,17 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// True for a tool that only reads (files, the code index, the web) and
+    /// keeps no state between calls, so its calls, and calls of other such
+    /// tools, can run at the same time without changing what any of them
+    /// returns. When the model asks for a run of such calls in one round, the
+    /// agent runs them together instead of one after another. `false`, the
+    /// default, for anything that writes, runs commands or keeps state
+    /// (`bash` keeps its working directory between calls).
+    fn is_concurrency_safe(&self) -> bool {
+        false
+    }
+
     fn to_definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),

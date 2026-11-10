@@ -87,6 +87,7 @@ fn customised() -> Settings {
     );
     s.local_ai.ctx_size = Some(8192);
     s.local_ai.auto_start = false;
+    s.agent.max_iterations = 37;
     s
 }
 

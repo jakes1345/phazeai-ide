@@ -17,6 +17,10 @@ impl Tool for FetchTool {
         "Make an HTTP request to a URL. Returns the response status, headers, and body. Use this to fetch web pages, API responses, or download content. Body is truncated to 50KB."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

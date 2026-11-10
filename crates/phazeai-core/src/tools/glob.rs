@@ -16,6 +16,10 @@ impl Tool for GlobTool {
         "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.ts'). Respects .gitignore."
     }
 
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

@@ -12,6 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
+/// How many model turns one run may take before it stops with
+/// [`PhazeError::MaxIterations`], unless `[agent] max_iterations` in
+/// `config.toml` (or [`Agent::with_max_iterations`]) says otherwise. A turn
+/// is one model response plus the tool calls it asked for, so a real task
+/// (read, search, edit, build, test, fix) takes dozens; the limit is a guard
+/// against a model that loops, not a budget for ordinary work.
+pub const DEFAULT_MAX_ITERATIONS: usize = 200;
+
 #[derive(Debug, Clone)]
 pub struct AgentResponse {
     pub content: String,
@@ -84,7 +92,7 @@ impl Agent {
             llm,
             tools: ToolRegistry::default(),
             conversation: Arc::new(Mutex::new(ConversationHistory::new())),
-            max_iterations: 15,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
             max_context_tokens: 32768,
             approval_fn: None,
             diff_hook: None,
@@ -164,8 +172,9 @@ impl Agent {
         self
     }
 
+    /// The most model turns a run may take (at least 1).
     pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = max;
+        self.max_iterations = max.max(1);
         self
     }
 
@@ -423,54 +432,83 @@ impl Agent {
                     ));
                 }
 
-                // Execute each tool call. A Stop from here on answers the
-                // calls that did not run before the run ends (`stop_round`).
-                for (i, tool_call) in tool_calls.iter().enumerate() {
+                // Execute the tool calls in the order the model gave them. A
+                // run of two or more calls to tools that only read
+                // (`Tool::is_concurrency_safe`) is asked about one call at a
+                // time, then run together; every other call runs on its own.
+                // A Stop from here on answers the calls that did not run
+                // before the run ends (`stop_round`).
+                let mut i = 0;
+                while i < tool_calls.len() {
                     if self.is_cancelled() {
                         return self.stop_round(&tool_calls[i..], &event_tx).await;
                     }
-                    let tool_name = &tool_call.function.name;
 
-                    // Check if approval is needed
-                    if let Some(ref approval_fn) = self.approval_fn {
-                        let params = tool_call.parse_arguments().unwrap_or(Value::Null);
-
-                        // Emit approval request event
-                        let _ = event_tx.send(AgentEvent::ToolApprovalRequest {
-                            name: tool_name.clone(),
-                            params: params.clone(),
-                        });
-
-                        // Stop ends the wait for an answer, and an answer
-                        // given after Stop (a prompt that Stop closed reads as
-                        // "no") does not run the tool either.
-                        let answer = self
-                            .unless_cancelled((approval_fn)(tool_name.clone(), params.clone()))
-                            .await;
-                        let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
-                            return self.stop_round(&tool_calls[i..], &event_tx).await;
-                        };
-                        if !approved {
-                            let _ = event_tx.send(AgentEvent::ToolResult {
-                                name: tool_name.clone(),
-                                success: false,
-                                summary: "Tool execution denied by user".to_string(),
-                            });
-                            // Add denial to conversation so LLM knows
+                    let run_end = self.concurrent_run_end(&tool_calls, i);
+                    if run_end - i >= 2 {
+                        let mut approved: Vec<usize> = Vec::new();
+                        for k in i..run_end {
+                            match self
+                                .approve(&tool_calls[k], &event_tx, &mut tool_executions)
+                                .await
                             {
-                                let mut conversation = self.conversation.lock().await;
-                                conversation.add_tool_result(
-                                    &tool_call.id,
-                                    "Error: Tool execution denied by user",
-                                );
+                                Gate::Allow => approved.push(k),
+                                Gate::Deny => {}
+                                Gate::Stop => {
+                                    // Approved calls in this run have not
+                                    // started yet: they did not run either.
+                                    let mut not_run: Vec<ToolCall> =
+                                        approved.iter().map(|&a| tool_calls[a].clone()).collect();
+                                    not_run.extend_from_slice(&tool_calls[k..]);
+                                    return self.stop_round(&not_run, &event_tx).await;
+                                }
                             }
-                            tool_executions.push(ToolExecution {
-                                tool_name: tool_name.clone(),
-                                params,
-                                success: false,
-                                result_summary: "Tool execution denied by user".to_string(),
+                        }
+                        if self.is_cancelled() {
+                            let mut not_run: Vec<ToolCall> =
+                                approved.iter().map(|&a| tool_calls[a].clone()).collect();
+                            not_run.extend_from_slice(&tool_calls[run_end..]);
+                            return self.stop_round(&not_run, &event_tx).await;
+                        }
+                        for &k in &approved {
+                            let _ = event_tx.send(AgentEvent::ToolStart {
+                                name: tool_calls[k].function.name.clone(),
                             });
-                            continue; // Skip to next tool call
+                        }
+                        // One task, polled together: the privacy audit scope
+                        // (task-local) covers every call. A Stop interrupts
+                        // each call (`tool_outcome`), and the check at the top
+                        // of the next pass answers the rest.
+                        let outcomes = futures::future::join_all(
+                            approved.iter().map(|&k| self.execute_tool(&tool_calls[k])),
+                        )
+                        .await;
+                        for (&k, (success, result_str)) in approved.iter().zip(outcomes) {
+                            self.record_outcome(
+                                &tool_calls[k],
+                                success,
+                                result_str,
+                                &event_tx,
+                                &mut tool_executions,
+                            )
+                            .await;
+                        }
+                        i = run_end;
+                        continue;
+                    }
+
+                    let tool_call = &tool_calls[i];
+                    let tool_name = &tool_call.function.name;
+                    i += 1;
+
+                    match self
+                        .approve(tool_call, &event_tx, &mut tool_executions)
+                        .await
+                    {
+                        Gate::Allow => {}
+                        Gate::Deny => continue,
+                        Gate::Stop => {
+                            return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
                         }
                     }
 
@@ -502,7 +540,7 @@ impl Agent {
                                 let answer =
                                     self.unless_cancelled((hook)(path, before, after)).await;
                                 let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
-                                    return self.stop_round(&tool_calls[i..], &event_tx).await;
+                                    return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
                                 };
                                 if !approved {
                                     let _ = event_tx.send(AgentEvent::ToolResult {
@@ -533,7 +571,7 @@ impl Agent {
                     // A tool must not start after Stop (it could finish in
                     // its first poll, e.g. a file write).
                     if self.is_cancelled() {
-                        return self.stop_round(&tool_calls[i..], &event_tx).await;
+                        return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
                     }
 
                     let _ = event_tx.send(AgentEvent::ToolStart {
@@ -549,36 +587,14 @@ impl Agent {
                         Action::Fail(e) => (false, format!("Error: {e}")),
                     };
 
-                    // Tool result summary sent to the UI/CLI event stream. The
-                    // full result goes to the conversation history below
-                    // (where very long output is cut, with a marker saying
-                    // so, to fit the context budget).
-                    // Cap at 4 KiB and tell the user how much was elided —
-                    // 200 chars (the previous limit) silently hid most output.
-                    const SUMMARY_LIMIT: usize = 4096;
-                    let summary = if success {
-                        truncate_str_annotated(&result_str, SUMMARY_LIMIT)
-                    } else {
-                        result_str.clone()
-                    };
-
-                    let _ = event_tx.send(AgentEvent::ToolResult {
-                        name: tool_name.clone(),
+                    self.record_outcome(
+                        tool_call,
                         success,
-                        summary: summary.clone(),
-                    });
-
-                    tool_executions.push(ToolExecution {
-                        tool_name: tool_name.clone(),
-                        params: tool_call.parse_arguments().unwrap_or(Value::Null),
-                        success,
-                        result_summary: summary,
-                    });
-
-                    {
-                        let mut conversation = self.conversation.lock().await;
-                        conversation.add_tool_result(&tool_call.id, &result_str);
-                    }
+                        result_str,
+                        &event_tx,
+                        &mut tool_executions,
+                    )
+                    .await;
                 }
 
                 // Continue loop to get next LLM response
@@ -609,6 +625,111 @@ impl Agent {
                 total_cache_write_tokens,
             });
         }
+    }
+
+    /// The end (exclusive) of the run of calls starting at `start` that may
+    /// run together: consecutive calls to registered tools that are
+    /// [`crate::tools::Tool::is_concurrency_safe`]. `start` itself when that
+    /// call is not such a call.
+    fn concurrent_run_end(&self, calls: &[ToolCall], start: usize) -> usize {
+        calls[start..]
+            .iter()
+            .position(|call| {
+                !self
+                    .tools
+                    .get(&call.function.name)
+                    .is_some_and(|tool| tool.is_concurrency_safe())
+            })
+            .map_or(calls.len(), |offset| start + offset)
+    }
+
+    /// Ask the approval callback, if there is one, about `tool_call`. A
+    /// denial is recorded (in the conversation, so the model knows, and in
+    /// `executions`) before `Gate::Deny` is returned. `Gate::Stop` when the
+    /// run was stopped while waiting, or before the answer could be used; the
+    /// caller then ends the round without recording this call.
+    async fn approve(
+        &self,
+        tool_call: &ToolCall,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        executions: &mut Vec<ToolExecution>,
+    ) -> Gate {
+        let Some(ref approval_fn) = self.approval_fn else {
+            return Gate::Allow;
+        };
+        let tool_name = &tool_call.function.name;
+        let params = tool_call.parse_arguments().unwrap_or(Value::Null);
+
+        let _ = event_tx.send(AgentEvent::ToolApprovalRequest {
+            name: tool_name.clone(),
+            params: params.clone(),
+        });
+
+        // Stop ends the wait for an answer, and an answer given after Stop
+        // (a prompt that Stop closed reads as "no") does not run the tool
+        // either.
+        let answer = self
+            .unless_cancelled((approval_fn)(tool_name.clone(), params.clone()))
+            .await;
+        let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+            return Gate::Stop;
+        };
+        if approved {
+            return Gate::Allow;
+        }
+        let _ = event_tx.send(AgentEvent::ToolResult {
+            name: tool_name.clone(),
+            success: false,
+            summary: "Tool execution denied by user".to_string(),
+        });
+        {
+            let mut conversation = self.conversation.lock().await;
+            conversation.add_tool_result(&tool_call.id, "Error: Tool execution denied by user");
+        }
+        executions.push(ToolExecution {
+            tool_name: tool_name.clone(),
+            params,
+            success: false,
+            result_summary: "Tool execution denied by user".to_string(),
+        });
+        Gate::Deny
+    }
+
+    /// Report a finished call to the UI/CLI and record it: the event stream
+    /// gets a summary, the conversation the full result (where very long
+    /// output is cut, with a marker saying so, to fit the context budget).
+    async fn record_outcome(
+        &self,
+        tool_call: &ToolCall,
+        success: bool,
+        result_str: String,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        executions: &mut Vec<ToolExecution>,
+    ) {
+        // Cap at 4 KiB and tell the user how much was elided.
+        const SUMMARY_LIMIT: usize = 4096;
+        let summary = if success {
+            truncate_str_annotated(&result_str, SUMMARY_LIMIT)
+        } else {
+            result_str.clone()
+        };
+        let tool_name = &tool_call.function.name;
+
+        let _ = event_tx.send(AgentEvent::ToolResult {
+            name: tool_name.clone(),
+            success,
+            summary: summary.clone(),
+        });
+
+        executions.push(ToolExecution {
+            tool_name: tool_name.clone(),
+            params: tool_call.parse_arguments().unwrap_or(Value::Null),
+            success,
+            result_summary: summary,
+        });
+
+        let mut conversation = self.conversation.lock().await;
+        conversation.add_tool_result(&tool_call.id, &result_str);
     }
 
     async fn execute_tool(&self, tool_call: &ToolCall) -> (bool, String) {
@@ -701,6 +822,16 @@ async fn cancelled(token: &AtomicBool) {
 const NOT_RUN: &str = "Cancelled by the user before this tool started; it did not run.";
 /// The result recorded for a tool call that Stop interrupted.
 const INTERRUPTED: &str = "Interrupted by the user before the tool finished.";
+
+/// The approval callback's answer about one call.
+enum Gate {
+    /// Run it.
+    Allow,
+    /// Denied; the denial is already recorded.
+    Deny,
+    /// The run was stopped; nothing is recorded for this call.
+    Stop,
+}
 
 /// How a tool call that was allowed is carried out.
 enum Action {
@@ -914,5 +1045,395 @@ mod tests {
             call.result_summary.contains("old_text not found"),
             "{call:?}"
         );
+    }
+
+    /// Answers each request with the next scripted round of tool calls (by
+    /// tool name), then with plain text once the script runs out. With
+    /// `forever`, every request asks for the same call again.
+    struct Rounds {
+        rounds: StdMutex<std::collections::VecDeque<Vec<&'static str>>>,
+        forever: Option<&'static str>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Rounds {
+        fn new(rounds: Vec<Vec<&'static str>>) -> Self {
+            Self {
+                rounds: StdMutex::new(rounds.into()),
+                forever: None,
+                requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for Rounds {
+        async fn chat(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<crate::llm::LlmResponse, PhazeError> {
+            Ok(crate::llm::LlmResponse {
+                message: Message::assistant("summary"),
+                usage: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<futures::channel::mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
+            let n = self.requests.fetch_add(1, Ordering::SeqCst);
+            let round = match self.forever {
+                Some(tool) => Some(vec![tool]),
+                None => self.rounds.lock().unwrap().pop_front(),
+            };
+            let mut events = Vec::new();
+            match round {
+                Some(names) => {
+                    for (k, name) in names.into_iter().enumerate() {
+                        let id = format!("r{n}c{k}");
+                        events.push(StreamEvent::ToolCallStart {
+                            id: id.clone(),
+                            name: name.into(),
+                        });
+                        events.push(StreamEvent::ToolCallDelta {
+                            id: id.clone(),
+                            arguments_delta: "{}".into(),
+                        });
+                        events.push(StreamEvent::ToolCallEnd { id });
+                    }
+                }
+                None => events.push(StreamEvent::TextDelta("done".into())),
+            }
+            events.push(StreamEvent::Done);
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            for event in events {
+                tx.unbounded_send(event).unwrap();
+            }
+            Ok(rx)
+        }
+    }
+
+    /// Counts how many of its calls (and those of tools sharing its
+    /// counters) are running at once. Each call takes `millis`.
+    struct Overlap {
+        name: &'static str,
+        safe: bool,
+        millis: u64,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        finished: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for Overlap {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "takes a while"
+        }
+        fn is_concurrency_safe(&self) -> bool {
+            self.safe
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _: Value) -> ToolResult {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(self.millis)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!(self.name))
+        }
+    }
+
+    struct Counters {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        finished: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Counters {
+        fn new() -> Self {
+            Self {
+                active: Arc::default(),
+                peak: Arc::default(),
+                finished: Arc::default(),
+            }
+        }
+        fn tool(&self, name: &'static str, safe: bool, millis: u64) -> Box<Overlap> {
+            Box::new(Overlap {
+                name,
+                safe,
+                millis,
+                active: self.active.clone(),
+                peak: self.peak.clone(),
+                finished: self.finished.clone(),
+            })
+        }
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Every tool call in `history` has exactly one result, and results come
+    /// in the order of the calls.
+    fn assert_every_call_answered_in_order(history: &[Message]) {
+        let mut pending: std::collections::VecDeque<String> = Default::default();
+        for m in history {
+            if let Some(calls) = &m.tool_calls {
+                assert!(pending.is_empty(), "unanswered calls {pending:?}");
+                pending.extend(calls.iter().map(|c| c.id.clone()));
+            }
+            if let Some(id) = &m.tool_call_id {
+                assert_eq!(
+                    pending.pop_front().as_deref(),
+                    Some(id.as_str()),
+                    "{history:#?}"
+                );
+            }
+        }
+        assert!(pending.is_empty(), "unanswered calls {pending:?}");
+    }
+
+    #[tokio::test]
+    async fn a_task_longer_than_fifteen_turns_finishes_by_default() {
+        // The old limit was 15 turns; a real task takes more.
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(counters.tool("step", false, 0));
+        let llm = Rounds::new(vec![vec!["step"]; 40]);
+        let agent = Agent::new(Box::new(llm)).with_tools(tools);
+
+        let response = agent.run("do it").await.unwrap();
+
+        assert_eq!(response.iterations, 41);
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 40);
+        assert_eq!(response.content, "done");
+    }
+
+    #[tokio::test]
+    async fn the_turn_limit_still_stops_a_model_that_loops() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(counters.tool("step", false, 0));
+        let mut llm = Rounds::new(Vec::new());
+        llm.forever = Some("step");
+        let requests = llm.requests.clone();
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_max_iterations(3);
+
+        let err = agent.run("loop").await.unwrap_err();
+
+        assert!(matches!(err, PhazeError::MaxIterations(3)), "{err:?}");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_every_call_answered_in_order(&agent.get_conversation_history().await);
+    }
+
+    #[tokio::test]
+    async fn a_zero_turn_limit_counts_as_one() {
+        let llm = Rounds::new(Vec::new());
+        let agent = Agent::new(Box::new(llm)).with_max_iterations(0);
+        let response = agent.run("hi").await.unwrap();
+        assert_eq!(response.content, "done");
+    }
+
+    #[tokio::test]
+    async fn read_only_calls_in_one_round_run_together() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        for name in ["read_a", "read_b", "read_c"] {
+            tools.register(counters.tool(name, true, 300));
+        }
+        let llm = Rounds::new(vec![vec!["read_a", "read_b", "read_c"]]);
+        let agent = Agent::new(Box::new(llm)).with_tools(tools);
+
+        let started = std::time::Instant::now();
+        let response = agent.run("read").await.unwrap();
+        let took = started.elapsed();
+
+        assert_eq!(counters.peak(), 3, "the three reads did not overlap");
+        assert!(took < Duration::from_millis(800), "took {took:?}");
+        let names: Vec<_> = response
+            .tool_calls
+            .iter()
+            .map(|t| t.tool_name.as_str())
+            .collect();
+        assert_eq!(names, ["read_a", "read_b", "read_c"]);
+        assert!(response.tool_calls.iter().all(|t| t.success));
+        let history = agent.get_conversation_history().await;
+        assert_every_call_answered_in_order(&history);
+        let results: Vec<_> = history
+            .iter()
+            .filter(|m| m.tool_call_id.is_some())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(results, ["\"read_a\"", "\"read_b\"", "\"read_c\""]);
+    }
+
+    #[tokio::test]
+    async fn a_call_that_is_not_read_only_runs_alone_and_in_order() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(counters.tool("read_a", true, 100));
+        tools.register(counters.tool("write", false, 100));
+        tools.register(counters.tool("read_b", true, 100));
+        let llm = Rounds::new(vec![vec!["read_a", "write", "read_b"]]);
+        let agent = Agent::new(Box::new(llm)).with_tools(tools);
+
+        let response = agent.run("go").await.unwrap();
+
+        assert_eq!(counters.peak(), 1, "a write overlapped a read");
+        let names: Vec<_> = response
+            .tool_calls
+            .iter()
+            .map(|t| t.tool_name.as_str())
+            .collect();
+        assert_eq!(names, ["read_a", "write", "read_b"]);
+        assert_every_call_answered_in_order(&agent.get_conversation_history().await);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_in_a_run_of_reads_splits_it_and_is_reported() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(counters.tool("read_a", true, 100));
+        tools.register(counters.tool("read_b", true, 100));
+        let llm = Rounds::new(vec![vec!["read_a", "no_such_tool", "read_b"]]);
+        let agent = Agent::new(Box::new(llm)).with_tools(tools);
+
+        let response = agent.run("go").await.unwrap();
+
+        assert_eq!(counters.peak(), 1);
+        assert!(!response.tool_calls[1].success);
+        assert!(response.tool_calls[1].result_summary.contains("not found"));
+        assert_every_call_answered_in_order(&agent.get_conversation_history().await);
+    }
+
+    #[tokio::test]
+    async fn each_read_in_a_run_is_asked_about_and_a_denied_one_does_not_run() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        for name in ["read_a", "read_b", "read_c"] {
+            tools.register(counters.tool(name, true, 200));
+        }
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let approval: ApprovalFn = {
+            let asked = asked.clone();
+            Box::new(move |name, _| {
+                asked.lock().unwrap().push(name.clone());
+                Box::pin(async move { name != "read_b" })
+            })
+        };
+        let llm = Rounds::new(vec![vec!["read_a", "read_b", "read_c"]]);
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_approval(approval);
+
+        let response = agent.run("read").await.unwrap();
+
+        assert_eq!(*asked.lock().unwrap(), ["read_a", "read_b", "read_c"]);
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 2);
+        assert_eq!(counters.peak(), 2, "the two allowed reads did not overlap");
+        let denied = response
+            .tool_calls
+            .iter()
+            .find(|t| t.tool_name == "read_b")
+            .unwrap();
+        assert!(!denied.success);
+        assert!(denied.result_summary.contains("denied"));
+        // Every call has its result: the denial is recorded as one.
+        let history = agent.get_conversation_history().await;
+        let results = history.iter().filter(|m| m.tool_call_id.is_some()).count();
+        assert_eq!(results, 3);
+    }
+
+    #[tokio::test]
+    async fn stop_during_a_run_of_reads_ends_promptly_and_answers_every_call() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        for name in ["read_a", "read_b"] {
+            tools.register(counters.tool(name, true, 30_000));
+        }
+        tools.register(counters.tool("write", false, 0));
+        let llm = Rounds::new(vec![vec!["read_a", "read_b", "write"]]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_cancel_token(cancel.clone());
+
+        let stopper = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = std::time::Instant::now();
+        let err = agent.run("read").await.unwrap_err();
+        stopper.await.unwrap();
+
+        assert!(matches!(err, PhazeError::Cancelled), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 0);
+        let history = agent.get_conversation_history().await;
+        assert_every_call_answered_in_order(&history);
+        let results: Vec<_> = history
+            .iter()
+            .filter(|m| m.tool_call_id.is_some())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(results, [INTERRUPTED, INTERRUPTED, NOT_RUN]);
+    }
+
+    #[tokio::test]
+    async fn stop_while_asking_about_a_read_in_a_run_answers_every_call() {
+        let counters = Counters::new();
+        let mut tools = ToolRegistry::new();
+        for name in ["read_a", "read_b", "read_c"] {
+            tools.register(counters.tool(name, true, 0));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Allows read_a at once, then never answers about read_b.
+        let approval: ApprovalFn = Box::new(move |name, _| {
+            Box::pin(async move {
+                if name == "read_a" {
+                    true
+                } else {
+                    std::future::pending().await
+                }
+            })
+        });
+        let llm = Rounds::new(vec![vec!["read_a", "read_b", "read_c"]]);
+        let agent = Agent::new(Box::new(llm))
+            .with_tools(tools)
+            .with_approval(approval)
+            .with_cancel_token(cancel.clone());
+
+        let stopper = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let err = agent.run("read").await.unwrap_err();
+        stopper.await.unwrap();
+
+        assert!(matches!(err, PhazeError::Cancelled), "{err:?}");
+        // read_a was allowed but had not started: it did not run either.
+        assert_eq!(counters.finished.load(Ordering::SeqCst), 0);
+        let history = agent.get_conversation_history().await;
+        let results: Vec<_> = history
+            .iter()
+            .filter(|m| m.tool_call_id.is_some())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(results, [NOT_RUN, NOT_RUN, NOT_RUN]);
     }
 }
