@@ -275,6 +275,13 @@ pub struct EditorSettings {
     /// (`crate::fim`). Each request sends the code around the cursor; the
     /// privacy deny rules and `local_only` still apply. Off: nothing is sent.
     pub ai_completions: bool,
+    /// The model inline completions ask, where the provider has a
+    /// fill-in-the-middle API (`crate::fim`): Ollama, DeepSeek and Mistral.
+    /// Unset: `codestral-latest` on Mistral, otherwise `[llm] small_model`'s
+    /// choice. A model that turns such requests down is asked with a chat
+    /// prompt instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_model: Option<String>,
 }
 
 impl Default for EditorSettings {
@@ -291,6 +298,7 @@ impl Default for EditorSettings {
             code_lens: true,
             organize_imports_on_save: false,
             ai_completions: true,
+            completion_model: None,
         }
     }
 }

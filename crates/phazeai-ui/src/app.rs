@@ -3377,46 +3377,16 @@ fn ide_root(state: IdeState) -> impl IntoView {
     // Keep the AI privacy policy in sync with the workspace root.
     crate::panels::privacy::install(&state);
 
-    // ── FIM inline completion worker ─────────────────────────────────────────
-    // Editors send (path, prefix, suffix, lang) after a 600ms debounce; this
-    // thread calls the LLM and writes completions back through a signal channel.
-    // `fim_complete` sends nothing when AI completions are off in config.toml
-    // or the privacy policy denies the file.
-    let (fim_req_tx, fim_req_rx) =
-        std::sync::mpsc::sync_channel::<(PathBuf, String, String, String)>(4);
+    // ── Inline completions ───────────────────────────────────────────────────
+    // Each editor asks `phazeai_core::fim` after a typing pause and shows the
+    // suggestion; this drops a suggestion already shown once AI completions
+    // are turned off.
     {
         let ghost_text = state.ai.ghost_text;
         let ai_completions = state.editor.ai_completions;
-        // Turning AI completions off also drops a suggestion already shown.
         create_effect(move |_| {
             if !ai_completions.get() {
                 ghost_text.set(None);
-            }
-        });
-        let (fim_result_tx, fim_result_rx) = std::sync::mpsc::sync_channel::<String>(4);
-        let fim_result_sig = floem::ext_event::create_signal_from_channel(fim_result_rx);
-        create_effect(move |_| {
-            if let Some(suggestion) = fim_result_sig.get() {
-                // A reply that lands after AI completions were turned off is dropped.
-                if !suggestion.is_empty() && ai_completions.get_untracked() {
-                    ghost_text.set(Some(suggestion));
-                }
-            }
-        });
-        std::thread::spawn(move || {
-            while let Ok((path, prefix, suffix, lang)) = fim_req_rx.recv() {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("fim tokio rt");
-                let result = rt
-                    .block_on(phazeai_core::fim::fim_complete(
-                        &path, &prefix, &suffix, &lang,
-                    ))
-                    .unwrap_or_default();
-                if !result.is_empty() {
-                    let _ = fim_result_tx.try_send(result);
-                }
             }
         });
     }
@@ -3478,7 +3448,6 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.close_active_tab_nonce,
         state.project.breakpoints,
         state.project.debug_stopped_at,
-        fim_req_tx.clone(),
         state.editor.ai_completions,
         state.editor.selected_text,
         state.project.code_search_if_enabled(),
@@ -3546,7 +3515,6 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
-        fim_req_tx.clone(),
         state.editor.ai_completions,
         create_rw_signal(String::new()), // split: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),
@@ -3871,7 +3839,6 @@ fn ide_root(state: IdeState) -> impl IntoView {
         create_rw_signal(0u64), // close_active_tab_nonce (split: no-op)
         state.project.breakpoints,
         state.project.debug_stopped_at,
-        fim_req_tx.clone(),
         state.editor.ai_completions,
         create_rw_signal(String::new()), // split-down: dedicated selected_text (unused)
         state.project.code_search_if_enabled(),

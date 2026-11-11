@@ -35,9 +35,10 @@
 - *Workspace search panel:* prefers `rg`. Without it, a substring scan ignores regex, whole-word and globs. An invalid regex shows no results and no error.
 - *Themes and `.vsix`:* the editor's syntax colours are hard-coded (syntect `base16-ocean.dark` and a fixed table), so **no user theme changes editor text**. User TOML themes recolour the chrome; 15 palette fields are read nowhere (`diag_*`, `bracket_1-4`, `find_match_*`, `indent_guide`, `cursor_line_bg`, `matching_bracket_bg`, `syn_comment`, `syn_operator`) and the other `syn_*` fields only colour the outline list. A `.vsix` installs and is listed, but its themes, snippets and language configs are **never converted or applied**.
 - *Provider routing:* real; model lists and prices are hard-coded and may be stale.
-- *Code completion (FIM):* a strip under the editor shows the first line of a suggestion, and Tab inserts the whole suggestion (up to 3 lines).
-  - It is on by default and fires after cursor moves and edits (300 ms and 600 ms debounces).
-  - It sends up to about 1.9 KB of code to the active provider, paid cloud providers included.
+- *Code completion (FIM):* a strip under the editor shows the first line of a suggestion and how many more it has, and Tab inserts the whole suggestion (up to 6 lines from a fill-in-the-middle API, 3 from the chat prompt).
+  - It is on by default and fires 300 ms after you stop typing: one request per pause. Moving the cursor without typing sends nothing.
+  - PhazeAI Local (llama.cpp `/infill`), Ollama (`/api/generate` with a suffix), DeepSeek (`/beta/completions`, on Flash) and Mistral (`/v1/fim/completions`, Codestral) get the code as it is, with no prompt around it. `[editor] completion_model` picks the model for Ollama, DeepSeek and Mistral. Other providers, and a model that turns such a request down, get a chat prompt.
+  - It sends the 40 lines before the cursor and the 20 after to the active provider, paid cloud providers included.
   - `[editor] ai_completions` turns it off entirely: Settings › Editor, or the palette's "Toggle AI Completions".
   - The privacy deny rules, `local_only` and the audit log still apply.
 - *First run:* a readiness card exists (provider ready, rust-analyzer found).
