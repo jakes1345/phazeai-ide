@@ -504,8 +504,13 @@ impl Found<'_> {
 
 /// `text` with `@path` import lines (Claude Code's and Gemini CLI's syntax)
 /// replaced by the files they name, outside code fences. An import is
-/// expanded when it names a Markdown or text file inside the project or the
-/// user's home that the privacy policy allows; other lines stay as they are.
+/// expanded when it names a Markdown or text file inside the project that the
+/// privacy policy allows; other lines stay as they are.
+///
+/// Only inside the project: these files come with the repository, so one
+/// cloned from anyone could otherwise import `@~/notes/private.md` and send
+/// the user's own files (which the project's privacy policy does not cover)
+/// to the model.
 fn expand_imports(text: &str, file: &Path, root: &Path, policy: &PrivacyPolicy) -> String {
     let mut stack = vec![file.canonicalize().unwrap_or_else(|_| file.to_path_buf())];
     expand(text, file, root, policy, &mut stack)
@@ -567,18 +572,19 @@ fn resolve_import(
     root: &Path,
     policy: &PrivacyPolicy,
 ) -> Option<PathBuf> {
-    let home = dirs::home_dir();
-    let path = match (target.strip_prefix("~/"), &home) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ if Path::new(target).is_absolute() => PathBuf::from(target),
-        _ => base.join(target),
+    // `~/...` names a file in the user's home, never in the project.
+    if target.starts_with('~') {
+        return None;
+    }
+    let path = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        base.join(target)
     };
+    // Canonical, so neither `..` nor a symbolic link leads out of the project.
     let path = path.canonicalize().ok()?;
     let root = root.canonicalize().ok()?;
-    let allowed_place = path.starts_with(&root)
-        || home
-            .and_then(|h| h.canonicalize().ok())
-            .is_some_and(|h| path.starts_with(h));
+    let allowed_place = path.starts_with(&root);
     let text_file = path
         .extension()
         .and_then(|e| e.to_str())
@@ -744,6 +750,34 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn a_projects_rules_cannot_import_the_users_own_files() {
+        // A file in the user's home, outside the project: the kind a cloned
+        // repository's CLAUDE.md must not be able to pull into requests.
+        let Some(home) = dirs::home_dir().and_then(|h| h.canonicalize().ok()) else {
+            return;
+        };
+        let outside = tempfile::tempdir_in(&home).unwrap();
+        let secret = outside.path().join("private.md");
+        std::fs::write(&secret, "PRIVATE NOTE 7f3a\n").unwrap();
+        let rel = secret.strip_prefix(&home).unwrap().display().to_string();
+
+        let p = Project::new();
+        p.write("notes/inside.md", "Inside rule.\n");
+        p.write(
+            "CLAUDE.md",
+            &format!(
+                "@notes/inside.md\n@~/{rel}\n@{}\n@notes/../../escape.md\n",
+                secret.display()
+            ),
+        );
+        let all = texts(&p.rules()).join("\n");
+        assert!(all.contains("Inside rule."), "{all}");
+        assert!(!all.contains("PRIVATE NOTE 7f3a"), "{all}");
+        // The lines stay as written, so the model sees nothing was imported.
+        assert!(all.contains(&format!("@~/{rel}")), "{all}");
     }
 
     #[test]
