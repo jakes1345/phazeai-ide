@@ -18,6 +18,11 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// What a reasoning model thought before this assistant message, kept
+    /// for providers that must be sent it back (DeepSeek refuses a request
+    /// with tools whose earlier assistant turns leave it out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl Message {
@@ -27,6 +32,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -36,6 +42,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -45,6 +52,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -54,7 +62,15 @@ impl Message {
             content: content.into(),
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            reasoning: None,
         }
+    }
+
+    /// The same message carrying the model's `reasoning`, when there is any.
+    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
+        let reasoning = reasoning.into();
+        self.reasoning = (!reasoning.is_empty()).then_some(reasoning);
+        self
     }
 
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
@@ -63,6 +79,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            reasoning: None,
         }
     }
 }
@@ -114,6 +131,8 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
+    /// Part of what a reasoning model thinks before it answers.
+    ReasoningDelta(String),
     ToolCallStart {
         id: String,
         name: String,

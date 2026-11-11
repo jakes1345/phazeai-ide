@@ -319,18 +319,7 @@ fn dirs_next_config() -> Option<PathBuf> {
 
 /// Convert a provider display name back to LlmProvider enum.
 fn provider_name_to_llm_provider(name: &str) -> Option<LlmProvider> {
-    match name {
-        "Claude (Anthropic)" => Some(LlmProvider::Claude),
-        "OpenAI" => Some(LlmProvider::OpenAI),
-        "Google Gemini" => Some(LlmProvider::Gemini),
-        "Groq" => Some(LlmProvider::Groq),
-        "Together.ai" => Some(LlmProvider::Together),
-        "OpenRouter" => Some(LlmProvider::OpenRouter),
-        "LM Studio (Local)" => Some(LlmProvider::LmStudio),
-        "Ollama (Local)" => Some(LlmProvider::Ollama),
-        "PhazeAI Local (built-in)" => Some(LlmProvider::BuiltIn),
-        _ => None,
-    }
+    LlmProvider::from_display_name(name)
 }
 
 /// Serializes all config.toml load-mutate-save cycles. Both the editor

@@ -15,6 +15,9 @@ pub struct OpenAIClient {
     /// Ask for usage at the end of a stream (`stream_options.include_usage`).
     /// Cleared for good if the server rejects the field.
     stream_usage: AtomicBool,
+    /// Send each assistant message's `reasoning` back as `reasoning_content`
+    /// (`with_reasoning_echo`).
+    echo_reasoning: bool,
 }
 
 /// What an OpenAI-compatible server is told so that requests sharing a
@@ -100,6 +103,7 @@ impl OpenAIClient {
             base_url: crate::constants::endpoints::OPENAI_BASE_URL.to_string(),
             cache_hints: CacheHints::default(),
             stream_usage: AtomicBool::new(true),
+            echo_reasoning: false,
         }
     }
 
@@ -111,6 +115,15 @@ impl OpenAIClient {
             }
         }
         self.cache_hints = hints;
+        self
+    }
+
+    /// Send the reasoning of earlier assistant turns back to the server.
+    /// DeepSeek requires it once a request carries tools and refuses the
+    /// request with a 400 otherwise; other servers may reject the unknown
+    /// field, so it is off unless the provider asks for it.
+    pub fn with_reasoning_echo(mut self) -> Self {
+        self.echo_reasoning = true;
         self
     }
 
@@ -164,6 +177,8 @@ struct OpenAIChoice {
 struct OpenAIMessage {
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<OpenAIToolCall>,
 }
 
@@ -181,8 +196,17 @@ struct OpenAIFunction {
     arguments: String,
 }
 
-/// One message in Chat Completions form.
-fn chat_message(m: &Message) -> Value {
+/// One message in Chat Completions form, with an assistant message's
+/// reasoning as `reasoning_content` when `echo_reasoning`.
+fn chat_message(m: &Message, echo_reasoning: bool) -> Value {
+    let mut out = chat_message_body(m);
+    if let (true, Role::Assistant, Some(reasoning)) = (echo_reasoning, &m.role, &m.reasoning) {
+        out["reasoning_content"] = Value::String(reasoning.clone());
+    }
+    out
+}
+
+fn chat_message_body(m: &Message) -> Value {
     if let Some(ref tool_call_id) = m.tool_call_id {
         serde_json::json!({
             "role": "tool",
@@ -229,7 +253,10 @@ impl OpenAIClient {
     fn request_body(&self, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
         let mut body = serde_json::json!({
             "model": self.model,
-            "messages": messages.iter().map(chat_message).collect::<Vec<_>>(),
+            "messages": messages
+                .iter()
+                .map(|m| chat_message(m, self.echo_reasoning))
+                .collect::<Vec<_>>(),
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(self.build_tool_defs(tools));
@@ -314,7 +341,12 @@ impl LlmClient for OpenAIClient {
             Message::assistant(content)
         } else {
             Message::assistant_with_tools(content, tool_calls)
-        };
+        }
+        .with_reasoning(if self.echo_reasoning {
+            choice.message.reasoning_content.clone().unwrap_or_default()
+        } else {
+            String::new()
+        });
 
         Ok(LlmResponse { message, usage })
     }
@@ -364,6 +396,9 @@ impl LlmClient for OpenAIClient {
         let (tx, rx) = mpsc::unbounded();
 
         let mut stream = response.bytes_stream();
+        // Reasoning is passed on only where it will be sent back; elsewhere
+        // keeping it would just fill the context.
+        let echo_reasoning = self.echo_reasoning;
         tokio::spawn(async move {
             use futures::StreamExt;
             let mut buffer = String::new();
@@ -421,6 +456,17 @@ impl LlmClient for OpenAIClient {
 
                         if let Some(choices) = event.get("choices").and_then(|c| c.as_array()) {
                             if let Some(delta) = choices.first().and_then(|c| c.get("delta")) {
+                                if let Some(reasoning) = delta
+                                    .get("reasoning_content")
+                                    .and_then(|c| c.as_str())
+                                    .filter(|_| echo_reasoning)
+                                {
+                                    if !reasoning.is_empty() {
+                                        let _ = tx.unbounded_send(StreamEvent::ReasoningDelta(
+                                            reasoning.to_string(),
+                                        ));
+                                    }
+                                }
                                 if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                                 {
                                     let _ = tx.unbounded_send(StreamEvent::TextDelta(
@@ -871,6 +917,84 @@ mod stream_tests {
             "only streams ask for usage"
         );
         assert!(body.get("stream").is_none());
+    }
+
+    /// The reasoning a stream carries, as events and as text.
+    async fn streamed_reasoning(client: OpenAIClient) -> (String, String) {
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let (mut reasoning, mut text) = (String::new(), String::new());
+        while let Some(ev) = rx.next().await {
+            match ev {
+                StreamEvent::ReasoningDelta(r) => reasoning.push_str(&r),
+                StreamEvent::TextDelta(t) => text.push_str(&t),
+                StreamEvent::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        (reasoning, text)
+    }
+
+    fn thinking_stream() -> String {
+        [
+            chunk(serde_json::json!({"choices": [{"delta": {"reasoning_content": "Let me "}}]})),
+            chunk(serde_json::json!({"choices": [{"delta": {"reasoning_content": "think."}}]})),
+            chunk(serde_json::json!({"choices": [{"delta": {"content": "Done."}}]})),
+            "data: [DONE]\n\n".to_string(),
+        ]
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn reasoning_is_kept_only_where_it_is_sent_back() {
+        let echoing = OpenAIClient::new("k")
+            .with_base_url(serve_once(thinking_stream()).await)
+            .with_reasoning_echo();
+        assert_eq!(
+            streamed_reasoning(echoing).await,
+            ("Let me think.".into(), "Done.".into())
+        );
+        let plain = OpenAIClient::new("k").with_base_url(serve_once(thinking_stream()).await);
+        assert_eq!(
+            streamed_reasoning(plain).await,
+            (String::new(), "Done.".into())
+        );
+    }
+
+    #[test]
+    fn assistant_reasoning_goes_back_as_reasoning_content_when_echoing() {
+        let call = ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let messages = [
+            Message::user("hi"),
+            Message::assistant_with_tools("", vec![call]).with_reasoning("plan"),
+            Message::tool_result("c1", "out"),
+            Message::assistant("answer").with_reasoning("check"),
+            Message::assistant("no thoughts"),
+        ];
+        let sent = |client: OpenAIClient| -> Vec<Option<String>> {
+            client.request_body(&messages, &[], false)["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["reasoning_content"].as_str().map(String::from))
+                .collect()
+        };
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            sent(OpenAIClient::new("k").with_reasoning_echo()),
+            [None, some("plan"), None, some("check"), None]
+        );
+        // Other servers may refuse the unknown field.
+        assert!(sent(OpenAIClient::new("k")).iter().all(Option::is_none));
     }
 }
 

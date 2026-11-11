@@ -4,6 +4,7 @@ use floem::{
     IntoView,
 };
 use phazeai_core::{
+    config::LlmProvider,
     llm::{
         key_setup::{check_api_key, key_help},
         provider::{keyring_delete, keyring_set, ApiKeySource, ProviderConfig, ProviderId},
@@ -29,28 +30,7 @@ struct ProviderUiStatus {
 }
 
 fn provider_name_to_id(name: &str) -> Option<ProviderId> {
-    match name {
-        "Claude (Anthropic)" => Some(ProviderId::Claude),
-        "OpenAI" => Some(ProviderId::OpenAI),
-        "Google Gemini" => Some(ProviderId::Gemini),
-        "Groq" => Some(ProviderId::Groq),
-        "Together.ai" => Some(ProviderId::Together),
-        "OpenRouter" => Some(ProviderId::OpenRouter),
-        "Ollama (Local)" => Some(ProviderId::Ollama),
-        "LM Studio (Local)" => Some(ProviderId::LmStudio),
-        "Mistral AI" => Some(ProviderId::Mistral),
-        "DeepSeek" => Some(ProviderId::DeepSeek),
-        "xAI (Grok)" => Some(ProviderId::Xai),
-        "Cohere" => Some(ProviderId::Cohere),
-        "Perplexity" => Some(ProviderId::Perplexity),
-        "Azure OpenAI" => Some(ProviderId::Azure),
-        "Cerebras" => Some(ProviderId::Cerebras),
-        "Fireworks AI" => Some(ProviderId::Fireworks),
-        "SambaNova" => Some(ProviderId::SambaNova),
-        "GitHub Models" => Some(ProviderId::GithubModels),
-        "PhazeAI Local (built-in)" => Some(ProviderId::BuiltIn),
-        _ => None,
-    }
+    LlmProvider::from_display_name(name).map(|p| p.to_provider_id())
 }
 
 fn provider_status(name: &str) -> ProviderUiStatus {
@@ -604,6 +584,7 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
     use floem::reactive::create_rw_signal;
     let theme = state.workbench.theme;
     let provider = state.ai.provider;
+    let model = state.ai.model;
     let is_hovered = create_rw_signal(false);
 
     container(
@@ -672,7 +653,19 @@ fn provider_tile(name: &'static str, state: IdeState) -> impl IntoView {
             .cursor(floem::style::CursorStyle::Pointer)
     })
     .on_click_stop(move |_| {
-        provider.set(name.to_string());
+        if provider.get_untracked() == name {
+            return;
+        }
+        // The old provider's model would only be refused by this one. One
+        // batch, so config.toml is written once, with the pair.
+        let next_model = LlmProvider::from_display_name(name)
+            .map(|p| p.model_after_switch(&model.get_untracked()));
+        floem::reactive::batch(|| {
+            provider.set(name.to_string());
+            if let Some(next_model) = next_model {
+                model.set(next_model);
+            }
+        });
     })
     .on_event_stop(floem::event::EventListener::PointerEnter, move |_| {
         is_hovered.set(true);
@@ -687,35 +680,14 @@ fn ai_section(state: IdeState) -> impl IntoView {
     let ai_provider = state.ai.provider;
     let ai_model = state.ai.model;
 
-    // Provider tiles — ordered: flagship → fast/cheap → specialized → local
-    const PROVIDERS: &[&str] = &[
-        "Claude (Anthropic)",
-        "OpenAI",
-        "Google Gemini",
-        "Mistral AI",
-        "DeepSeek",
-        "xAI (Grok)",
-        "Groq",
-        "Cerebras",
-        "Together.ai",
-        "Fireworks AI",
-        "SambaNova",
-        "OpenRouter",
-        "Perplexity",
-        "Cohere",
-        "Azure OpenAI",
-        "GitHub Models",
-        "PhazeAI Local (built-in)",
-        "Ollama (Local)",
-        "LM Studio (Local)",
-    ];
-
+    // Provider tiles, in `LlmProvider::ALL` order: flagship, fast/cheap,
+    // specialized, local.
     let provider_tiles = dyn_stack(
         move || {
-            PROVIDERS
+            LlmProvider::ALL
                 .iter()
+                .map(LlmProvider::display_name)
                 .enumerate()
-                .map(|(i, n)| (i, *n))
                 .collect::<Vec<_>>()
         },
         |(i, _)| *i,

@@ -376,6 +376,9 @@ impl Agent {
 
             // Accumulate response content and tool calls from stream
             let mut content = String::new();
+            // Kept on the assistant message for providers that must be sent
+            // it back (`Message::reasoning`); not shown.
+            let mut reasoning = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, arguments)
 
@@ -396,6 +399,7 @@ impl Agent {
                         content.push_str(&delta);
                         let _ = event_tx.send(AgentEvent::TextDelta(delta));
                     }
+                    StreamEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
                     StreamEvent::ToolCallStart { id, name } => {
                         current_tool_calls.insert(id.clone(), (name, String::new()));
                     }
@@ -437,10 +441,10 @@ impl Agent {
                 // Add assistant message with tool calls to conversation
                 {
                     let mut conversation = self.conversation.lock().await;
-                    conversation.add_message(Message::assistant_with_tools(
-                        content.clone(),
-                        tool_calls.clone(),
-                    ));
+                    conversation.add_message(
+                        Message::assistant_with_tools(content.clone(), tool_calls.clone())
+                            .with_reasoning(std::mem::take(&mut reasoning)),
+                    );
                 }
                 // A call that runs a held-back tool through `more_tools` is
                 // from here on a call of that tool (same id, so its result
@@ -629,7 +633,7 @@ impl Agent {
 
             {
                 let mut conversation = self.conversation.lock().await;
-                conversation.add_assistant_message(&content);
+                conversation.add_message(Message::assistant(&content).with_reasoning(reasoning));
             }
 
             return Ok(AgentResponse {
