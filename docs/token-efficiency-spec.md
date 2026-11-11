@@ -268,16 +268,38 @@ Not done here:
   no plan or to-do state yet; this comes with the to-do work.
 
 ### T7: side jobs on a cheap model, and local-model settings
-- **Cheap models for side jobs only.** Compaction summaries, titles and commit
-  messages go to a cheap model. The main loop never switches model per turn,
-  because each switch throws away the provider's cache for that model. Phaze's
-  keyword router does exactly that today
-  ([models-and-local-runtime.md](research/models-and-local-runtime.md) section 1.4).
-- **Thinking off for helper calls** (`enable_thinking: false`, or a low
-  `reasoning_effort`).
-- **Ollama:** send `num_ctx` and `keep_alive`. Ollama's default window is 4,096
-  tokens on GPUs under 24 GiB, while Phaze assumes 8,192.
-- **llama-server:** one pinned slot per session and `--cache-reuse`.
+Built:
+- **Side jobs on the provider's cheap model.** Inline completions (both
+  editor paths), AI commit messages and the terminal's natural-language
+  command run on `Settings::small_model()`: `[llm] small_model` when set,
+  otherwise the active provider's own cheaper model (`llm::small_model_for`:
+  Claude Haiku 4.5, gpt-4o-mini, Gemini 2.5 Flash, grok-3-mini, Codestral,
+  Command R), unless the price list shows the main model costs no more. Same
+  provider, key and address, so nothing goes anywhere new. Inline completions
+  fire on every typing pause, so they are the most frequent request after the
+  agent's own. With Claude Sonnet 4.5 as the main model they now bill at $1/$5
+  per million tokens instead of $3/$15 (a third); with Opus 4.6, a fifteenth.
+  The price list had Haiku 4.5 at Haiku 3.5's $0.80/$4; corrected to $1/$5.
+- **The main loop never switches model**, and compaction stays on the main
+  model: T6's in-place summary is served from that model's cache, which a
+  cheap model can't read.
+- **Ollama: `num_ctx` and `keep_alive` on every request.** Ollama runs a model
+  at its own default window (2,048 or 4,096 tokens on many setups) and drops
+  the start of a longer prompt without an error, while Phaze budgets for
+  8,192. Requests now ask for the window the budget assumes (or, with
+  `[llm] context_tokens`, that budget plus the reply and tool reserve), the
+  same value every time, since a change makes Ollama reload. `keep_alive` is
+  30 minutes, so an ordinary pause no longer unloads the model and throws away
+  its prompt cache. The vendored `ollama-rs` gained `keep_alive` on chat
+  requests and no longer sends unset options as `null`.
+
+Not done here:
+- **Thinking off for helper calls:** Phaze never turns thinking on, so there
+  is nothing to turn off yet. It belongs with the model-list update (gap 3),
+  since newer models such as Claude Haiku 5.5 think by default.
+- **llama-server slots and `--cache-reuse`:** no llama-server binary can be
+  run in this environment to check the flags against, so this waits for a
+  test on a real machine.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
@@ -300,6 +322,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T4: lean prompt and tools | 91,678 | -25.4% | 89.9% | 1,466 of 1,507 | Per request, the system prompt fell from 1,134 to 257 tokens and the tools from 23 schemas (2,557 tokens) to 8 schemas plus `more_tools` (1,205). Claude bill: **19,809 (21.6% of sent)** from 82,507 read and 9,247 written, an **83.9% cut** from the T2 commit's 123,206, past the 80% target. The raw target (61,000 or less) is not met yet: T5 is next. |
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 | T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
+| T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

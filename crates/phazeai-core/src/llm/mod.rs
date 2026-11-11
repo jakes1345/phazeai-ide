@@ -17,6 +17,8 @@ pub use model_router::{ModelRoute, ModelRouter, TaskType};
 pub use ollama::OllamaClient;
 pub use ollama_manager::OllamaManager;
 pub use openai::{CacheHints, OpenAIClient};
-pub use provider::{ModelInfo, ProviderConfig, ProviderId, ProviderRegistry, UsageTracker};
+pub use provider::{
+    small_model_for, ModelInfo, ProviderConfig, ProviderId, ProviderRegistry, UsageTracker,
+};
 pub use text_only::{text_only_reply, TextReply};
 pub use traits::*;

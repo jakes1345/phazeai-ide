@@ -267,6 +267,8 @@ pub struct ProviderRegistry {
     providers: HashMap<ProviderId, ProviderConfig>,
     active_provider: ProviderId,
     active_model: String,
+    /// The context window to ask Ollama for, when the settings fix one.
+    local_window: Option<usize>,
 }
 
 impl Default for ProviderRegistry {
@@ -295,6 +297,7 @@ impl ProviderRegistry {
             providers,
             active_provider: ProviderId::Claude,
             active_model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
+            local_window: None,
         }
     }
 
@@ -317,6 +320,12 @@ impl ProviderRegistry {
     pub fn set_active(&mut self, provider: ProviderId, model: String) {
         self.active_provider = provider;
         self.active_model = model;
+    }
+
+    /// Ask Ollama for a `tokens` context window (`num_ctx`) instead of the
+    /// window Phaze assumes for the model ([`super::context_budget::context_window`]).
+    pub fn set_local_window(&mut self, tokens: usize) {
+        self.local_window = Some(tokens);
     }
 
     pub fn set_provider(&mut self, provider: ProviderId) {
@@ -427,7 +436,15 @@ impl ProviderRegistry {
                 Ok(Box::new(client))
             }
             ProviderId::Ollama => {
-                let client = super::OllamaClient::new(model).with_base_url(base_url);
+                // Ollama runs a model at its own default window (as small as
+                // 2,048 or 4,096 tokens) and silently drops the start of a
+                // longer prompt, so ask for the window the budget assumes.
+                let window = self
+                    .local_window
+                    .unwrap_or_else(|| super::context_budget::context_window(&config.id, model));
+                let client = super::OllamaClient::new(model)
+                    .with_base_url(base_url)
+                    .with_context_window(window);
                 let client = if direct {
                     client.without_proxy()
                 } else {
@@ -496,8 +513,8 @@ impl ProviderRegistry {
                     name: "Claude Haiku 4.5".into(),
                     context_window: 200_000,
                     supports_tools: true,
-                    input_cost_per_m: 0.80,
-                    output_cost_per_m: 4.0,
+                    input_cost_per_m: 1.0,
+                    output_cost_per_m: 5.0,
                 },
             ],
             ProviderId::OpenAI => vec![
@@ -944,6 +961,24 @@ impl ProviderRegistry {
 /// set `promptCacheKey: true`); strict servers answer an unknown body field
 /// with a 400. xAI takes the same key as its `x-grok-conv-id` header
 /// (docs.x.ai, "Maximizing cache hits").
+/// The provider's own cheaper model for side jobs such as inline
+/// completions, where Phaze knows one: a small model of the same family,
+/// reached with the same key at the same address. `None` for local servers
+/// (no per-token price, and one model loaded) and for providers that host
+/// many vendors' models.
+pub fn small_model_for(provider: &ProviderId) -> Option<&'static str> {
+    match provider {
+        ProviderId::Claude => Some("claude-haiku-4-5-20251001"),
+        ProviderId::OpenAI | ProviderId::Azure => Some("gpt-4o-mini"),
+        ProviderId::Gemini => Some("gemini-2.5-flash"),
+        ProviderId::Xai => Some("grok-3-mini"),
+        // Codestral is Mistral's code-completion model.
+        ProviderId::Mistral => Some("codestral-latest"),
+        ProviderId::Cohere => Some("command-r-08-2024"),
+        _ => None,
+    }
+}
+
 pub(crate) fn cache_hints_for(id: &ProviderId, key: Option<String>) -> super::CacheHints {
     let mut hints = super::CacheHints::default();
     match id {

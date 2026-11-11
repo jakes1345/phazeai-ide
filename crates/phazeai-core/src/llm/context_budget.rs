@@ -70,9 +70,24 @@ pub fn budget_for_window(
         .max(MIN_BUDGET)
 }
 
+/// The context window a budget of `budget` conversation tokens needs: room
+/// for the reply and the tool schemas on top. Local servers are asked for
+/// this window, so a request the agent fits to the budget fits the server.
+pub fn window_for_budget(budget: usize, max_output_tokens: usize) -> usize {
+    budget + max_output_tokens + SCHEMA_RESERVE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_for_a_budget_always_gives_that_budget_back() {
+        for (budget, reply) in [(4_096, 8_192), (32_000, 8_192), (100_000, 4_096)] {
+            let window = window_for_budget(budget, reply);
+            assert!(budget_for_window(window, reply, None) >= budget);
+        }
+    }
 
     #[test]
     fn known_models_use_the_registry_window() {

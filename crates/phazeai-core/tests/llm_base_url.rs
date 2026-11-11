@@ -242,6 +242,32 @@ async fn ollama_chat_goes_to_the_configured_server() {
         "{:?}",
         seen[0].body
     );
+    // The window Phaze budgets for (Ollama's own default can be smaller,
+    // and it drops the start of a longer prompt), held for 30 minutes.
+    assert_eq!(
+        seen[0].body["options"],
+        serde_json::json!({"num_ctx": 8192})
+    );
+    assert_eq!(seen[0].body["keep_alive"], "30m");
+}
+
+#[tokio::test]
+async fn ollama_is_asked_for_a_window_that_holds_the_set_budget() {
+    let _turn = turn();
+    let (server, log) = model_server().await;
+    let mut s = settings(LlmProvider::Ollama, "llama3.2:3b", Some(&server));
+    s.llm.context_tokens = Some(20_000);
+    s.llm.max_tokens = 4_096;
+    assert_eq!(s.context_budget(), 20_000);
+
+    let client = s.build_llm_client().expect("client builds");
+    client
+        .chat(&[Message::user("hi")], &[])
+        .await
+        .expect("the configured Ollama answers");
+    let seen = requests(&log);
+    // 20,000 for the conversation, 4,096 for the reply, 2,000 for the tools.
+    assert_eq!(seen[0].body["options"]["num_ctx"], 26_096);
 }
 
 #[tokio::test]
@@ -450,6 +476,38 @@ async fn fim_completions_go_to_the_configured_server() {
         "the completion prompt: {:?}",
         seen[0].body
     );
+}
+
+/// Background completions run on `[llm] small_model`, at the same server.
+#[cfg(unix)]
+#[tokio::test]
+async fn fim_completions_use_the_small_model() {
+    let _turn = turn();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = home.path().join("xdg");
+    let _env = EnvVars::set(&[
+        ("HOME", home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+    ]);
+    assert!(Settings::config_path().starts_with(home.path()));
+    let (server, log) = model_server().await;
+    let mut s = settings(LlmProvider::LmStudio, "qwen2.5-coder-32b", Some(&server));
+    s.llm.small_model = Some("qwen2.5-coder-1.5b".to_string());
+    s.save().expect("config.toml written");
+
+    let completion = phazeai_core::fim::fim_complete(
+        &home.path().join("project/src/lib.rs"),
+        "fn add(a: i32, b: i32) -> i32 {\n    ",
+        "\n}\n",
+        "rust",
+    )
+    .await
+    .expect("the configured server completes");
+
+    assert_eq!(completion, REPLY);
+    let seen = requests(&log);
+    assert_eq!(lines(&seen), ["POST /v1/chat/completions HTTP/1.1"]);
+    assert_eq!(seen[0].body["model"], "qwen2.5-coder-1.5b");
 }
 
 /// A proxy on 127.0.0.1 that counts the connections it gets and refuses them.

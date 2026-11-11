@@ -7,6 +7,8 @@ use ollama_rs::generation::chat::{
     ChatMessage as OllamaChatMessage, ChatMessageRequest, ChatToolCall, ChatToolFunction,
     MessageRole,
 };
+use ollama_rs::generation::options::GenerationOptions;
+use ollama_rs::generation::parameters::{KeepAlive, TimeUnit};
 use ollama_rs::Ollama;
 use serde_json::Value;
 
@@ -15,7 +17,13 @@ pub struct OllamaClient {
     ollama: Ollama,
     model: String,
     base_url: String,
+    num_ctx: Option<u32>,
 }
+
+/// How long Ollama keeps the model loaded after a request. Its default, five
+/// minutes, unloads it during an ordinary pause, and the next request then
+/// waits for the reload and processes the whole prompt again.
+const KEEP_ALIVE_MINUTES: u64 = 30;
 
 impl OllamaClient {
     pub fn new(model: impl Into<String>) -> Self {
@@ -29,7 +37,32 @@ impl OllamaClient {
             ollama,
             model: model.into(),
             base_url,
+            num_ctx: None,
         }
+    }
+
+    /// Run the model with a `tokens` context window (`num_ctx`). The same
+    /// value on every request, since a change makes Ollama reload the model.
+    pub fn with_context_window(mut self, tokens: usize) -> Self {
+        self.num_ctx = Some(tokens.min(u32::MAX as usize) as u32);
+        self
+    }
+
+    /// A chat request with this client's model, window and keep-alive.
+    fn request(&self, messages: &[Message], tools: &[ToolDefinition]) -> ChatMessageRequest {
+        let mut request =
+            ChatMessageRequest::new(self.model.clone(), Self::to_ollama_messages(messages))
+                .keep_alive(KeepAlive::Until {
+                    time: KEEP_ALIVE_MINUTES,
+                    unit: TimeUnit::Minutes,
+                });
+        if let Some(num_ctx) = self.num_ctx {
+            request = request.options(GenerationOptions::default().num_ctx(num_ctx));
+        }
+        if !tools.is_empty() {
+            request = request.tools(Self::build_tool_defs(tools));
+        }
+        request
     }
 
     /// Connect directly, ignoring proxies (for a server on this machine).
@@ -120,13 +153,7 @@ impl LlmClient for OllamaClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse, PhazeError> {
-        let ollama_messages = Self::to_ollama_messages(messages);
-        let request = if !tools.is_empty() {
-            ChatMessageRequest::new(self.model.clone(), ollama_messages)
-                .tools(Self::build_tool_defs(tools))
-        } else {
-            ChatMessageRequest::new(self.model.clone(), ollama_messages)
-        };
+        let request = self.request(messages, tools);
 
         let response = self
             .ollama
@@ -208,8 +235,7 @@ impl LlmClient for OllamaClient {
         }
 
         // No tools — use ollama-rs streaming API
-        let ollama_messages = Self::to_ollama_messages(messages);
-        let request = ChatMessageRequest::new(self.model.clone(), ollama_messages);
+        let request = self.request(messages, &[]);
 
         let stream = self
             .ollama

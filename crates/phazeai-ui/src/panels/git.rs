@@ -2416,7 +2416,7 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
             };
 
             let result = rt.block_on(async move {
-                let client = match settings.build_llm_client() {
+                let client = match settings.build_small_llm_client() {
                     Ok(c) => c,
                     Err(e) => return Err(format!("AI commit message: {e}")),
                 };
