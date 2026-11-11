@@ -570,3 +570,38 @@ async fn kept_hunks_are_not_written_over_a_file_that_changed_during_review() {
     assert!(!ok, "{result}");
     assert_eq!(read(&file), saved, "the user's save is kept");
 }
+
+#[tokio::test]
+async fn keeping_part_of_a_change_never_rewrites_bytes_the_reviewer_left_alone() {
+    // A Latin-1 byte (0xE9, "é") on a line the reviewer keeps as it is. The
+    // review sees the file as lossy text, so rebuilding the kept parts from
+    // that text would write U+FFFD in its place.
+    let dir = project();
+    let file = dir.path().join("notes.txt");
+    let original: &[u8] = b"caf\xe9 = 1\nkeep = 2\ntotal = 3\n";
+    std::fs::write(&file, original).unwrap();
+    let proposed = "caf\u{e9} = 1\nkeep = 2\ntotal = 4\n";
+    let args = at(&file, json!({"content": proposed}));
+
+    let (_, ok, result) = run_answering(
+        "write_file",
+        args,
+        // The first hunk (the lossy line read back as "café") and the second
+        // (total = 4): keep only the second.
+        DiffAnswer::Keep(vec![false, true]),
+        || {},
+    )
+    .await;
+
+    let written = std::fs::read(&file).unwrap();
+    let replacement = "\u{fffd}".as_bytes();
+    assert!(
+        !written.windows(replacement.len()).any(|w| w == replacement),
+        "a byte the reviewer did not change was replaced: {:?} ({result})",
+        String::from_utf8_lossy(&written)
+    );
+    // Refused, with the reason, and the file untouched: approving or
+    // rejecting the whole change still works.
+    assert!(!ok && result.contains("not valid UTF-8"), "{result}");
+    assert_eq!(written, original);
+}
