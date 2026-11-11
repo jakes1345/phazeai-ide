@@ -663,7 +663,7 @@ impl Agent {
                                         let mut conversation = self.conversation.lock().await;
                                         conversation.add_tool_result(
                                             &tool_call.id,
-                                            &format!("Error: {why}"),
+                                            format!("Error: {why}"),
                                         );
                                     }
                                     tool_executions.push(ToolExecution {
