@@ -2,7 +2,6 @@ use crate::error::PhazeError;
 use crate::llm::traits::*;
 use crate::tools::ToolDefinition;
 use futures::channel::mpsc;
-use futures::StreamExt;
 use ollama_rs::generation::chat::{
     ChatMessage as OllamaChatMessage, ChatMessageRequest, ChatToolCall, ChatToolFunction,
     MessageRole,
@@ -248,7 +247,9 @@ impl LlmClient for OllamaClient {
         tokio::spawn(async move {
             let mut stream = stream;
 
-            while let Some(result) = stream.next().await {
+            while let Some(result) =
+                super::stream_cancel::next_unless_dropped(&mut stream, &tx).await
+            {
                 match result {
                     Ok(response) => {
                         if let Some(msg) = &response.message {

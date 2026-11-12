@@ -409,7 +409,6 @@ impl LlmClient for ClaudeClient {
 
         let mut stream = response.bytes_stream();
         tokio::spawn(async move {
-            use futures::StreamExt;
             let mut buffer = String::new();
             // Maps content_block index → tool_use id, so delta events can find their tool call
             let mut tool_block_ids: std::collections::HashMap<u64, String> =
@@ -419,7 +418,9 @@ impl LlmClient for ClaudeClient {
             let mut start_usage: Option<Value> = None;
             let mut usage_sent = false;
 
-            while let Some(chunk) = stream.next().await {
+            while let Some(chunk) =
+                super::stream_cancel::next_unless_dropped(&mut stream, &tx).await
+            {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
@@ -782,5 +783,49 @@ mod tests {
                 cache_write_tokens: 0,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_closes_the_provider_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = sock.read(&mut buf).await;
+            let first = json!({ "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": "Hel" } });
+            let first = format!("event: content_block_delta\ndata: {first}\n\n");
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            let part = format!("{:x}\r\n{first}\r\n", first.len());
+            sock.write_all(part.as_bytes()).await.unwrap();
+            // Still generating: send nothing more until the client hangs up.
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        let client = ClaudeClient::new("k").with_base_url(url).without_proxy();
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        match rx.next().await {
+            Some(StreamEvent::TextDelta(t)) => assert_eq!(t, "Hel"),
+            other => panic!("expected the first text, got {other:?}"),
+        }
+        // What the agent does on Stop.
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(3), closed)
+            .await
+            .expect("the request was still open 3 s after Stop")
+            .unwrap();
     }
 }

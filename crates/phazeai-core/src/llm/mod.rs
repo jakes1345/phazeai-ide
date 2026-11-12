@@ -9,6 +9,7 @@ pub mod ollama_manager;
 pub(crate) mod openai;
 pub mod provider;
 pub mod retry;
+mod stream_cancel;
 mod text_only;
 mod traits;
 
