@@ -196,3 +196,105 @@ async fn rust_analyzer_dies_then_health_check_replaces_it() {
     drop(replacement);
     manager.shutdown_all().await;
 }
+
+/// Rename through a real rust-analyzer, applied the way the IDE applies it:
+/// a crate in a folder whose name has a space, a CRLF file holding non-ASCII
+/// text before the renamed call. Both files change, nothing else does.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "needs a working rust-analyzer; fails (never skips) without one"]
+async fn rust_analyzer_rename_applies_cleanly() {
+    use phazeai_core::lsp::text::{apply_text_edits, uri_to_path};
+
+    let tmp = tempfile::tempdir().expect("create tmpdir");
+    let root: PathBuf = tmp.path().join("my crate é");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"rename_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let main_src = "mod util;\r\n\r\nfn main() {\r\n    let s = \"héllo 😀\"; let n = util::parse_config(s);\r\n    println!(\"{n}\");\r\n}\r\n";
+    let util_src = "pub fn parse_config(s: &str) -> usize {\n    s.len()\n}\n";
+    let main = root.join("src/main.rs");
+    let util = root.join("src/util.rs");
+    std::fs::write(&main, main_src).unwrap();
+    std::fs::write(&util, util_src).unwrap();
+    let version = require_rust_analyzer(&root);
+    eprintln!("using {version}");
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<LspEvent>();
+    let mut manager = LspManager::new(root.clone(), tx);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    manager
+        .ensure_server_for_file(&main)
+        .await
+        .expect("spawn rust-analyzer");
+    manager.did_open(&main, main_src);
+    let client = manager
+        .client_for_language("rust")
+        .expect("rust client")
+        .clone();
+
+    // `parse_config` in the call on line 3; its UTF-16 column lies past the
+    // non-ASCII string, so a byte column would land elsewhere.
+    let line3 = main_src.split("\r\n").nth(3).unwrap();
+    let byte_col = line3.find("parse_config").unwrap();
+    let col = line3[..byte_col].encode_utf16().count() as u32 + 2;
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let edit = loop {
+        match client
+            .rename_symbol(&main, 3, col, "load_settings".to_string())
+            .await
+        {
+            Ok(Some(edit)) => break edit,
+            other => {
+                assert!(
+                    Instant::now() < deadline,
+                    "rust-analyzer never answered the rename: {other:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    };
+    eprintln!("workspace edit: {edit:?}");
+
+    let mut files: Vec<(PathBuf, Vec<lsp_types::TextEdit>)> = Vec::new();
+    if let Some(lsp_types::DocumentChanges::Edits(edits)) = edit.document_changes {
+        for te in edits {
+            let path = uri_to_path(&te.text_document.uri).expect("file URI");
+            let edits = te
+                .edits
+                .into_iter()
+                .map(|e| match e {
+                    lsp_types::OneOf::Left(t) => t,
+                    lsp_types::OneOf::Right(a) => a.text_edit,
+                })
+                .collect();
+            files.push((path, edits));
+        }
+    } else if let Some(changes) = edit.changes {
+        for (uri, edits) in changes {
+            files.push((uri_to_path(&uri).expect("file URI"), edits));
+        }
+    }
+    let mut results = std::collections::HashMap::new();
+    for (path, edits) in files {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("edit names {}: {e}", path.display()));
+        results.insert(path, apply_text_edits(&text, &edits).expect("edits apply"));
+    }
+    assert_eq!(
+        results.get(&main).map(String::as_str),
+        Some(main_src.replace("parse_config", "load_settings").as_str()),
+        "main.rs: only the call changes; CRLF and the non-ASCII text stay"
+    );
+    assert_eq!(
+        results.get(&util).map(String::as_str),
+        Some(util_src.replace("parse_config", "load_settings").as_str()),
+        "util.rs: only the definition changes"
+    );
+
+    drop(client);
+    manager.shutdown_all().await;
+}

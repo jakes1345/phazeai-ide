@@ -1,3 +1,4 @@
+use super::text::path_to_uri;
 use crate::process::ChildSlot;
 /// Lean LSP client that speaks the Language Server Protocol over stdio.
 /// Inspired by Lapce's LSP client but simplified for PhazeAI's architecture.
@@ -19,18 +20,6 @@ type PendingResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
 type PendingMap = Arc<Mutex<HashMap<u64, PendingResponse>>>;
 
 /// Convert a filesystem path to a file:// URI string
-fn path_to_uri(path: &Path) -> Result<Uri, String> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
-    let uri_str = format!("file://{}", abs.display());
-    uri_str.parse().map_err(|e| format!("Invalid URI: {:?}", e))
-}
-
 /// Events emitted by the LSP client to the IDE
 #[derive(Debug, Clone)]
 pub enum LspEvent {
