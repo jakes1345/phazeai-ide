@@ -3438,6 +3438,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.panes,
         true,
         app_shortcut.clone(),
+        state.workbench.status_toast,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3506,6 +3507,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.panes,
         false,
         app_shortcut.clone(),
+        state.workbench.status_toast,
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3830,6 +3832,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.panes,
         false,
         app_shortcut.clone(),
+        state.workbench.status_toast,
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)

@@ -1,12 +1,12 @@
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -1327,6 +1327,7 @@ pub fn editor_panel(
     // The app's global shortcuts (Ctrl+P, Ctrl+T, Ctrl+B ...): runs the one
     // a key press names and says whether there was one. See `editor_keys`.
     app_shortcut: ShortcutFn,
+    status_toast: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1393,6 +1394,62 @@ pub fn editor_panel(
     let docs_for_stack = docs.clone();
     let docs_for_save = docs.clone();
     let docs_for_find = docs.clone();
+
+    // ── Files changed on disk ────────────────────────────────────────────────
+    // The agent, rename, the formatter run on save and other programs write
+    // files behind the editor. A tab without unsaved edits shows the new text;
+    // one with unsaved edits keeps them, and says the file changed.
+    // `reloading` is set while such a reload edits a document, so the edit is
+    // not taken for typing (no unsaved flag, no auto-save).
+    let reloading: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    {
+        let watched: crate::disk_watch::Watched = Arc::new(Mutex::new(Vec::new()));
+        let (disk_tx, disk_rx) = std::sync::mpsc::sync_channel::<(PathBuf, String)>(16);
+        crate::disk_watch::spawn(&watched, std::time::Duration::from_secs(1), disk_tx);
+        {
+            let watched = watched.clone();
+            create_effect(move |_| {
+                let paths: Vec<PathBuf> = tabs.get().into_iter().map(|t| t.path).collect();
+                if let Ok(mut list) = watched.lock() {
+                    *list = paths;
+                }
+            });
+        }
+        let changes = create_signal_from_channel(disk_rx);
+        let docs = docs.clone();
+        let reloading = reloading.clone();
+        create_effect(move |_| {
+            // Owned here, so the watcher runs as long as this panel does.
+            let _watched = &watched;
+            let Some((path, disk)) = changes.get() else {
+                return;
+            };
+            let Some(tab) = tabs.get_untracked().into_iter().find(|t| t.path == path) else {
+                return;
+            };
+            let key = path.to_string_lossy().to_string();
+            let Some(doc) = docs.borrow().get(&key).cloned() else {
+                return;
+            };
+            let text = doc.text().to_string();
+            let unsaved = tab.dirty.try_get_untracked().unwrap_or(true);
+            match crate::disk_watch::on_disk_change(&text, &disk, unsaved) {
+                crate::disk_watch::DiskChange::Same => {}
+                crate::disk_watch::DiskChange::Reload => {
+                    reloading.set(true);
+                    doc.edit_single(Selection::region(0, text.len()), &disk, EditType::Other);
+                    reloading.set(false);
+                }
+                crate::disk_watch::DiskChange::Conflict => crate::app::show_toast(
+                    status_toast,
+                    format!(
+                        "{} changed on disk. Your unsaved edits are kept; saving will overwrite that change.",
+                        tab.name
+                    ),
+                ),
+            }
+        });
+    }
 
     // ── Find in file (Ctrl+F) ────────────────────────────────────────────────
     let find_open: RwSignal<bool> = create_rw_signal(false);
@@ -4542,12 +4599,17 @@ pub fn editor_panel(
                         .modal_relative_line(relative_line_numbers.get())
                 })
                 .update({
+                    let reloading = reloading.clone();
                     let as_gen = Arc::clone(&auto_save_gen);
                     let as_tx = auto_save_tx.clone();
                     let rec_gen = Arc::clone(&recovery_gen);
                     let rec_tx = recovery_tx.clone();
                     move |_| {
-                        mark_modified(dirty);
+                        // Reloaded from disk: the tab matches the file again.
+                        let from_disk = reloading.get();
+                        if !from_disk {
+                            mark_modified(dirty);
+                        }
                         // Notify LSP server of content change (textDocument/didChange).
                         let text = doc_for_lsp.text().to_string();
                         let ver = lsp_ver.get();
@@ -4595,6 +4657,9 @@ pub fn editor_panel(
                                     }
                                 }
                             }
+                        }
+                        if from_disk {
+                            return;
                         }
                         // Auto-save: debounce 1.5 s — each edit cancels the previous timer.
                         if auto_save.get_untracked() {
