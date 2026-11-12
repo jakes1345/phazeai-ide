@@ -10,6 +10,7 @@ pub mod components;
 pub mod crash_recovery;
 pub mod custom_theme;
 pub mod debug_session;
+pub mod disk_watch;
 pub mod domain_state;
 pub mod editor_command;
 pub mod lsp_bridge;
