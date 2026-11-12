@@ -334,7 +334,9 @@ pub async fn fetch_models(
         )));
     }
     let mut builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
-    if is_local(id) {
+    // By address, as for chat: a local server is reached directly, and a
+    // remote one through the proxy even when it runs Ollama.
+    if crate::privacy::is_local_endpoint(id, base_url) {
         builder = builder.no_proxy();
     }
     let client = builder

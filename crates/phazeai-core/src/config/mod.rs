@@ -623,11 +623,16 @@ impl Settings {
         &self,
         refresh: bool,
     ) -> Result<crate::llm::model_list::ModelList, crate::error::PhazeError> {
+        // The same checks a chat request passes: the key never goes to
+        // another machine over plain http, and `local_only` allows only a
+        // server on this machine.
+        self.check_base_url()?;
         let registry = self.build_provider_registry();
         let config = registry.active_config().cloned().ok_or_else(|| {
             crate::error::PhazeError::Config("No provider is configured.".to_string())
         })?;
         let base_url = crate::llm::provider::request_base_url(&config)?;
+        crate::privacy::check_provider(&config.id, &base_url, "model list")?;
         let key = config.api_key();
         crate::llm::model_list::live_models(&config.id, &base_url, key.as_deref(), refresh).await
     }
