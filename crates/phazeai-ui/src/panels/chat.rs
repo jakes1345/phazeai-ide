@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,8 +11,8 @@ use floem::{
     IntoView,
 };
 use phazeai_core::context::system_prompt::{
-    fit_instructions, instructions_allowance, project_instructions, Instructions,
-    INSTRUCTIONS_TITLE,
+    collect_git_info, fit_instructions, instructions_allowance, project_instructions, Instructions,
+    SystemPromptBuilder, INSTRUCTIONS_TITLE,
 };
 use phazeai_core::permissions::rule_says_ask;
 use phazeai_core::tools::{ToolApprovalManager, ToolPermission};
@@ -375,38 +376,60 @@ struct SendToAiJob {
     attached_files: Vec<std::path::PathBuf>,
 }
 
-/// The chat's system prompt: the project's rules (`project_instructions`:
-/// its rules files, whichever tool they were written for, and the menu of
-/// those read on demand) with the active skill (if any), the mode hint, and,
-/// with no skill active, the menu of skills. The rules and skill together,
-/// and the skills menu, each take at most the instructions' share of the
-/// model's context budget (`fit_instructions`), so a long rules or skill file
-/// can't push a small local model's requests over budget, where the trim
-/// would cut every tool result down to a bare marker. The rules come first:
-/// they stay the same from request to request, and a provider's prompt
-/// cache reuses the part of a prompt before its first difference.
-fn chat_system_prompt(
-    project_rules: &[Instructions],
-    active_skill: Option<&Skill>,
-    mode_hint: &str,
-    skills_menu: &str,
-    context_budget: usize,
-) -> String {
+/// What the chat's system prompt is built from, besides the model's budget.
+struct ChatPromptParts<'a> {
+    /// The open folder: the prompt names it and its kind of project.
+    workspace_root: &'a Path,
+    /// The project's rules (`project_instructions`).
+    project_rules: &'a [Instructions],
+    active_skill: Option<&'a Skill>,
+    mode_hint: &'a str,
+    /// The menu of skills, shown when no skill is active.
+    skills_menu: &'a str,
+    /// The branch and modified files (`collect_git_info`).
+    git: (Option<String>, Vec<String>),
+}
+
+/// The chat's system prompt, built the way the CLI builds the agent's
+/// (`SystemPromptBuilder`): the agent's core instructions (how to use its
+/// tools, how to reply, what to ask before), the open folder and its kind of
+/// project, then the project's rules (`project_instructions`: its rules
+/// files, whichever tool they were written for, and the menu of those read
+/// on demand) with the active skill (if any), the mode hint and, with no
+/// skill active, the menu of skills, and the git state last. The rules and
+/// skill together, and the skills menu, each take at most the instructions'
+/// share of the model's context budget (`fit_instructions`), so a long rules
+/// or skill file can't push a small local model's requests over budget,
+/// where the trim would cut every tool result down to a bare marker. What
+/// stays the same from request to request comes first and what changes
+/// last, as a provider's prompt cache reuses the part of a prompt before its
+/// first difference.
+fn chat_system_prompt(parts: ChatPromptParts<'_>, context_budget: usize) -> String {
     let room = instructions_allowance(context_budget);
-    let mut blocks = project_rules.to_vec();
+    let mut blocks = parts.project_rules.to_vec();
     if let Some(first) = blocks.first_mut() {
         first.heading = format!("{INSTRUCTIONS_TITLE}{}", first.heading);
     }
-    blocks.extend(active_skill.map(Skill::instructions));
-    let instructions = (!blocks.is_empty()).then(|| fit_instructions(&blocks, room));
-    let menu = (active_skill.is_none() && !skills_menu.is_empty())
-        .then(|| fit_instructions(&[Instructions::new(skills_menu)], room));
-    [instructions.as_deref(), Some(mode_hint), menu.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    blocks.extend(parts.active_skill.map(Skill::instructions));
+    let instructions = if blocks.is_empty() {
+        String::new()
+    } else {
+        fit_instructions(&blocks, room)
+    };
+    let menu = if parts.active_skill.is_none() && !parts.skills_menu.is_empty() {
+        fit_instructions(&[Instructions::new(parts.skills_menu)], room)
+    } else {
+        String::new()
+    };
+    let (branch, dirty_files) = parts.git;
+    SystemPromptBuilder::new()
+        .with_context_budget(context_budget)
+        .with_project_root(parts.workspace_root.to_path_buf())
+        .with_section(instructions)
+        .with_section(parts.mode_hint)
+        .with_section(menu)
+        .with_git_info(branch, dirty_files)
+        .build()
 }
 
 fn send_to_ai(job: SendToAiJob) {
@@ -463,10 +486,14 @@ fn send_to_ai(job: SendToAiJob) {
             };
             let project_rules = project_instructions(&workspace_root);
             let system_prompt = chat_system_prompt(
-                &project_rules,
-                active_skill.as_ref(),
-                mode_hint,
-                &skills_menu,
+                ChatPromptParts {
+                    workspace_root: &workspace_root,
+                    project_rules: &project_rules,
+                    active_skill: active_skill.as_ref(),
+                    mode_hint,
+                    skills_menu: &skills_menu,
+                    git: collect_git_info(&workspace_root),
+                },
                 settings.context_budget(),
             );
             // The UI index of this run's user message: the bubble pushed (or,
@@ -2732,10 +2759,33 @@ fn diff_view_rows(before: &str, after: &str) -> Vec<DiffViewRow> {
 mod tests {
     use super::{
         chat_system_prompt, compaction_after_run, expand_file_mentions, rebuild_history,
-        shape_retry_prior_messages, AiMode, ChatMessage, ChatRole, CompactionState,
+        shape_retry_prior_messages, AiMode, ChatMessage, ChatPromptParts, ChatRole,
+        CompactionState,
     };
     use super::{diff_view_rows, DiffViewRow};
     use phazeai_core::context::system_prompt::instructions_allowance;
+
+    /// The chat's prompt for a folder that is not a git repository.
+    fn prompt_for(
+        root: &std::path::Path,
+        rules: &[phazeai_core::context::system_prompt::Instructions],
+        skill: Option<&phazeai_core::Skill>,
+        hint: &str,
+        menu: &str,
+        budget: usize,
+    ) -> String {
+        chat_system_prompt(
+            ChatPromptParts {
+                workspace_root: root,
+                project_rules: rules,
+                active_skill: skill,
+                mode_hint: hint,
+                skills_menu: menu,
+                git: (None, Vec::new()),
+            },
+            budget,
+        )
+    }
 
     #[test]
     fn a_long_skill_or_skill_menu_is_cut_to_its_share_of_a_small_budget() {
@@ -2756,39 +2806,44 @@ mod tests {
         let skills = phazeai_core::discover_skills(Some(&root));
         let skill = phazeai_core::find_skill(&skills, "reviewer").unwrap();
         let hint = AiMode::Debug.system_hint();
+        // The core prompt and the folder, which every request starts with.
+        let base = prompt_for(&root, &[], None, "", "", 200_000);
 
-        // A cloud model's budget: exactly the prompt the chat sent before.
+        // A cloud model's budget: the whole skill, then the mode hint.
         assert_eq!(
-            chat_system_prompt(&[], Some(skill), hint, "ignored menu", 200_000),
+            prompt_for(&root, &[], Some(skill), hint, "ignored menu", 200_000),
             format!(
-                "# Active Expert Skill: reviewer\n\n{}\n\n\n{hint}",
-                skill.body
+                "{base}\n\n# Active Expert Skill: reviewer\n\n{}\n\n{}",
+                skill.body.trim_end(),
+                hint.trim()
             )
         );
 
         // A local model's budget: the skill takes at most its share, cut at a
         // line, and the marker gives the skill file's own line numbers.
         let budget = 4_096;
-        let prompt = chat_system_prompt(&[], Some(skill), "", "", budget);
+        let base = prompt_for(&root, &[], None, "", "", budget);
+        let prompt = prompt_for(&root, &[], Some(skill), "", "", budget);
+        let skill_part = prompt.strip_prefix(&format!("{base}\n\n")).unwrap();
         assert!(
-            prompt.len() <= instructions_allowance(budget),
+            skill_part.len() <= instructions_allowance(budget),
             "{} bytes",
-            prompt.len()
+            skill_part.len()
         );
-        let shown = prompt.matches("Step ").count();
+        let shown = skill_part.matches("Step ").count();
         assert!(shown > 10, "only {shown} steps shown");
         // Front matter and a blank line take the file's first five lines.
         let next = 5 + shown + 1;
         let last = file.lines().count();
         assert!(
-            prompt.ends_with(&format!(
+            skill_part.ends_with(&format!(
                 "\n[... {p} is shortened here to fit this model's context budget: lines \
                  {next}-{last} are not shown. To read them, call read_file with \
                  {{\"path\": \"{p}\", \"offset\": {next}}}.]",
                 p = path.display()
             )),
             "{}",
-            &prompt[prompt.rfind("[... ").unwrap()..]
+            &skill_part[skill_part.rfind("[... ").unwrap()..]
         );
         assert!(file
             .lines()
@@ -2800,8 +2855,10 @@ mod tests {
         let menu: String = (0..500)
             .map(|i| format!("- **skill-{i}** (project) — does task number {i}\n"))
             .collect();
-        let prompt = chat_system_prompt(&[], None, hint, &menu, budget);
-        let menu_part = prompt.strip_prefix(&format!("{hint}\n\n")).unwrap();
+        let prompt = prompt_for(&root, &[], None, hint, &menu, budget);
+        let menu_part = prompt
+            .strip_prefix(&format!("{base}\n\n{}\n\n", hint.trim()))
+            .unwrap();
         assert!(menu_part.len() <= instructions_allowance(budget));
         assert!(menu.starts_with(menu_part.split("[... ").next().unwrap()));
         assert!(
@@ -2830,7 +2887,8 @@ mod tests {
         let rules = phazeai_core::context::system_prompt::project_instructions(&root);
         let hint = AiMode::Plan.system_hint();
 
-        let prompt = super::chat_system_prompt(&rules, Some(skill), hint, "", 200_000);
+        let base = prompt_for(&root, &[], None, "", "", 200_000);
+        let prompt = prompt_for(&root, &rules, Some(skill), hint, "", 200_000);
         let menu = format!(
             "# More project rules\nNot loaded. Before work one covers, read it with \
              read_file.\n- {}: rules written for Gemini CLI; may repeat the rules above\n",
@@ -2838,18 +2896,66 @@ mod tests {
         );
         assert!(
             prompt.starts_with(&format!(
-                "## Project-Specific Instructions\nRun the tests before saying a change \
-                 works.\n\n\n---\n\n{menu}\n\n---\n\n# Active Expert Skill: reviewer\n\n\
-                 Check the spec.\n"
+                "{base}\n\n## Project-Specific Instructions\nRun the tests before saying a \
+                 change works.\n\n\n---\n\n{menu}\n\n---\n\n# Active Expert Skill: \
+                 reviewer\n\nCheck the spec."
             )),
             "{prompt}"
         );
-        assert!(prompt.ends_with(hint), "{prompt}");
+        assert!(prompt.ends_with(hint.trim()), "{prompt}");
 
         // A small model's budget holds the rules and the skill to one share.
         let budget = 4_096;
-        let prompt = super::chat_system_prompt(&rules, Some(skill), "", "", budget);
-        assert!(prompt.len() <= instructions_allowance(budget));
+        let base = prompt_for(&root, &[], None, "", "", budget);
+        let prompt = prompt_for(&root, &rules, Some(skill), "", "", budget);
+        assert!(prompt.len() - base.len() <= instructions_allowance(budget) + 2);
+    }
+
+    #[test]
+    fn the_chat_gets_the_agents_core_prompt_with_the_folder_first_and_git_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Keep functions short.\n").unwrap();
+        let rules = phazeai_core::context::system_prompt::project_instructions(&root);
+        let hint = AiMode::Ask.system_hint();
+        let prompt = chat_system_prompt(
+            ChatPromptParts {
+                workspace_root: &root,
+                project_rules: &rules,
+                active_skill: None,
+                mode_hint: hint,
+                skills_menu: "- **reviewer** (project) — Reviews changes\n",
+                git: (Some("main".into()), vec!["M src/lib.rs".into()]),
+            },
+            200_000,
+        );
+
+        // The CLI agent's prompt for the same folder, rules and git state:
+        // the chat's starts the same way, so both agents work alike.
+        let cli = phazeai_core::SystemPromptBuilder::new()
+            .with_context_budget(200_000)
+            .with_project_root(root.clone())
+            .load_project_instructions()
+            .build();
+        assert!(prompt.starts_with(&cli), "{prompt}");
+        assert!(prompt.starts_with("You are PhazeAI, a coding agent"));
+        assert!(prompt.contains(&format!("- Working directory: {}\n", root.display())));
+        assert!(prompt.contains("- Project type: Rust\n"), "{prompt}");
+
+        // Then the parts that change with the mode and the skills, and the git
+        // state last, as it changes with every edit.
+        let rest = &prompt[cli.len()..];
+        let hint_at = rest.find(hint.trim()).expect("the mode hint");
+        let menu_at = rest
+            .find("- **reviewer** (project)")
+            .expect("the skills menu");
+        let git_at = rest.find("## Git Status\n").expect("the git state");
+        assert!(hint_at < menu_at && menu_at < git_at, "{rest}");
+        assert!(
+            prompt.ends_with("## Git Status\n- Git branch: main\n- Modified files: M src/lib.rs\n"),
+            "{prompt}"
+        );
     }
 
     #[test]
