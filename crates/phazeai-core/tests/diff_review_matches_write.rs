@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use phazeai_core::tools::sandbox;
 use phazeai_core::{
-    Agent, ApprovalFn, DiffHookFn, LlmClient, LlmResponse, Message, PhazeError, StreamEvent,
-    ToolDefinition,
+    Agent, ApprovalFn, DiffAnswer, DiffHookFn, LlmClient, LlmResponse, Message, PhazeError,
+    StreamEvent, ToolDefinition,
 };
 use serde_json::{json, Value};
 
@@ -121,7 +121,7 @@ fn chat_approval() -> ApprovalFn {
 /// answers `approve`.
 fn reviewer(
     log: &Arc<Mutex<Vec<Shown>>>,
-    approve: bool,
+    answer: DiffAnswer,
     during: impl Fn() + Send + Sync + 'static,
 ) -> DiffHookFn {
     let log = log.clone();
@@ -132,7 +132,8 @@ fn reviewer(
             after,
         });
         during();
-        Box::pin(async move { approve })
+        let answer = answer.clone();
+        Box::pin(async move { answer })
     })
 }
 
@@ -145,11 +146,21 @@ async fn run(
     approve: bool,
     during: impl Fn() + Send + Sync + 'static,
 ) -> (Vec<Shown>, bool, String) {
+    run_answering(tool, args, approve.into(), during).await
+}
+
+/// [`run`], with the review answering `answer`.
+async fn run_answering(
+    tool: &str,
+    args: Value,
+    answer: DiffAnswer,
+    during: impl Fn() + Send + Sync + 'static,
+) -> (Vec<Shown>, bool, String) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let script = Script(Mutex::new(VecDeque::from([call(tool, &args)])));
     let agent = Agent::new(Box::new(script))
         .with_approval(chat_approval())
-        .with_diff_hook(reviewer(&log, approve, during));
+        .with_diff_hook(reviewer(&log, answer, during));
     let response = agent.run("change the file").await.expect("the run ends");
     let [done] = response.tool_calls.as_slice() else {
         panic!("expected one tool call: {:?}", response.tool_calls);
@@ -466,4 +477,131 @@ async fn a_write_through_a_dangling_link_is_refused_with_the_real_reason() {
             dest.display()
         );
     }
+}
+
+// ── Keeping some hunks of a change ──────────────────────────────────────────
+
+const ORIGINAL: &str = "fn total(a: i32, b: i32) -> i32 {\n    a + b\n}\n\nfn main() {\n    println!(\"{}\", total(1, 2));\n}\n";
+const PROPOSED: &str = "fn total(a: i64, b: i64) -> i64 {\n    a + b\n}\n\nfn main() {\n    let sum = total(1, 2);\n    println!(\"{sum}\");\n}\n";
+
+#[tokio::test]
+async fn keeping_one_hunk_writes_that_hunk_and_tells_the_model_what_was_left_out() {
+    let dir = project();
+    let file = dir.path().join("lib.rs");
+    std::fs::write(&file, ORIGINAL).unwrap();
+    let args = at(&file, json!({"content": PROPOSED}));
+
+    let (shown, ok, result) = run_answering(
+        "write_file",
+        args,
+        DiffAnswer::Keep(vec![false, true]),
+        || {},
+    )
+    .await;
+
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        phazeai_core::review::hunks(&shown[0].before, &shown[0].after).len(),
+        2
+    );
+    assert!(ok, "{result}");
+    let written = read(&file);
+    assert!(
+        written.contains("fn total(a: i32, b: i32) -> i32"),
+        "{written}"
+    );
+    assert!(written.contains("let sum = total(1, 2);"), "{written}");
+    assert!(
+        result.contains("kept 1 of 2") && result.contains("line 1"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn keeping_every_hunk_or_none_is_a_plain_approve_or_reject() {
+    let dir = project();
+    let file = dir.path().join("lib.rs");
+    std::fs::write(&file, ORIGINAL).unwrap();
+
+    let args = at(&file, json!({"content": PROPOSED}));
+    let (_, ok, result) = run_answering(
+        "write_file",
+        args.clone(),
+        DiffAnswer::Keep(vec![false, false]),
+        || {},
+    )
+    .await;
+    assert!(!ok && result.contains("rejected"), "{result}");
+    assert_eq!(read(&file), ORIGINAL);
+
+    let (_, ok, result) = run_answering(
+        "write_file",
+        args,
+        DiffAnswer::Keep(vec![true, true]),
+        || {},
+    )
+    .await;
+    assert!(ok, "{result}");
+    assert_eq!(read(&file), PROPOSED);
+    assert!(!result.contains("user_review"), "{result}");
+}
+
+#[tokio::test]
+async fn kept_hunks_are_not_written_over_a_file_that_changed_during_review() {
+    let dir = project();
+    let file = dir.path().join("lib.rs");
+    std::fs::write(&file, ORIGINAL).unwrap();
+    let saved = format!("{ORIGINAL}// saved in the editor\n");
+    let during = {
+        let file = file.clone();
+        let saved = saved.clone();
+        move || std::fs::write(&file, &saved).unwrap()
+    };
+
+    let args = at(&file, json!({"content": PROPOSED}));
+    let (_, ok, result) = run_answering(
+        "write_file",
+        args,
+        DiffAnswer::Keep(vec![true, false]),
+        during,
+    )
+    .await;
+
+    assert!(!ok, "{result}");
+    assert_eq!(read(&file), saved, "the user's save is kept");
+}
+
+#[tokio::test]
+async fn keeping_part_of_a_change_never_rewrites_bytes_the_reviewer_left_alone() {
+    // A Latin-1 byte (0xE9, "é") on a line the reviewer keeps as it is. The
+    // review sees the file as lossy text, so rebuilding the kept parts from
+    // that text would write U+FFFD in its place.
+    let dir = project();
+    let file = dir.path().join("notes.txt");
+    let original: &[u8] = b"caf\xe9 = 1\nkeep = 2\ntotal = 3\n";
+    std::fs::write(&file, original).unwrap();
+    let proposed = "caf\u{e9} = 1\nkeep = 2\ntotal = 4\n";
+    let args = at(&file, json!({"content": proposed}));
+
+    let (_, ok, result) = run_answering(
+        "write_file",
+        args,
+        // The first hunk (the lossy line read back as "café") and the second
+        // (total = 4): keep only the second.
+        DiffAnswer::Keep(vec![false, true]),
+        || {},
+    )
+    .await;
+
+    let written = std::fs::read(&file).unwrap();
+    let replacement = "\u{fffd}".as_bytes();
+    assert!(
+        !written.windows(replacement.len()).any(|w| w == replacement),
+        "a byte the reviewer did not change was replaced: {:?} ({result})",
+        String::from_utf8_lossy(&written)
+    );
+    // Refused, with the reason, and the file untouched: approving or
+    // rejecting the whole change still works.
+    assert!(!ok && result.contains("not valid UTF-8"), "{result}");
+    assert_eq!(written, original);
 }

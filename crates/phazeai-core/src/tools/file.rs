@@ -245,6 +245,30 @@ impl FileWrite {
         &self.after
     }
 
+    /// This write with only part of the change: `after` is what the file
+    /// will hold instead, and `note` (what the reviewer left out) goes into
+    /// the tool's result as `user_review`, for the model.
+    pub fn keep_only(mut self, after: String, note: String) -> Self {
+        if let Value::Object(map) = &mut self.result {
+            if map.contains_key("bytes_written") {
+                map.insert("bytes_written".to_string(), Value::from(after.len()));
+            }
+            map.insert("user_review".to_string(), Value::String(note));
+        }
+        self.after = after;
+        self
+    }
+
+    /// Whether [`before`](Self::before) is exactly the file's bytes: true
+    /// unless the file holds bytes that are not UTF-8 (shown as U+FFFD). A
+    /// change rebuilt from `before` (keeping only some hunks) is only safe
+    /// when this holds.
+    pub fn before_is_exact(&self) -> bool {
+        self.current
+            .as_deref()
+            .is_none_or(|bytes| std::str::from_utf8(bytes).is_ok())
+    }
+
     /// Whether there is no file yet, so committing creates one.
     pub fn creates_file(&self) -> bool {
         self.current.is_none()

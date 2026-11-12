@@ -47,12 +47,39 @@ pub type ApprovalFn = Box<
 /// tool that writes one file ([`crate::tools::Tool::plan_write`]: `write_file`,
 /// `edit_file`) and would change it is shown here first, as (path, before,
 /// after): the file that will be written (resolved), what it holds now and
-/// exactly what it will hold. Return true to write `after`, which is then
-/// written only if the file still holds `before`; false rejects the call. A
-/// call that would fail, or would change nothing, is not shown (and writes
-/// nothing different).
-pub type DiffHookFn =
-    Box<dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+/// exactly what it will hold. The answer ([`DiffAnswer`]) writes all of
+/// `after`, none of it, or only some of its hunks ([`crate::review`]); what
+/// is written is written only if the file still holds `before`. A call that
+/// would fail, or would change nothing, is not shown (and writes nothing
+/// different).
+pub type DiffHookFn = Box<
+    dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = DiffAnswer> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A reviewer's answer to a proposed file write ([`DiffHookFn`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffAnswer {
+    /// Write the whole change.
+    Approve,
+    /// Write nothing; the call fails as rejected.
+    Reject,
+    /// Write only the hunks marked true, by index in
+    /// [`crate::review::hunks`]`(before, after)`; the rest stay as they are.
+    /// The model is told which parts were not written.
+    Keep(Vec<bool>),
+}
+
+impl From<bool> for DiffAnswer {
+    fn from(approved: bool) -> Self {
+        if approved {
+            Self::Approve
+        } else {
+            Self::Reject
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolExecution {
@@ -558,29 +585,68 @@ impl Agent {
                                     after: after.clone(),
                                 });
                                 // As with approval: Stop ends the review.
-                                let answer =
-                                    self.unless_cancelled((hook)(path, before, after)).await;
-                                let Some(approved) = answer.filter(|_| !self.is_cancelled()) else {
+                                let answer = self
+                                    .unless_cancelled((hook)(path, before.clone(), after.clone()))
+                                    .await;
+                                let Some(answer) = answer.filter(|_| !self.is_cancelled()) else {
                                     return self.stop_round(&tool_calls[i - 1..], &event_tx).await;
                                 };
-                                if !approved {
+                                // Some hunks kept: write those, and tell the
+                                // model which parts were not written.
+                                const REJECTED: &str = "File change rejected by user";
+                                let (refused, write) = match answer {
+                                    DiffAnswer::Approve => (None, write),
+                                    DiffAnswer::Reject => (Some(REJECTED.to_string()), write),
+                                    DiffAnswer::Keep(keep) => {
+                                        let total = crate::review::hunks(&before, &after).len();
+                                        let kept = keep.iter().take(total).filter(|k| **k).count();
+                                        if kept == 0 {
+                                            (Some(REJECTED.to_string()), write)
+                                        } else if kept == total {
+                                            (None, write)
+                                        } else if !write.before_is_exact() {
+                                            // The review saw the file as lossy
+                                            // text; rebuilding the parts left
+                                            // alone from it would rewrite bytes
+                                            // nobody approved changing.
+                                            (
+                                                Some(format!(
+                                                    "Only part of the change to '{path}' was \
+                                                     kept, but the file is not valid UTF-8, so \
+                                                     a partial write could not keep its other \
+                                                     bytes exactly. Nothing was written: the \
+                                                     user can approve or reject the whole change.",
+                                                    path = write.target().display()
+                                                )),
+                                                write,
+                                            )
+                                        } else {
+                                            let content =
+                                                crate::review::apply(&before, &after, &keep);
+                                            let note =
+                                                crate::review::partial_note(&before, &after, &keep);
+                                            (None, write.keep_only(content, note))
+                                        }
+                                    }
+                                };
+                                if let Some(why) = refused {
                                     let _ = event_tx.send(AgentEvent::ToolResult {
                                         name: tool_name.clone(),
                                         success: false,
-                                        summary: "File change rejected by user".to_string(),
+                                        summary: why.clone(),
                                     });
                                     {
                                         let mut conversation = self.conversation.lock().await;
                                         conversation.add_tool_result(
                                             &tool_call.id,
-                                            "Error: File change rejected by user",
+                                            format!("Error: {why}"),
                                         );
                                     }
                                     tool_executions.push(ToolExecution {
                                         tool_name: tool_name.clone(),
                                         params: tool_call.parse_arguments().unwrap_or(Value::Null),
                                         success: false,
-                                        result_summary: "File change rejected by user".to_string(),
+                                        result_summary: why,
                                     });
                                     continue;
                                 }
@@ -1094,7 +1160,7 @@ mod tests {
             let reviews = reviews.clone();
             Box::new(move |_, _, _| {
                 reviews.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { true })
+                Box::pin(async { DiffAnswer::Approve })
             })
         };
         let llm = OneCall {
