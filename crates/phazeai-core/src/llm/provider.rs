@@ -362,6 +362,11 @@ impl ProviderRegistry {
         self.providers.insert(ProviderId::Custom(name), config);
     }
 
+    /// Replace the settings of the provider `config.id` names.
+    pub fn set_config(&mut self, config: ProviderConfig) {
+        self.providers.insert(config.id.clone(), config);
+    }
+
     /// Point `id` at `base_url` instead of its default address.
     pub fn set_base_url(&mut self, id: &ProviderId, base_url: impl Into<String>) {
         if let Some(config) = self.providers.get_mut(id) {

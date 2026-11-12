@@ -6,9 +6,10 @@
 //! panel turns into signal writes via `create_signal_from_channel`.
 
 use phazeai_core::dap::{DapClient, DebugEvent, LaunchConfig, SourceBreakpoint};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::domain_state::project::DebugStatus;
 
@@ -77,6 +78,34 @@ pub fn detect_adapter() -> Option<(String, Vec<String>)> {
 }
 
 /// Internal unified message for the session loop.
+/// How long session setup waits for an adapter's 'initialized' event or its
+/// answer to `launch`.
+const STARTUP_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether `adapter_cmd` must get its breakpoints before `launch`: gdb's
+/// DAP interpreter starts the program on `launch` itself.
+fn breakpoints_before_launch(adapter_cmd: &str) -> bool {
+    std::path::Path::new(adapter_cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "gdb")
+}
+
+/// Send the session's starting breakpoints, one `setBreakpoints` per file.
+fn set_initial_breakpoints(client: &DapClient, bps_by_file: &HashMap<PathBuf, Vec<u64>>) {
+    for (path, lines) in bps_by_file {
+        let bps: Vec<SourceBreakpoint> = lines
+            .iter()
+            .map(|&line| SourceBreakpoint {
+                line,
+                column: None,
+                condition: None,
+            })
+            .collect();
+        let _ = client.set_breakpoints(path, &bps);
+    }
+}
+
 enum Msg {
     Dap(DebugEvent),
     Cmd(DebugCmd),
@@ -124,23 +153,6 @@ pub fn run_session(
         bps_by_file.entry(path).or_default().push(line);
     }
 
-    // The launch request usually doesn't get a response until after
-    // configurationDone, which we can only send once the 'initialized' event
-    // arrives — so launch must not block this loop.
-    {
-        let client = client.clone();
-        let config = LaunchConfig {
-            program: program.clone(),
-            args: vec![],
-            cwd: Some(cwd.to_string_lossy().to_string()),
-            env: HashMap::new(),
-            stop_on_entry: false,
-        };
-        std::thread::spawn(move || {
-            let _ = client.launch(&config);
-        });
-    }
-
     send(SessionUpdate::Status(DebugStatus::Running));
     send(SessionUpdate::Output(format!(
         "Debugging {program} ({adapter_cmd})\n"
@@ -166,23 +178,64 @@ pub fn run_session(
         }
     });
 
+    let config = LaunchConfig {
+        program: program.clone(),
+        args: vec![],
+        cwd: Some(cwd.to_string_lossy().to_string()),
+        env: HashMap::new(),
+        stop_on_entry: false,
+    };
+
+    // Messages that arrive while the session is being set up, handled by the
+    // loop below once it starts.
+    let mut early: VecDeque<Msg> = VecDeque::new();
+    let mut configured = false;
+    if breakpoints_before_launch(&adapter_cmd) {
+        // gdb starts the program as soon as it gets `launch`, not at
+        // `configurationDone`, and sends 'initialized' right after
+        // `initialize`. Breakpoints sent after `launch` raced the program, so
+        // a short one ran straight past them: set them first.
+        let deadline = Instant::now() + STARTUP_WAIT;
+        while !configured {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match msg_rx.recv_timeout(left) {
+                Ok(Msg::Dap(DebugEvent::Initialized)) => {
+                    set_initial_breakpoints(&client, &bps_by_file);
+                    configured = true;
+                }
+                Ok(other) => early.push_back(other),
+                Err(_) => break,
+            }
+        }
+    }
+
+    // The launch request usually doesn't get a response until after
+    // configurationDone, which other adapters (lldb-dap) only accept once their
+    // 'initialized' event arrives, after launch: so launch must not block.
+    let (launched_tx, launched_rx) = mpsc::channel::<()>();
+    {
+        let client = client.clone();
+        std::thread::spawn(move || {
+            let _ = client.launch(&config);
+            let _ = launched_tx.send(());
+        });
+    }
+    if configured {
+        // gdb answers `launch` at once; `configurationDone` must follow it.
+        let _ = launched_rx.recv_timeout(STARTUP_WAIT);
+        let _ = client.configuration_done();
+    }
+
     let mut thread_id: u64 = 1;
 
-    while let Ok(msg) = msg_rx.recv() {
+    while let Some(msg) = early.pop_front().or_else(|| msg_rx.recv().ok()) {
         match msg {
             Msg::Dap(DebugEvent::Initialized) => {
-                for (path, lines) in &bps_by_file {
-                    let bps: Vec<SourceBreakpoint> = lines
-                        .iter()
-                        .map(|&line| SourceBreakpoint {
-                            line,
-                            column: None,
-                            condition: None,
-                        })
-                        .collect();
-                    let _ = client.set_breakpoints(path, &bps);
+                if !configured {
+                    configured = true;
+                    set_initial_breakpoints(&client, &bps_by_file);
+                    let _ = client.configuration_done();
                 }
-                let _ = client.configuration_done();
             }
             Msg::Dap(DebugEvent::Stopped {
                 reason: _,
