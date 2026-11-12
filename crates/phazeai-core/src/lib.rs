@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_event;
 pub mod analysis;
+pub mod checkpoint;
 pub mod companion;
 pub mod config;
 pub mod constants;
@@ -32,6 +33,7 @@ pub mod debug_ndjson;
 // Re-export key types
 pub use agent::{Agent, AgentResponse, ApprovalFn, DiffAnswer, DiffHookFn, DEFAULT_MAX_ITERATIONS};
 pub use agent_event::AgentEvent;
+pub use checkpoint::{Checkpoints, UndoReport};
 pub use config::Settings;
 pub use context::{
     collect_git_info, ContextBuilder, ConversationHistory, ConversationMetadata, ConversationStore,

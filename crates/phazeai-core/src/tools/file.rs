@@ -259,6 +259,11 @@ impl FileWrite {
         self
     }
 
+    /// The file's bytes when the write was planned; `None`: no file.
+    pub fn current(&self) -> Option<&[u8]> {
+        self.current.as_deref()
+    }
+
     /// Whether [`before`](Self::before) is exactly the file's bytes: true
     /// unless the file holds bytes that are not UTF-8 (shown as U+FFFD). A
     /// change rebuilt from `before` (keeping only some hunks) is only safe

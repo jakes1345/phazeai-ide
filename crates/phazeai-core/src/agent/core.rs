@@ -1,4 +1,5 @@
 use crate::agent_event::AgentEvent;
+use crate::checkpoint::Checkpoints;
 use crate::context::ConversationHistory;
 use crate::error::PhazeError;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
@@ -103,6 +104,8 @@ pub struct Agent {
     mcp_event_sink: Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>,
     /// Builder-provided system prompt, applied at run start under the async lock.
     system_prompt: Option<String>,
+    /// Records each run's file writes so they can be undone.
+    checkpoints: Option<Arc<StdMutex<Checkpoints>>>,
 }
 
 struct McpEventSinkGuard(Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>);
@@ -128,6 +131,7 @@ impl Agent {
             cancel_token: None,
             mcp_event_sink: Arc::new(StdMutex::new(None)),
             system_prompt: None,
+            checkpoints: None,
         }
     }
 
@@ -229,6 +233,14 @@ impl Agent {
 
     /// Replace the internal conversation with a shared one, enabling history persistence
     /// across multiple `run_with_events` calls from different Agent instances.
+    /// Record what each run writes with `write_file` and `edit_file` in
+    /// `checkpoints`, so [`Checkpoints::undo_last`] can put the files back.
+    /// Share one across the agents of a conversation.
+    pub fn with_checkpoints(mut self, checkpoints: Arc<StdMutex<Checkpoints>>) -> Self {
+        self.checkpoints = Some(checkpoints);
+        self
+    }
+
     pub fn with_shared_conversation(mut self, conv: Arc<Mutex<ConversationHistory>>) -> Self {
         self.conversation = conv;
         self
@@ -325,6 +337,9 @@ impl Agent {
                 conversation.set_system_prompt(prompt.clone());
             }
             conversation.add_user_message(&user_input);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.lock().unwrap().begin_run(&user_input);
         }
 
         loop {
@@ -563,19 +578,27 @@ impl Agent {
                     // With a diff hook, a tool that writes one file first
                     // shows exactly what it will write, and then only that
                     // is written (see `DiffHookFn`).
+                    // With checkpoints, it is planned the same way, so what
+                    // it wrote is known and can be undone.
                     let mut action = Action::Run;
-                    if let Some(ref hook) = self.diff_hook {
+                    if self.diff_hook.is_some() || self.checkpoints.is_some() {
                         match self.compute_file_patch(tool_call).await {
                             None => {}
                             // The tool would fail this way, writing nothing:
                             // report it without running the tool, so no file
                             // is written that was not reviewed.
                             Some(Err(e)) => action = Action::Fail(e),
-                            // A write that changes nothing has nothing to review.
-                            Some(Ok(write)) if !write.changes_file() => {
+                            // A write that changes nothing has nothing to
+                            // review, and without a hook nothing is reviewed.
+                            Some(Ok(write))
+                                if !write.changes_file() || self.diff_hook.is_none() =>
+                            {
                                 action = Action::Write(write);
                             }
                             Some(Ok(write)) => {
+                                let Some(hook) = self.diff_hook.as_ref() else {
+                                    unreachable!("checked by the arm above")
+                                };
                                 let path = write.target().display().to_string();
                                 let before = write.before().into_owned();
                                 let after = write.after().to_string();
@@ -670,7 +693,35 @@ impl Agent {
                     let (success, result_str) = match action {
                         Action::Run => self.execute_tool(tool_call).await,
                         // What was reviewed, or nothing if the file changed since.
-                        Action::Write(write) => self.tool_outcome(tool_name, write.commit()).await,
+                        Action::Write(write) => {
+                            let record = self
+                                .checkpoints
+                                .as_ref()
+                                .filter(|_| write.changes_file())
+                                .map(|cp| {
+                                    (
+                                        cp.clone(),
+                                        write.target().to_path_buf(),
+                                        write.current().map(<[u8]>::to_vec),
+                                        write.after().to_string(),
+                                    )
+                                });
+                            let outcome = self.tool_outcome(tool_name, write.commit()).await;
+                            // Interrupted or not, what reached the disk counts.
+                            if let Some((cp, path, before, after)) = record {
+                                let written = outcome.0
+                                    || std::fs::read(&path)
+                                        .is_ok_and(|now| now == after.as_bytes());
+                                if written {
+                                    cp.lock().unwrap().record(
+                                        &path,
+                                        before.as_deref(),
+                                        after.as_bytes(),
+                                    );
+                                }
+                            }
+                            outcome
+                        }
                         Action::Fail(e) => (false, format!("Error: {e}")),
                     };
 
