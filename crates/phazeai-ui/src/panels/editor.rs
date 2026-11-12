@@ -1066,6 +1066,59 @@ impl TabState {
     }
 }
 
+/// What the last edit of a document typed, for the editor's typing helpers
+/// (bracket auto-close, smart indent). They run on every cursor move, so
+/// without this an arrow key landing after `(` added a `)`, and Down onto the
+/// line under a `{` inserted an indent.
+#[derive(Default)]
+struct Typing {
+    /// Counts edits, so a helper acts once per edit, not once per cursor move.
+    gen: u64,
+    /// `(offset, text)` when the last edit was a plain insert.
+    last: Option<(usize, String)>,
+    /// Where the closer auto-close inserted now is, while only typing
+    /// before it has happened since; typing that character steps over it.
+    closer: Option<usize>,
+}
+
+impl Typing {
+    fn record(&mut self, typed: Option<(usize, String)>) {
+        self.gen += 1;
+        self.closer = match (&typed, self.closer) {
+            (Some((at, text)), Some(closer)) if *at <= closer => Some(closer + text.len()),
+            _ => None,
+        };
+        self.last = typed;
+    }
+
+    /// The text just typed, when it ends at `cursor` and the edit is newer
+    /// than the one `seen` holds (which is then updated).
+    fn typed_since(&self, seen: &std::cell::Cell<u64>, cursor: usize) -> Option<String> {
+        if seen.replace(self.gen) == self.gen {
+            return None;
+        }
+        let (at, text) = self.last.as_ref()?;
+        (at + text.len() == cursor).then(|| text.clone())
+    }
+}
+
+/// `(offset, text)` when `deltas` are one plain insert (typing, a paste),
+/// `None` for anything else.
+fn typed_insert<'a>(
+    mut deltas: impl Iterator<Item = &'a floem_editor_core::xi_rope::RopeDelta>,
+) -> Option<(usize, String)> {
+    let delta = deltas.next()?;
+    if deltas.next().is_some() {
+        return None;
+    }
+    let (interval, new_len) = delta.summary();
+    if !interval.is_empty() || new_len == 0 {
+        return None;
+    }
+    let text = delta.as_simple_insert()?;
+    Some((interval.start, String::from(text.clone())))
+}
+
 /// Flag a tab as having unsaved edits. Only the false -> true change is written: floem re-runs
 /// every subscriber on each `set`, equal value or not, and the git-gutter, fold and bracket
 /// effects (a `git diff` process, a copy of the whole buffer) watch `dirty` to refresh on save.
@@ -2014,6 +2067,10 @@ pub fn editor_panel(
                 });
             }
             let doc = raw_editor.doc().clone();
+            // What the last edit typed, for the auto-close and smart-indent
+            // effects below: they run on every cursor move and must act only
+            // after real typing, never after an arrow key or a click.
+            let typing: Rc<RefCell<Typing>> = Rc::new(RefCell::new(Typing::default()));
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
             let lsp_ver: RwSignal<i32> = create_rw_signal(0i32);
@@ -2438,28 +2495,41 @@ pub fn editor_panel(
             // Uses a suppress flag so our own insert doesn't re-trigger.
             {
                 let doc_for_ac = doc.clone();
+                let typing = typing.clone();
                 // Suppress re-entry after our own edit.
                 let ac_suppress: RwSignal<bool> = create_rw_signal(false);
-                // Previous cursor offset for delta detection.
-                let ac_prev: RwSignal<usize> = create_rw_signal(0usize);
+                let ac_seen = std::cell::Cell::new(0u64);
                 create_effect(move |_| {
                     let cur_pos = cursor_sig.get().offset();
                     // Skip if this was triggered by our own bracket insert.
                     if ac_suppress.get_untracked() {
                         ac_suppress.set(false);
+                        ac_seen.set(typing.borrow().gen);
                         return;
                     }
-                    let prev = ac_prev.get_untracked();
-                    ac_prev.set(cur_pos);
-                    // Only act when cursor advanced by exactly 1 (character typed).
-                    if active_idx.get() != Some(i) {
+                    // Only act on a character just typed, ending at the cursor.
+                    let Some(typed) = typing.borrow().typed_since(&ac_seen, cur_pos) else {
                         return;
-                    }
-                    if cur_pos == 0 || cur_pos != prev + 1 {
+                    };
+                    if active_idx.get() != Some(i) || typed.chars().count() != 1 {
                         return;
                     }
                     let rope = doc_for_ac.rope_text();
                     if cur_pos > rope.len() {
+                        return;
+                    }
+                    // Typing the closer this effect inserted steps over it.
+                    let closer = typing.borrow().closer;
+                    if closer == Some(cur_pos)
+                        && matches!(typed.as_str(), ")" | "]" | "}" | "\"" | "'")
+                        && rope.slice_to_cow(cur_pos..(cur_pos + 1).min(rope.len())) == typed
+                    {
+                        ac_suppress.set(true);
+                        doc_for_ac.edit_single(
+                            Selection::region(cur_pos, cur_pos + 1),
+                            "",
+                            EditType::Delete,
+                        );
                         return;
                     }
                     let prefix = rope.slice_to_cow(0..cur_pos);
@@ -2515,6 +2585,7 @@ pub fn editor_panel(
                                     &close_ch.to_string(),
                                     EditType::InsertChars,
                                 );
+                                typing.borrow_mut().closer = Some(cur_pos);
                                 // Keep cursor between the pair (don't advance past closing bracket).
                                 cursor_sig.set(Cursor::new(
                                     CursorMode::Insert(Selection::caret(cur_pos)),
@@ -2621,16 +2692,21 @@ pub fn editor_panel(
             {
                 let doc_for_si = doc.clone();
                 let si_suppress: RwSignal<bool> = create_rw_signal(false);
-                let si_prev: RwSignal<usize> = create_rw_signal(0usize);
+                let typing = typing.clone();
+                let si_seen = std::cell::Cell::new(0u64);
                 create_effect(move |_| {
                     let cur_pos = cursor_sig.get().offset();
                     if si_suppress.get_untracked() {
                         si_suppress.set(false);
+                        si_seen.set(typing.borrow().gen);
                         return;
                     }
-                    let prev = si_prev.get_untracked();
-                    si_prev.set(cur_pos);
-                    if active_idx.get() != Some(i) {
+                    // Only right after Enter: a line break just typed, ending
+                    // at the cursor (an arrow key moves the cursor, types nothing).
+                    let Some(typed) = typing.borrow().typed_since(&si_seen, cur_pos) else {
+                        return;
+                    };
+                    if active_idx.get() != Some(i) || !matches!(typed.as_str(), "\n" | "\r\n") {
                         return;
                     }
                     if cur_pos == 0 {
@@ -2647,20 +2723,7 @@ pub fn editor_panel(
                     if cur_col != 0 || cur_line == 0 {
                         return;
                     }
-                    let prev_clamped = prev.min(len.saturating_sub(1));
-                    let prev_line = rope.line_of_offset(prev_clamped);
-                    // Check that we moved exactly one line down (Enter was pressed).
-                    if cur_line != prev_line + 1 {
-                        return;
-                    }
-                    // Verify the char before cursor is a newline (not a cursor jump).
-                    let before_cur = rope
-                        .slice_to_cow(cur_pos.saturating_sub(1)..cur_pos)
-                        .chars()
-                        .next();
-                    if before_cur != Some('\n') {
-                        return;
-                    }
+                    let prev_line = cur_line - 1;
                     // Derive indentation from the previous line.
                     let pl_start = rope.offset_of_line(prev_line);
                     let pl_end = rope.offset_of_line(cur_line);
@@ -4611,7 +4674,9 @@ pub fn editor_panel(
                     let as_tx = auto_save_tx.clone();
                     let rec_gen = Arc::clone(&recovery_gen);
                     let rec_tx = recovery_tx.clone();
-                    move |_| {
+                    let typing = typing.clone();
+                    move |update: floem::views::editor::text_document::OnUpdate| {
+                        typing.borrow_mut().record(typed_insert(update.deltas()));
                         // Reloaded from disk: the tab matches the file again.
                         let from_disk = reloading.get();
                         if !from_disk {
@@ -6929,5 +6994,61 @@ mod editor_key_tests {
             "",
             "a key the IDE used must not also be typed"
         );
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::{typed_insert, Typing};
+    use floem_editor_core::xi_rope::{Interval, Rope, RopeDelta};
+    use std::cell::Cell;
+
+    fn insert(at: usize, text: &str, len: usize) -> RopeDelta {
+        RopeDelta::simple_edit(Interval::new(at, at), Rope::from(text), len)
+    }
+
+    #[test]
+    fn only_a_plain_insert_counts_as_typing() {
+        assert_eq!(
+            typed_insert([insert(3, "(", 10)].iter()),
+            Some((3, "(".to_string()))
+        );
+        let delete = RopeDelta::simple_edit(Interval::new(2, 3), Rope::from(""), 10);
+        assert_eq!(typed_insert([delete].iter()), None);
+        let replace = RopeDelta::simple_edit(Interval::new(2, 3), Rope::from("x"), 10);
+        assert_eq!(typed_insert([replace].iter()), None);
+        assert_eq!(typed_insert(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn a_cursor_move_after_an_edit_is_not_typing() {
+        let mut typing = Typing::default();
+        let seen = Cell::new(0);
+        typing.record(Some((4, "(".into())));
+        // The cursor moves to just after the typed `(`: that edit, once.
+        assert_eq!(typing.typed_since(&seen, 5), Some("(".into()));
+        // Moving away and back (arrow keys) types nothing.
+        assert_eq!(typing.typed_since(&seen, 6), None);
+        assert_eq!(typing.typed_since(&seen, 5), None);
+        // A new edit that does not end at the cursor is not typing there.
+        typing.record(Some((0, "x".into())));
+        assert_eq!(typing.typed_since(&seen, 5), None);
+    }
+
+    #[test]
+    fn the_inserted_closer_moves_with_text_typed_before_it() {
+        let mut typing = Typing::default();
+        typing.record(Some((5, ")".into()))); // the closer auto-close adds
+        typing.closer = Some(5);
+        typing.record(Some((5, "a".into()))); // typed between the pair
+        assert_eq!(typing.closer, Some(6));
+        typing.record(Some((9, "b".into()))); // typed after the closer
+        assert_eq!(
+            typing.closer, None,
+            "past the closer: no longer stepped over"
+        );
+        typing.closer = Some(3);
+        typing.record(None); // a deletion, a paste over a selection ...
+        assert_eq!(typing.closer, None);
     }
 }

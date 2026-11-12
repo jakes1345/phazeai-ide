@@ -272,31 +272,46 @@ fn java_config() -> Option<HighlightConfiguration> {
     Some(config)
 }
 
+/// The highlighting setup for `lang`, built once per language and kept.
+/// Building it compiles the language's tree-sitter queries, which takes
+/// tens of milliseconds in a release build and seconds in a debug one; the
+/// editor re-highlights on every edit, so building it each time made typing
+/// lag and dropped key presses.
+fn config(lang: SyntaxLang) -> Option<&'static HighlightConfiguration> {
+    use std::sync::OnceLock;
+    const LANGS: usize = SyntaxLang::Java as usize + 1;
+    static CONFIGS: [OnceLock<Option<HighlightConfiguration>>; LANGS] =
+        [const { OnceLock::new() }; LANGS];
+    CONFIGS[lang as usize]
+        .get_or_init(|| match lang {
+            SyntaxLang::Rust => rust_config(),
+            SyntaxLang::Python => python_config(),
+            SyntaxLang::JavaScript => javascript_config(),
+            SyntaxLang::TypeScript => typescript_config(),
+            SyntaxLang::Tsx => tsx_config(),
+            SyntaxLang::Go => go_config(),
+            SyntaxLang::C => c_config(),
+            SyntaxLang::Cpp => cpp_config(),
+            SyntaxLang::Json => json_config(),
+            SyntaxLang::Bash => bash_config(),
+            SyntaxLang::Html => html_config(),
+            SyntaxLang::Css => css_config(),
+            SyntaxLang::Ruby => ruby_config(),
+            SyntaxLang::Java => java_config(),
+        })
+        .as_ref()
+}
+
 /// Highlight a source string into class-tagged spans. Returns an empty Vec
 /// on any tree-sitter error so callers can safely fall back to plain text.
 pub fn highlight(source: &str, lang: SyntaxLang) -> Vec<HighlightSpan> {
-    let Some(config) = (match lang {
-        SyntaxLang::Rust => rust_config(),
-        SyntaxLang::Python => python_config(),
-        SyntaxLang::JavaScript => javascript_config(),
-        SyntaxLang::TypeScript => typescript_config(),
-        SyntaxLang::Tsx => tsx_config(),
-        SyntaxLang::Go => go_config(),
-        SyntaxLang::C => c_config(),
-        SyntaxLang::Cpp => cpp_config(),
-        SyntaxLang::Json => json_config(),
-        SyntaxLang::Bash => bash_config(),
-        SyntaxLang::Html => html_config(),
-        SyntaxLang::Css => css_config(),
-        SyntaxLang::Ruby => ruby_config(),
-        SyntaxLang::Java => java_config(),
-    }) else {
+    let Some(config) = config(lang) else {
         return Vec::new();
     };
 
     let mut highlighter = Highlighter::new();
     let bytes = source.as_bytes();
-    let events = match highlighter.highlight(&config, bytes, None, |_| None) {
+    let events = match highlighter.highlight(config, bytes, None, |_| None) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
@@ -325,6 +340,32 @@ pub fn highlight(source: &str, lang: SyntaxLang) -> Vec<HighlightSpan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_language_is_set_up_once_and_highlighting_an_edit_is_quick() {
+        let src = "fn main() {\n    let x = 1;\n}\n";
+        let started = std::time::Instant::now();
+        let first = highlight(src, SyntaxLang::Rust);
+        let set_up = started.elapsed();
+        let started = std::time::Instant::now();
+        for i in 0..20 {
+            // An edit per call, as the editor does on each keystroke.
+            highlight(&format!("{src}// {i}\n"), SyntaxLang::Rust);
+        }
+        let twenty_edits = started.elapsed();
+        assert!(!first.is_empty());
+        assert!(
+            std::ptr::eq(
+                config(SyntaxLang::Rust).unwrap(),
+                config(SyntaxLang::Rust).unwrap()
+            ),
+            "the setup is kept, not rebuilt"
+        );
+        assert!(
+            twenty_edits < set_up,
+            "20 highlights of an edited file took {twenty_edits:?}; building the setup once took {set_up:?}"
+        );
+    }
 
     #[test]
     fn lang_from_extension_maps_known_languages() {

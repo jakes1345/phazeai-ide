@@ -266,6 +266,7 @@ pub struct SystemPromptBuilder {
     git_branch: Option<String>,
     git_dirty_files: Vec<String>,
     instructions: Vec<Instructions>,
+    sections: Vec<String>,
     model_name: String,
     provider_name: String,
     context_budget: usize,
@@ -365,6 +366,7 @@ impl SystemPromptBuilder {
             git_branch: None,
             git_dirty_files: Vec::new(),
             instructions: Vec::new(),
+            sections: Vec::new(),
             model_name: String::new(),
             provider_name: String::new(),
             context_budget: MIN_BUDGET,
@@ -422,6 +424,20 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Add `text` as a section of its own after the instructions and before
+    /// the git state, as given: the caller decides its size. Sections come in
+    /// the order they were added, a blank line apart; blank text adds none.
+    /// The IDE chat puts its mode hint and menu of skills here, so they sit
+    /// behind the parts of the prompt that stay the same for the project.
+    pub fn with_section(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        let text = text.trim();
+        if !text.is_empty() {
+            self.sections.push(text.to_string());
+        }
+        self
+    }
+
     pub fn build(&self) -> String {
         let mut prompt = String::with_capacity(4096);
 
@@ -443,6 +459,11 @@ impl SystemPromptBuilder {
                 .saturating_sub(INSTRUCTIONS_HEADING.len());
             prompt.push_str(INSTRUCTIONS_HEADING);
             prompt.push_str(&fit_instructions(&self.instructions, room));
+        }
+
+        for section in &self.sections {
+            prompt.push_str("\n\n");
+            prompt.push_str(section);
         }
 
         // Git state last. It changes as files are edited and committed, while
@@ -684,6 +705,29 @@ pub(crate) mod tests {
             .with_project_root(PathBuf::from("/work/app"))
             .build();
         assert!(!no_git.contains(GIT_HEADING));
+    }
+
+    #[test]
+    fn sections_follow_the_instructions_in_order_and_precede_the_git_state() {
+        let prompt = SystemPromptBuilder::new()
+            .with_project_root(PathBuf::from("/work/app"))
+            .with_additional_instructions("Run cargo fmt before committing.".into())
+            .with_section("Answer concisely.\n\n")
+            .with_section("  \n")
+            .with_section("- **reviewer** (project) — Reviews changes")
+            .with_git_info(Some("main".into()), vec![])
+            .build();
+        let without = SystemPromptBuilder::new()
+            .with_project_root(PathBuf::from("/work/app"))
+            .with_additional_instructions("Run cargo fmt before committing.".into())
+            .build();
+        assert_eq!(
+            prompt,
+            format!(
+                "{without}\n\nAnswer concisely.\n\n- **reviewer** (project) — Reviews \
+                 changes\n\n## Git Status\n- Git branch: main\n"
+            )
+        );
     }
 
     // ── Instructions sized to the context budget ────────────────────────────
