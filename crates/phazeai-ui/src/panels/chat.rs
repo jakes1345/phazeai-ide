@@ -13,6 +13,8 @@ use phazeai_core::context::system_prompt::{
     fit_instructions, instructions_allowance, project_instructions, Instructions,
     INSTRUCTIONS_TITLE,
 };
+use phazeai_core::permissions::rule_says_ask;
+use phazeai_core::tools::{ToolApprovalManager, ToolPermission};
 use phazeai_core::{
     discover_skills, find_skill, skills_menu_block, Agent, AgentEvent, ApprovalFn, BuildIndexTool,
     Checkpoints, CodeSearch, CodeSearchTool, ConversationHistory, ConversationMetadata,
@@ -511,12 +513,23 @@ fn send_to_ai(job: SendToAiJob) {
                 })
             });
 
-            // Tool approval hook — shown for every tool except write/edit (those
-            // go through the diff hook above which already gates the write).
+            // Permission rules and hooks: the user's `[permissions]` and
+            // `[hooks]`, plus the project's own deny and ask rules.
+            let permissions = Arc::new(settings.permissions(Some(&workspace_root)));
+            for warning in permissions.warnings() {
+                tracing::warn!("permission rules: {warning}");
+            }
+
+            // Tool approval hook. Writes and edits go through the diff hook
+            // above, which already gates the write; tools that only read
+            // (files, search, `todo`, `subagent`) run unasked, as reading
+            // is checked by the privacy policy. An `ask` rule asks anyway.
             let approval_update_tx = update_tx.clone();
             let approval_fn: ApprovalFn = Box::new(move |name, params| {
-                // `todo` only shows its list back; nothing to approve.
-                if matches!(name.as_str(), "write_file" | "edit_file" | "todo") {
+                let read_only = ToolApprovalManager::default().classify_tool(&name, &params)
+                    == ToolPermission::ReadOnly;
+                let reviewed = matches!(name.as_str(), "write_file" | "edit_file");
+                if reviewed || (read_only && !rule_says_ask()) {
                     return Box::pin(async { true });
                 }
                 let tx = approval_update_tx.clone();
@@ -542,6 +555,7 @@ fn send_to_ai(job: SendToAiJob) {
                 .with_diff_hook(diff_hook)
                 .with_checkpoints(checkpoints)
                 .with_approval(approval_fn)
+                .with_permissions(permissions)
                 .with_subagents(settings.subagent_config(Some(&workspace_root)));
 
             // Let the agent search the workspace's code.

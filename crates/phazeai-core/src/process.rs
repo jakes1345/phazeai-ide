@@ -51,14 +51,29 @@ pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
 /// process group of its own (Unix) and the whole group is killed. On Windows
 /// only the direct child is killed, through the `Child` handle.
 pub async fn output_or_kill(
-    mut cmd: tokio::process::Command,
+    cmd: tokio::process::Command,
     timeout: Duration,
 ) -> std::io::Result<Option<Output>> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Dropping the child kills it…
-        .kill_on_drop(true);
+    output_or_kill_with_input(cmd, None, timeout).await
+}
+
+/// [`output_or_kill`], with `input` written to the command's stdin (then
+/// closed) instead of stdin closed from the start. A command that exits
+/// without reading all of it is not an error.
+pub async fn output_or_kill_with_input(
+    mut cmd: tokio::process::Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> std::io::Result<Option<Output>> {
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    // Dropping the child kills it…
+    .kill_on_drop(true);
     // …and a process group of its own lets `KillGroupOnDrop` take whatever
     // it started along with it.
     #[cfg(unix)]
@@ -68,8 +83,21 @@ pub async fn output_or_kill(
     let mut guard = KillGroupOnDrop { pid: child.id() };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let stdin = child.stdin.take();
+    let feed = async move {
+        if let (Some(mut stdin), Some(input)) = (stdin, input) {
+            use tokio::io::AsyncWriteExt;
+            // A broken pipe only means the command did not read it all.
+            let _ = stdin.write_all(&input).await;
+            let _ = stdin.shutdown().await;
+        }
+    };
     let finished = {
-        let run = async { tokio::join!(child.wait(), read_to_end(stdout), read_to_end(stderr)) };
+        let run = async {
+            let (status, out, err, ()) =
+                tokio::join!(child.wait(), read_to_end(stdout), read_to_end(stderr), feed);
+            (status, out, err)
+        };
         tokio::select! {
             result = run => Some(result),
             _ = tokio::time::sleep(timeout) => None,

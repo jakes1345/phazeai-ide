@@ -88,6 +88,13 @@ fn customised() -> Settings {
     s.local_ai.ctx_size = Some(8192);
     s.local_ai.auto_start = false;
     s.agent.max_iterations = 37;
+    s.permissions.allow = vec!["bash(cargo test*)".to_string()];
+    s.permissions.deny = vec!["bash(rm -rf*)".to_string(), "read_file(*.pem)".to_string()];
+    s.hooks.post_tool.push(phazeai_core::hooks::HookEntry {
+        tools: vec!["edit_file(*.rs)".to_string()],
+        command: "cargo fmt".to_string(),
+        timeout_secs: Some(30),
+    });
     s
 }
 

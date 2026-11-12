@@ -97,12 +97,20 @@ pub fn approval_fn(allow: Allow, can_ask: bool, refusals: Refusals) -> phazeai_c
     Box::new(move |name, params| {
         let refusals = refusals.clone();
         let prompt_lock = prompt_lock.clone();
+        // An `ask` permission rule asks whatever `--allow` says.
+        let must_ask = phazeai_core::permissions::rule_says_ask();
         Box::pin(async move {
             let permission = ToolApprovalManager::default().classify_tool(&name, &params);
-            if allow.permits(&name, permission) {
+            if !must_ask && allow.permits(&name, permission) {
                 return true;
             }
             let needed = Allow::needed_for(&name, permission);
+            if !can_ask && must_ask {
+                // No `--allow` level would let it run unasked.
+                let call = describe_call(&name, &params);
+                eprintln!("  ✗ blocked {call} (a permission rule asks first, and there is no terminal to ask on)");
+                return false;
+            }
             if !can_ask {
                 let call = describe_call(&name, &params);
                 eprintln!("  ✗ blocked {call} (needs {})", needed.flag());

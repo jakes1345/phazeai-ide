@@ -18,6 +18,14 @@ pub struct Settings {
     pub local_ai: crate::local_ai::LocalAiSettings,
     pub updates: UpdateSettings,
     pub agent: AgentSettings,
+    /// `[permissions]`: tool calls that run unasked, always ask, or never
+    /// run (see [`crate::permissions`]).
+    #[serde(skip_serializing_if = "crate::permissions::PermissionSettings::is_empty")]
+    pub permissions: crate::permissions::PermissionSettings,
+    /// `[hooks]`: the user's commands run before and after tool calls (see
+    /// [`crate::hooks`]).
+    #[serde(skip_serializing_if = "crate::hooks::HookSettings::is_empty")]
+    pub hooks: crate::hooks::HookSettings,
 }
 
 /// `config.toml` as it is read. Not a field alias: serde refuses a file that
@@ -44,6 +52,10 @@ struct RawSettings {
     updates: UpdateSettings,
     #[serde(default)]
     agent: AgentSettings,
+    #[serde(default)]
+    permissions: crate::permissions::PermissionSettings,
+    #[serde(default)]
+    hooks: crate::hooks::HookSettings,
 }
 
 impl From<RawSettings> for Settings {
@@ -57,6 +69,8 @@ impl From<RawSettings> for Settings {
             local_ai: raw.local_ai,
             updates: raw.updates,
             agent: raw.agent,
+            permissions: raw.permissions,
+            hooks: raw.hooks,
         }
     }
 }
@@ -393,6 +407,8 @@ impl Default for Settings {
             local_ai: Default::default(),
             updates: UpdateSettings::default(),
             agent: AgentSettings::default(),
+            permissions: Default::default(),
+            hooks: Default::default(),
         }
     }
 }
@@ -639,6 +655,13 @@ impl Settings {
             Some(root) => config.with_root(root),
             None => config,
         }
+    }
+
+    /// The permission rules and hooks for a run in `root`: the user's
+    /// `[permissions]` and `[hooks]`, plus the project's own `deny` and `ask`
+    /// rules (see [`crate::permissions`]).
+    pub fn permissions(&self, root: Option<&std::path::Path>) -> crate::Permissions {
+        crate::Permissions::load(&self.permissions, &self.hooks, root)
     }
 
     /// Refuse a `[llm] base_url` the clients must not use. Anything that sends

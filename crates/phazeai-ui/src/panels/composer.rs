@@ -163,8 +163,10 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 fn approval_fn(mode: ComposerApprovalMode, updates: SyncSender<ComposerUpdate>) -> ApprovalFn {
     Box::new(move |tool_name: String, params: Value| {
         let updates = updates.clone();
+        // An `ask` rule asks whatever the mode would do.
+        let must_ask = phazeai_core::permissions::rule_says_ask();
         Box::pin(async move {
-            if !mode.needs_approval(&tool_name, &params) {
+            if !must_ask && !mode.needs_approval(&tool_name, &params) {
                 return true;
             }
             let (reply, answer) = std::sync::mpsc::sync_channel(1);
@@ -422,6 +424,12 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         .with_context_budget(settings.context_budget())
                         .with_max_iterations(settings.agent.max_iterations())
                         .with_cancel_token(token);
+                    let permissions = Arc::new(settings.permissions(Some(&ws)));
+                    for warning in permissions.warnings() {
+                        tracing::warn!("permission rules: {warning}");
+                    }
+                    let ask_rules = permissions.has_ask_rules();
+                    agent.set_permissions(permissions);
 
                     // Let the agent search the workspace's code.
                     if let Some(search) = code_search {
@@ -441,8 +449,9 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                         agent.register_mcp_tools(Arc::new(std::sync::Mutex::new(mcp_manager)));
                     }
 
-                    // Wire approval function when mode is not AutoAll.
-                    if mode != ComposerApprovalMode::AutoAll {
+                    // Wire approval function when mode is not AutoAll, or when
+                    // an `ask` rule may need to ask even then.
+                    if mode != ComposerApprovalMode::AutoAll || ask_rules {
                         agent = agent.with_approval(approval_fn(mode, tx.clone()));
                     }
 
