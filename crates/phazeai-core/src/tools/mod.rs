@@ -21,6 +21,7 @@ mod open;
 pub mod render;
 pub mod sandbox;
 mod screenshot;
+mod todo;
 mod traits;
 mod web_search;
 
@@ -44,5 +45,6 @@ pub use move_path::MovePathTool;
 pub use now::NowTool;
 pub use open::OpenTool;
 pub use screenshot::ScreenshotTool;
+pub use todo::TodoTool;
 pub use traits::*;
 pub use web_search::WebSearchTool;

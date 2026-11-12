@@ -42,9 +42,11 @@ fn switch_llm(state: &mut AppState, settings: Settings) -> Result<(), String> {
     match settings.build_llm_client() {
         Ok(llm) => {
             let context_budget = settings.context_budget();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let _ = state.worker_tx.send(WorkerCommand::SetLlm {
                 llm,
                 context_budget,
+                subagents: Some(settings.subagent_config(Some(&cwd))),
             });
             state.context_budget = context_budget;
             state.settings = settings;

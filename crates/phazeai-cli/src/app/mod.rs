@@ -610,6 +610,11 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             let billed = billed.as_ref().map(|(p, m)| (p, m.as_str()));
             state.meter.add(billed, &usage);
         }
+        // A helper's call: same provider, its own (cheaper) model.
+        AgentEvent::SubagentUsage { model, usage } => {
+            let provider = state.settings.llm.provider.to_provider_id();
+            state.meter.add(Some((&provider, model.as_str())), &usage);
+        }
         // The run's totals: already counted call by call.
         AgentEvent::TokenUsage { .. } => {}
         AgentEvent::Complete { .. } => {
@@ -748,6 +753,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             context_budget: state.context_budget,
             max_iterations: state.settings.agent.max_iterations(),
             code_search: code_search(&state.settings),
+            subagents: Some(state.settings.subagent_config(Some(&cwd))),
         },
         worker_rx,
         ui_tx,
@@ -877,7 +883,8 @@ fn single_prompt_agent(
     let mut agent = Agent::new(llm)
         .with_system_prompt(system_prompt)
         .with_context_budget(context_budget)
-        .with_max_iterations(settings.agent.max_iterations());
+        .with_max_iterations(settings.agent.max_iterations())
+        .with_subagents(settings.subagent_config(Some(root)));
     if let Some(search) = code_search(settings) {
         register_code_search(&mut agent, &search);
     }
@@ -1351,6 +1358,7 @@ mod tests {
                 context_budget: 60_000,
                 max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
                 code_search: None,
+                subagents: None,
             },
             worker_rx,
             ui_tx,
@@ -1364,6 +1372,7 @@ mod tests {
             .send(WorkerCommand::SetLlm {
                 llm: fake_client(&url),
                 context_budget: 4_096,
+                subagents: None,
             })
             .unwrap();
         worker_tx.send(WorkerCommand::Run("second".into())).unwrap();

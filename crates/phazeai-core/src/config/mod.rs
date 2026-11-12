@@ -613,6 +613,34 @@ impl Settings {
         registry.build_client_for(config, &self.small_model())
     }
 
+    /// How `subagent` helpers run for a project at `root`: on
+    /// [`Self::small_model`] through [`Self::build_small_llm_client`] (made
+    /// when a question is asked, so a client that can't be built only fails
+    /// that call), with that model's context budget.
+    pub fn subagent_config(&self, root: Option<&std::path::Path>) -> crate::SubagentConfig {
+        let model = self.small_model();
+        let budget = if self.llm.provider.to_provider_id() == crate::llm::ProviderId::BuiltIn {
+            self.context_budget()
+        } else {
+            crate::llm::context_budget::context_budget(
+                &self.llm.provider.to_provider_id(),
+                &model,
+                self.llm.max_tokens as usize,
+                self.llm.context_tokens,
+            )
+        };
+        let settings = self.clone();
+        let config = crate::SubagentConfig::new(
+            std::sync::Arc::new(move || settings.build_small_llm_client()),
+            model,
+            budget,
+        );
+        match root {
+            Some(root) => config.with_root(root),
+            None => config,
+        }
+    }
+
     /// Refuse a `[llm] base_url` the clients must not use. Anything that sends
     /// the active provider's key to `[llm] base_url` checks this first.
     ///

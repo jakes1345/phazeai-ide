@@ -29,6 +29,8 @@ pub enum WorkerCommand {
     SetLlm {
         llm: Box<dyn LlmClient>,
         context_budget: usize,
+        /// How `subagent` helpers run with the new settings.
+        subagents: Option<phazeai_core::SubagentConfig>,
     },
     /// Replace the context with restored (role, content) pairs.
     Restore(Vec<(String, String)>),
@@ -70,6 +72,8 @@ pub struct WorkerConfig {
     pub max_iterations: usize,
     /// Shared by every agent the worker builds; `None` when search is off.
     pub code_search: Option<CodeSearch>,
+    /// How `subagent` helpers run; `None` offers no `subagent` tool.
+    pub subagents: Option<phazeai_core::SubagentConfig>,
 }
 
 fn build_approval_fn(
@@ -161,6 +165,9 @@ fn build_agent(
     if let Some(search) = &cfg.code_search {
         super::register_code_search(&mut agent, search);
     }
+    if let Some(subagents) = &cfg.subagents {
+        agent.register_subagents(subagents.clone());
+    }
     agent
 }
 
@@ -218,15 +225,20 @@ pub fn spawn(
                 WorkerCommand::SetLlm {
                     llm,
                     context_budget,
+                    subagents,
                 } => {
                     // The new model's budget sizes the conversation and the
                     // system prompt alike.
                     cfg.context_budget = context_budget;
+                    cfg.subagents = subagents;
                     match agent.as_mut() {
                         Some(a) => {
                             a.swap_llm(llm);
                             a.set_context_budget(context_budget);
                             a.set_system_prompt(system_prompt(&cfg));
+                            if let Some(subagents) = &cfg.subagents {
+                                a.register_subagents(subagents.clone());
+                            }
                         }
                         None => {
                             agent = Some(build_agent(llm, &cfg, conversation.clone(), &approval_tx))

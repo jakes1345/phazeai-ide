@@ -161,6 +161,10 @@ impl ToolApprovalManager {
             "read_file" | "grep" | "glob" | "list_files" | "code_search" | "build_search_index" => {
                 ToolPermission::ReadOnly
             }
+            // `todo` only echoes the list it is given; `subagent` runs a
+            // helper whose only tools read files (through the same sandbox
+            // and privacy checks).
+            "todo" | "subagent" => ToolPermission::ReadOnly,
 
             // File-level write operations. These are the tools `-p --allow edit`
             // may run unasked; all of them resolve their paths inside the
