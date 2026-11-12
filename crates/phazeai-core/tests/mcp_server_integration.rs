@@ -77,6 +77,79 @@ fn texts(result: &McpToolResult) -> Vec<&str> {
         .collect()
 }
 
+/// A stdio MCP server in a few lines of Node, for what the filesystem server
+/// never does. Its tools list without descriptions (optional in MCP).
+/// `pinged` pings the client before it answers, and answers with the reply
+/// it got; `exit` ends the process without answering.
+const PINGING_SERVER: &str = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+let waiting = null;
+rl.on('line', (line) => {
+  const m = JSON.parse(line);
+  if (m.id === 'p1' && waiting !== null) {
+    send({ jsonrpc: '2.0', id: waiting, result: { content: [{ type: 'text', text: JSON.stringify(m) }] } });
+    waiting = null;
+  } else if (m.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params.protocolVersion,
+      capabilities: { tools: {} }, serverInfo: { name: 'pinging', version: '1' } } });
+  } else if (m.method === 'tools/list') {
+    send({ jsonrpc: '2.0', id: m.id, result: { tools: [
+      { name: 'pinged', inputSchema: { type: 'object' } },
+      { name: 'exit', inputSchema: { type: 'object' } } ] } });
+  } else if (m.method === 'tools/call' && m.params.name === 'pinged') {
+    waiting = m.id;
+    send({ jsonrpc: '2.0', id: 'p1', method: 'ping' });
+  } else if (m.method === 'tools/call' && m.params.name === 'exit') {
+    process.exit(0);
+  }
+});
+"#;
+
+#[test]
+#[ignore = "needs Node"]
+fn client_answers_a_servers_ping_and_fails_fast_when_the_server_exits() {
+    let config = McpServerConfig {
+        name: "pinging".to_string(),
+        command: "node".to_string(),
+        args: vec!["-e".to_string(), PINGING_SERVER.to_string()],
+        env: HashMap::new(),
+        ..Default::default()
+    };
+    let client =
+        McpClient::connect(&config).unwrap_or_else(|e| panic!("start the Node test server: {e}"));
+
+    // Tools without a description are listed, not dropped.
+    let names: Vec<&str> = client.tools().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["pinged", "exit"]);
+    assert!(client.tools().iter().all(|t| t.description.is_empty()));
+
+    // The server pings mid-call and answers only once the client replies.
+    let result = client.call_tool("pinged", json!({})).expect("the call");
+    let reply: Value = serde_json::from_str(texts(&result)[0]).unwrap();
+    assert_eq!(reply, json!({"jsonrpc": "2.0", "id": "p1", "result": {}}));
+
+    // A server that exits mid-call fails the call now, not after 30 s.
+    let started = std::time::Instant::now();
+    let err = client.call_tool("exit", json!({})).unwrap_err();
+    assert!(
+        err.contains("exited before answering 'tools/call'"),
+        "{err}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!client.is_alive());
+
+    // And a call to the gone server is not sent at all.
+    let started = std::time::Instant::now();
+    let err = client.call_tool("pinged", json!({})).unwrap_err();
+    assert!(err.contains("is not running"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 #[test]
 #[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
 fn client_reads_inside_the_sandbox_and_is_refused_outside_it() {

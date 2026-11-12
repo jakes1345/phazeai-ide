@@ -248,8 +248,9 @@ impl Worker {
         found.ok_or_else(|| format!("the server's response did not answer request {id}"))
     }
 
-    /// Reads server-sent events until the response to `id` arrives. Other
-    /// messages on the stream (progress, log notifications) are passed over.
+    /// Reads server-sent events until the response to `id` arrives. A request
+    /// from the server is answered; other messages on the stream (progress,
+    /// log notifications) are passed over.
     fn read_stream(
         &mut self,
         response: reqwest::blocking::Response,
@@ -270,6 +271,13 @@ impl Worker {
                     if let Ok(message) = serde_json::from_str::<Value>(&data) {
                         if is_response_to(&message, id) {
                             return Ok(message);
+                        }
+                        // A request from the server (a `ping` while it
+                        // works): answered by its own POST, as the spec has it.
+                        if let Some(answer) = super::answer_server_request(&message) {
+                            if let Err(e) = self.post(&answer) {
+                                tracing::warn!("MCP: could not answer the server's request: {e}");
+                            }
                         }
                     }
                     data.clear();

@@ -96,8 +96,8 @@
 
 24. **Fixed (PR #23):** language servers, debug adapters and MCP servers are reaped (`process::ChildSlot`).
 25. **Fixed (PR #19):** keywords match at word starts, so "no explanation" no longer routes to Reasoning ("planet" still does, on purpose).
-26. **MCP client gaps.** It does not answer requests the server sends (such as `ping`). Pending requests wait 30 s when a server dies. `McpToolDef.description` is required, though MCP makes it optional.
-27. **Fixed (this PR):** Stop now ends the request. The OpenAI-compatible, Claude and Ollama stream readers read through `llm/stream_cancel.rs`, which checks every 200 ms whether the receiver is gone and then drops the response, closing the connection, so a stopped run stops generating and billing. Tested against real local sockets that keep the reply open.
+26. **Fixed (this PR):** the MCP client answers a server's `ping` (over stdio and in an HTTP event stream) and turns down other server requests with "Method not found" instead of leaving them unanswered; a server's request id is no longer taken for the answer to one of the client's. A server that exits fails its waiting requests at once rather than after 30 s, and a request to it is not sent. A tool without a `description` is listed.
+27. **Fixed (PR #65):** Stop now ends the request. The OpenAI-compatible, Claude and Ollama stream readers read through `llm/stream_cancel.rs`, which checks every 200 ms whether the receiver is gone and then drops the response, closing the connection, so a stopped run stops generating and billing. Tested against real local sockets that keep the reply open.
 28. **Settings saves can land out of order.** Each change spawns its own save thread; `SETTINGS_WRITE_LOCK` stops overlapping writes but not reordering.
 29. **The commit-message request's audit entry lists no files**, though the request carries the staged diff.
 30. `plugin_canary_e2e` hard-codes `<workspace>/target/debug`, so it fails when `CARGO_TARGET_DIR` is set.
