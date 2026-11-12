@@ -13,6 +13,7 @@ pub mod debug_session;
 pub mod disk_watch;
 pub mod domain_state;
 pub mod editor_command;
+pub mod format;
 pub mod lsp_bridge;
 pub mod notify;
 pub mod panels;
