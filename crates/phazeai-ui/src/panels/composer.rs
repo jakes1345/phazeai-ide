@@ -10,6 +10,8 @@ use floem::{
     views::{container, dyn_stack, h_stack, label, scroll, text_input, v_stack, Decorators},
     IntoView,
 };
+use phazeai_core::context::system_prompt::{collect_git_info, SystemPromptBuilder};
+use phazeai_core::cost::metered_call;
 use phazeai_core::tools::{BashTool, ToolApprovalManager, ToolPermission, ToolRegistry};
 use phazeai_core::{Agent, AgentEvent, ApprovalFn, Settings};
 use serde_json::Value;
@@ -96,6 +98,12 @@ enum ComposerUpdate {
     McpStatus(String),
     /// Something worth knowing about this run (e.g. context was compacted).
     Notice(String),
+    /// One model call's tokens, for the token and cost meter, with the model
+    /// to price them at (`None`: not known, counted without a price).
+    CallUsage {
+        usage: phazeai_core::llm::Usage,
+        billed: Option<(phazeai_core::llm::ProviderId, String)>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +358,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 ComposerUpdate::DiffOutput(cards) => {
                     diff_cards.set(cards);
                 }
+                ComposerUpdate::CallUsage { usage, billed } => {
+                    let billed = billed.as_ref().map(|(p, m)| (p, m.as_str()));
+                    state.ai.token_meter.update(|m| m.add(billed, &usage));
+                }
             }
         }
     });
@@ -421,6 +433,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     tools.register(Box::new(BashTool::new(ws.clone())));
                     let mut agent = Agent::new(client)
                         .with_tools(tools)
+                        .with_system_prompt(composer_system_prompt(
+                            std::path::Path::new(&ws),
+                            settings.context_budget(),
+                        ))
                         .with_context_budget(settings.context_budget())
                         .with_max_iterations(settings.agent.max_iterations())
                         .with_cancel_token(token);
@@ -460,9 +476,17 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
                     let run_fut = agent.run_with_events(&trimmed, agent_tx);
                     let tx2 = tx.clone();
+                    let provider = settings.llm.provider.to_provider_id();
+                    let billed = settings.billed_model();
                     let drain_fut = async move {
                         let mut accumulated = String::new();
                         while let Some(event) = agent_rx.recv().await {
+                            if let Some((usage, billed)) =
+                                metered_call(&event, &provider, billed.as_ref())
+                            {
+                                let _ = tx2.send(ComposerUpdate::CallUsage { usage, billed });
+                                continue;
+                            }
                             match event {
                                 AgentEvent::Thinking { iteration } => {
                                     let _ = tx2.send(ComposerUpdate::Thinking(iteration));
@@ -1058,6 +1082,21 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// The Composer agent's system prompt: the one the CLI agent gets for the
+/// same folder (`SystemPromptBuilder`): the agent's core instructions, the
+/// folder and its kind of project, the project's rules (`AGENTS.md`,
+/// `CLAUDE.md` and the like) within their share of `context_budget`, and the
+/// git state last, where it doesn't spoil the provider's prompt cache.
+fn composer_system_prompt(workspace: &std::path::Path, context_budget: usize) -> String {
+    let (branch, dirty_files) = collect_git_info(workspace);
+    SystemPromptBuilder::new()
+        .with_context_budget(context_budget)
+        .with_project_root(workspace.to_path_buf())
+        .load_project_instructions()
+        .with_git_info(branch, dirty_files)
+        .build()
+}
+
 /// Extract a file path from tool parameters for prominent display.
 fn extract_path_from_params(tool_name: &str, params: &Value) -> Option<String> {
     match tool_name {
@@ -1172,7 +1211,9 @@ fn parse_diff_cards(diff_text: &str) -> Vec<DiffCard> {
 #[cfg(test)]
 mod tests {
     use super::ComposerApprovalMode::{ApproveAll, ApproveDestructive, AutoAll};
-    use super::{approval_fn, ApprovalResponse, ComposerUpdate, PendingApproval};
+    use super::{
+        approval_fn, composer_system_prompt, ApprovalResponse, ComposerUpdate, PendingApproval,
+    };
     use serde_json::json;
     use std::sync::mpsc::{sync_channel, Receiver};
     use std::time::Duration;
@@ -1273,5 +1314,41 @@ mod tests {
         for (tool, params) in calls {
             assert!(!AutoAll.needs_approval(tool, params), "{tool} {params}");
         }
+    }
+
+    #[test]
+    fn the_composer_agent_gets_the_core_prompt_and_the_projects_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Keep functions short.\n").unwrap();
+
+        let prompt = composer_system_prompt(&root, 200_000);
+        assert!(
+            prompt.starts_with("You are PhazeAI, a coding agent"),
+            "{prompt}"
+        );
+        assert!(prompt.contains(&format!("- Working directory: {}\n", root.display())));
+        assert!(prompt.contains("- Project type: Rust\n"), "{prompt}");
+        assert!(
+            prompt.ends_with("## Project-Specific Instructions\nKeep functions short.\n"),
+            "{prompt}"
+        );
+
+        // A long rules file is held to its share of a small model's budget.
+        let long: String = (0..2_000)
+            .map(|i| format!("Rule {i:04}: be careful.\n"))
+            .collect();
+        std::fs::write(root.join("AGENTS.md"), &long).unwrap();
+        let budget = 4_096;
+        let small = composer_system_prompt(&root, budget);
+        let rules = &small[small.find("## Project-Specific Instructions").unwrap()..];
+        assert!(
+            rules.len() <= phazeai_core::context::system_prompt::instructions_allowance(budget),
+            "{} bytes",
+            rules.len()
+        );
+        assert!(rules.contains("Rule 0000: be careful."));
+        assert!(!rules.contains("Rule 1999"));
     }
 }
