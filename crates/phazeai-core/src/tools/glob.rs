@@ -60,7 +60,9 @@ impl Tool for GlobTool {
         let mut matches = Vec::new();
         let policy = crate::privacy::active();
 
-        let walker = WalkBuilder::new(base_path)
+        // A relative path is read from the open project (see `resolve_relative`).
+        let base = crate::tools::sandbox::resolve_relative(std::path::Path::new(base_path));
+        let walker = WalkBuilder::new(&base)
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
@@ -76,7 +78,7 @@ impl Tool for GlobTool {
             }
 
             let entry_path = entry.path();
-            let relative = entry_path.strip_prefix(base_path).unwrap_or(entry_path);
+            let relative = entry_path.strip_prefix(&base).unwrap_or(entry_path);
 
             if glob_set.is_match(relative) {
                 matches.push(entry_path.to_string_lossy().to_string());
