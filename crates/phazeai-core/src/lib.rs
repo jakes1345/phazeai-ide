@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_event;
 pub mod analysis;
 pub mod checkpoint;
+pub mod code_review;
 pub mod companion;
 pub mod config;
 pub mod constants;

@@ -73,6 +73,10 @@ enum Command {
     /// Run coding tasks against an agent (this one, Claude Code, or any
     /// other) and report how many it solved and what that cost.
     Eval(phazeai_cli::eval::EvalArgs),
+    /// Review a change like a careful senior engineer: this branch's
+    /// commits, or the uncommitted or staged changes. Can fail CI and post
+    /// inline comments to a GitHub pull request.
+    Review(phazeai_cli::review_cmd::ReviewArgs),
 }
 
 /// In the TUI, log to a file: anything written to stderr would corrupt the
@@ -160,9 +164,16 @@ async fn start_local_ai_if_selected(
 
 async fn run(cli: Cli) -> Result<()> {
     use std::io::{IsTerminal, Read};
-    if let Some(Command::Eval(args)) = cli.command {
-        init_tracing(false);
-        return phazeai_cli::eval::run(args).await;
+    match cli.command {
+        Some(Command::Eval(args)) => {
+            init_tracing(false);
+            return phazeai_cli::eval::run(args).await;
+        }
+        Some(Command::Review(args)) => {
+            init_tracing(false);
+            return phazeai_cli::review_cmd::run(args).await;
+        }
+        None => {}
     }
     let stdin_piped = !std::io::stdin().is_terminal();
     let tui = cli.prompt.is_none() && !stdin_piped;
