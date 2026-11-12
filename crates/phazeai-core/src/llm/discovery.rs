@@ -50,7 +50,7 @@ impl LocalDiscovery {
             .timeout(std::time::Duration::from_secs(3))
             .build()?;
 
-        let url = format!("{}/v1/models", base_url);
+        let url = crate::llm::openai::openai_compat_url(base_url, "models");
         let response = client
             .get(&url)
             .send()
@@ -90,8 +90,15 @@ impl LocalDiscovery {
             .ok();
 
         if let Some(client) = client {
-            let url = format!("{}/v1/models", base_url);
-            client.get(&url).send().await.is_ok()
+            // The URL the chat client builds, so a base that already ends in
+            // /v1 (as LM Studio's docs write it) isn't asked for /v1/v1; and
+            // a server that answers 404 there isn't LM Studio's API.
+            let url = crate::llm::openai::openai_compat_url(base_url, "models");
+            client
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
         } else {
             false
         }
