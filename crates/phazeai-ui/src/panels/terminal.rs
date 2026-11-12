@@ -1,30 +1,51 @@
-use arboard;
+//! Integrated terminal panel: tabs, split, find, AI command bar and the
+//! command-block list around one or more terminal sessions.
+//!
+//! Each session runs a shell in a PTY (`portable-pty`) and keeps its screen in
+//! a [`TermCore`] (`terminal_emu.rs`, built on `alacritty_terminal`'s cell
+//! grid). A reader thread feeds PTY output to the core and writes the
+//! emulator's replies back; the view paints the core's [`GridSnapshot`] on one
+//! canvas and turns keys, the mouse and paste into PTY input.
+
+use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
+use alacritty_terminal::index::Side;
+use alacritty_terminal::selection::SelectionType;
+use alacritty_terminal::term::TermMode;
+use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use floem::{
+    action::exec_after,
     event::{Event, EventListener},
     ext_event::create_signal_from_channel,
-    keyboard::{Key, Modifiers},
+    keyboard::{Key, Modifiers, NamedKey},
+    kurbo::{Point, Rect},
     peniko::Color,
+    pointer::{MouseButton, PointerButton},
     reactive::{create_effect, create_memo, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     style::{CursorStyle, Display},
-    text::{Attrs, AttrsList, FamilyOwned, TextLayout, Weight},
+    text::{Attrs, AttrsList, FamilyOwned, Style as FontStyle, TextLayout, Weight},
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
-    IntoView, Renderer,
+    IntoView, Renderer, View,
 };
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use vte::{Params, Perform};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize, PtySystem};
 
+use super::terminal_emu::{
+    key_bytes, mouse_report, paste_bytes, process_pty_output, text_key_bytes, FindHit, FindMark,
+    GridSnapshot, Mods, MouseCode, SnapCell, TermCore, TermKey, TermPalette, TermSize, ANSI_BASE,
+};
 use crate::commands::{execute_command, match_global_shortcut};
 use crate::domain_state::IdeState;
+use crate::theme::{PhazePalette, PhazeTheme};
 use crate::util::safe_get;
 use phazeai_core::constants::terminal as term_consts;
 use phazeai_core::Settings;
-
-use crate::theme::PhazeTheme;
-use std::time::{Duration, Instant};
 
 // ── PTY defaults ──────────────────────────────────────────────────────────────
 
@@ -35,628 +56,645 @@ pub const DEFAULT_PTY_COLS: u16 = 220;
 pub const DEFAULT_PTY_ROWS: u16 = 40;
 const _: () = assert!(DEFAULT_PTY_COLS >= 180 && DEFAULT_PTY_ROWS >= 24);
 
-// ── Terminal Colors ────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum TermColor {
-    Default,
-    Rgb(u8, u8, u8),
-    Indexed(u8),
-}
-
-impl TermColor {
-    fn to_floem_color(self, default: Color) -> Color {
-        match self {
-            TermColor::Default => default,
-            TermColor::Rgb(r, g, b) => Color::from_rgb8(r, g, b),
-            TermColor::Indexed(idx) => indexed_to_color(idx),
-        }
-    }
-}
-
-/// Convert a 256-color xterm index to a floem Color.
-fn indexed_to_color(idx: u8) -> Color {
-    const BASIC: [(u8, u8, u8); 16] = [
-        (0, 0, 0),       // 0  Black
-        (194, 54, 33),   // 1  Red
-        (37, 188, 36),   // 2  Green
-        (173, 173, 39),  // 3  Yellow
-        (73, 46, 225),   // 4  Blue
-        (211, 56, 211),  // 5  Magenta
-        (51, 187, 200),  // 6  Cyan
-        (203, 204, 205), // 7  White
-        (129, 131, 131), // 8  Bright Black
-        (252, 57, 31),   // 9  Bright Red
-        (49, 231, 34),   // 10 Bright Green
-        (234, 236, 35),  // 11 Bright Yellow
-        (88, 51, 255),   // 12 Bright Blue
-        (249, 53, 248),  // 13 Bright Magenta
-        (20, 240, 240),  // 14 Bright Cyan
-        (233, 235, 235), // 15 Bright White
-    ];
-
-    if (idx as usize) < BASIC.len() {
-        let (r, g, b) = BASIC[idx as usize];
-        return Color::from_rgb8(r, g, b);
-    }
-
-    if (16..=231).contains(&idx) {
-        let i = idx - 16;
-        let b = i % 6;
-        let g = (i / 6) % 6;
-        let r = i / 36;
-        let to_val = |v: u8| {
-            if v == 0 {
-                0u8
-            } else {
-                55u8.saturating_add(v.saturating_mul(40))
-            }
-        };
-        return Color::from_rgb8(to_val(r), to_val(g), to_val(b));
-    }
-
-    let v = 8u8.saturating_add((idx - 232).saturating_mul(10));
-    Color::from_rgb8(v, v, v)
-}
-
-// ── Terminal Segment ──────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-struct TermSegment {
-    text: String,
-    fg: TermColor,
-    bg: TermColor,
-    bold: bool,
-}
-
-// ── Terminal Line ─────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-struct TermLine {
-    segments: Vec<TermSegment>,
-}
-
-impl TermLine {
-    fn new() -> Self {
-        Self {
-            segments: Vec::new(),
-        }
-    }
-
-    fn push_char(&mut self, ch: char, fg: TermColor, bg: TermColor, bold: bool) {
-        if let Some(last) = self.segments.last_mut() {
-            if last.fg == fg && last.bg == bg && last.bold == bold {
-                last.text.push(ch);
-                return;
-            }
-        }
-        self.segments.push(TermSegment {
-            text: ch.to_string(),
-            fg,
-            bg,
-            bold,
-        });
-    }
-
-    fn plain_text(&self) -> String {
-        self.segments.iter().map(|s| s.text.as_str()).collect()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.segments.iter().all(|s| s.text.is_empty())
-    }
-}
-
-// ── Terminal Block ────────────────────────────────────────────────────────────
-
-/// One completed shell command unit: the prompt display + all output.
-/// Populated from OSC 133 markers (A = prompt start, D = command done).
-#[derive(Clone, Debug)]
-struct TermBlock {
-    id: u64,
-    lines: Vec<TermLine>,
-    exit_code: i32,
-}
-
-// ── Terminal State ────────────────────────────────────────────────────────────
-
-/// Maximum completed blocks retained in memory (each may have many lines).
-const MAX_BLOCKS: usize = 200;
-/// Maximum lines in the current (in-progress) block before trimming old ones.
-const MAX_CURRENT_LINES: usize = 5_000;
-
-struct TermState {
-    /// Finalized blocks (OSC 133;D received, committed on next OSC 133;A).
-    blocks: Vec<TermBlock>,
-    /// Lines accumulating for the current in-progress block.
-    current_block_lines: Vec<TermLine>,
-    /// Stable id for the block currently being built.
-    current_block_id: u64,
-    /// Monotonically increasing id counter.
-    next_id: u64,
-    /// Exit code received from OSC 133;D, held until A fires and commits.
-    pending_exit_code: Option<i32>,
-
-    current_line: TermLine,
-    cur_fg: TermColor,
-    cur_bg: TermColor,
-    cur_bold: bool,
-    cursor_col: usize,
-    pub cwd: String,
-}
-
-impl TermState {
-    fn new() -> Self {
-        Self {
-            blocks: Vec::new(),
-            current_block_lines: Vec::new(),
-            current_block_id: 0,
-            next_id: 1,
-            pending_exit_code: None,
-            current_line: TermLine::new(),
-            cur_fg: TermColor::Default,
-            cur_bg: TermColor::Default,
-            cur_bold: false,
-            cursor_col: 0,
-            cwd: String::new(),
-        }
-    }
-
-    fn commit_line(&mut self) {
-        let line = std::mem::replace(&mut self.current_line, TermLine::new());
-        self.current_block_lines.push(line);
-        if self.current_block_lines.len() > MAX_CURRENT_LINES {
-            let drain = self.current_block_lines.len() - MAX_CURRENT_LINES;
-            self.current_block_lines.drain(0..drain);
-        }
-        self.cursor_col = 0;
-    }
-
-    fn push_char(&mut self, ch: char) {
-        let fg = self.cur_fg;
-        let bg = self.cur_bg;
-        let bold = self.cur_bold;
-        self.current_line.push_char(ch, fg, bg, bold);
-        self.cursor_col += 1;
-    }
-
-    fn reset_attrs(&mut self) {
-        self.cur_fg = TermColor::Default;
-        self.cur_bg = TermColor::Default;
-        self.cur_bold = false;
-    }
-
-    /// OSC 133;D;code — store exit code for the block being built.
-    fn on_exit_code(&mut self, code: i32) {
-        self.pending_exit_code = Some(code);
-    }
-
-    /// OSC 133;A — commit the current block and start a new one.
-    fn on_prompt_start(&mut self) {
-        if !self.current_line.is_empty() {
-            let line = std::mem::replace(&mut self.current_line, TermLine::new());
-            self.current_block_lines.push(line);
-            self.cursor_col = 0;
-        }
-        if !self.current_block_lines.is_empty() {
-            let exit_code = self.pending_exit_code.unwrap_or(0);
-            self.blocks.push(TermBlock {
-                id: self.current_block_id,
-                lines: std::mem::take(&mut self.current_block_lines),
-                exit_code,
-            });
-            if self.blocks.len() > MAX_BLOCKS {
-                let drain = self.blocks.len() - MAX_BLOCKS;
-                self.blocks.drain(0..drain);
-            }
-            self.current_block_id = self.next_id;
-            self.next_id += 1;
-        }
-        self.pending_exit_code = None;
-    }
-
-    fn handle_sgr(&mut self, params: &Params) {
-        let mut iter = params.iter();
-        while let Some(param) = iter.next() {
-            let code = param.first().copied().unwrap_or(0);
-            match code {
-                0 => self.reset_attrs(),
-                1 => self.cur_bold = true,
-                2..=4 => {}
-                22 => self.cur_bold = false,
-                30..=37 => self.cur_fg = TermColor::Indexed(code as u8 - 30),
-                38 => {
-                    if let Some(mode) = iter.next() {
-                        match mode.first().copied().unwrap_or(0) {
-                            5 => {
-                                if let Some(idx) = iter.next() {
-                                    self.cur_fg =
-                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
-                                }
-                            }
-                            2 => {
-                                let r =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let g =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let b =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                self.cur_fg = TermColor::Rgb(r, g, b);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                39 => self.cur_fg = TermColor::Default,
-                40..=47 => self.cur_bg = TermColor::Indexed(code as u8 - 40),
-                48 => {
-                    if let Some(mode) = iter.next() {
-                        match mode.first().copied().unwrap_or(0) {
-                            5 => {
-                                if let Some(idx) = iter.next() {
-                                    self.cur_bg =
-                                        TermColor::Indexed(idx.first().copied().unwrap_or(0) as u8);
-                                }
-                            }
-                            2 => {
-                                let r =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let g =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                let b =
-                                    iter.next().and_then(|p| p.first().copied()).unwrap_or(0) as u8;
-                                self.cur_bg = TermColor::Rgb(r, g, b);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                49 => self.cur_bg = TermColor::Default,
-                90..=97 => self.cur_fg = TermColor::Indexed(code as u8 - 90 + 8),
-                100..=107 => self.cur_bg = TermColor::Indexed(code as u8 - 100 + 8),
-                _ => {}
-            }
-        }
-    }
-}
-
-// ── VTE Performer ─────────────────────────────────────────────────────────────
-
-struct VtePerformer {
-    state: Arc<Mutex<TermState>>,
-}
-
-impl Perform for VtePerformer {
-    fn print(&mut self, c: char) {
-        if let Ok(mut state) = self.state.lock() {
-            state.push_char(c);
-        }
-    }
-
-    fn execute(&mut self, byte: u8) {
-        if let Ok(mut state) = self.state.lock() {
-            match byte {
-                b'\n' | 0x0B | 0x0C => state.commit_line(),
-                b'\r' => state.cursor_col = 0,
-                b'\x08' => {
-                    if let Some(last) = state.current_line.segments.last_mut() {
-                        last.text.pop();
-                    }
-                }
-                b'\x07' => {}
-                _ => {}
-            }
-        }
-    }
-
-    fn csi_dispatch(
-        &mut self,
-        params: &Params,
-        _intermediates: &[u8],
-        _ignore: bool,
-        action: char,
-    ) {
-        if let Ok(mut state) = self.state.lock() {
-            match action {
-                'm' => state.handle_sgr(params),
-                'J' => {
-                    let p = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
-                    if (p == 2 || p == 3) && !state.current_line.is_empty() {
-                        let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.current_block_lines.push(line);
-                    }
-                }
-                'K' => {
-                    let p = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
-                    if p == 0 {
-                        state.current_line = TermLine::new();
-                    }
-                }
-                'A' => {
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1)
-                        .max(1) as usize;
-                    if !state.current_line.is_empty() {
-                        let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.current_block_lines.push(line);
-                    }
-                    let len = state.current_block_lines.len();
-                    state.current_block_lines.truncate(len.saturating_sub(n));
-                }
-                'H' | 'f' => {
-                    let row = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1);
-                    if row == 1 && !state.current_line.is_empty() {
-                        let line = std::mem::replace(&mut state.current_line, TermLine::new());
-                        state.current_block_lines.push(line);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
-    fn put(&mut self, _byte: u8) {}
-    fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.is_empty() {
-            return;
-        }
-        // OSC 7: working directory notification
-        // Format: \e]7;file://hostname/path\a
-        if params[0] == b"7" && params.len() > 1 {
-            let url = String::from_utf8_lossy(params[1]);
-            if let Some(path) = url.strip_prefix("file://") {
-                let path = if let Some(p) = path.split_once('/').map(|x| x.1) {
-                    format!("/{}", p)
-                } else {
-                    path.to_string()
-                };
-                if let Ok(mut s) = self.state.lock() {
-                    s.cwd = path;
-                }
-            }
-        }
-
-        // OSC 133: shell integration (FinalTerm / VSCode protocol)
-        // A = prompt start, B = prompt end, C = command executing, D;code = done
-        if params[0] == b"133" && params.len() > 1 {
-            let marker = String::from_utf8_lossy(params[1]);
-            if marker.starts_with('A') {
-                if let Ok(mut s) = self.state.lock() {
-                    s.on_prompt_start();
-                }
-            } else if marker.starts_with("D") {
-                // D;exit_code — parse exit code after the semicolon
-                let code = marker
-                    .strip_prefix("D;")
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or(0);
-                if let Ok(mut s) = self.state.lock() {
-                    s.on_exit_code(code);
-                }
-            }
-        }
-    }
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
-        if byte == b'c' {
-            if let Ok(mut state) = self.state.lock() {
-                state.reset_attrs();
-            }
-        }
-    }
-}
-
-// ── Key → PTY byte encoding ───────────────────────────────────────────────────
-
-/// Encode a floem KeyDown event into the bytes that should be sent to the PTY.
-/// Returns an empty Vec if the key should not be forwarded (e.g. pure modifiers).
-fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent) -> Vec<u8> {
-    use floem::keyboard::NamedKey::*;
-
-    let mods = event.modifiers;
-    let ctrl = mods.contains(Modifiers::CONTROL);
-    let shift = mods.contains(Modifiers::SHIFT);
-    let alt = mods.contains(Modifiers::ALT);
-
-    match &event.key.logical_key {
-        // ── Named keys ────────────────────────────────────────────────────────
-        Key::Named(named) => match named {
-            Enter => b"\r".to_vec(),
-            Backspace => {
-                if alt {
-                    vec![0x1b, 0x7f] // ESC + DEL = word backward delete
-                } else {
-                    vec![0x7f] // normal backspace
-                }
-            }
-            Tab => {
-                if shift {
-                    b"\x1b[Z".to_vec() // Shift+Tab (reverse tab)
-                } else {
-                    b"\t".to_vec()
-                }
-            }
-            Escape => b"\x1b".to_vec(),
-            Delete => b"\x1b[3~".to_vec(),
-            Insert => b"\x1b[2~".to_vec(),
-            Home => {
-                if ctrl {
-                    b"\x1b[1;5H".to_vec()
-                } else {
-                    b"\x1b[H".to_vec()
-                }
-            }
-            End => {
-                if ctrl {
-                    b"\x1b[1;5F".to_vec()
-                } else {
-                    b"\x1b[F".to_vec()
-                }
-            }
-            ArrowUp => {
-                if ctrl {
-                    b"\x1b[1;5A".to_vec()
-                } else {
-                    b"\x1b[A".to_vec()
-                }
-            }
-            ArrowDown => {
-                if ctrl {
-                    b"\x1b[1;5B".to_vec()
-                } else {
-                    b"\x1b[B".to_vec()
-                }
-            }
-            ArrowRight => {
-                if ctrl {
-                    b"\x1b[1;5C".to_vec()
-                } else {
-                    b"\x1b[C".to_vec()
-                }
-            }
-            ArrowLeft => {
-                if ctrl {
-                    b"\x1b[1;5D".to_vec()
-                } else {
-                    b"\x1b[D".to_vec()
-                }
-            }
-            PageUp => b"\x1b[5~".to_vec(),
-            PageDown => b"\x1b[6~".to_vec(),
-            F1 => b"\x1bOP".to_vec(),
-            F2 => b"\x1bOQ".to_vec(),
-            F3 => b"\x1bOR".to_vec(),
-            F4 => b"\x1bOS".to_vec(),
-            F5 => b"\x1b[15~".to_vec(),
-            F6 => b"\x1b[17~".to_vec(),
-            F7 => b"\x1b[18~".to_vec(),
-            F8 => b"\x1b[19~".to_vec(),
-            F9 => b"\x1b[20~".to_vec(),
-            F10 => b"\x1b[21~".to_vec(),
-            F11 => b"\x1b[23~".to_vec(),
-            F12 => b"\x1b[24~".to_vec(),
-            _ => vec![],
-        },
-
-        // ── Character keys ────────────────────────────────────────────────────
-        Key::Character(ch) => {
-            let s = ch.as_str();
-            if ctrl {
-                // Ctrl+letter → control character (Ctrl+A = 0x01, Ctrl+Z = 0x1A)
-                if let Some(c) = s.chars().next() {
-                    if c.is_ascii_alphabetic() {
-                        let ctrl_byte = (c.to_ascii_uppercase() as u8)
-                            .wrapping_sub(b'A')
-                            .wrapping_add(1);
-                        return vec![ctrl_byte];
-                    }
-                    // Special Ctrl combos
-                    match c {
-                        '[' => return b"\x1b".to_vec(), // Ctrl+[ = ESC
-                        '\\' => return b"\x1c".to_vec(),
-                        ']' => return b"\x1d".to_vec(),
-                        '^' | '6' => return b"\x1e".to_vec(),
-                        '_' | '-' => return b"\x1f".to_vec(),
-                        _ => return vec![],
-                    }
-                }
-                vec![]
-            } else if alt {
-                // Alt+key → ESC prefix
-                let mut out = vec![b'\x1b'];
-                out.extend_from_slice(s.as_bytes());
-                out
-            } else {
-                // Regular printable character
-                s.as_bytes().to_vec()
-            }
-        }
-
-        _ => vec![],
-    }
-}
-
-// ── Panel ─────────────────────────────────────────────────────────────────────
-
 const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh"];
-/// Maximum lines rendered at once — keeps the dyn_stack fast.
-const MAX_RENDER_LINES: usize = 500;
 
-fn build_line_layout(
-    line: &TermLine,
-    default_fg: Color,
-    _default_bg: Color,
-    font_size: f32,
-) -> TextLayout {
-    let plain = line.plain_text();
-    let fonts = [
+/// Left margin holding the prompt marks, in pixels.
+const GUTTER_W: f64 = 10.0;
+const PAD_TOP: f64 = 2.0;
+const PAD_RIGHT: f64 = 6.0;
+/// Below this the view is hidden (an inactive tab): do not resize the PTY.
+const MIN_COLS: usize = 4;
+const MIN_ROWS: usize = 2;
+
+/// Shell integration typed into the shell once it starts: OSC 133;D;$? (exit
+/// code of the last command), OSC 133;A (prompt start), OSC 7 (cwd). D comes
+/// before A so each block gets its own code.
+const PROMPT_COMMAND_INJECT: &str = "export PROMPT_COMMAND='printf \"\\033]133;D;$?\\007\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
+
+/// Shared PTY writer — `Arc` so callers (Run in Terminal, the AI command bar)
+/// can write to the shell once the PTY is ready.
+type SharedPtyWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+type SharedMaster = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
+
+/// `Write` adapter over the shared PTY writer (drops bytes until it is set).
+struct SharedWriterRef<'a>(&'a SharedPtyWriter);
+
+impl Write for SharedWriterRef<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.0.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(w) => w.write(buf),
+                None => Ok(buf.len()),
+            },
+            Err(_) => Err(std::io::Error::other("pty writer lock poisoned")),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.0.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(w) => w.flush(),
+                None => Ok(()),
+            },
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+fn write_shared(writer: &SharedPtyWriter, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    let mut w = SharedWriterRef(writer);
+    let _ = w.write_all(data);
+    let _ = w.flush();
+}
+
+// ── Colours and fonts ─────────────────────────────────────────────────────────
+
+fn to_color(c: Rgb) -> Color {
+    Color::from_rgb8(c.r, c.g, c.b)
+}
+
+fn to_rgb(c: Color) -> Rgb {
+    let x = c.to_rgba8();
+    Rgb {
+        r: x.r,
+        g: x.g,
+        b: x.b,
+    }
+}
+
+/// Terminal colours from the IDE theme: text and background follow the
+/// palette, the 16 ANSI colours keep the terminal's table.
+fn palette_from_theme(p: &PhazePalette) -> TermPalette {
+    TermPalette {
+        fg: to_rgb(p.text_primary),
+        bg: to_rgb(p.bg_base),
+        cursor: to_rgb(p.text_primary),
+        ansi: ANSI_BASE,
+    }
+}
+
+fn term_fonts() -> [FamilyOwned; 4] {
+    [
         FamilyOwned::Name("JetBrains Mono".to_string()),
         FamilyOwned::Name("Fira Code".to_string()),
         FamilyOwned::Name("Cascadia Code".to_string()),
         FamilyOwned::Monospace,
-    ];
-    let default_attrs = Attrs::new()
-        .font_size(font_size)
-        .color(default_fg)
-        .family(&fonts);
-    let mut attrs_list = AttrsList::new(default_attrs);
-
-    let mut byte_offset: usize = 0;
-    for seg in &line.segments {
-        let seg_len = seg.text.len();
-        if seg_len == 0 {
-            continue;
-        }
-        let start = byte_offset;
-        let end = byte_offset + seg_len;
-        byte_offset = end;
-
-        let fg = seg.fg.to_floem_color(default_fg);
-        let mut span_attrs = Attrs::new().font_size(font_size).color(fg).family(&fonts);
-        if seg.bold {
-            span_attrs = span_attrs.weight(Weight::BOLD);
-        }
-        attrs_list.add_span(start..end, span_attrs);
-    }
-
-    let mut layout = TextLayout::new();
-    layout.set_text(&plain, attrs_list, None);
-    layout
+    ]
 }
 
-/// One independent PTY terminal session rendered into a Floem view.
-/// Each terminal tab gets its own call to `single_terminal()`.
-/// `clear_nonce`: when incremented, sends Ctrl+L to the PTY to clear the screen.
-/// `shell`: the shell binary name or path to launch (e.g. "bash", "zsh").
-/// `cwd_out`: signal that receives the current working directory via OSC 7.
-/// `term_font_size`: reactive font size (8..32).
-/// `find_open`: whether the find bar is visible.
-/// `find_query`: current find query string.
-/// Shared PTY writer type — Arc so it can be cloned and shared with callers.
-type SharedPtyWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+/// Size of one terminal cell in pixels for a font size, measured from the
+/// font the grid is drawn with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CellMetrics {
+    w: f64,
+    h: f64,
+    font_size: f32,
+}
+
+fn measure_cell(font_size: f32) -> CellMetrics {
+    let fonts = term_fonts();
+    let attrs = Attrs::new().font_size(font_size).family(&fonts);
+    let mut layout = TextLayout::new();
+    layout.set_text("MMMMMMMMMM", AttrsList::new(attrs), None);
+    let size = layout.size();
+    CellMetrics {
+        w: (size.width / 10.0).max(1.0),
+        h: size.height.ceil().max(1.0),
+        font_size,
+    }
+}
+
+/// Grid size that fits `px` (width, height) pixels.
+fn grid_size_for(px: (f64, f64), m: CellMetrics) -> (usize, usize) {
+    let cols = ((px.0 - GUTTER_W - PAD_RIGHT) / m.w).floor().max(0.0) as usize;
+    let rows = ((px.1 - PAD_TOP) / m.h).floor().max(0.0) as usize;
+    (cols, rows)
+}
+
+// ── Painting ──────────────────────────────────────────────────────────────────
+
+/// Text runs of one row, keyed by a hash of what affects them.
+struct RowLayouts {
+    key: u64,
+    runs: Vec<(usize, TextLayout)>,
+}
+
+fn row_key(row: &[SnapCell], font_size: f32) -> u64 {
+    let mut h = DefaultHasher::new();
+    font_size.to_bits().hash(&mut h);
+    for cell in row {
+        cell.c.hash(&mut h);
+        cell.zerowidth.hash(&mut h);
+        (cell.style.fg.r, cell.style.fg.g, cell.style.fg.b).hash(&mut h);
+        (cell.style.bold, cell.style.italic, cell.wide, cell.spacer).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A cell drawn as part of a run of ASCII text.
+fn is_run_cell(cell: &SnapCell) -> bool {
+    !cell.spacer
+        && !cell.wide
+        && cell.zerowidth.is_empty()
+        && (cell.c == ' ' || cell.c.is_ascii_graphic())
+}
+
+fn text_attrs<'a>(
+    fonts: &'a [FamilyOwned],
+    font_size: f32,
+    fg: Rgb,
+    bold: bool,
+    italic: bool,
+) -> Attrs<'a> {
+    let mut a = Attrs::new()
+        .font_size(font_size)
+        .family(fonts)
+        .color(to_color(fg));
+    if bold {
+        a = a.weight(Weight::BOLD);
+    }
+    if italic {
+        a = a.style(FontStyle::Italic);
+    }
+    a
+}
+
+/// Lay out one row: runs of ASCII cells become one layout each (a monospace
+/// font keeps them on the grid); any other glyph gets its own layout placed
+/// at its cell, so a wide or fallback glyph cannot shift the rest of the row.
+fn build_row_runs(row: &[SnapCell], font_size: f32) -> Vec<(usize, TextLayout)> {
+    let fonts = term_fonts();
+    let mut runs = Vec::new();
+    let mut col = 0;
+    while col < row.len() {
+        let cell = &row[col];
+        if cell.spacer || cell.c == ' ' && is_run_cell(cell) {
+            col += 1;
+            continue;
+        }
+        if is_run_cell(cell) {
+            let start = col;
+            let mut end = col;
+            let mut j = col;
+            while j < row.len() && is_run_cell(&row[j]) {
+                if row[j].c != ' ' {
+                    end = j + 1;
+                }
+                j += 1;
+            }
+            let first = &row[start].style;
+            let mut list = AttrsList::new(text_attrs(
+                &fonts,
+                font_size,
+                first.fg,
+                first.bold,
+                first.italic,
+            ));
+            let mut text = String::with_capacity(end - start);
+            let mut span_start = 0;
+            let mut span_style = (first.fg, first.bold, first.italic);
+            for c in &row[start..end] {
+                let style = (c.style.fg, c.style.bold, c.style.italic);
+                if style != span_style {
+                    let (fg, b, i) = span_style;
+                    list.add_span(
+                        span_start..text.len(),
+                        text_attrs(&fonts, font_size, fg, b, i),
+                    );
+                    span_start = text.len();
+                    span_style = style;
+                }
+                text.push(c.c);
+            }
+            let (fg, b, i) = span_style;
+            list.add_span(
+                span_start..text.len(),
+                text_attrs(&fonts, font_size, fg, b, i),
+            );
+            let mut layout = TextLayout::new();
+            layout.set_text(&text, list, None);
+            runs.push((start, layout));
+            col = j;
+        } else {
+            let mut text = String::new();
+            text.push(cell.c);
+            text.extend(cell.zerowidth.iter());
+            let s = &cell.style;
+            let mut layout = TextLayout::new();
+            layout.set_text(
+                &text,
+                AttrsList::new(text_attrs(&fonts, font_size, s.fg, s.bold, s.italic)),
+                None,
+            );
+            runs.push((col, layout));
+            col += 1;
+        }
+    }
+    runs
+}
+
+/// Theme colours the painter needs besides the snapshot.
+struct PaintColors {
+    selection: Color,
+    find_match: Color,
+    find_current: Color,
+    ok: Color,
+    error: Color,
+    muted: Color,
+    accent: Color,
+    scrollbar: Color,
+}
+
+impl PaintColors {
+    fn from_palette(p: &PhazePalette) -> Self {
+        Self {
+            selection: p.selection.with_alpha(0.45),
+            find_match: p.warning.with_alpha(0.35),
+            find_current: p.accent.with_alpha(0.6),
+            ok: Color::from_rgb8(80, 200, 80),
+            error: p.error,
+            muted: p.text_muted,
+            accent: p.accent,
+            scrollbar: p.text_muted.with_alpha(0.35),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_grid(
+    cx: &mut floem::context::PaintCx,
+    size: floem::kurbo::Size,
+    mut snap: GridSnapshot,
+    history: usize,
+    m: CellMetrics,
+    colors: &PaintColors,
+    focused: bool,
+    cache: &RefCell<Vec<Option<RowLayouts>>>,
+) {
+    let (w, h) = (m.w, m.h);
+    let x0 = GUTTER_W;
+    cx.fill(
+        &Rect::new(0.0, 0.0, size.width, size.height),
+        to_color(snap.default_bg),
+        0.0,
+    );
+
+    // A focused block cursor shows its character in the background colour.
+    if let Some(cur) = snap.cursor {
+        if focused && cur.shape == CursorShape::Block {
+            if let Some(cell) = snap.cells.get_mut(cur.row).and_then(|r| r.get_mut(cur.col)) {
+                cell.style.fg = cell.style.bg;
+            }
+        }
+    }
+
+    let cell_rect = |row: usize, c0: usize, c1: usize| {
+        let y = PAD_TOP + row as f64 * h;
+        Rect::new(x0 + c0 as f64 * w, y, x0 + c1 as f64 * w, y + h)
+    };
+
+    // Backgrounds, selection and find highlights.
+    for (r, row) in snap.cells.iter().enumerate() {
+        let mut c = 0;
+        while c < row.len() {
+            let bg = row[c].style.bg;
+            let mut e = c + 1;
+            while e < row.len() && row[e].style.bg == bg {
+                e += 1;
+            }
+            if bg != snap.default_bg {
+                cx.fill(&cell_rect(r, c, e), to_color(bg), 0.0);
+            }
+            c = e;
+        }
+        let mut c = 0;
+        while c < row.len() {
+            let key = (row[c].selected, row[c].find);
+            let mut e = c + 1;
+            while e < row.len() && (row[e].selected, row[e].find) == key {
+                e += 1;
+            }
+            match key.1 {
+                FindMark::Current => cx.fill(&cell_rect(r, c, e), colors.find_current, 0.0),
+                FindMark::Match => cx.fill(&cell_rect(r, c, e), colors.find_match, 0.0),
+                FindMark::None => {}
+            }
+            if key.0 {
+                cx.fill(&cell_rect(r, c, e), colors.selection, 0.0);
+            }
+            c = e;
+        }
+    }
+
+    // Block cursor fill (under the text).
+    let cursor_color = to_color(snap.cursor_color);
+    if let Some(cur) = snap.cursor {
+        let span = if cur.wide { 2 } else { 1 };
+        if focused && cur.shape == CursorShape::Block {
+            cx.fill(
+                &cell_rect(cur.row, cur.col, cur.col + span),
+                cursor_color,
+                0.0,
+            );
+        }
+    }
+
+    // Text, from the per-row layout cache.
+    {
+        let mut cache = cache.borrow_mut();
+        cache.resize_with(snap.rows, || None);
+        for (r, row) in snap.cells.iter().enumerate() {
+            let key = row_key(row, m.font_size);
+            let fresh = !matches!(&cache[r], Some(entry) if entry.key == key);
+            if fresh {
+                cache[r] = Some(RowLayouts {
+                    key,
+                    runs: build_row_runs(row, m.font_size),
+                });
+            }
+            if let Some(entry) = &cache[r] {
+                let y = PAD_TOP + r as f64 * h;
+                for (col, layout) in &entry.runs {
+                    cx.draw_text(layout, Point::new(x0 + *col as f64 * w, y));
+                }
+            }
+        }
+    }
+
+    // Underline and strikeout.
+    for (r, row) in snap.cells.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            let s = &cell.style;
+            if !(s.underline || s.strikeout) || cell.spacer {
+                continue;
+            }
+            let span = if cell.wide { 2.0 } else { 1.0 };
+            let x = x0 + c as f64 * w;
+            let y = PAD_TOP + r as f64 * h;
+            if s.underline {
+                cx.fill(
+                    &Rect::new(x, y + h - 1.5, x + w * span, y + h - 0.5),
+                    to_color(s.fg),
+                    0.0,
+                );
+            }
+            if s.strikeout {
+                cx.fill(
+                    &Rect::new(x, y + h * 0.5 - 0.5, x + w * span, y + h * 0.5 + 0.5),
+                    to_color(s.fg),
+                    0.0,
+                );
+            }
+        }
+    }
+
+    // Other cursor shapes (and the unfocused outline).
+    if let Some(cur) = snap.cursor {
+        let span = if cur.wide { 2 } else { 1 };
+        let r = cell_rect(cur.row, cur.col, cur.col + span);
+        let outline = |cx: &mut floem::context::PaintCx| {
+            for edge in [
+                Rect::new(r.x0, r.y0, r.x1, r.y0 + 1.0),
+                Rect::new(r.x0, r.y1 - 1.0, r.x1, r.y1),
+                Rect::new(r.x0, r.y0, r.x0 + 1.0, r.y1),
+                Rect::new(r.x1 - 1.0, r.y0, r.x1, r.y1),
+            ] {
+                cx.fill(&edge, cursor_color, 0.0);
+            }
+        };
+        match cur.shape {
+            CursorShape::Block if !focused => outline(cx),
+            CursorShape::HollowBlock => outline(cx),
+            CursorShape::Beam => {
+                cx.fill(&Rect::new(r.x0, r.y0, r.x0 + 2.0, r.y1), cursor_color, 0.0)
+            }
+            CursorShape::Underline => {
+                cx.fill(&Rect::new(r.x0, r.y1 - 2.0, r.x1, r.y1), cursor_color, 0.0)
+            }
+            _ => {}
+        }
+    }
+
+    // Prompt marks in the gutter, coloured by the command's exit code.
+    for (r, mark) in snap.marks.iter().enumerate() {
+        let Some(mark) = mark else { continue };
+        let color = match (mark.finished, mark.exit_code) {
+            (true, Some(0)) => colors.ok,
+            (true, Some(_)) => colors.error,
+            (true, None) => colors.muted,
+            (false, _) => colors.accent,
+        };
+        let y = PAD_TOP + r as f64 * h;
+        cx.fill(&Rect::new(3.0, y + 1.0, 6.0, y + h - 1.0), color, 1.5);
+    }
+
+    // Scroll position, while scrolled back.
+    if snap.display_offset > 0 && history > 0 {
+        let total = (history + snap.rows) as f64;
+        let track = size.height;
+        let thumb = (snap.rows as f64 / total * track).max(12.0);
+        let top = (history - snap.display_offset) as f64 / total * track;
+        cx.fill(
+            &Rect::new(size.width - 4.0, top, size.width - 1.0, top + thumb),
+            colors.scrollbar,
+            1.5,
+        );
+    }
+}
+
+// ── Keys ──────────────────────────────────────────────────────────────────────
+
+fn mods_of(m: &Modifiers) -> Mods {
+    Mods {
+        shift: m.contains(Modifiers::SHIFT),
+        alt: m.contains(Modifiers::ALT),
+        ctrl: m.contains(Modifiers::CONTROL),
+    }
+}
+
+/// Encode a key press into the bytes the PTY should get (empty for keys that
+/// send nothing, such as bare modifiers). `app_cursor` is the terminal's
+/// application-cursor mode.
+fn key_to_pty_bytes(event: &floem::keyboard::KeyEvent, app_cursor: bool) -> Vec<u8> {
+    let mods = mods_of(&event.modifiers);
+    match &event.key.logical_key {
+        Key::Named(named) => {
+            let key = match named {
+                NamedKey::Enter => TermKey::Enter,
+                NamedKey::Backspace => TermKey::Backspace,
+                NamedKey::Tab => TermKey::Tab,
+                NamedKey::Escape => TermKey::Escape,
+                NamedKey::Delete => TermKey::Delete,
+                NamedKey::Insert => TermKey::Insert,
+                NamedKey::Home => TermKey::Home,
+                NamedKey::End => TermKey::End,
+                NamedKey::ArrowUp => TermKey::Up,
+                NamedKey::ArrowDown => TermKey::Down,
+                NamedKey::ArrowRight => TermKey::Right,
+                NamedKey::ArrowLeft => TermKey::Left,
+                NamedKey::PageUp => TermKey::PageUp,
+                NamedKey::PageDown => TermKey::PageDown,
+                NamedKey::Space => return text_key_bytes(" ", mods),
+                NamedKey::F1 => TermKey::F(1),
+                NamedKey::F2 => TermKey::F(2),
+                NamedKey::F3 => TermKey::F(3),
+                NamedKey::F4 => TermKey::F(4),
+                NamedKey::F5 => TermKey::F(5),
+                NamedKey::F6 => TermKey::F(6),
+                NamedKey::F7 => TermKey::F(7),
+                NamedKey::F8 => TermKey::F(8),
+                NamedKey::F9 => TermKey::F(9),
+                NamedKey::F10 => TermKey::F(10),
+                NamedKey::F11 => TermKey::F(11),
+                NamedKey::F12 => TermKey::F(12),
+                _ => return Vec::new(),
+            };
+            key_bytes(key, mods, app_cursor)
+        }
+        Key::Character(ch) => text_key_bytes(ch.as_str(), mods),
+        _ => Vec::new(),
+    }
+}
+
+// ── One terminal session ──────────────────────────────────────────────────────
+
+/// A finished command, as shown in the block list.
+#[derive(Clone, Debug, PartialEq)]
+struct BlockInfo {
+    id: u64,
+    prompt_row: u64,
+    exit_code: Option<i32>,
+    command: String,
+    output: String,
+}
+
+fn write_notice(core: &Mutex<TermCore>, text: &str) {
+    if let Ok(mut c) = core.lock() {
+        c.feed(format!("\r\n\x1b[1;31m{text}\x1b[0m\r\n").as_bytes());
+    }
+}
+
+/// Spawn the shell in a PTY and run the reader loop (on its own thread).
+fn spawn_pty(
+    shell: String,
+    core: Arc<Mutex<TermCore>>,
+    pty_writer: SharedPtyWriter,
+    pty_master: SharedMaster,
+    update_tx: std::sync::mpsc::SyncSender<()>,
+) {
+    thread::spawn(move || {
+        let size = core.lock().map(|c| c.size()).unwrap_or(TermSize::new(
+            DEFAULT_PTY_COLS as usize,
+            DEFAULT_PTY_ROWS as usize,
+        ));
+        let pty_size = |s: TermSize| PtySize {
+            rows: s.rows as u16,
+            cols: s.cols as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let PtyPair { master, slave } = match NativePtySystem::default().openpty(pty_size(size)) {
+            Ok(p) => p,
+            Err(e) => {
+                write_notice(&core, &format!("PTY open error: {e}"));
+                let _ = update_tx.try_send(());
+                return;
+            }
+        };
+
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.env("TERM", term_consts::TERM_TYPE);
+        cmd.env("COLORTERM", term_consts::COLOR_TERM);
+        let mut child = match slave.spawn_command(cmd) {
+            Ok(c) => c,
+            Err(e) => {
+                write_notice(&core, &format!("Shell spawn error: {e}"));
+                let _ = update_tx.try_send(());
+                return;
+            }
+        };
+        // Only the child holds the slave now, so reads end when it exits.
+        drop(slave);
+
+        match master.take_writer() {
+            Ok(w) => {
+                if let Ok(mut guard) = pty_writer.lock() {
+                    *guard = Some(w);
+                }
+            }
+            Err(e) => {
+                tracing::error!(target: "phazeai_ui::terminal", "PTY take_writer error: {e}")
+            }
+        }
+
+        // Shell integration: OSC 7 (cwd) and OSC 133 (blocks, exit codes).
+        {
+            let w = Arc::clone(&pty_writer);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                write_shared(&w, PROMPT_COMMAND_INJECT.as_bytes());
+            });
+        }
+
+        let mut reader = match master.try_clone_reader() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(target: "phazeai_ui::terminal", "PTY clone_reader error: {e}");
+                write_notice(&core, &format!("PTY read error: {e}"));
+                let _ = update_tx.try_send(());
+                return;
+            }
+        };
+
+        // Keep the master for resizes from the UI thread; catch up with a
+        // resize that happened while the PTY was starting.
+        if let Ok(mut guard) = pty_master.lock() {
+            let now = core.lock().map(|c| c.size()).unwrap_or(size);
+            if now != size {
+                let _ = master.resize(pty_size(now));
+            }
+            *guard = Some(master);
+        }
+
+        let mut buf = vec![0u8; term_consts::READ_BUFFER_SIZE];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let outcome =
+                        process_pty_output(&core, &buf[..n], &mut SharedWriterRef(&pty_writer));
+                    if let Some(text) = outcome.clipboard {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(text);
+                        }
+                    }
+                    let _ = update_tx.try_send(());
+                }
+            }
+        }
+        let status = child.wait();
+        if let Ok(mut c) = core.lock() {
+            let msg = match status {
+                Ok(s) => format!("[process exited with code {}]", s.exit_code()),
+                Err(e) => format!("[process ended: {e}]"),
+            };
+            c.feed(format!("\r\n\x1b[2m{msg}\x1b[0m\r\n").as_bytes());
+        }
+        let _ = update_tx.try_send(());
+    });
+}
 
 /// One independent PTY terminal session.
-/// `pty_writer_out`: if `Some`, will be set to `Arc::clone` of this terminal's PTY
-/// writer once the PTY is ready — callers can then write bytes directly to the shell
-/// (Feature 3 — Run in Terminal).
-/// `prompt_positions_out`: if `Some`, receives live-updated prompt line positions from
-/// OSC 133;A markers so the caller can implement prev/next command navigation (Feature 2).
+/// - `clear_nonce`: when incremented, sends Ctrl+L to the shell.
+/// - `cwd_out`: receives the working directory reported by OSC 7.
+/// - `pty_writer_out`: if `Some`, receives this terminal's PTY writer so the
+///   panel can write to the shell (Run in Terminal, AI command bar).
+/// - `prompt_positions_out`: if `Some`, receives the absolute rows of the
+///   prompts (OSC 133;A) still in the scrollback.
+/// - `prompt_jump`: if `Some`, a `(nonce, direction)` request to scroll to the
+///   previous (-1) or next (+1) prompt.
 #[allow(clippy::too_many_arguments)]
 fn single_terminal(
     theme: RwSignal<PhazeTheme>,
@@ -668,374 +706,722 @@ fn single_terminal(
     find_open: RwSignal<bool>,
     find_query: RwSignal<String>,
     ai_cmd_open: RwSignal<bool>,
+    blocks_open: RwSignal<bool>,
     pty_writer_out: Option<RwSignal<Option<SharedPtyWriter>>>,
     prompt_positions_out: Option<RwSignal<Vec<usize>>>,
+    prompt_jump: Option<RwSignal<(u64, i32)>>,
 ) -> impl IntoView {
-    // ── Shared VTE state ──────────────────────────────────────────────────
-    let term_state: Arc<Mutex<TermState>> = Arc::new(Mutex::new(TermState::new()));
+    let core: Arc<Mutex<TermCore>> = Arc::new(Mutex::new(TermCore::new(
+        DEFAULT_PTY_COLS as usize,
+        DEFAULT_PTY_ROWS as usize,
+    )));
     let pty_writer: SharedPtyWriter = Arc::new(Mutex::new(None));
-    // Keep the master PTY handle alive so we can resize it when the view dimensions change.
-    let pty_master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> = Arc::new(Mutex::new(None));
+    let pty_master: SharedMaster = Arc::new(Mutex::new(None));
 
-    // Expose pty_writer Arc to caller (Feature 3: Run in Terminal).
-    // The Arc is shared — the background PTY thread fills Option<Box<dyn Write+Send>> inside it.
-    // The caller just clones the Arc and writes to it after the PTY is ready.
     if let Some(out_sig) = pty_writer_out {
         out_sig.set(Some(Arc::clone(&pty_writer)));
     }
 
-    // ── Update channel: reader thread → reactive signal ───────────────────
-    // Coalesced update channel: at most one pending repaint signal at a time.
+    // Reader thread → UI: at most one pending wake-up at a time.
     let (update_tx, update_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let update_signal = create_signal_from_channel(update_rx);
+    spawn_pty(
+        shell,
+        Arc::clone(&core),
+        Arc::clone(&pty_writer),
+        Arc::clone(&pty_master),
+        update_tx,
+    );
 
-    // ── Reactive buffers ──────────────────────────────────────────────────
-    // completed_blocks: stable list of finished blocks (exit_code known).
-    // Key is block id — dyn_stack creates each block view exactly once.
-    let completed_blocks: RwSignal<Vec<(u64, Vec<TermLine>, i32)>> = create_rw_signal(vec![]);
-    // live_lines: lines of the current in-progress block. Updates every keystroke.
-    let live_lines: RwSignal<Vec<TermLine>> = create_rw_signal(vec![]);
-    // Increment on every update so auto-scroll can detect new output
-    let line_version: RwSignal<u64> = create_rw_signal(0);
-    // Cursor column position for rendering the cursor block
-    let cursor_col_sig: RwSignal<usize> = create_rw_signal(0usize);
-    // Throttle expensive UI syncs under high PTY throughput.
-    let last_ui_sync_at: RwSignal<Option<Instant>> = create_rw_signal(None);
+    // Bumped whenever the grid should be repainted.
+    let repaint: RwSignal<u64> = create_rw_signal(0);
+    let bump = move || repaint.update(|v| *v = v.wrapping_add(1));
+    let is_focused = create_rw_signal(false);
+    let blocks_sig: RwSignal<Vec<BlockInfo>> = create_rw_signal(Vec::new());
+    let find_hits: RwSignal<Vec<FindHit>> = create_rw_signal(Vec::new());
+    let find_idx: RwSignal<Option<usize>> = create_rw_signal(None);
+    let find_pending = create_rw_signal(false);
 
-    // ── Spawn PTY thread ──────────────────────────────────────────────────
+    let recompute_find = {
+        let core = Arc::clone(&core);
+        move || {
+            let query = find_query.get_untracked();
+            let hits = if find_open.get_untracked() && !query.is_empty() {
+                core.lock().map(|c| c.find(&query)).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let idx = if hits.is_empty() {
+                None
+            } else {
+                Some(
+                    find_idx
+                        .get_untracked()
+                        .unwrap_or(hits.len() - 1)
+                        .min(hits.len() - 1),
+                )
+            };
+            find_hits.set(hits);
+            find_idx.set(idx);
+        }
+    };
+
+    // ── Reader updates → repaint, cwd, blocks, find ──────────────────────
     {
-        let term_state_t = Arc::clone(&term_state);
-        let pty_writer_t = Arc::clone(&pty_writer);
-        let pty_master_t = Arc::clone(&pty_master);
-
-        thread::spawn(move || {
-            let pty_system = NativePtySystem::default();
-            let pair = match pty_system.openpty(PtySize {
-                rows: DEFAULT_PTY_ROWS,
-                cols: DEFAULT_PTY_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    if let Ok(mut s) = term_state_t.lock() {
-                        let mut err = TermLine::new();
-                        for ch in format!("PTY open error: {e}").chars() {
-                            err.push_char(ch, TermColor::Indexed(1), TermColor::Default, true);
-                        }
-                        s.current_block_lines.push(err);
-                    }
-                    let _ = update_tx.try_send(());
-                    return;
-                }
-            };
-
-            let mut cmd = CommandBuilder::new(&shell);
-            cmd.env("TERM", term_consts::TERM_TYPE);
-            cmd.env("COLORTERM", term_consts::COLOR_TERM);
-
-            let child = match pair.slave.spawn_command(cmd) {
-                Ok(c) => c,
-                Err(e) => {
-                    if let Ok(mut s) = term_state_t.lock() {
-                        let mut err = TermLine::new();
-                        for ch in format!("Shell spawn error: {e}").chars() {
-                            err.push_char(ch, TermColor::Indexed(1), TermColor::Default, true);
-                        }
-                        s.current_block_lines.push(err);
-                    }
-                    let _ = update_tx.try_send(());
-                    return;
-                }
-            };
-
-            match pair.master.take_writer() {
-                Ok(w) => {
-                    if let Ok(mut guard) = pty_writer_t.lock() {
-                        *guard = Some(w);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(target: "phazeai_ui::terminal", "PTY take_writer error: {e}")
-                }
-            }
-
-            // Inject PROMPT_COMMAND for OSC 7 (cwd) and OSC 133;A (shell integration) tracking
-            {
-                let pty_w2 = Arc::clone(&pty_writer_t);
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_millis(300));
-                    if let Ok(mut guard) = pty_w2.lock() {
-                        if let Some(ref mut w) = *guard {
-                            // OSC 133;D;$? = exit code of last cmd, then A = prompt start,
-                            // then OSC 7 = cwd. D fires before A so each block gets its code.
-                            let cmd = "export PROMPT_COMMAND='printf \"\\033]133;D;$?\\007\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
-                            let _ = w.write_all(cmd.as_bytes());
-                            let _ = w.flush();
-                        }
-                    }
-                });
-            }
-
-            let mut reader = match pair.master.try_clone_reader() {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(target: "phazeai_ui::terminal", "PTY clone_reader error: {e}");
-                    return;
-                }
-            };
-
-            // Store master handle for resize calls from the UI thread.
-            if let Ok(mut guard) = pty_master_t.lock() {
-                *guard = Some(pair.master);
-            }
-
-            let mut child = child;
-            let mut parser = vte::Parser::new();
-            let mut performer = VtePerformer {
-                state: Arc::clone(&term_state_t),
-            };
-            let mut buf = [0u8; term_consts::READ_BUFFER_SIZE];
-
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        for &byte in &buf[..n] {
-                            parser.advance(&mut performer, byte);
-                        }
-                        let _ = update_tx.try_send(());
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = child.wait();
-
-            if let Ok(mut s) = term_state_t.lock() {
-                if !s.current_line.is_empty() {
-                    let line = std::mem::replace(&mut s.current_line, TermLine::new());
-                    s.current_block_lines.push(line);
-                }
-            }
-            let _ = update_tx.try_send(());
-        });
-    }
-
-    // ── Sync thread state → reactive signals ─────────────────────────────
-    {
-        let term_state_e = Arc::clone(&term_state);
+        let core = Arc::clone(&core);
+        let last_blocks_version = create_rw_signal(u64::MAX);
+        let recompute_find = recompute_find.clone();
         create_effect(move |_| {
             update_signal.get();
-            let now = Instant::now();
-            if let Some(prev) = last_ui_sync_at.get_untracked() {
-                if now.duration_since(prev) < Duration::from_millis(16) {
-                    return;
+            bump();
+            let Ok(c) = core.lock() else { return };
+            if let Some(cwd) = c.cwd() {
+                if cwd_out.get_untracked() != cwd {
+                    cwd_out.set(cwd.to_string());
                 }
             }
-            last_ui_sync_at.set(Some(now));
-            if let Ok(ts) = term_state_e.lock() {
-                completed_blocks.set(
-                    ts.blocks
+            let version = c.blocks_version();
+            if version != last_blocks_version.get_untracked() {
+                last_blocks_version.set(version);
+                blocks_sig.set(
+                    c.blocks()
                         .iter()
-                        .map(|b| (b.id, b.lines.clone(), b.exit_code))
+                        .filter(|b| b.finished)
+                        .map(|b| BlockInfo {
+                            id: b.id,
+                            prompt_row: b.prompt_row,
+                            exit_code: b.exit_code,
+                            command: b.command.clone(),
+                            output: b.output.clone(),
+                        })
                         .collect(),
                 );
-                let mut live = ts.current_block_lines.clone();
-                if !ts.current_line.is_empty() {
-                    live.push(ts.current_line.clone());
+                if let Some(pp) = prompt_positions_out {
+                    pp.set(c.prompt_rows().into_iter().map(|r| r as usize).collect());
                 }
-                live_lines.set(live);
-                line_version.update(|v| *v += 1);
-                cursor_col_sig.set(ts.cursor_col);
-                // Propagate block count as prompt positions for prev/next nav buttons.
-                if let Some(pp_sig) = prompt_positions_out {
-                    pp_sig.set((0..ts.blocks.len()).collect());
-                }
+            }
+            drop(c);
+            // Keep find results current while output arrives (debounced).
+            if find_open.get_untracked()
+                && !find_query.get_untracked().is_empty()
+                && !find_pending.get_untracked()
+            {
+                find_pending.set(true);
+                let recompute_find = recompute_find.clone();
+                exec_after(Duration::from_millis(300), move |_| {
+                    find_pending.set(false);
+                    recompute_find();
+                });
             }
         });
     }
 
-    // ── Sync cwd from OSC 7 → cwd_out signal ─────────────────────────────
+    // Find query or bar visibility changed.
     {
-        let term_state_cwd = Arc::clone(&term_state);
+        let recompute_find = recompute_find.clone();
         create_effect(move |_| {
-            update_signal.get();
-            if let Ok(s) = term_state_cwd.lock() {
-                let cwd = s.cwd.clone();
-                if !cwd.is_empty() {
-                    cwd_out.set(cwd);
-                }
-            }
+            find_query.get();
+            find_open.get();
+            find_idx.set(None);
+            recompute_find();
+            bump();
         });
     }
 
-    // ── PTY send helper ───────────────────────────────────────────────────
-    let pty_writer_send = Arc::clone(&pty_writer);
-    let send_to_pty = move |data: Vec<u8>| {
-        if data.is_empty() {
-            return;
-        }
-        if let Ok(mut guard) = pty_writer_send.lock() {
-            if let Some(ref mut w) = *guard {
-                let _ = w.write_all(&data);
-                let _ = w.flush();
+    // ── Theme → emulator colours ─────────────────────────────────────────
+    {
+        let core = Arc::clone(&core);
+        create_effect(move |_| {
+            let palette = palette_from_theme(&theme.get().palette);
+            if let Ok(mut c) = core.lock() {
+                c.set_palette(palette);
             }
-        }
-    };
+            bump();
+        });
+    }
 
-    // ── Clear terminal effect (Ctrl+L → clears screen) ───────────────────
+    // ── Clear (Ctrl+L to the shell) ──────────────────────────────────────
     {
         let pty_w = Arc::clone(&pty_writer);
-        let last_clear = create_rw_signal(0u64);
-        create_effect(move |_| {
+        create_effect(move |prev: Option<u64>| {
             let n = clear_nonce.get();
-            if n == 0 || n == last_clear.get_untracked() {
-                return;
+            if prev.is_some_and(|p| p != n) {
+                write_shared(&pty_w, b"\x0c");
             }
-            last_clear.set(n);
-            if let Ok(mut guard) = pty_w.lock() {
-                if let Some(ref mut w) = *guard {
-                    // Ctrl+L (form feed) — clears terminal in bash/zsh/fish/pwsh
-                    let _ = w.write_all(b"\x0c");
-                    let _ = w.flush();
+            n
+        });
+    }
+
+    // ── Previous/next prompt requests from the tab bar ───────────────────
+    if let Some(jump) = prompt_jump {
+        let core = Arc::clone(&core);
+        create_effect(move |prev: Option<u64>| {
+            let (n, dir) = jump.get();
+            if prev.is_some_and(|p| p != n) {
+                if let Ok(mut c) = core.lock() {
+                    c.jump_prompt(dir);
                 }
+                bump();
+            }
+            n
+        });
+    }
+
+    // ── Sizing ───────────────────────────────────────────────────────────
+    let metrics = create_memo(move |_| measure_cell(term_font_size.get() as f32));
+    let last_px: RwSignal<(f64, f64)> = create_rw_signal((0.0, 0.0));
+    let apply_size = {
+        let core = Arc::clone(&core);
+        let master = Arc::clone(&pty_master);
+        move |px: (f64, f64), m: CellMetrics| {
+            let (cols, rows) = grid_size_for(px, m);
+            if cols < MIN_COLS || rows < MIN_ROWS {
+                return; // hidden (inactive tab or collapsed panel)
+            }
+            let changed = match core.lock() {
+                Ok(mut c) => {
+                    let before = c.size();
+                    c.resize(cols, rows, (m.w.round() as u16, m.h.round() as u16));
+                    before != c.size()
+                }
+                Err(_) => false,
+            };
+            if changed {
+                if let Ok(guard) = master.lock() {
+                    if let Some(ref master) = *guard {
+                        let _ = master.resize(PtySize {
+                            rows: rows as u16,
+                            cols: cols as u16,
+                            pixel_width: (cols as f64 * m.w) as u16,
+                            pixel_height: (rows as f64 * m.h) as u16,
+                        });
+                    }
+                }
+                bump();
+            }
+        }
+    };
+    {
+        let apply_size = apply_size.clone();
+        create_effect(move |_| {
+            let m = metrics.get();
+            let px = last_px.get_untracked();
+            if px.0 > 0.0 && px.1 > 0.0 {
+                apply_size(px, m);
             }
         });
     }
 
-    // ── Focus state ───────────────────────────────────────────────────────
-    let is_focused = create_rw_signal(false);
-
-    // ── Helper: render a single TermLine as a rich_text row ──────────────
-    let line_row = move |tl: TermLine| {
-        let segments = tl.segments.clone();
-        let init = {
-            let t = theme.get_untracked();
-            let p = &t.palette;
-            let fs = term_font_size.get_untracked() as f32;
-            if segments.is_empty() {
-                let mut lay = TextLayout::new();
-                lay.set_text(
-                    " ",
-                    AttrsList::new(
-                        Attrs::new()
-                            .font_size(fs)
-                            .color(p.text_primary)
-                            .family(&[FamilyOwned::Monospace]),
-                    ),
-                    None,
-                );
-                lay
-            } else {
-                build_line_layout(&tl, p.text_primary, p.bg_base, fs)
-            }
-        };
-        let layout_sig: RwSignal<TextLayout> = create_rw_signal(init);
-        create_effect(move |_| {
+    // ── Grid canvas ──────────────────────────────────────────────────────
+    let layout_cache: Rc<RefCell<Vec<Option<RowLayouts>>>> = Rc::new(RefCell::new(Vec::new()));
+    let grid_canvas = {
+        let core = Arc::clone(&core);
+        canvas(move |cx, size| {
+            repaint.get();
             let t = theme.get();
-            let p = &t.palette;
-            let fs = term_font_size.get() as f32;
-            let new_lay = if segments.is_empty() {
-                let mut lay = TextLayout::new();
-                lay.set_text(
-                    " ",
-                    AttrsList::new(
-                        Attrs::new()
-                            .font_size(fs)
-                            .color(p.text_primary)
-                            .family(&[FamilyOwned::Monospace]),
+            let m = metrics.get();
+            let focused = is_focused.get();
+            let open = find_open.get();
+            let query = find_query.get();
+            let current = find_idx.get().and_then(|i| find_hits.get().get(i).copied());
+            let colors = PaintColors::from_palette(&t.palette);
+            let (snap, history) = match core.lock() {
+                Ok(c) => (
+                    c.snapshot(
+                        (open && !query.is_empty()).then_some(query.as_str()),
+                        current,
                     ),
-                    None,
-                );
-                lay
-            } else {
-                build_line_layout(
-                    &TermLine {
-                        segments: segments.clone(),
-                    },
-                    p.text_primary,
-                    p.bg_base,
-                    fs,
-                )
+                    c.history_size(),
+                ),
+                Err(_) => return,
             };
-            layout_sig.set(new_lay);
-        });
-        container(floem::views::rich_text(move || layout_sig.get()).style(|s| s.width_full()))
-            .style(|s| s.padding_horiz(8.0).padding_vert(1.0).width_full())
+            paint_grid(cx, size, snap, history, m, &colors, focused, &layout_cache);
+        })
+        .style(|s| s.size_full())
     };
 
-    // ── Completed blocks (one collapsible card per shell command) ─────────
-    let blocks_view = {
-        let state_b = state.clone();
-        dyn_stack(
-            move || completed_blocks.get(),
-            |(id, _, _): &(u64, Vec<TermLine>, i32)| *id,
-            move |(id, lines, exit_code): (u64, Vec<TermLine>, i32)| {
-                let _ = id; // used as key only
-                let collapsed = create_rw_signal(lines.len() > 60);
-                let hovered = create_rw_signal(false);
+    // ── Mouse ────────────────────────────────────────────────────────────
+    let selecting = create_rw_signal(false);
+    let mouse_down: RwSignal<Option<MouseCode>> = create_rw_signal(None);
+    let last_mouse_cell: RwSignal<(usize, usize)> = create_rw_signal((usize::MAX, usize::MAX));
+    let wheel_acc = create_rw_signal(0.0f64);
 
-                // Split: first line = prompt/command header; rest = output
-                let header_line = lines.first().cloned().unwrap_or_else(TermLine::new);
-                let output_lines: Vec<TermLine> = lines.into_iter().skip(1).collect();
-                let has_output = !output_lines.is_empty();
+    // Viewport cell under a point, and which half of the cell it is in.
+    let cell_at = {
+        let core = Arc::clone(&core);
+        move |pos: Point| -> (usize, usize, Side) {
+            let m = metrics.get_untracked();
+            let size = core.lock().map(|c| c.size()).unwrap_or(TermSize::new(2, 1));
+            let x = (pos.x - GUTTER_W).max(0.0);
+            let y = (pos.y - PAD_TOP).max(0.0);
+            let col = ((x / m.w) as usize).min(size.cols - 1);
+            let row = ((y / m.h) as usize).min(size.rows - 1);
+            let side = if x - col as f64 * m.w > m.w / 2.0 {
+                Side::Right
+            } else {
+                Side::Left
+            };
+            (row, col, side)
+        }
+    };
+    let term_mode = {
+        let core = Arc::clone(&core);
+        move || core.lock().map(|c| c.mode()).unwrap_or(TermMode::empty())
+    };
+    let send_to_pty = {
+        let w = Arc::clone(&pty_writer);
+        move |data: &[u8]| write_shared(&w, data)
+    };
+
+    let output_area = container(grid_canvas);
+    let area_id = output_area.id();
+    let output_area = output_area
+        .keyboard_navigable()
+        .on_event_stop(EventListener::FocusGained, move |_| is_focused.set(true))
+        .on_event_stop(EventListener::FocusLost, move |_| is_focused.set(false))
+        .on_event_stop(EventListener::PointerDown, {
+            let core = Arc::clone(&core);
+            let cell_at = cell_at.clone();
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |e| {
+                let Event::PointerDown(pe) = e else { return };
+                area_id.request_focus();
+                let (row, col, side) = cell_at(pe.pos);
+                let mods = mods_of(&pe.modifiers);
+                let mode = term_mode();
+                let code = match pe.button {
+                    PointerButton::Mouse(MouseButton::Primary) => MouseCode::Left,
+                    PointerButton::Mouse(MouseButton::Auxiliary) => MouseCode::Middle,
+                    PointerButton::Mouse(MouseButton::Secondary) => MouseCode::Right,
+                    _ => return,
+                };
+                if mode.intersects(TermMode::MOUSE_MODE) && !mods.shift {
+                    mouse_down.set(Some(code));
+                    last_mouse_cell.set((row, col));
+                    send_to_pty(&mouse_report(code, true, false, col, row, mods, mode));
+                    return;
+                }
+                if code != MouseCode::Left {
+                    return;
+                }
+                let ty = match pe.count {
+                    2 => SelectionType::Semantic,
+                    n if n >= 3 => SelectionType::Lines,
+                    _ => SelectionType::Simple,
+                };
+                if let Ok(mut c) = core.lock() {
+                    c.start_selection(ty, row, col, side);
+                }
+                selecting.set(true);
+                bump();
+            }
+        })
+        .on_event_stop(EventListener::PointerMove, {
+            let core = Arc::clone(&core);
+            let cell_at = cell_at.clone();
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |e| {
+                let Event::PointerMove(pe) = e else { return };
+                let (row, col, side) = cell_at(pe.pos);
+                if selecting.get_untracked() {
+                    if let Ok(mut c) = core.lock() {
+                        // Dragging past the top or bottom scrolls.
+                        if pe.pos.y < 0.0 {
+                            c.scroll_lines(1);
+                        } else if pe.pos.y
+                            > PAD_TOP + c.size().rows as f64 * metrics.get_untracked().h
+                        {
+                            c.scroll_lines(-1);
+                        }
+                        c.update_selection(row, col, side);
+                    }
+                    bump();
+                    return;
+                }
+                let mode = term_mode();
+                let mods = mods_of(&pe.modifiers);
+                if !mode.intersects(TermMode::MOUSE_MODE) || mods.shift {
+                    return;
+                }
+                if last_mouse_cell.get_untracked() == (row, col) {
+                    return;
+                }
+                let held = mouse_down.get_untracked();
+                let report = match held {
+                    Some(code)
+                        if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
+                    {
+                        Some(code)
+                    }
+                    None if mode.contains(TermMode::MOUSE_MOTION) => Some(MouseCode::NoButton),
+                    _ => None,
+                };
+                if let Some(code) = report {
+                    last_mouse_cell.set((row, col));
+                    send_to_pty(&mouse_report(code, true, true, col, row, mods, mode));
+                }
+            }
+        })
+        .on_event_stop(EventListener::PointerUp, {
+            let core = Arc::clone(&core);
+            let cell_at = cell_at.clone();
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |e| {
+                let Event::PointerUp(pe) = e else { return };
+                if let Some(code) = mouse_down.get_untracked() {
+                    mouse_down.set(None);
+                    let (row, col, _) = cell_at(pe.pos);
+                    let mode = term_mode();
+                    if mode.intersects(TermMode::MOUSE_MODE) {
+                        let mods = mods_of(&pe.modifiers);
+                        send_to_pty(&mouse_report(code, false, false, col, row, mods, mode));
+                    }
+                    return;
+                }
+                if selecting.get_untracked() {
+                    selecting.set(false);
+                    if let Ok(mut c) = core.lock() {
+                        if !c.has_selection() {
+                            c.clear_selection();
+                        }
+                    }
+                    bump();
+                }
+            }
+        })
+        .on_event_stop(EventListener::PointerWheel, {
+            let core = Arc::clone(&core);
+            let cell_at = cell_at.clone();
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |e| {
+                let Event::PointerWheel(we) = e else { return };
+                let h = metrics.get_untracked().h;
+                let acc = wheel_acc.get_untracked() + we.delta.y;
+                let lines = (acc / h).trunc() as i32;
+                wheel_acc.set(acc - lines as f64 * h);
+                if lines == 0 {
+                    return;
+                }
+                let mode = term_mode();
+                let mods = mods_of(&we.modifiers);
+                let down = lines > 0;
+                let count = lines.unsigned_abs().min(10) as usize;
+                if mode.intersects(TermMode::MOUSE_MODE) && !mods.shift {
+                    let (row, col, _) = cell_at(we.pos);
+                    let code = if down {
+                        MouseCode::WheelDown
+                    } else {
+                        MouseCode::WheelUp
+                    };
+                    let one = mouse_report(code, true, false, col, row, mods, mode);
+                    send_to_pty(&one.repeat(count));
+                } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+                    && !mods.shift
+                {
+                    // Programs on the alternate screen (less, man) scroll
+                    // with the arrow keys.
+                    let key = if down { TermKey::Down } else { TermKey::Up };
+                    let one = key_bytes(key, Mods::default(), mode.contains(TermMode::APP_CURSOR));
+                    send_to_pty(&one.repeat(count));
+                } else {
+                    if let Ok(mut c) = core.lock() {
+                        c.scroll_lines(-lines);
+                    }
+                    bump();
+                }
+            }
+        })
+        .on_event_stop(EventListener::KeyDown, {
+            let core = Arc::clone(&core);
+            let state = state.clone();
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |event| {
+                let Event::KeyDown(e) = event else { return };
+                let ctrl = e.modifiers.contains(Modifiers::CONTROL);
+                let shift = e.modifiers.contains(Modifiers::SHIFT);
+
+                // Global shortcuts route through the same execute_command as the root
+                // key handler in app.rs — single dispatch, no drift.
+                if let Some(cmd) = match_global_shortcut(&e.key.logical_key, &e.modifiers) {
+                    execute_command(&cmd, &state);
+                    return;
+                }
+
+                if ctrl && !shift {
+                    if let Key::Character(ref ch) = e.key.logical_key {
+                        match ch.as_str() {
+                            "f" | "F" => {
+                                find_open.update(|v| *v = !*v);
+                                return;
+                            }
+                            "k" | "K" => {
+                                ai_cmd_open.update(|v| *v = !*v);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if ctrl && shift {
+                    if let Key::Character(ref ch) = e.key.logical_key {
+                        match ch.as_str() {
+                            // Paste (bracketed when the program asked for it).
+                            "v" | "V" => {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(text) = clipboard.get_text() {
+                                        let bracketed =
+                                            term_mode().contains(TermMode::BRACKETED_PASTE);
+                                        send_to_pty(&paste_bytes(&text, bracketed));
+                                        if let Ok(mut c) = core.lock() {
+                                            c.scroll_to_bottom();
+                                        }
+                                        bump();
+                                    }
+                                }
+                                return;
+                            }
+                            // Copy the selection, or everything when nothing
+                            // is selected.
+                            "c" | "C" => {
+                                let text = core
+                                    .lock()
+                                    .ok()
+                                    .map(|c| c.selection_text().unwrap_or_else(|| c.all_text()));
+                                if let Some(text) = text {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(text);
+                                    }
+                                }
+                                return;
+                            }
+                            "=" | "+" => {
+                                term_font_size.update(|v| *v = (*v + 1).min(32));
+                                return;
+                            }
+                            "-" | "_" => {
+                                term_font_size.update(|v| *v = (*v).saturating_sub(1).max(8));
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Shift+PageUp/PageDown scroll the view instead of the program.
+                if shift && !ctrl {
+                    if let Key::Named(named @ (NamedKey::PageUp | NamedKey::PageDown)) =
+                        e.key.logical_key
+                    {
+                        if let Ok(mut c) = core.lock() {
+                            c.scroll_page(named == NamedKey::PageUp);
+                        }
+                        bump();
+                        return;
+                    }
+                }
+
+                let app_cursor = term_mode().contains(TermMode::APP_CURSOR);
+                let bytes = key_to_pty_bytes(e, app_cursor);
+                if !bytes.is_empty() {
+                    send_to_pty(&bytes);
+                    if let Ok(mut c) = core.lock() {
+                        c.scroll_to_bottom();
+                    }
+                    bump();
+                }
+            }
+        })
+        .on_resize(move |rect| {
+            let px = (rect.width(), rect.height());
+            last_px.set(px);
+            apply_size(px, metrics.get_untracked());
+        })
+        .style(move |s| {
+            let p = theme.get().palette;
+            // Subtle accent border when focused so the user knows keys go to the PTY.
+            let border = if is_focused.get() {
+                p.accent.with_alpha(0.35)
+            } else {
+                p.bg_base
+            };
+            s.flex_grow(1.0)
+                .min_height(0.0)
+                .min_width(0.0)
+                .height_full()
+                .border(1.0)
+                .border_color(border)
+                .cursor(CursorStyle::Text)
+        });
+
+    // ── Find bar ─────────────────────────────────────────────────────────
+    let find_step = {
+        let core = Arc::clone(&core);
+        move |dir: i32| {
+            let hits = find_hits.get_untracked();
+            if hits.is_empty() {
+                return;
+            }
+            let n = hits.len();
+            let idx = match find_idx.get_untracked() {
+                Some(i) if dir < 0 => (i + n - 1) % n,
+                Some(i) => (i + 1) % n,
+                None => n - 1,
+            };
+            find_idx.set(Some(idx));
+            if let Ok(mut c) = core.lock() {
+                let rows = c.size().rows as u64;
+                c.scroll_to_abs(hits[idx].row.saturating_sub(rows / 2));
+            }
+            bump();
+        }
+    };
+    let find_btn = |text: &'static str| {
+        container(label(move || text)).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(12.0)
+                .color(p.text_muted)
+                .padding_horiz(6.0)
+                .padding_vert(3.0)
+                .border_radius(3.0)
+                .cursor(CursorStyle::Pointer)
+                .hover(|s| s.background(p.bg_elevated).color(p.text_primary))
+        })
+    };
+    let find_bar = container(
+        stack((
+            text_input(find_query)
+                .placeholder("Find in terminal")
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(12.0)
+                        .width(200.0)
+                        .padding(4.0)
+                        .background(p.bg_elevated)
+                        .color(p.text_primary)
+                        .border(1.0)
+                        .border_color(p.accent)
+                        .border_radius(3.0)
+                })
+                .on_event_cont(EventListener::KeyDown, {
+                    let find_step = find_step.clone();
+                    move |e| {
+                        if let Event::KeyDown(k) = e {
+                            match k.key.logical_key {
+                                Key::Named(NamedKey::Enter) => {
+                                    // Enter searches upward (older output).
+                                    let dir = if k.modifiers.contains(Modifiers::SHIFT) {
+                                        1
+                                    } else {
+                                        -1
+                                    };
+                                    find_step(dir);
+                                }
+                                Key::Named(NamedKey::Escape) => find_open.set(false),
+                                _ => {}
+                            }
+                        }
+                    }
+                }),
+            label(move || {
+                let n = find_hits.get().len();
+                match find_idx.get() {
+                    Some(i) if n > 0 => format!("  {} of {}", i + 1, n),
+                    _ => format!("  {} result{}", n, if n == 1 { "" } else { "s" }),
+                }
+            })
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.font_size(11.0).color(p.text_muted).padding_horiz(8.0)
+            }),
+            find_btn("↑").on_click_stop({
+                let find_step = find_step.clone();
+                move |_| find_step(-1)
+            }),
+            find_btn("↓").on_click_stop(move |_| find_step(1)),
+            find_btn("✕").on_click_stop(move |_| find_open.set(false)),
+        ))
+        .style(|s| {
+            s.flex_row()
+                .items_center()
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
+        }),
+    )
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.width_full()
+            .background(p.bg_panel)
+            .border_bottom(1.0)
+            .border_color(p.border)
+            .apply_if(!find_open.get(), |s| s.display(Display::None))
+    });
+
+    // ── Command blocks (one card per finished shell command) ─────────────
+    let blocks_list = {
+        let state_b = state.clone();
+        let core_b = Arc::clone(&core);
+        dyn_stack(
+            move || blocks_sig.get(),
+            |b: &BlockInfo| b.id,
+            move |b: BlockInfo| {
+                let collapsed = create_rw_signal(true);
+                let hovered = create_rw_signal(false);
+                let exit_code = b.exit_code;
+                let has_output = !b.output.is_empty();
 
                 // ── Exit badge ──────────────────────────────────────────
-                let badge = container(
-                    label(move || {
-                        if exit_code == 0 {
-                            " ✓ ".to_string()
-                        } else {
-                            format!(" ✗ {} ", exit_code)
-                        }
-                    })
-                    .style(move |s| {
-                        s.font_size(10.0)
-                            .color(if exit_code == 0 {
-                                Color::from_rgb8(80, 200, 80)
-                            } else {
-                                theme.get().palette.error
-                            })
-                            .font_weight(Weight::BOLD)
-                    }),
-                )
+                let badge = container(label(move || match exit_code {
+                    Some(0) => " ✓ ".to_string(),
+                    Some(code) => format!(" ✗ {code} "),
+                    None => " • ".to_string(),
+                }))
                 .style(move |s| {
-                    let bg = if exit_code == 0 {
-                        Color::from_rgba8(80, 200, 80, 35)
-                    } else {
-                        theme.get().palette.error.with_alpha(0.15)
+                    let p = theme.get().palette;
+                    let (fg, bg) = match exit_code {
+                        Some(0) => (
+                            Color::from_rgb8(80, 200, 80),
+                            Color::from_rgba8(80, 200, 80, 35),
+                        ),
+                        Some(_) => (p.error, p.error.with_alpha(0.15)),
+                        None => (p.text_muted, p.bg_elevated),
                     };
-                    s.padding_horiz(4.0)
+                    s.font_size(10.0)
+                        .font_weight(Weight::BOLD)
+                        .color(fg)
+                        .padding_horiz(4.0)
                         .padding_vert(1.0)
                         .border_radius(3.0)
                         .margin_right(6.0)
                         .background(bg)
                 });
 
-                // ── Header text (prompt + command) ──────────────────────
-                let header_init = {
-                    let t = theme.get_untracked();
-                    build_line_layout(
-                        &header_line,
-                        t.palette.text_secondary,
-                        t.palette.bg_base,
-                        term_font_size.get_untracked() as f32,
-                    )
-                };
-                let header_sig: RwSignal<TextLayout> = create_rw_signal(header_init);
-                let hl2 = header_line.clone();
-                create_effect(move |_| {
-                    let t = theme.get();
-                    let fs = term_font_size.get() as f32;
-                    header_sig.set(build_line_layout(
-                        &hl2,
-                        t.palette.text_secondary,
-                        t.palette.bg_base,
-                        fs,
-                    ));
-                });
-                let header_text = floem::views::rich_text(move || header_sig.get())
-                    .style(|s| s.flex_grow(1.0).min_width(0.0));
+                // ── Header (prompt + command); click jumps to it ────────
+                let command = b.command.clone();
+                let prompt_row = b.prompt_row;
+                let core_h = Arc::clone(&core_b);
+                let header_text = label(move || command.clone())
+                    .style(move |s| {
+                        let p = theme.get().palette;
+                        s.font_size(12.0)
+                            .font_family("monospace".to_string())
+                            .color(p.text_secondary)
+                            .flex_grow(1.0)
+                            .min_width(0.0)
+                            .text_ellipsis()
+                            .cursor(CursorStyle::Pointer)
+                    })
+                    .on_click_stop(move |_| {
+                        if let Ok(mut c) = core_h.lock() {
+                            c.scroll_to_abs(prompt_row);
+                        }
+                        bump();
+                    });
 
                 // ── Collapse toggle ─────────────────────────────────────
                 let toggle = container(label(move || if collapsed.get() { " ⌄ " } else { " ⌃ " }))
@@ -1064,14 +1450,15 @@ fn single_terminal(
 
                 // ── AI explain button ───────────────────────────────────
                 let state_ai = state_b.clone();
-                let lines_ai: String = {
-                    let mut s = header_line.plain_text();
+                let ai_text: String = {
+                    let mut s = b.command.clone();
                     s.push('\n');
-                    for l in &output_lines {
-                        s.push_str(&l.plain_text());
-                        s.push('\n');
+                    s.push_str(&b.output);
+                    let mut cut = s.len().min(4000);
+                    while !s.is_char_boundary(cut) {
+                        cut -= 1;
                     }
-                    s.truncate(4000);
+                    s.truncate(cut);
                     s
                 };
                 let ai_btn = container(label(|| " ✦ "))
@@ -1086,12 +1473,11 @@ fn single_terminal(
                     })
                     .on_click_stop(move |_| {
                         let prompt =
-                            format!("Explain this terminal output:\n\n```\n{}\n```", lines_ai);
+                            format!("Explain this terminal output:\n\n```\n{}\n```", ai_text);
                         state_ai.ai.pending_chat_inject.set(Some(prompt));
                         state_ai.workbench.show_right_panel.set(true);
                     });
 
-                // ── Header row ──────────────────────────────────────────
                 let header_row = container(
                     stack((badge, header_text, toggle, ai_btn))
                         .style(|s| s.flex_row().items_center().width_full()),
@@ -1099,7 +1485,7 @@ fn single_terminal(
                 .style(move |s| {
                     let p = theme.get().palette;
                     s.width_full()
-                        .min_height(28.0)
+                        .min_height(26.0)
                         .padding_horiz(4.0)
                         .padding_vert(2.0)
                         .background(if hovered.get() {
@@ -1111,338 +1497,66 @@ fn single_terminal(
                 .on_event_stop(EventListener::PointerEnter, move |_| hovered.set(true))
                 .on_event_stop(EventListener::PointerLeave, move |_| hovered.set(false));
 
-                // ── Output lines (collapsible) ──────────────────────────
-                let ol_segs: Vec<Vec<TermSegment>> =
-                    output_lines.iter().map(|l| l.segments.clone()).collect();
-                let output_rows = dyn_stack(
-                    move || ol_segs.clone().into_iter().enumerate().collect::<Vec<_>>(),
-                    |(i, _): &(usize, Vec<TermSegment>)| *i,
-                    move |(_, segs): (usize, Vec<TermSegment>)| {
-                        line_row(TermLine { segments: segs })
-                    },
-                )
-                .style(move |s| {
-                    s.flex_col()
+                // ── Output (collapsible) ────────────────────────────────
+                let output = b.output.clone();
+                let output_view = label(move || output.clone()).style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(11.0)
+                        .font_family("monospace".to_string())
+                        .color(p.text_primary)
+                        .padding_horiz(8.0)
+                        .padding_vert(2.0)
                         .width_full()
                         .apply_if(collapsed.get(), |s| s.display(Display::None))
                 });
 
-                // ── Block card ──────────────────────────────────────────
-                container(stack((header_row, output_rows)).style(|s| s.flex_col().width_full()))
+                container(stack((header_row, output_view)).style(|s| s.flex_col().width_full()))
                     .style(move |s| {
                         let p = theme.get().palette;
                         s.width_full()
                             .border_bottom(1.0)
                             .border_color(p.border.with_alpha(0.25))
-                            .margin_bottom(1.0)
                     })
             },
         )
         .style(|s| s.flex_col().width_full())
     };
-
-    // ── Live / current-block lines (no exit code yet) ─────────────────────
-    let live_view = dyn_stack(
-        move || {
-            let all = live_lines.get();
-            let n = all.len();
-            all.into_iter()
-                .enumerate()
-                .skip(n.saturating_sub(MAX_RENDER_LINES))
-                .collect::<Vec<_>>()
-        },
-        |(i, _): &(usize, TermLine)| *i,
-        move |(_, tl): (usize, TermLine)| line_row(tl),
-    )
-    .style(|s| s.flex_col().width_full().padding_vert(4.0));
-
-    let output_list = stack((blocks_view, live_view)).style(|s| s.flex_col().width_full());
-
-    // ── Scroll area — also the keyboard target ────────────────────────────
-    let output_scroll = scroll(output_list).style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        // Subtle accent border when focused so user knows keys are going to PTY
-        let border_color = if is_focused.get() {
-            p.accent.with_alpha(0.35)
-        } else {
-            p.bg_base // invisible border when unfocused
-        };
-        s.flex_grow(1.0)
-            .min_height(0.0)
-            .width_full()
-            .background(p.bg_base)
-            .border(1.0)
-            .border_color(border_color)
-    });
-
-    // ── Cursor overlay ────────────────────────────────────────────────────
-    // Renders a semi-transparent block cursor at the current column position
-    // on the last (current) line. Uses 8.4 px per character as approximation.
-    let cursor_view = canvas(move |cx, _size| {
-        let col = cursor_col_sig.get() as f64;
-        let x = 8.0 + col * 8.4;
-        let y = 0.0;
-        cx.fill(
-            &floem::kurbo::Rect::new(x, y, x + 7.0, y + 16.0),
-            theme.get().palette.text_primary.with_alpha(0.7),
-            0.0,
-        );
-    })
-    .style(|s| {
-        s.absolute()
-            .width_full()
-            .height(16.0)
-            .inset_bottom(0.0)
-            .inset_left(0.0)
-            .z_index(5)
-            .pointer_events_none()
-    });
-
-    let terminal_with_cursor = stack((output_scroll, cursor_view))
-        .style(|s| s.flex_col().flex_grow(1.0).min_height(0.0).width_full());
-
-    // Clones for the clipboard key handler closure.
-    let pty_writer_c = Arc::clone(&pty_writer);
-    let term_state_c = Arc::clone(&term_state);
-    let pty_master_resize = Arc::clone(&pty_master);
-    let pty_master_font_resize = Arc::clone(&pty_master);
-
-    // Track the last PTY size to avoid redundant resize calls.
-    let last_pty_cols: RwSignal<u16> = create_rw_signal(220u16);
-    let last_pty_rows: RwSignal<u16> = create_rw_signal(40u16);
-    // Track the last known pixel dimensions so font-size changes can recompute cols/rows.
-    let last_pixel_w: RwSignal<f64> = create_rw_signal(0.0_f64);
-    let last_pixel_h: RwSignal<f64> = create_rw_signal(0.0_f64);
-
-    // Wrap scroll in a keyboard-navigable container so it can receive focus
-    // and capture all key events to forward to the PTY.
-    let output_area = container(terminal_with_cursor)
-        .keyboard_navigable()
-        .on_event_stop(EventListener::FocusGained, move |_| {
-            is_focused.set(true);
-        })
-        .on_event_stop(EventListener::FocusLost, move |_| {
-            is_focused.set(false);
-        })
-        .on_event_stop(EventListener::KeyDown, move |event| {
-            if let Event::KeyDown(e) = event {
-                let ctrl = e.modifiers.contains(Modifiers::CONTROL);
-                let shift = e.modifiers.contains(Modifiers::SHIFT);
-
-                // Global shortcuts route through the same execute_command as the root
-                // key handler in app.rs — single dispatch, no drift.
-                if let Some(cmd) = match_global_shortcut(&e.key.logical_key, &e.modifiers) {
-                    execute_command(&cmd, &state);
-                    return;
-                }
-
-                if ctrl && !shift {
-                    if let Key::Character(ref ch) = e.key.logical_key {
-                        match ch.as_str() {
-                            "f" | "F" => {
-                                find_open.update(|v| *v = !*v);
-                                return;
-                            }
-                            "k" | "K" => {
-                                ai_cmd_open.update(|v| *v = !*v);
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Ctrl+Shift+V — paste clipboard text into terminal
-                if ctrl && shift {
-                    if let Key::Character(ref ch) = e.key.logical_key {
-                        if ch.as_str() == "v" || ch.as_str() == "V" {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                if let Ok(text) = clipboard.get_text() {
-                                    if let Ok(mut w) = pty_writer_c.lock() {
-                                        if let Some(writer) = w.as_mut() {
-                                            let _ = writer.write_all(text.as_bytes());
-                                            let _ = writer.flush();
-                                        }
-                                    }
-                                }
-                            }
-                            return;
-                        }
-
-                        // Ctrl+Shift+C — copy all visible terminal text to clipboard
-                        if ch.as_str() == "c" || ch.as_str() == "C" {
-                            if let Ok(ts) = term_state_c.lock() {
-                                let mut parts: Vec<String> = ts
-                                    .blocks
-                                    .iter()
-                                    .flat_map(|b| b.lines.iter())
-                                    .chain(ts.current_block_lines.iter())
-                                    .map(|line| line.plain_text())
-                                    .collect();
-                                if !ts.current_line.is_empty() {
-                                    parts.push(ts.current_line.plain_text());
-                                }
-                                let text = parts.join("\n");
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    let _ = clipboard.set_text(text);
-                                }
-                            }
-                            return;
-                        }
-
-                        // Ctrl+Shift+= — zoom terminal font in
-                        if ch.as_str() == "=" || ch.as_str() == "+" {
-                            term_font_size.update(|v| *v = (*v + 1).min(32));
-                            return;
-                        }
-
-                        // Ctrl+Shift+- — zoom terminal font out
-                        if ch.as_str() == "-" || ch.as_str() == "_" {
-                            term_font_size.update(|v| *v = (*v).saturating_sub(1).max(8));
-                            return;
-                        }
-                    }
-                }
-
-                let bytes = key_to_pty_bytes(e);
-                send_to_pty(bytes);
-            }
-        })
-        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full())
-        // Resize PTY when this view's layout size changes.
-        .on_resize(move |rect| {
-            let font_sz = term_font_size.get_untracked() as f64;
-            let char_w = font_sz * 0.60; // standard monospace width-to-height ratio
-            let char_h = font_sz + 3.0;
-            let pw = rect.width();
-            let ph = rect.height();
-            last_pixel_w.set(pw);
-            last_pixel_h.set(ph);
-            let cols = (pw / char_w).max(1.0) as u16;
-            let rows = (ph / char_h).max(1.0) as u16;
-            if cols == last_pty_cols.get_untracked() && rows == last_pty_rows.get_untracked() {
-                return;
-            }
-            last_pty_cols.set(cols);
-            last_pty_rows.set(rows);
-            if let Ok(guard) = pty_master_resize.lock() {
-                if let Some(ref master) = *guard {
-                    let _ = master.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: pw as u16,
-                        pixel_height: ph as u16,
-                    });
-                }
-            }
-        });
-
-    // Re-trigger PTY resize whenever the terminal font size changes.
-    create_effect(move |_| {
-        let font_sz = term_font_size.get() as f64; // subscribes to font size changes
-        let pw = last_pixel_w.get_untracked();
-        let ph = last_pixel_h.get_untracked();
-        if pw == 0.0 || ph == 0.0 {
-            return;
-        }
-        let char_w = font_sz * 0.60;
-        let char_h = font_sz + 3.0;
-        let cols = (pw / char_w).max(1.0) as u16;
-        let rows = (ph / char_h).max(1.0) as u16;
-        last_pty_cols.set(cols);
-        last_pty_rows.set(rows);
-        if let Ok(guard) = pty_master_font_resize.lock() {
-            if let Some(ref master) = *guard {
-                let _ = master.resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: pw as u16,
-                    pixel_height: ph as u16,
-                });
-            }
-        }
-    });
-
-    // ── Find bar (shown when find_open is true) ───────────────────────────
-    let find_results_count = create_memo(move |_| {
-        let query = find_query.get();
-        if query.is_empty() {
-            return 0usize;
-        }
-        let query_lower = query.to_lowercase();
-        let mut count = 0usize;
-        for (_, block_lines, _) in completed_blocks.get() {
-            count += block_lines
-                .iter()
-                .filter(|l| l.plain_text().to_lowercase().contains(&query_lower))
-                .count();
-        }
-        count += live_lines
-            .get()
-            .iter()
-            .filter(|l| l.plain_text().to_lowercase().contains(&query_lower))
-            .count();
-        count
-    });
-
-    let find_bar = container(
-        stack((
-            text_input(find_query).style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(12.0)
-                    .width(200.0)
-                    .padding(4.0)
-                    .background(p.bg_elevated)
-                    .color(p.text_primary)
-                    .border(1.0)
-                    .border_color(p.accent)
-                    .border_radius(3.0)
-            }),
-            label(move || {
-                let count = find_results_count.get();
-                format!("  {} result{}", count, if count == 1 { "" } else { "s" })
-            })
-            .style(move |s| {
-                let t = theme.get();
-                let p = &t.palette;
-                s.font_size(11.0).color(p.text_muted).padding_horiz(8.0)
-            }),
-            container(label(|| "✕"))
-                .style(move |s| {
-                    let t = theme.get();
-                    let p = &t.palette;
-                    s.font_size(13.0)
-                        .color(p.text_muted)
-                        .padding_horiz(8.0)
-                        .padding_vert(4.0)
-                        .cursor(CursorStyle::Pointer)
-                        .hover(|s| s.background(p.bg_elevated).color(p.text_primary))
-                })
-                .on_click_stop(move |_| find_open.set(false)),
-        ))
-        .style(|s| {
-            s.flex_row()
-                .items_center()
+    let blocks_panel = stack((
+        label(|| "Commands").style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(11.0)
+                .font_weight(Weight::BOLD)
+                .color(p.text_muted)
                 .padding_horiz(8.0)
                 .padding_vert(4.0)
         }),
-    )
+        label(|| "No finished commands yet. Blocks come from shell integration (bash).").style(
+            move |s| {
+                let p = theme.get().palette;
+                s.font_size(11.0)
+                    .color(p.text_disabled)
+                    .padding_horiz(8.0)
+                    .apply_if(!blocks_sig.get().is_empty(), |s| s.display(Display::None))
+            },
+        ),
+        scroll(blocks_list).style(|s| s.flex_grow(1.0).min_height(0.0).width_full()),
+    ))
     .style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        s.width_full()
+        let p = theme.get().palette;
+        s.flex_col()
+            .width(300.0)
+            .height_full()
             .background(p.bg_panel)
-            .border_bottom(1.0)
+            .border_left(1.0)
             .border_color(p.border)
-            .apply_if(!find_open.get(), |s| s.display(Display::None))
+            .apply_if(!blocks_open.get(), |s| s.display(Display::None))
     });
 
-    // ── Assemble — find bar + output area ────────────────────────────────
-    stack((find_bar, output_area)).style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
+    let body = stack((output_area, blocks_panel))
+        .style(|s| s.flex_row().flex_grow(1.0).min_height(0.0).width_full());
+
+    stack((find_bar, body)).style(move |s| {
+        let p = theme.get().palette;
         s.flex_col()
             .flex_grow(1.0)
             .min_height(0.0)
@@ -1452,6 +1566,40 @@ fn single_terminal(
 }
 
 // ── Multi-tab terminal panel ───────────────────────────────────────────────────
+
+/// One terminal tab and the signals the panel shares with its session.
+#[derive(Clone)]
+struct TermTab {
+    id: usize,
+    /// Tab title (renamable).
+    name: RwSignal<String>,
+    /// Bumped by the Clear button.
+    clear_nonce: RwSignal<u64>,
+    shell: String,
+    /// Working directory from OSC 7, shown in the title.
+    cwd: RwSignal<String>,
+    /// The session's PTY writer once the shell is running.
+    pty_writer: RwSignal<Option<SharedPtyWriter>>,
+    /// Prompt rows still in the scrollback.
+    prompt_positions: RwSignal<Vec<usize>>,
+    /// `(nonce, direction)` request to scroll to the previous/next prompt.
+    prompt_jump: RwSignal<(u64, i32)>,
+}
+
+impl TermTab {
+    fn new(id: usize, shell: &str) -> Self {
+        Self {
+            id,
+            name: create_rw_signal(shell.to_string()),
+            clear_nonce: create_rw_signal(0),
+            shell: shell.to_string(),
+            cwd: create_rw_signal(String::new()),
+            pty_writer: create_rw_signal(None),
+            prompt_positions: create_rw_signal(Vec::new()),
+            prompt_jump: create_rw_signal((0, 0)),
+        }
+    }
+}
 
 /// Real PTY terminal panel with multiple tab support.
 ///
@@ -1491,14 +1639,12 @@ pub fn terminal_panel(
     // Writing bytes to this sends them directly to the active shell.
     let active_pty_writer: RwSignal<Option<SharedPtyWriter>> = create_rw_signal(None);
 
-    // Feature 2: command marker positions from OSC 133;A in the active terminal.
-    // Each entry is a line index where a new prompt started.
+    // Feature 2: prompt rows (OSC 133;A) in the active terminal, for the
+    // prev/next command buttons.
     let prompt_positions: RwSignal<Vec<usize>> = create_rw_signal(Vec::new());
-    // Current position in the command-marker navigation list (for prev/next jumps).
-    let cmd_marker_idx: RwSignal<usize> = create_rw_signal(0usize);
-    // Target line to scroll to (None = no pending scroll).
-    // Note: wire to actual scroll-to-line once Floem exposes stable scroll API.
-    let _cmd_scroll_target: RwSignal<Option<usize>> = create_rw_signal(None);
+
+    // Command-block list (finished commands with exit badges) beside each terminal.
+    let blocks_open: RwSignal<bool> = create_rw_signal(false);
 
     // Feature 3: watch run_in_terminal_text — write to active PTY when set.
     {
@@ -1552,28 +1698,7 @@ pub fn terminal_panel(
         });
     }
 
-    // Each entry: (id, name_signal, clear_nonce_signal, shell_str, cwd_signal,
-    //              pty_writer_signal, prompt_positions_signal)
-    // pty_writer_signal: receives the PTY writer Arc once single_terminal initialises
-    // prompt_positions_signal: receives OSC 133;A positions from that terminal
-    type TabEntry = (
-        usize,
-        RwSignal<String>,
-        RwSignal<u64>,
-        String,
-        RwSignal<String>,
-        RwSignal<Option<SharedPtyWriter>>,
-        RwSignal<Vec<usize>>,
-    );
-    let tab_data: RwSignal<Vec<TabEntry>> = create_rw_signal(vec![(
-        1usize,
-        create_rw_signal("bash".to_string()),
-        create_rw_signal(0u64),
-        "bash".to_string(),
-        create_rw_signal(String::new()),
-        create_rw_signal(None::<SharedPtyWriter>),
-        create_rw_signal(Vec::<usize>::new()),
-    )]);
+    let tab_data: RwSignal<Vec<TermTab>> = create_rw_signal(vec![TermTab::new(1, "bash")]);
     let active_tab: RwSignal<usize> = create_rw_signal(1);
     let next_id: RwSignal<usize> = create_rw_signal(2);
 
@@ -1586,17 +1711,7 @@ pub fn terminal_panel(
                 let id = next_id.get_untracked();
                 next_id.set(id + 1);
                 let shell_name = SHELLS[shell_idx.get_untracked() % SHELLS.len()].to_string();
-                tab_data.update(|data| {
-                    data.push((
-                        id,
-                        create_rw_signal(shell_name.clone()),
-                        create_rw_signal(0u64),
-                        shell_name,
-                        create_rw_signal(String::new()),
-                        create_rw_signal(None::<SharedPtyWriter>),
-                        create_rw_signal(Vec::<usize>::new()),
-                    ))
-                });
+                tab_data.update(|data| data.push(TermTab::new(id, &shell_name)));
                 active_tab.set(id);
             }
             cur
@@ -1608,16 +1723,26 @@ pub fn terminal_panel(
         create_effect(move |_| {
             let id = active_tab.get();
             let data = tab_data.get();
-            if let Some((_, _, _, _, _, pw_sig, pp_sig)) = data.iter().find(|(tid, ..)| *tid == id)
-            {
-                active_pty_writer.set(pw_sig.get());
-                prompt_positions.set(pp_sig.get());
+            if let Some(tab) = data.iter().find(|t| t.id == id) {
+                active_pty_writer.set(tab.pty_writer.get());
+                prompt_positions.set(tab.prompt_positions.get());
             }
         });
     }
     // Which tab is currently being renamed (None = none)
     let editing_tab: RwSignal<Option<usize>> = create_rw_signal(None);
     let rename_text: RwSignal<String> = create_rw_signal(String::new());
+
+    // Ask the active terminal to scroll to its previous (-1) / next (+1) prompt.
+    let jump_prompt = move |dir: i32| {
+        let id = active_tab.get_untracked();
+        if let Some(tab) = tab_data.get_untracked().into_iter().find(|t| t.id == id) {
+            tab.prompt_jump.update(|(n, d)| {
+                *n += 1;
+                *d = dir;
+            });
+        }
+    };
 
     // ── Tab bar ───────────────────────────────────────────────────────────
     let tab_bar = stack((
@@ -1627,11 +1752,11 @@ pub fn terminal_panel(
                 tab_data
                     .get()
                     .into_iter()
-                    .map(|(id, ns, cs, _sh, cwd, _pw, _pp)| (id, ns, cs, cwd))
+                    .map(|t| (t.id, t.name, t.cwd))
                     .collect::<Vec<_>>()
             },
-            |(id, _, _, _)| *id,
-            move |(id, name_sig, _clear_sig, cwd_sig)| {
+            |(id, _, _)| *id,
+            move |(id, name_sig, cwd_sig)| {
                 let is_active = move || active_tab.get() == id;
                 let hovered = create_rw_signal(false);
 
@@ -1735,11 +1860,10 @@ pub fn terminal_panel(
                             .apply_if(!show, |s| s.display(Display::None))
                     })
                     .on_click_stop(move |_| {
-                        tab_data.update(|data| data.retain(|(tid, _, _, _, _, _, _)| *tid != id));
+                        tab_data.update(|data| data.retain(|t| t.id != id));
                         if active_tab.get_untracked() == id {
-                            if let Some((last, _, _, _, _, _, _)) = tab_data.get_untracked().last()
-                            {
-                                active_tab.set(*last);
+                            if let Some(last) = tab_data.get_untracked().last() {
+                                active_tab.set(last.id);
                             }
                         }
                         if editing_tab.get_untracked() == Some(id) {
@@ -1782,17 +1906,7 @@ pub fn terminal_panel(
                     .margin_right(2.0)
                     .hover(|s| s.color(p.accent))
             })
-            .on_click_stop(move |_| {
-                let positions = prompt_positions.get_untracked();
-                if positions.is_empty() {
-                    return;
-                }
-                let cur = cmd_marker_idx.get_untracked();
-                let new_idx = cur.saturating_sub(1);
-                cmd_marker_idx.set(new_idx);
-                // Note: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
-                let _target_line = positions.get(new_idx).copied();
-            }),
+            .on_click_stop(move |_| jump_prompt(-1)),
         // Feature 2: "⬇" next command button — jump to next OSC 133;A prompt marker
         container(label(|| "\u{2B07}"))
             .style(move |s| {
@@ -1814,17 +1928,7 @@ pub fn terminal_panel(
                     .margin_right(4.0)
                     .hover(|s| s.color(p.accent))
             })
-            .on_click_stop(move |_| {
-                let positions = prompt_positions.get_untracked();
-                if positions.is_empty() {
-                    return;
-                }
-                let cur = cmd_marker_idx.get_untracked();
-                let new_idx = (cur + 1).min(positions.len().saturating_sub(1));
-                cmd_marker_idx.set(new_idx);
-                // Note: scroll terminal to positions[new_idx] once Floem exposes stable scroll API
-                let _target_line = positions.get(new_idx).copied();
-            }),
+            .on_click_stop(move |_| jump_prompt(1)),
         // "A-" zoom out button
         container(label(|| "A-"))
             .style(move |s| {
@@ -1902,6 +2006,31 @@ pub fn terminal_panel(
                 .hover(|s| s.color(p.accent))
         })
         .on_click_stop(move |_| ai_cmd_open.update(|v| *v = !*v)),
+        // "▤" command-block list toggle (finished commands, exit badges, AI explain)
+        container(label(move || {
+            let n = prompt_positions.get().len();
+            if n == 0 {
+                "▤".to_string()
+            } else {
+                format!("▤ {n}")
+            }
+        }))
+        .style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let active = blocks_open.get();
+            s.padding_horiz(8.0)
+                .padding_vert(5.0)
+                .font_size(12.0)
+                .color(if active { p.accent } else { p.text_muted })
+                .cursor(CursorStyle::Pointer)
+                .border(1.0)
+                .border_color(if active { p.accent } else { p.border })
+                .border_radius(3.0)
+                .margin_right(4.0)
+                .hover(|s| s.color(p.accent))
+        })
+        .on_click_stop(move |_| blocks_open.update(|v| *v = !*v)),
         // "⊟" split button — toggle side-by-side split
         container(label(|| "⊟"))
             .style(move |s| {
@@ -1934,12 +2063,8 @@ pub fn terminal_panel(
             })
             .on_click_stop(move |_| {
                 let id = active_tab.get_untracked();
-                if let Some((_, _, clear_sig, _, _, _, _)) = tab_data
-                    .get_untracked()
-                    .into_iter()
-                    .find(|(tid, ..)| *tid == id)
-                {
-                    clear_sig.update(|v| *v += 1);
+                if let Some(tab) = tab_data.get_untracked().into_iter().find(|t| t.id == id) {
+                    tab.clear_nonce.update(|v| *v += 1);
                 }
             }),
         // Shell selector button (cycles through SHELLS)
@@ -1976,17 +2101,7 @@ pub fn terminal_panel(
                 let id = next_id.get_untracked();
                 next_id.set(id + 1);
                 let shell_name = SHELLS[shell_idx.get_untracked() % SHELLS.len()].to_string();
-                tab_data.update(|data| {
-                    data.push((
-                        id,
-                        create_rw_signal(shell_name.clone()),
-                        create_rw_signal(0u64),
-                        shell_name,
-                        create_rw_signal(String::new()),
-                        create_rw_signal(None::<SharedPtyWriter>),
-                        create_rw_signal(Vec::<usize>::new()),
-                    ))
-                });
+                tab_data.update(|data| data.push(TermTab::new(id, &shell_name)));
                 active_tab.set(id);
             }),
     ))
@@ -2017,32 +2132,32 @@ pub fn terminal_panel(
         term_find_open,
         term_find_query,
         ai_cmd_open,
+        blocks_open,
+        None,
         None,
         None,
     );
 
     // ── Terminal instances (one per tab, hidden when not active) ──────────
     let instances = dyn_stack(
-        move || {
-            safe_get(tab_data, Vec::new())
-                .into_iter()
-                .map(|(id, _, cs, shell, cwd, pw_sig, pp_sig)| (id, cs, shell, cwd, pw_sig, pp_sig))
-                .collect::<Vec<_>>()
-        },
-        |(id, _, _, _, _, _)| *id,
-        move |(id, clear_sig, shell, cwd_sig, pw_sig, pp_sig)| {
+        move || safe_get(tab_data, Vec::new()),
+        |t: &TermTab| t.id,
+        move |t: TermTab| {
+            let id = t.id;
             single_terminal(
                 theme,
-                clear_sig,
-                shell,
-                cwd_sig,
+                t.clear_nonce,
+                t.shell,
+                t.cwd,
                 state.clone(),
                 term_font_size,
                 term_find_open,
                 term_find_query,
                 ai_cmd_open,
-                Some(pw_sig),
-                Some(pp_sig),
+                blocks_open,
+                Some(t.pty_writer),
+                Some(t.prompt_positions),
+                Some(t.prompt_jump),
             )
             .style(move |s| {
                 s.size_full()
@@ -2203,4 +2318,54 @@ pub fn terminal_panel(
             .border_top(1.0)
             .border_color(p.border)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_size_leaves_room_for_the_gutter() {
+        let m = CellMetrics {
+            w: 8.0,
+            h: 16.0,
+            font_size: 13.0,
+        };
+        let (cols, rows) = grid_size_for(
+            (GUTTER_W + PAD_RIGHT + 80.0 * 8.0, PAD_TOP + 24.0 * 16.0),
+            m,
+        );
+        assert_eq!((cols, rows), (80, 24));
+        assert_eq!(grid_size_for((0.0, 0.0), m), (0, 0));
+    }
+
+    #[test]
+    fn theme_drives_the_default_colours() {
+        let theme = PhazeTheme::default();
+        let p = palette_from_theme(&theme.palette);
+        assert_eq!(p.bg, to_rgb(theme.palette.bg_base));
+        assert_eq!(p.fg, to_rgb(theme.palette.text_primary));
+        assert_eq!(p.ansi, ANSI_BASE);
+    }
+
+    #[test]
+    fn shared_writer_forwards_bytes() {
+        let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let shared: SharedPtyWriter = Arc::new(Mutex::new(None));
+        write_shared(&shared, b"dropped");
+        *shared.lock().unwrap() = Some(Box::new(Sink(Arc::clone(&sink))));
+        let core = Mutex::new(TermCore::new(20, 5));
+        process_pty_output(&core, b"\x1b[6n", &mut SharedWriterRef(&shared));
+        assert_eq!(&*sink.lock().unwrap(), b"\x1b[1;1R");
+    }
 }
