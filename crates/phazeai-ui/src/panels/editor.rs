@@ -53,6 +53,7 @@ use phazeai_core::syntax::{self, SyntaxLang};
 
 use crate::{
     components::icon::{icons, phaze_icon},
+    components::FocusWhenOpen,
     theme::PhazeTheme,
 };
 
@@ -1085,9 +1086,10 @@ pub type ShortcutFn = Rc<dyn Fn(&Key, &Modifiers) -> bool>;
 /// key press it gets, so while the editor had focus neither the panel's key
 /// handler nor the app's ever ran: no global shortcut worked (Ctrl+P, Ctrl+T,
 /// Ctrl+B ...), and Ctrl+S, Ctrl+F and Ctrl+H did nothing (a save came only
-/// from auto-save). A press with Ctrl or Alt first goes to `panel_shortcut`,
-/// then `app_shortcut`; anything neither claims gets the editor's usual key
-/// bindings.
+/// from auto-save), and neither did F12, Vim mode or Tab-to-accept. A press
+/// with Ctrl or Alt first goes to `panel_shortcut`; then every press goes to
+/// `app_shortcut` (the IDE's key bindings); anything neither claims gets the
+/// editor's usual key bindings.
 fn editor_keys(
     panel_shortcut: ShortcutFn,
     app_shortcut: ShortcutFn,
@@ -1097,9 +1099,19 @@ fn editor_keys(
     let default: Rc<RefCell<Option<Handler>>> = Rc::new(RefCell::new(None));
     move |editor, press, mods| {
         if let KeyInput::Keyboard(key, _) = &press.key {
-            if (mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT))
-                && (panel_shortcut(key, &mods) || app_shortcut(key, &mods))
-            {
+            let chord = mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT);
+            if chord && panel_shortcut(key, &mods) {
+                return CommandExecuted::Yes;
+            }
+            if app_shortcut(key, &mods) {
+                if !chord
+                    && matches!(
+                        key,
+                        Key::Character(_) | Key::Named(floem::keyboard::NamedKey::Space)
+                    )
+                {
+                    skip_typing(editor);
+                }
                 return CommandExecuted::Yes;
             }
         }
@@ -1107,6 +1119,21 @@ fn editor_keys(
         let handler = slot.get_or_insert_with(|| Box::new(default_key_handler(editor)));
         handler(press, mods)
     }
+}
+
+/// Keep the press being handled from also typing text. Floem's editor types a
+/// plain character (or a space) after the key handler returns, whatever the
+/// handler did with it, so a Vim normal-mode `j` would both move the cursor
+/// and insert a "j". A read-only editor types nothing; it is writable again
+/// once this event is over. Edits made through the document (Vim's `x`,
+/// `dd` ...) are not affected by the flag.
+fn skip_typing(editor: RwSignal<floem::views::editor::Editor>) {
+    let read_only = editor.get_untracked().read_only;
+    if read_only.get_untracked() {
+        return;
+    }
+    read_only.set(true);
+    floem::action::exec_after(std::time::Duration::ZERO, move |_| read_only.set(false));
 }
 
 /// Write `tab`'s document (looked up in `docs` by path) to disk. Only on success is the tab
@@ -4979,19 +5006,36 @@ pub fn editor_panel(
                 find_in_selection.set(turning_on);
             });
 
-        let find_input = text_input(find_query).style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.width(220.0)
-                .padding_horiz(8.0)
-                .padding_vert(4.0)
-                .font_size(13.0)
-                .color(p.text_primary)
-                .background(p.bg_elevated)
-                .border(1.0)
-                .border_color(p.border_focus)
-                .border_radius(4.0)
-        });
+        // The find box takes Escape itself (it only drops its focus), so the
+        // bar's own Escape handler below never sees it; the root reports it.
+        {
+            let escapes = crate::components::unclaimed_escapes();
+            create_effect(move |seen: Option<u64>| {
+                let now = escapes.get();
+                if seen.is_some_and(|seen| seen != now) && find_open.get_untracked() {
+                    find_open.set(false);
+                    find_query.set(String::new());
+                    replace_open.set(false);
+                    find_in_selection.set(false);
+                }
+                now
+            });
+        }
+        let find_input = text_input(find_query)
+            .focus_when_open(move || find_open.get())
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width(220.0)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .font_size(13.0)
+                    .color(p.text_primary)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border_focus)
+                    .border_radius(4.0)
+            });
 
         let replace_input = text_input(replace_query)
             .placeholder("Replace…")
@@ -6751,5 +6795,67 @@ mod tab_tests {
             "let x = 1;  (+1 more lines)"
         );
         assert_eq!(ghost_preview("\n  \n"), "");
+    }
+}
+
+#[cfg(test)]
+mod editor_key_tests {
+    use super::{editor_keys, ShortcutFn};
+    use floem::keyboard::{Key, KeyCode, Modifiers, NamedKey, PhysicalKey};
+    use floem::reactive::{create_rw_signal, SignalGet};
+    use floem::views::editor::command::CommandExecuted;
+    use floem::views::editor::keypress::key::KeyInput;
+    use floem::views::editor::keypress::press::KeyPress;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn the_ides_keys_run_while_the_editor_has_focus() {
+        let seen: Rc<RefCell<Vec<Key>>> = Rc::default();
+        let app: ShortcutFn = {
+            let seen = seen.clone();
+            Rc::new(move |key: &Key, _: &Modifiers| {
+                seen.borrow_mut().push(key.clone());
+                true
+            })
+        };
+        let panel: ShortcutFn = Rc::new(|_: &Key, _: &Modifiers| false);
+        let keys = editor_keys(panel, app);
+        let editor = create_rw_signal(floem::views::text_editor("").editor().clone());
+
+        // F12 (go to definition), Tab (accept an AI suggestion) and a bare
+        // letter (a Vim normal-mode motion) carry no Ctrl or Alt.
+        let presses = [
+            (Key::Named(NamedKey::F12), KeyCode::F12),
+            (Key::Named(NamedKey::Tab), KeyCode::Tab),
+            (Key::Character("j".into()), KeyCode::KeyJ),
+        ];
+        for (key, code) in presses.iter().cloned() {
+            let press = KeyPress::new(
+                KeyInput::Keyboard(key, PhysicalKey::Code(code)),
+                Modifiers::empty(),
+            );
+            assert!(
+                matches!(
+                    keys(editor, &press, Modifiers::empty()),
+                    CommandExecuted::Yes
+                ),
+                "a key the IDE uses must not reach the editor's own bindings"
+            );
+        }
+        let expected: Vec<Key> = presses.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(
+            *seen.borrow(),
+            expected,
+            "every press must reach the IDE's key bindings"
+        );
+
+        // Floem types a plain character after the handler returns, whatever the
+        // handler did; a press the IDE used must not also type text.
+        editor.get_untracked().receive_char("j");
+        assert_eq!(
+            editor.get_untracked().doc().text().to_string(),
+            "",
+            "a key the IDE used must not also be typed"
+        );
     }
 }

@@ -24,6 +24,24 @@ thread_local! {
     static EDITOR_REFOCUS: RwSignal<u64> = Scope::new().create_rw_signal(0);
 }
 
+thread_local! {
+    /// Bumped by an Escape no overlay used; see [`unclaimed_escapes`].
+    static UNCLAIMED_ESCAPE: RwSignal<u64> = Scope::new().create_rw_signal(0);
+}
+
+/// Report an Escape press that closed no overlay. A focused text box takes
+/// Escape itself (Floem only drops its focus), so a bar whose input had focus,
+/// such as the editor's find bar, never sees the key; it watches
+/// [`unclaimed_escapes`] instead.
+pub fn escape_unclaimed() {
+    UNCLAIMED_ESCAPE.with(|s| s.update(|n| *n = n.wrapping_add(1)));
+}
+
+/// The signal [`escape_unclaimed`] bumps.
+pub fn unclaimed_escapes() -> RwSignal<u64> {
+    UNCLAIMED_ESCAPE.with(|s| *s)
+}
+
 /// Ask the active editor to take keyboard focus.
 pub fn refocus_editor() {
     EDITOR_REFOCUS.with(|s| s.update(|n| *n = n.wrapping_add(1)));
