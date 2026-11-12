@@ -95,3 +95,20 @@ async fn a_local_server_needs_no_key() {
     assert_eq!(models[0].id, "qwen3-coder:30b");
     assert!(!seen.lock().unwrap()[0].contains("authorization"));
 }
+
+#[tokio::test]
+async fn the_key_is_not_sent_unencrypted_to_another_machine() {
+    // As for chat: a cloud provider pointed at a plain-http address on
+    // another machine would get the key in clear text. Nothing is sent.
+    std::env::set_var("OPENAI_API_KEY", "sk-must-not-leave");
+    let mut settings = phazeai_core::Settings::default();
+    settings.llm.provider = phazeai_core::config::LlmProvider::OpenAI;
+    settings.llm.base_url = Some("http://192.0.2.1:9/v1".into());
+    let started = std::time::Instant::now();
+    let err = settings.live_models(true).await.unwrap_err().to_string();
+    assert!(err.contains("unencrypted"), "{err}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "refused before any request, not after a timeout"
+    );
+}
