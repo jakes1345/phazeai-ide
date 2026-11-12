@@ -32,6 +32,8 @@ pub const FS_SERVER_NAME: &str = "secure-filesystem-server";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {
     pub name: String,
+    /// Optional in MCP: a tool without one is still listed, described as "".
+    #[serde(default)]
     pub description: String,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: serde_json::Value,
@@ -287,12 +289,18 @@ impl McpClient {
         let name_clone = config.name.clone();
         let process = ChildSlot::new(process);
         let reader_process = process.clone();
+        let reply_stdin = stdin.clone();
         std::thread::spawn(move || {
-            Self::read_loop(stdout, pending_clone);
+            Self::read_loop(stdout, pending_clone.clone(), |answer| {
+                if let Err(e) = write_line(&reply_stdin, answer) {
+                    tracing::warn!("MCP server '{name_clone}': could not answer its request: {e}");
+                }
+            });
             // The server exited or closed its output: reap it before
-            // `is_alive` turns false.
+            // `is_alive` turns false, then fail every request still waiting
+            // for an answer instead of leaving each to time out.
             reader_process.end();
-            alive_clone.store(false, Ordering::SeqCst);
+            Self::server_gone(&alive_clone, &pending_clone);
             tracing::warn!("MCP server '{name_clone}' reader loop exited (EOF)");
         });
 
@@ -395,10 +403,11 @@ impl McpClient {
             "initialize",
             serde_json::json!({
                 "protocolVersion": version,
-                // None: this client answers no server-to-client requests, so it
-                // must not offer `roots`. A server offered roots asks for them
-                // with `roots/list`, and the official filesystem server holds
-                // every tool call until that is answered or times out.
+                // None. The client answers a server's `ping` and turns down
+                // every other request it sends (`answer_server_request`), so
+                // it must not offer `roots`: a server offered roots asks for
+                // them with `roots/list`, and the official filesystem server
+                // holds every tool call until that is answered with a list.
                 "capabilities": {},
                 "clientInfo": {
                     "name": "PhazeAI",
@@ -588,6 +597,21 @@ impl McpClient {
             pending.insert(id, tx);
         }
 
+        // Checked after the request is listed: the reader marks the server
+        // gone before it clears the list, so either this sees it gone or the
+        // reader's clearing drops this request's sender, and the wait below
+        // ends at once.
+        if !self.is_alive() {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(format!(
+                "MCP server '{}' is not running (it exited or stopped answering), so \
+                 '{method}' was not sent",
+                self.name
+            ));
+        }
+
         if let Err(e) = self.send_raw(&request) {
             if let Ok(mut pending) = self.pending.lock() {
                 pending.remove(&id);
@@ -596,18 +620,27 @@ impl McpClient {
         }
 
         // Block waiting for response with a real timeout.
-        let response = rx.recv_timeout(REQUEST_TIMEOUT).map_err(|_| {
+        let response = rx.recv_timeout(REQUEST_TIMEOUT).map_err(|e| {
             if let Ok(mut pending) = self.pending.lock() {
                 pending.remove(&id);
             }
-            // Mark unhealthy so `health_check` can recycle wedged-but-alive processes.
-            self.alive.store(false, Ordering::SeqCst);
-            format!(
-                "MCP server '{}' timed out after {}s while calling '{}'",
-                self.name,
-                REQUEST_TIMEOUT.as_secs(),
-                method
-            )
+            match e {
+                mpsc::RecvTimeoutError::Disconnected => format!(
+                    "MCP server '{}' exited before answering '{method}'",
+                    self.name
+                ),
+                mpsc::RecvTimeoutError::Timeout => {
+                    // Mark unhealthy so `health_check` can recycle
+                    // wedged-but-alive processes.
+                    self.alive.store(false, Ordering::SeqCst);
+                    format!(
+                        "MCP server '{}' timed out after {}s while calling '{}'",
+                        self.name,
+                        REQUEST_TIMEOUT.as_secs(),
+                        method
+                    )
+                }
+            }
         })?;
 
         Self::result_of(response)
@@ -645,29 +678,34 @@ impl McpClient {
     /// LSP's Content-Length framing: a server reads up to `\n`, so a header
     /// is a parse error and an unterminated body is never read at all.
     fn send_raw(&self, message: &serde_json::Value) -> Result<(), String> {
-        let stdin = match &self.transport {
-            Transport::Http(http) => return http.notify(message.clone()),
-            Transport::Stdio { stdin, .. } => stdin,
-        };
-        let mut line = serde_json::to_string(message)
-            .map_err(|e| format!("Failed to serialize message: {e}"))?;
-        line.push('\n');
-
-        let mut stdin = stdin.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-        stdin
-            .write_all(line.as_bytes())
-            .map_err(|e| format!("Failed to write to MCP server: {e}"))?;
-        stdin
-            .flush()
-            .map_err(|e| format!("Failed to flush MCP server stdin: {e}"))?;
-
-        Ok(())
+        match &self.transport {
+            Transport::Http(http) => http.notify(message.clone()),
+            Transport::Stdio { stdin, .. } => write_line(stdin, message),
+        }
     }
 
-    /// Reads one JSON-RPC message per line (see `send_raw`) until EOF.
+    /// The server's output has ended: mark it gone, then drop every waiting
+    /// request's sender so each wait ends at once with "exited" rather than
+    /// after [`REQUEST_TIMEOUT`]. In that order: see `send_request`.
+    fn server_gone(
+        alive: &AtomicBool,
+        pending: &Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>,
+    ) {
+        alive.store(false, Ordering::SeqCst);
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Reads one JSON-RPC message per line (see `send_raw`) until EOF. A
+    /// request from the server is answered through `reply`
+    /// ([`answer_server_request`]); a response goes to the request waiting
+    /// for it.
     fn read_loop(
         stdout: impl std::io::Read + Send + 'static,
         pending: Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>,
+        reply: impl Fn(&serde_json::Value),
     ) {
         let mut reader = BufReader::new(stdout);
         let mut line = Vec::new();
@@ -690,6 +728,13 @@ impl McpClient {
                 }
             };
 
+            // A request from the server. Its id is the server's own, so it
+            // must not be taken for the answer to one of ours.
+            if let Some(answer) = answer_server_request(&response) {
+                reply(&answer);
+                continue;
+            }
+
             // Match response to pending request
             if let Some(id) = response.get("id").and_then(|i| i.as_u64()) {
                 let sender = {
@@ -709,6 +754,49 @@ impl McpClient {
             }
         }
     }
+}
+
+/// Writes `message` as one line of JSON (MCP's stdio framing; see
+/// `McpClient::send_raw`).
+fn write_line(
+    stdin: &Mutex<Box<dyn Write + Send>>,
+    message: &serde_json::Value,
+) -> Result<(), String> {
+    let mut line =
+        serde_json::to_string(message).map_err(|e| format!("Failed to serialize message: {e}"))?;
+    line.push('\n');
+
+    let mut stdin = stdin.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    stdin
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("Failed to write to MCP server: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("Failed to flush MCP server stdin: {e}"))?;
+    Ok(())
+}
+
+/// The answer to `message` when it is a request from the server (it has a
+/// `method` and an `id`), or `None` for a response or a notification.
+/// `ping` gets the empty result MCP requires: a server that pings to see
+/// whether the client is still there may otherwise drop the connection.
+/// Anything else gets "Method not found", as the client offers no
+/// capability (roots, sampling, elicitation) a server may ask it to use;
+/// an answer, even a refusal, keeps the server from waiting on one.
+fn answer_server_request(message: &serde_json::Value) -> Option<serde_json::Value> {
+    let method = message.get("method")?.as_str()?;
+    let id = message
+        .get("id")
+        .filter(|id| id.is_string() || id.is_number())?;
+    Some(if method == "ping" {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+    } else {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": format!("Method not found: {method}")},
+        })
+    })
 }
 
 impl Drop for McpClient {
@@ -1005,10 +1093,91 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pending = Arc::new(Mutex::new(HashMap::from([(7, tx)])));
 
-        McpClient::read_loop(std::io::Cursor::new(stdout.into_bytes()), pending.clone());
+        McpClient::read_loop(
+            std::io::Cursor::new(stdout.into_bytes()),
+            pending.clone(),
+            |answer| panic!("nothing here is a request, yet it answered {answer}"),
+        );
 
         let response = rx.try_recv().expect("the answer to request 7");
         assert_eq!(response["result"]["text"], "two\nlines");
         assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_server_s_ping_is_answered_and_its_ids_are_not_taken_for_ours() {
+        // The server pings with id 7 while our request 7 is waiting, asks for
+        // roots (which the client doesn't offer), then answers request 7.
+        let stdout = [
+            r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":"r-1","method":"roots/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#,
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat();
+        let (tx, rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(HashMap::from([(7, tx)])));
+        let answers = Mutex::new(Vec::new());
+
+        McpClient::read_loop(
+            std::io::Cursor::new(stdout.into_bytes()),
+            pending.clone(),
+            |answer| answers.lock().unwrap().push(answer.clone()),
+        );
+
+        assert_eq!(
+            answers.into_inner().unwrap(),
+            vec![
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "result": {}}),
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": "r-1",
+                    "error": {"code": -32601, "message": "Method not found: roots/list"},
+                }),
+            ]
+        );
+        // Our request 7 got its own answer, not the server's ping.
+        assert_eq!(rx.try_recv().unwrap()["result"]["ok"], true);
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn responses_and_notifications_are_not_requests() {
+        for message in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": 1, "message": "x"}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/progress"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+        ] {
+            assert_eq!(answer_server_request(&message), None, "{message}");
+        }
+    }
+
+    #[test]
+    fn requests_waiting_on_a_server_that_exits_fail_at_once() {
+        let (tx, rx) = mpsc::channel::<serde_json::Value>();
+        let pending = Arc::new(Mutex::new(HashMap::from([(3, tx)])));
+        let alive = AtomicBool::new(true);
+
+        McpClient::server_gone(&alive, &pending);
+
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(pending.lock().unwrap().is_empty());
+        // No 30 s wait: the sender is gone, so the wait ends now.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_tool_without_a_description_is_still_listed() {
+        let tool: McpToolDef = serde_json::from_value(serde_json::json!({
+            "name": "now",
+            "inputSchema": {"type": "object"},
+        }))
+        .unwrap();
+        assert_eq!(tool.name, "now");
+        assert_eq!(tool.description, "");
     }
 }

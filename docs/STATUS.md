@@ -96,7 +96,7 @@
 
 24. **Fixed (PR #23):** language servers, debug adapters and MCP servers are reaped (`process::ChildSlot`).
 25. **Fixed (PR #19):** keywords match at word starts, so "no explanation" no longer routes to Reasoning ("planet" still does, on purpose).
-26. **MCP client gaps.** It does not answer requests the server sends (such as `ping`). Pending requests wait 30 s when a server dies. `McpToolDef.description` is required, though MCP makes it optional.
+26. **Fixed (this PR):** the MCP client answers a server's `ping` (over stdio and in an HTTP event stream) and turns down other server requests with "Method not found" instead of leaving them unanswered; a server's request id is no longer taken for the answer to one of the client's. A server that exits fails its waiting requests at once rather than after 30 s, and a request to it is not sent. A tool without a `description` is listed.
 27. **Stop drops the response stream, not the request.** The spawned SSE readers (`openai.rs` ~401, `claude.rs` ~411) never check whether the receiver is gone, so they keep the HTTP response open until the provider finishes. In the CLI's long-lived runtime the request carries on in the background.
 28. **Settings saves can land out of order.** Each change spawns its own save thread; `SETTINGS_WRITE_LOCK` stops overlapping writes but not reordering.
 29. **The commit-message request's audit entry lists no files**, though the request carries the staged diff.
