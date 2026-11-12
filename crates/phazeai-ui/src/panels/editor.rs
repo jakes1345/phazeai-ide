@@ -53,6 +53,7 @@ use phazeai_core::syntax::{self, SyntaxLang};
 
 use crate::{
     components::icon::{icons, phaze_icon},
+    components::FocusWhenOpen,
     theme::PhazeTheme,
 };
 
@@ -5005,19 +5006,36 @@ pub fn editor_panel(
                 find_in_selection.set(turning_on);
             });
 
-        let find_input = text_input(find_query).style(move |s| {
-            let t = theme.get();
-            let p = &t.palette;
-            s.width(220.0)
-                .padding_horiz(8.0)
-                .padding_vert(4.0)
-                .font_size(13.0)
-                .color(p.text_primary)
-                .background(p.bg_elevated)
-                .border(1.0)
-                .border_color(p.border_focus)
-                .border_radius(4.0)
-        });
+        // The find box takes Escape itself (it only drops its focus), so the
+        // bar's own Escape handler below never sees it; the root reports it.
+        {
+            let escapes = crate::components::unclaimed_escapes();
+            create_effect(move |seen: Option<u64>| {
+                let now = escapes.get();
+                if seen.is_some_and(|seen| seen != now) && find_open.get_untracked() {
+                    find_open.set(false);
+                    find_query.set(String::new());
+                    replace_open.set(false);
+                    find_in_selection.set(false);
+                }
+                now
+            });
+        }
+        let find_input = text_input(find_query)
+            .focus_when_open(move || find_open.get())
+            .style(move |s| {
+                let t = theme.get();
+                let p = &t.palette;
+                s.width(220.0)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .font_size(13.0)
+                    .color(p.text_primary)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.border_focus)
+                    .border_radius(4.0)
+            });
 
         let replace_input = text_input(replace_query)
             .placeholder("Replace…")

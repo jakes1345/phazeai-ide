@@ -4263,8 +4263,9 @@ pub fn launch_phaze_ide() {
                             if key_event.key.logical_key
                                 == Key::Named(floem::keyboard::NamedKey::Escape)
                                 && !ESCAPE_DOWN_SEEN.with(|seen| seen.replace(false))
+                                && !close_topmost_overlay(&state)
                             {
-                                close_topmost_overlay(&state);
+                                crate::components::escape_unclaimed();
                             }
                         }
                     }
