@@ -3382,6 +3382,21 @@ fn ide_root(state: IdeState) -> impl IntoView {
         });
     }
 
+    // The editors run the app's global shortcuts themselves: while one has
+    // focus, key presses never reach the handler at the root.
+    let app_shortcut: crate::panels::editor::ShortcutFn = {
+        let state = state.clone();
+        std::rc::Rc::new(move |key: &Key, mods: &Modifiers| {
+            match match_global_shortcut(key, mods) {
+                Some(cmd) => {
+                    execute_command(&cmd, &state);
+                    true
+                }
+                None => false,
+            }
+        })
+    };
+
     let raw_editor = editor_panel(
         state.editor.open_file,
         state.workbench.theme,
@@ -3444,6 +3459,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.code_search_if_enabled(),
         state.editor.panes,
         true,
+        app_shortcut.clone(),
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3511,6 +3527,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.code_search_if_enabled(),
         state.editor.panes,
         false,
+        app_shortcut.clone(),
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3834,6 +3851,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.project.code_search_if_enabled(),
         state.editor.panes,
         false,
+        app_shortcut.clone(),
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
