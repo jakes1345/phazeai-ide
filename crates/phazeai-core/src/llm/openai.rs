@@ -400,7 +400,6 @@ impl LlmClient for OpenAIClient {
         // keeping it would just fill the context.
         let echo_reasoning = self.echo_reasoning;
         tokio::spawn(async move {
-            use futures::StreamExt;
             let mut buffer = String::new();
             // Maps tool_call index → id, since OpenAI only sends id on the first
             // delta chunk. Ordered by index so parallel calls finish (and run)
@@ -419,7 +418,9 @@ impl LlmClient for OpenAIClient {
                     }
                 };
 
-            while let Some(chunk) = stream.next().await {
+            while let Some(chunk) =
+                super::stream_cancel::next_unless_dropped(&mut stream, &tx).await
+            {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
@@ -683,6 +684,54 @@ mod stream_tests {
         }
         assert_eq!(ended, vec!["call_a", "call_b"]);
         assert!(done);
+    }
+
+    /// Serve the start of a reply that never finishes, and report when the
+    /// client hangs up.
+    async fn serve_endless(first: String) -> (String, tokio::sync::oneshot::Receiver<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = sock.read(&mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            let part = format!("{:x}\r\n{first}\r\n", first.len());
+            sock.write_all(part.as_bytes()).await.unwrap();
+            // A provider still generating: send nothing more, and wait for
+            // the client to close the connection.
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        (format!("http://{addr}"), closed_rx)
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_closes_the_provider_connection() {
+        let first = chunk(serde_json::json!({"choices": [{"delta": {"content": "Hel"}}]}));
+        let (base, closed) = serve_endless(first).await;
+        let client = OpenAIClient::new("test-key").with_base_url(base);
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        match rx.next().await {
+            Some(StreamEvent::TextDelta(t)) => assert_eq!(t, "Hel"),
+            other => panic!("expected the first text, got {other:?}"),
+        }
+        // What the agent does on Stop.
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(3), closed)
+            .await
+            .expect("the request was still open 3 s after Stop")
+            .unwrap();
     }
 
     /// One request as the server saw it: header lines and the JSON body.
