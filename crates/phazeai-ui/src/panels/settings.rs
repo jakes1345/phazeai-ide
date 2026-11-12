@@ -1405,6 +1405,49 @@ fn keybindings_section(state: IdeState) -> impl IntoView {
 /// The settings panel. Accepts IdeState so that theme/font_size/tab_size are
 /// the shared signals — changes here propagate to the rest of the IDE and are
 /// persisted to disk via reactive effects wired in IdeState::new().
+/// What the person reads when their settings file can't be read, or `None`.
+fn settings_file_notice(problem: Option<String>, path: &std::path::Path) -> Option<String> {
+    problem.map(|problem| {
+        format!(
+            "Your settings file has an error, so PhazeAI is using its defaults and \
+             won't save changes over it.\n{}\n{problem}\nFix it (or move it aside to \
+             start fresh), then open Settings again.",
+            path.display()
+        )
+    })
+}
+
+/// A warning at the top of Settings while the settings file can't be read.
+/// The file is checked again each time Settings is shown, so a fix made in
+/// another editor clears it.
+fn settings_file_problem(state: IdeState) -> impl IntoView {
+    use floem::reactive::{create_effect, create_rw_signal};
+    let theme = state.workbench.theme;
+    let tab = state.workbench.left_panel_tab;
+    let notice = create_rw_signal(None::<String>);
+    create_effect(move |_| {
+        if tab.get() == crate::app::Tab::Settings {
+            notice.set(settings_file_notice(
+                Settings::file_problem(),
+                &Settings::config_path(),
+            ));
+        }
+    });
+    label(move || notice.get().unwrap_or_default()).style(move |s| {
+        let t = theme.get();
+        let p = &t.palette;
+        s.apply_if(notice.get().is_none(), |s| s.hide())
+            .font_size(12.0)
+            .color(p.warning)
+            .padding(10.0)
+            .margin_bottom(12.0)
+            .border(1.0)
+            .border_color(p.warning)
+            .border_radius(6.0)
+            .width_full()
+    })
+}
+
 pub fn settings_panel(state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
 
@@ -1433,6 +1476,7 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
 
     // Scrollable body containing all sections
     let body = stack((
+        settings_file_problem(state.clone()),
         theme_section(state.clone()),
         divider(state.clone()),
         editor_section(state.clone()),
@@ -1460,6 +1504,29 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
             .height_full()
             .background(p.bg_panel)
     })
+}
+
+#[cfg(test)]
+mod settings_file_tests {
+    use super::settings_file_notice;
+    use std::path::Path;
+
+    #[test]
+    fn the_notice_names_the_file_the_line_and_what_to_do() {
+        let path = Path::new("/home/me/.config/phazeai/config.toml");
+        assert_eq!(settings_file_notice(None, path), None);
+        let notice = settings_file_notice(Some("line 6, column 13: invalid string".into()), path)
+            .expect("a problem is shown");
+        assert!(
+            notice.contains("/home/me/.config/phazeai/config.toml"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("line 6, column 13: invalid string"),
+            "{notice}"
+        );
+        assert!(notice.contains("won't save changes over it"), "{notice}");
+    }
 }
 
 #[cfg(test)]

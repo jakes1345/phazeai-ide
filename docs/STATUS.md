@@ -107,6 +107,7 @@
 31. **Fixed (this PR):** opening another folder moves the agent's file sandbox, its relative paths and its shell with it (`app/tool_root.rs`). Detail under "Roots after Open Folder".
 32. **The terminal is a line/block renderer**, so full-screen programs (`vim`, `htop`, `less`) inside it draw wrongly.
 33. **No end-to-end run with a real model** (cloud key or built-in) has been recorded for the chat, agent or Composer paths; their tests use mocks.
+34. **Fixed (this PR):** a `config.toml` with a mistake in it was replaced by the defaults. The IDE loaded the defaults with only a line on stderr, and its provider/model effect saved them at every start, so one typo erased the whole file. Now `Settings::save` refuses while the file can't be read, the IDE shows "line L, column C: reason" in a toast at start and at the top of Settings, and the CLI prints it.
 
 ## Build and test on Linux (Linux Mint / Ubuntu)
 
