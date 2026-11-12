@@ -550,6 +550,7 @@ fn editor_section(state: IdeState) -> impl IntoView {
     let auto_save = state.editor.auto_save;
     let word_wrap = state.editor.word_wrap;
     let organize_imports = state.editor.organize_imports_on_save;
+    let format_on_save = state.editor.format_on_save;
     let code_lens_vis = state.editor.code_lens_visible;
     let inlay_hints = state.editor.inlay_hints_toggle;
     let relative_ln = state.editor.relative_line_numbers;
@@ -563,6 +564,7 @@ fn editor_section(state: IdeState) -> impl IntoView {
         toggle_row("Auto Save (1.5 s delay)", None, auto_save, theme),
         toggle_row("Word Wrap  (Alt+Z)", None, word_wrap, theme),
         toggle_row("Organize Imports on Save", None, organize_imports, theme),
+        toggle_row("Format on Save", None, format_on_save, theme),
         toggle_row("Show Code Lens", None, code_lens_vis, theme),
         toggle_row("Inlay Hints  (Ctrl+Alt+I)", None, inlay_hints, theme),
         toggle_row("Relative Line Numbers", None, relative_ln, theme),

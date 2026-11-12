@@ -24,6 +24,7 @@ pub struct EditorPrefs {
     pub inlay_hints: RwSignal<bool>,
     pub code_lens: RwSignal<bool>,
     pub organize_imports_on_save: RwSignal<bool>,
+    pub format_on_save: RwSignal<bool>,
     pub ai_completions: RwSignal<bool>,
 }
 
@@ -39,6 +40,7 @@ impl EditorPrefs {
             inlay_hints: create_rw_signal(cfg.inlay_hints),
             code_lens: create_rw_signal(cfg.code_lens),
             organize_imports_on_save: create_rw_signal(cfg.organize_imports_on_save),
+            format_on_save: create_rw_signal(cfg.format_on_save),
             ai_completions: create_rw_signal(cfg.ai_completions),
         }
     }
@@ -56,6 +58,7 @@ impl EditorPrefs {
             inlay_hints: self.inlay_hints.get(),
             code_lens: self.code_lens.get(),
             organize_imports_on_save: self.organize_imports_on_save.get(),
+            format_on_save: self.format_on_save.get(),
             ai_completions: self.ai_completions.get(),
         }
     }
@@ -95,6 +98,7 @@ struct PrefValues {
     inlay_hints: bool,
     code_lens: bool,
     organize_imports_on_save: bool,
+    format_on_save: bool,
     ai_completions: bool,
 }
 
@@ -127,6 +131,9 @@ impl PrefValues {
         }
         if self.organize_imports_on_save != before.organize_imports_on_save {
             e.organize_imports_on_save = self.organize_imports_on_save;
+        }
+        if self.format_on_save != before.format_on_save {
+            e.format_on_save = self.format_on_save;
         }
         if self.ai_completions != before.ai_completions {
             e.ai_completions = self.ai_completions;
@@ -221,6 +228,8 @@ pub struct EditorState {
     pub save_no_format_nonce: RwSignal<u64>,
     pub code_lens_visible: RwSignal<bool>,
     pub organize_imports_on_save: RwSignal<bool>,
+    /// `[editor] format_on_save`.
+    pub format_on_save: RwSignal<bool>,
     pub inlay_hints_sig: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     pub inlay_hints_toggle: RwSignal<bool>,
     /// `[editor] ai_completions`: while false, the editor requests no inline
@@ -358,6 +367,7 @@ impl EditorState {
             save_no_format_nonce: create_rw_signal(0),
             code_lens_visible: prefs.code_lens,
             organize_imports_on_save: prefs.organize_imports_on_save,
+            format_on_save: prefs.format_on_save,
             inlay_hints_sig: lsp.inlay_hints,
             inlay_hints_toggle: prefs.inlay_hints,
             ai_completions: prefs.ai_completions,

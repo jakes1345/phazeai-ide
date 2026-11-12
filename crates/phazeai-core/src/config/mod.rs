@@ -285,6 +285,9 @@ pub struct EditorSettings {
     pub inlay_hints: bool,
     pub code_lens: bool,
     pub organize_imports_on_save: bool,
+    /// Run the language's formatter (rustfmt, prettier, black) on a file
+    /// when it is saved. Only that file changes, and its line endings stay.
+    pub format_on_save: bool,
     /// Ask the active AI provider for inline completions while you edit
     /// (`crate::fim`). Each request sends the code around the cursor; the
     /// privacy deny rules and `local_only` still apply. Off: nothing is sent.
@@ -311,6 +314,7 @@ impl Default for EditorSettings {
             inlay_hints: true,
             code_lens: true,
             organize_imports_on_save: false,
+            format_on_save: true,
             ai_completions: true,
             completion_model: None,
         }

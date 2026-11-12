@@ -1252,6 +1252,10 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
             action: |s| s.editor.organize_imports_on_save.update(|v| *v = !*v),
         },
         PaletteCommand {
+            label: "Toggle Format on Save",
+            action: |s| s.editor.format_on_save.update(|v| *v = !*v),
+        },
+        PaletteCommand {
             label: "Transform: To Title Case",
             action: |s| s.editor.transform_title_nonce.update(|v| *v += 1),
         },
@@ -3426,6 +3430,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         state.editor.code_lens,
         state.editor.code_lens_visible,
         state.editor.organize_imports_on_save,
+        state.editor.format_on_save,
         state.editor.inlay_hints_sig,
         state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
@@ -3495,6 +3500,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         // one setting governs every pane.
         state.editor.code_lens_visible,
         state.editor.organize_imports_on_save,
+        state.editor.format_on_save,
         create_rw_signal(vec![]), // inlay_hints_sig
         state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,
@@ -3820,6 +3826,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         // Shared with the main pane, like the split pane's.
         state.editor.code_lens_visible,
         state.editor.organize_imports_on_save,
+        state.editor.format_on_save,
         create_rw_signal(vec![]), // inlay_hints_sig
         state.editor.inlay_hints_toggle,
         state.editor.minimap_visible,

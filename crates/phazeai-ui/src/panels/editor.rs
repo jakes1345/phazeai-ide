@@ -1362,6 +1362,7 @@ pub fn editor_panel(
     code_lens_sig: RwSignal<Vec<crate::lsp_bridge::CodeLensEntry>>,
     code_lens_visible: RwSignal<bool>,
     organize_imports_on_save: RwSignal<bool>,
+    format_on_save: RwSignal<bool>,
     inlay_hints: RwSignal<Vec<crate::lsp_bridge::InlayHintEntry>>,
     inlay_hints_toggle: RwSignal<bool>,
     minimap_visible: RwSignal<bool>,
@@ -1709,22 +1710,28 @@ pub fn editor_panel(
                 path: tab.path.clone(),
             });
         }
-        // Run formatter in background — file is already saved to disk
+        // Format in the background. The saved text goes through the
+        // formatter and the result replaces the file only if the file still
+        // holds that text; the tab then shows it (see `disk_watch`).
         let path = tab.path.clone();
         let code_search = code_search_for_save.clone();
+        let saved = format_on_save
+            .get_untracked()
+            .then(|| {
+                docs_for_save
+                    .borrow()
+                    .get(&tab.path.to_string_lossy().to_string())
+                    .map(|d| d.text().to_string())
+            })
+            .flatten();
         std::thread::spawn(move || {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let formatter: Option<(&str, Vec<String>)> = match ext {
-                "rs" => Some(("rustfmt", vec![path.to_string_lossy().to_string()])),
-                "js" | "ts" | "jsx" | "tsx" | "json" => Some((
-                    "prettier",
-                    vec!["--write".to_string(), path.to_string_lossy().to_string()],
-                )),
-                "py" => Some(("black", vec![path.to_string_lossy().to_string()])),
-                _ => None,
-            };
-            if let Some((cmd, args)) = formatter {
-                let _ = phazeai_core::process::std_command(cmd).args(&args).status();
+            if let Some(saved) = saved {
+                if let Some(formatted) = crate::format::format_text(&path, &saved) {
+                    let unchanged = std::fs::read_to_string(&path).is_ok_and(|now| now == saved);
+                    if formatted != saved && unchanged {
+                        let _ = std::fs::write(&path, formatted);
+                    }
+                }
             }
             // Index the file as it ended up on disk, after any formatting.
             if let Some(search) = &code_search {
