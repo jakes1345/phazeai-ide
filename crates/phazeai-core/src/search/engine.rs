@@ -28,9 +28,11 @@
 //!   the other way round, the two gates are never held together, and no
 //!   thread holds the state lock while waiting for it again.
 
+use super::embed::EmbeddingConfig;
 use super::index::{Applied, Candidate, Index, Parsed};
 use super::paths::{absolutize, path_key, path_starts_with};
 use super::scan::{self, Planned, Stop, COMMIT_GROUP};
+use super::semantic::{self, EmbeddingStatus, Semantic, SemanticCandidate};
 use super::snippet;
 use super::tokenize;
 use super::types::{BuildStats, IndexStatus, SearchError, SearchHit, SearchLimits, SearchResults};
@@ -48,6 +50,8 @@ const MAX_TOP_K: usize = 50;
 const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// How many times one search re-reads files it found out of date and re-ranks.
 const MAX_FIXUP_ROUNDS: usize = 2;
+/// How long a search waits for the embedding of its query.
+const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 /// A search walks the whole root again (files are only stat-ed, so this is
 /// cheap) unless a search did so less than this long ago...
 const RESYNC_INTERVAL: Duration = Duration::from_secs(1);
@@ -90,6 +94,8 @@ struct Inner {
     /// When a search last walked the whole root (the last build does not
     /// count: it may be old by the time the first search runs).
     searched_at: Mutex<Option<Instant>>,
+    /// Meaning-based matching, when an embedding model is set.
+    semantic: RwLock<Option<Arc<Semantic>>>,
     /// How long the last walk (finding and stat-ing the files) took.
     walk_nanos: AtomicU64,
     /// Test seam: replaces [`resync_interval`].
@@ -169,6 +175,7 @@ impl CodeSearch {
                 files: AtomicUsize::new(0),
                 chunks: AtomicUsize::new(0),
                 searched_at: Mutex::new(None),
+                semantic: RwLock::new(None),
                 walk_nanos: AtomicU64::new(0),
                 #[cfg(test)]
                 resync_after: Mutex::new(None),
@@ -214,6 +221,9 @@ impl CodeSearch {
                 .unwrap_or_else(|e| e.into_inner()) = None;
             std::mem::replace(&mut st.index, Index::new())
         };
+        if let Some(sem) = self.semantic() {
+            sem.clear();
+        }
         // Freeing a big index (every term, posting list and file record) takes
         // over 100 ms at 20,000 files. If no thread can be had, the closure
         // is dropped on the way out, which frees the index right here.
@@ -270,7 +280,27 @@ impl CodeSearch {
     /// first, and surviving files are noted in the privacy audit scope of the
     /// calling task (see `privacy::audit::note_file`).
     pub fn search_blocking(&self, query: &str, top_k: usize) -> Result<SearchResults, SearchError> {
-        let results = self.search_inner(query, top_k, &Arc::default())?;
+        let semantic = self.semantic();
+        let mut meaning: Vec<SemanticCandidate> = Vec::new();
+        // Inside an async runtime a nested one cannot be started: keywords only.
+        if tokio::runtime::Handle::try_current().is_err() {
+            if let Some(sem) = &semantic {
+                if sem.has_vectors() && !sem.backing_off() && query.len() <= MAX_QUERY_BYTES {
+                    let want = top_k.min(MAX_TOP_K) * 3 + 8;
+                    match sem.rank_blocking(query, want, QUERY_EMBED_TIMEOUT) {
+                        Ok(c) => {
+                            sem.note_ok();
+                            meaning = c;
+                        }
+                        Err(e) => sem.note_error(e),
+                    }
+                }
+            }
+        }
+        let results = self.search_inner(query, top_k, &Arc::default(), &meaning)?;
+        if let Some(sem) = &semantic {
+            sem.spawn_sync(self);
+        }
         note_files(&results);
         Ok(results)
     }
@@ -278,16 +308,120 @@ impl CodeSearch {
     /// [`search_blocking`](Self::search_blocking) for async callers; the audit
     /// notes are recorded on the awaiting task. Dropping the future cancels the
     /// search, and the first search's build with it.
+    ///
+    /// With an embedding model set ([`set_embeddings`](Self::set_embeddings)),
+    /// the query is also compared by meaning with every chunk embedded so far,
+    /// and the two rankings are merged (reciprocal rank fusion; a hit's `score`
+    /// is then the fused score). The search also starts embedding whatever
+    /// changed, in the background. If the embedding endpoint fails, the
+    /// search is keyword-only and [`embedding_status`](Self::embedding_status)
+    /// says why.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<SearchResults, SearchError> {
+        let semantic = self.semantic();
+        let mut meaning: Vec<SemanticCandidate> = Vec::new();
+        if let Some(sem) = &semantic {
+            if sem.has_vectors() && !sem.backing_off() && query.len() <= MAX_QUERY_BYTES {
+                let want = top_k.min(MAX_TOP_K) * 3 + 8;
+                match tokio::time::timeout(QUERY_EMBED_TIMEOUT, sem.rank(query, want)).await {
+                    Ok(Ok(c)) => {
+                        sem.note_ok();
+                        meaning = c;
+                    }
+                    Ok(Err(e)) => sem.note_error(e),
+                    Err(_) => sem.note_error(format!(
+                        "the embedding endpoint took over {}s to answer",
+                        QUERY_EMBED_TIMEOUT.as_secs()
+                    )),
+                }
+            }
+        }
         let this = self.clone();
         let query = query.to_owned();
         let cancel = CancelOnDrop(Arc::default());
         let flag = Arc::clone(&cancel.0);
-        let results = tokio::task::spawn_blocking(move || this.search_inner(&query, top_k, &flag))
-            .await
-            .map_err(|e| SearchError::Worker(e.to_string()))??;
+        let results =
+            tokio::task::spawn_blocking(move || this.search_inner(&query, top_k, &flag, &meaning))
+                .await
+                .map_err(|e| SearchError::Worker(e.to_string()))??;
+        if let Some(sem) = &semantic {
+            sem.spawn_sync(self);
+        }
         note_files(&results);
         Ok(results)
+    }
+
+    /// Compare queries by meaning too, with this embedding model; `None` turns
+    /// it off. Setting the same model and address again keeps the vectors.
+    /// Nothing is sent until the next search or
+    /// [`start_embeddings`](Self::start_embeddings).
+    pub fn set_embeddings(&self, cfg: Option<EmbeddingConfig>) {
+        self.set_semantic(cfg.map(Semantic::new));
+    }
+
+    pub(crate) fn set_semantic(&self, sem: Option<Semantic>) {
+        let mut slot = self
+            .inner
+            .semantic
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let same = match (&*slot, &sem) {
+            (Some(old), Some(new)) => old.config() == new.config(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            *slot = sem.map(Arc::new);
+        }
+    }
+
+    /// How far embedding has got; `None` when no embedding model is set.
+    pub fn embedding_status(&self) -> Option<EmbeddingStatus> {
+        self.semantic().map(|s| s.status())
+    }
+
+    /// Embed what changed since the last look, in the background, if an
+    /// embedding model is set and the index has been built. Returns at once,
+    /// from any thread.
+    pub fn start_embeddings(&self) {
+        if let Some(sem) = self.semantic() {
+            if self.inner.built.load(Ordering::Acquire) {
+                sem.spawn_sync(self);
+            }
+        }
+    }
+
+    /// Build the index if needed, then embed what changed, and wait for both.
+    pub async fn sync_embeddings(&self) -> Result<(), SearchError> {
+        let Some(sem) = self.semantic() else {
+            return Ok(());
+        };
+        if !self.inner.built.load(Ordering::Acquire) {
+            self.build(&[]).await?;
+        }
+        sem.sync(self).await.map_err(SearchError::Embedding)
+    }
+
+    fn semantic(&self) -> Option<Arc<Semantic>> {
+        self.inner
+            .semantic
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The root, the generation and every indexed file with its stamp.
+    pub(super) fn file_stamps(&self) -> (PathBuf, u64, Vec<(Arc<Path>, super::index::Stamp)>) {
+        let st = self.read();
+        let files = st
+            .index
+            .entries()
+            .map(|(_, m)| (Arc::clone(&m.path), m.stamp))
+            .collect();
+        (st.root.clone(), self.generation(), files)
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Acquire)
     }
 
     /// Re-read one file after it was saved. Does nothing for a file that is
@@ -824,6 +958,7 @@ impl CodeSearch {
         query: &str,
         top_k: usize,
         cancel: &Arc<AtomicBool>,
+        meaning: &[SemanticCandidate],
     ) -> Result<SearchResults, SearchError> {
         if query.len() > MAX_QUERY_BYTES {
             return Err(SearchError::InvalidQuery(format!(
@@ -833,7 +968,7 @@ impl CodeSearch {
         }
         let terms = tokenize::query_terms(query);
         let k = top_k.min(MAX_TOP_K);
-        if terms.is_empty() || k == 0 {
+        if (terms.is_empty() && meaning.is_empty()) || k == 0 {
             return Ok(SearchResults::default());
         }
         self.ensure_built(cancel)?;
@@ -848,11 +983,20 @@ impl CodeSearch {
         let mut want = k * 3 + 8;
         let mut fixups = 0;
         loop {
-            let ranked = self.read().index.rank(&terms, want);
+            let (candidates, more) = {
+                let st = self.read();
+                let ranked = st.index.rank(&terms, want);
+                let more = ranked.matched > ranked.candidates.len();
+                if meaning.is_empty() {
+                    (ranked.candidates, more)
+                } else {
+                    (fuse(&st.index, ranked.candidates, meaning), more)
+                }
+            };
             let mut hits: Vec<SearchHit> = Vec::new();
             let mut denied = 0;
             let mut stale: Vec<Arc<Path>> = Vec::new();
-            for cand in &ranked.candidates {
+            for cand in &candidates {
                 if hits.len() == k {
                     break;
                 }
@@ -873,7 +1017,7 @@ impl CodeSearch {
                 }
                 continue;
             }
-            if hits.len() < k && ranked.matched > ranked.candidates.len() {
+            if hits.len() < k && more {
                 want = want.saturating_mul(4);
                 continue;
             }
@@ -960,6 +1104,43 @@ impl CodeSearch {
             .get(&path_key(&absolutize(path)))
             .map(|m| m.stamp)
     }
+}
+
+/// Merge the keyword ranking with the meaning ranking (reciprocal rank
+/// fusion). A file in both keeps its keyword chunk, whose snippet shows the
+/// words. Meaning candidates whose file changed since it was embedded are left
+/// out until the next sync embeds the new text.
+fn fuse(index: &Index, keyword: Vec<Candidate>, meaning: &[SemanticCandidate]) -> Vec<Candidate> {
+    let mut merged: HashMap<Arc<Path>, Candidate> = HashMap::new();
+    for (rank, mut c) in keyword.into_iter().enumerate() {
+        c.score = semantic::rrf(rank);
+        merged.insert(Arc::clone(&c.path), c);
+    }
+    let current = meaning.iter().filter(|m| {
+        index
+            .get(&path_key(&m.path))
+            .is_some_and(|f| f.stamp == m.stamp)
+    });
+    for (rank, m) in current.enumerate() {
+        let add = semantic::rrf(rank);
+        merged
+            .entry(Arc::clone(&m.path))
+            .and_modify(|c| c.score += add)
+            .or_insert_with(|| Candidate {
+                path: Arc::clone(&m.path),
+                stamp: m.stamp,
+                start: m.start,
+                end: m.end,
+                score: add,
+            });
+    }
+    let mut out: Vec<Candidate> = merged.into_values().collect();
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    out
 }
 
 /// Record the files whose text is about to go into a model request.
