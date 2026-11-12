@@ -27,6 +27,7 @@ tracing-appender = "0.2"
 dirs = "5.0"
 portable-pty = { workspace = true }
 vte = { workspace = true }
+alacritty_terminal = { workspace = true }
 arboard = { workspace = true }
 rfd = { workspace = true }
 walkdir = "2.4"
