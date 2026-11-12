@@ -100,20 +100,23 @@ impl Ollama {
     }
 
     /// Create new instance from a [`Url`].
+    ///
+    /// The API paths (`api/tags`, ...) are joined onto the URL, so its path
+    /// is made to end in `/`: a server behind a proxy at
+    /// `http://host/ollama` is asked at `http://host/ollama/api/tags`, not
+    /// `http://host/ollamaapi/tags`.
     #[inline]
-    pub fn from_url(url: Url) -> Self {
+    pub fn from_url(mut url: Url) -> Self {
+        if !url.path().ends_with('/') {
+            let path = format!("{}/", url.path());
+            url.set_path(&path);
+        }
         Self {
             url,
             ..Default::default()
         }
     }
 
-    /// Returns the http URI of the Ollama instance
-    ///
-    /// # Panics
-    ///
-    /// Panics if the URL does not have a host.
-    #[inline]
     /// Connect directly, ignoring `HTTP(S)_PROXY` / `ALL_PROXY`: for a
     /// server on this machine, which a proxy must never see.
     pub fn without_proxy(mut self) -> Self {
@@ -123,6 +126,12 @@ impl Ollama {
         self
     }
 
+    /// Returns the http URI of the Ollama instance
+    ///
+    /// # Panics
+    ///
+    /// Panics if the URL does not have a host.
+    #[inline]
     pub fn uri(&self) -> String {
         self.url.host().unwrap().to_string()
     }
