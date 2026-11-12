@@ -2,39 +2,42 @@
 
 > Companion to [`MISSION.md`](MISSION.md). **This file goes stale; re-check a claim against the code before building on it, and correct the file when you find it wrong.**
 >
-> **Which code this describes.** `main` at `1facf80` (2026-10-31). Since the last version it includes:
-> - PR #8: the feature tests run real tests, and MCP works with real servers.
-> - PR #7: the Vim ex bar saves for real.
-> - PR #9: the AI helpers can't run tools, and each approval card answers only its own call.
-> - PR #10: Stop always stops, and trimming keeps the question.
-> - PR #11: settings that work, and off switches for background sends.
+> **Which code this describes.** `main` at `7255f5b` (2026-11-12). Since the last version (`1facf80`, PRs #7–#11) it includes:
+> - Safety: MCP tool calls obey the privacy policy (#13); the approved diff is exactly what gets written (#14); `[llm] base_url` is honoured and a key never goes there unencrypted (#16); local-model requests skip proxies (#21); permission rules and tool hooks (#49).
+> - Agent: the system prompt fits the context budget (#17); long tool output never crashes (#18); word-start router matching (#19); real tool examples (#20); prompt caching and cache-hit reporting (#35–#37, #40); lean prompt and on-demand tools (#38, #39); cheap model for side jobs (#41); keep or undo each hunk of an edit (#44) and undo a whole run (#45); live token and cost meter (#46); other tools' rules files (#47); subagents and a todo list (#48); `-p` JSON output and MCP over HTTP (#51); `phazeai eval` (#52).
+> - Providers: every provider in Settings can be the active one (#42); fill-in-the-middle per provider (#43); live model lists (#50); `[[providers]]` entries take effect, LM Studio `/v1` and Ollama-at-a-path addresses work (#53).
+> - Editor: auto-save writes the edited tab (#25); the editor takes focus after opening a file or closing a popup, shortcuts work while typing, undo no longer crashes (#55); Ctrl+T, Peek and inlay hints show language-server results, guessed hints removed (#56); F12, Vim keys, Tab-to-accept and the find box work while typing (#57).
+> - Other: language servers, debug adapters and MCP servers are reaped (#23); gdb breakpoints set before launch (#54); install scripts build the real IDE (#22); README and landing page match the code (#29, #31).
 >
-> **Last verified:** 2026-10-31 for items marked fixed: the tests named in their PRs, plus CI on `main` after each merge. Other statuses date from 2026-10-30. They were written against `e8f00d2` from reading the code, then reviewed twice by readers who tried to disprove each claim; expect a few errors. Items 17 and up were found by probes and reviews during the 2026-10-31 fixes. Nothing was run end to end except where stated. Statistics from test runs are from one working session and cannot be reproduced from the repo.
+> **Last verified:** 2026-11-12. Fixed items: the tests named in their PRs, plus CI on `main` after each merge. Each open item was re-checked against `7255f5b` by reading the code (not by running it). #55 and #57 were also driven in the real IDE under Xvfb. Older statuses date from 2026-10-30. They were written against `e8f00d2` from reading the code, then reviewed twice by readers who tried to disprove each claim; expect a few errors. Items 17 and up were found by probes and reviews during the 2026-10-31 fixes. Nothing was run end to end except where stated. Statistics from test runs are from one working session and cannot be reproduced from the repo.
 
 ## Where we are
 
-**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (15 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
+**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (16 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
 - the MCP client, against the official filesystem server in CI;
 - the Vim ex bar's save and quit commands;
 - the text-only AI helpers;
 - settings save and load;
-- Stop and history trimming in the agent loop.
+- Stop and history trimming in the agent loop;
+- permission rules and tool hooks (#49), the per-hunk keep/undo of an agent's edit (#44) and run undo (#45);
+- editor key routing and focus (#55, #57): unit tests plus real-IDE runs under Xvfb.
 
 **Implemented, but with little or no test of the real code** (the UI panels and `lsp_bridge.rs` have almost no unit tests, and the older test files mostly test copies; see Known problem 10): editor basics; LSP completions / hover / go-to-definition / diagnostics; DAP (one smoke test that silently skips without a debugger; only `lldb-dap`, `lldb-vscode` and `gdb` 14+); Git panel (parsing helpers are tested, the flows are not); streaming chat panel (retry-shaping and compaction-state helpers are tested; the streaming and cancel path is not); terminal; Composer; the MCP watchdog (restarts lazily on the next MCP tool call; only the restart cap is tested).
 
 **Partly real:**
 - *Vim mode:* movement and common edits, no counts. The ex bar's `:w`, `:wq`, `:x`, `:q`, `:qa` and `:wqa` save, and check for unsaved work, for real.
-- *LSP rename:* treats UTF-16 columns as bytes, can panic on non-ASCII, rewrites files with `lines().join("\n")` (loses CRLF and trailing newlines) and bypasses open buffers. *Code actions and inlay hints:* limited.
+- *LSP rename:* treats UTF-16 columns as bytes, can panic on non-ASCII, rewrites files with `lines().join("\n")` (loses CRLF and trailing newlines; `apply_text_edits`, `lsp_bridge.rs` ~1277) and bypasses open buffers. *Code actions:* limited. *Inlay hints, code lens and folding ranges:* main pane only; split panes get empty signals (`app.rs` ~3486, ~3810).
+- *Vim normal mode* (#57) works while typing, but the cursor can sit past a line's last character, so `x` there deletes the newline.
 - *Ctrl+K inline edit:* inserts the reply at the cursor; it does not replace the selection, despite the README. Like the commit-message button and the terminal bar, it makes a text-only model call (no tools).
-- *Composer:* real agent loop with three approval modes. "Auto-approve all" attaches no approval. "Approve destructive" asks for every call the classifier does not class ReadOnly. "Approve all" asks for every call. Each approval card answers only the call it shows, and the approval function is tested. Diff cards come from `git diff HEAD` after the run, not a pre-write review, omit new untracked files and include the user's earlier uncommitted changes. The run itself has no tests.
-- *MCP host:* stdio only, configured in `<project>/.phazeai/mcp.json` (`{"servers":[...]}`; the CLI reads it from the cwd, not the git root).
-  - It speaks MCP's newline-delimited JSON-RPC, and CI tests it against the official `@modelcontextprotocol/server-filesystem`. Before PR #8 it never worked with a real server.
-  - **Its tool calls do not go through the privacy policy** (Known problem 17).
+- *Composer:* real agent loop with three approval modes. "Auto-approve all" attaches no approval. "Approve destructive" asks for every call the classifier does not class ReadOnly. "Approve all" asks for every call. Each approval card answers only the call it shows, and the approval function is tested. Diff cards come from `git diff HEAD` after the run, not a pre-write review, omit new untracked files and include the user's earlier uncommitted changes. The run itself has no tests. (The chat panel, unlike Composer, reviews each hunk before the write and can undo a run: #44, #45.)
+- *MCP host:* stdio servers, and remote servers by `url` (#51), configured in `<project>/.phazeai/mcp.json` (`{"servers":[...]}`; the CLI reads it from the cwd, not the git root).
+  - It speaks MCP's newline-delimited JSON-RPC, and CI tests it against the official `@modelcontextprotocol/server-filesystem`.
+  - Tool calls go through the privacy policy, and results are filtered (#13).
   - The repo-root `.mcp.json` is **not read by PhazeAI**. Claude Code does read it, so a Claude Code run in this repo tries to load that Supabase server.
 - *Terminal:* real PTY, but a line/block renderer, not a full cell grid.
 - *Workspace search panel:* prefers `rg`. Without it, a substring scan ignores regex, whole-word and globs. An invalid regex shows no results and no error.
 - *Themes and `.vsix`:* the editor's syntax colours are hard-coded (syntect `base16-ocean.dark` and a fixed table), so **no user theme changes editor text**. User TOML themes recolour the chrome; 15 palette fields are read nowhere (`diag_*`, `bracket_1-4`, `find_match_*`, `indent_guide`, `cursor_line_bg`, `matching_bracket_bg`, `syn_comment`, `syn_operator`) and the other `syn_*` fields only colour the outline list. A `.vsix` installs and is listed, but its themes, snippets and language configs are **never converted or applied**.
-- *Provider routing:* real; model lists and prices are hard-coded and may be stale.
+- *Provider routing:* real. Model lists come from each provider and are cached for a day (#50). Prices are a hard-coded table (`cost.rs`); unknown models get no price.
 - *Code completion (FIM):* a strip under the editor shows the first line of a suggestion and how many more it has, and Tab inserts the whole suggestion (up to 6 lines from a fill-in-the-middle API, 3 from the chat prompt).
   - It is on by default and fires 300 ms after you stop typing: one request per pause. Moving the cursor without typing sends nothing.
   - PhazeAI Local (llama.cpp `/infill`), Ollama (`/api/generate` with a suffix), DeepSeek (`/beta/completions`, on Flash) and Mistral (`/v1/fim/completions`, Codestral) get the code as it is, with no prompt around it. `[editor] completion_model` picks the model for Ollama, DeepSeek and Mistral. Other providers, and a model that turns such a request down, get a chat prompt.
@@ -46,7 +49,7 @@
 - *Smallest built-in model (1.5B):* its catalog notes say it writes tool calls as plain text, so agent actions are unreliable on it. That matters for the "works without a strong machine" goal.
 - *Roots after "Open Folder":* the agent's **file sandbox root is fixed at startup** (from the git root of the cwd, or the cwd) and is not updated, so the file tools refuse paths in a newly opened folder outside it. The workspace, the **privacy policy root and the code-search root do follow** Open Folder, so the sandbox and the privacy policy can name different projects.
 
-**Claimed as shipped but absent:** the multi-agent planner / coder / reviewer pipeline and the Account panel (README), and the removed `phazeai-cloud` crate (still named in README and CONTRIBUTING).
+**Claimed as shipped but absent:** the README is accurate since #29. `CONTRIBUTING.md` (~35) still names the removed `phazeai-cloud` crate and "WASM" plugins, and `ROADMAP.md` (~134) its skeleton.
 **Honestly marked as planned:** cloud tier (architecture undecided), real-time collaboration, ACP client, mobile companion, plugin marketplace.
 
 ## Known problems (the first work items)
@@ -55,55 +58,55 @@
 
 1. **Fixed (PR #7):** the Vim ex bar's `:w`, `:wq` and `:x` save for real. `:q` and `:qa` refuse to quit over unsaved tabs (`:q!` discards). Quitting closes the window properly, so the close handler runs and stops the built-in model server and saves the session.
 2. **Fixed (PR #9):** Ctrl+K, the commit-message button and the terminal bar make text-only model calls: no tools are offered and none can run. The terminal bar types one line only and refuses a reply with a control character in it. The helpers now report failures, and refuse a reply cut short by an error.
-3. **Provider tiles that do nothing.** Settings shows 19 providers; only 9 exist as the active provider (`LlmProvider`). Picking Mistral, DeepSeek, xAI, Cohere, Perplexity, Azure, Cerebras, Fireworks, SambaNova or GitHub Models saves nothing, silently (`provider_name_to_llm_provider` returns `None`). The CLI `--provider` rejects them. They work only through `[model_routes]`. Hide them or widen the enum.
+3. **Fixed (PR #42):** every provider in Settings and the CLI `--provider` can be the active provider. Perplexity and GitHub Models are no longer offered (retired).
 4. **Fixed (PR #9):** Composer's "Approve all" asks before every call. Each approval card answers only the call it shows. Before, clicking Allow on a card for a read-only call that had already run approved the next write or command, unseen.
 5. **Fixed (PR #11):** `[editor] ai_completions` turns background code completion off entirely.
 6. **Fixed (PR #11):** `organize_imports_on_save`, `inlay_hints` and `code_lens` come from `config.toml`. Toggles are saved, and a save writes only the keys that changed. Organize-imports-on-save is off unless the config turns it on.
-7. **Fake inlay hints and a silent no-op.** When the language server errors or returns nothing, `lsp_bridge.rs` shows regex-guessed type hints that look real (inlay hints are on by default). With no language server attached, `organize_rust_imports`'s result is discarded (`lsp_bridge.rs` ~701). Separately, inlay hints never reach the editor at all (Known problem 21). Wiring them will expose the guessed hints, so fix both together.
-8. **Network claims that are false or misleading.** The start-up update check is now a setting (`[updates] check_at_start`), skipped when the folder PhazeAI starts in is local-only. The GitHub Actions panel no longer fetches while hidden (PR #11). **Still open:** The README FAQ says "The IDE itself never needs the network" (about *needing*; the check fails silently) and answers "does it phone home?" with telemetry only. `index.html` says "No cloud. No subscriptions. No data leaving your box." (~1181-1182) and, separately, "no telemetry" (~1462), and still says the GUI is built with egui. Telemetry is real, opt-in and off by default. Editing the README and `index.html` needs the owner's approval.
-9. **Docs claim things that do not exist:** the multi-agent pipeline, the Account panel and cloud tier, "Ctrl+K rewrites the selection", `.vsix` theme import.
+7. **Partly fixed (PR #56):** the regex-guessed inlay hints are gone; only the server's hints are shown. **Still open:** with no language server attached, organize-imports-on-save does nothing (`organize_rust_imports`'s result is discarded, `lsp_bridge.rs` ~701).
+8. **Fixed (PRs #29, #31):** the README has a "Network use" section (update check, telemetry, downloads, Actions, model lists, remote MCP), and `index.html` no longer claims "no telemetry", "No data leaving your box" or egui.
+9. **Fixed in README and `index.html` (PRs #29, #31).** Leftovers in `CONTRIBUTING.md` and `ROADMAP.md`: see 15.
 
 *Found 2026-10-31:*
 
-17. **MCP tool calls bypass the privacy policy.** `McpToolBridge::execute` sends the model's arguments to the server and returns its result unchecked. Against the official filesystem server, the model could:
-    - read `.env` by a relative, absolute or `..` path, through `read_multiple_files`, or with an `edit_file` dry run;
-    - move a denied directory out of the policy;
-    - rewrite `.phazeai/privacy.toml` to `deny = []`;
-    - reach denied files through Unicode-equivalent spellings of their paths.
-
-    Listings also name denied files. A fix is in progress.
-18. **Chat's diff approval can show a different change than the one written.** For `edit_file` the preview applies the edit once (`replacen(.., 1)`), but with `replace_all` the tool changes every occurrence. A fix is in progress.
-19. **`[llm] base_url` is ignored for chat and completions.** Only the readiness probe reads it, so requests can go to a different host than the one configured. Observed: the probe on a custom port, `POST /api/chat` on `localhost:11434`. A fix is in progress.
+17. **Fixed (PR #13):** MCP tool calls are checked against the privacy policy before they run (`mcp_bridge.rs` ~112), and listings and text results are filtered.
+18. **Fixed (PR #14):** the agent writes exactly the approved change (`Tool::plan_write`), `replace_all` included.
+19. **Fixed (PRs #16, #53):** `[llm] base_url` and `[[providers]]` addresses are used for every request, and a key is never sent to a plain-HTTP address on another machine.
 
 **P1: our tests cannot yet be trusted as evidence**
 
 10. About 284 of roughly 1,200 tests (counted by attribute) never call production code: `crates/phazeai-ui/tests/tier1_state.rs` (46), `lsp_tests.rs` (73), `terminal_tests.rs` (54) and about 111 of the 135 in `crates/phazeai-core/tests/editor_tests.rs` test hand-copied logic inside the test files, and stay green when the real code breaks. New tests must call the real functions (export them if needed).
-11. **Fixed (PR #8):** every `feature-tests.yml` job builds and runs real tests, and the workflow runs on every PR. The MCP job runs against the official filesystem server and the LSP job against `rust-analyzer`; Eval Harness was removed because there is no eval feature. **Still open:** the DAP test passes without testing when no debugger or C compiler is installed, which is always the case in `ci.yml`.
+11. **Fixed (PR #8):** every `feature-tests.yml` job builds and runs real tests, and the workflow runs on every PR. The MCP job runs against the official filesystem server and the LSP job against `rust-analyzer`. (`phazeai eval`, #52, is a separate graded-task runner, not a CI job.) **Still open:** the DAP test passes without testing when no debugger or C compiler is installed, which is always the case in `ci.yml`.
 12. The GUI suite (`tier2_integration.rs`) is the flakiest part: it is timing- and pixel-based under software rendering. In one working session, after the harness changes in PR #5 (now on `main`), the single picker scenario passed 27 of 28 runs (3 of 10 before, on `main`) and the full suite 6 of 7; about 1 run in 12 never reached a stable frame in 60 s, which predates the PR. *These numbers are author-measured and not reproducible from the repo.* The harness now says why it gave up and saves the last frame. Measure the same scenario on `main` before blaming a PR.
 
 *Found 2026-10-31:*
 
-20. **The system prompt is not sized to the context budget.** Project instructions go in whole: `CLAUDE.md` is about 20 KB here, roughly 7,000 tokens. A local model's default budget is about 4,100 tokens, so with Ollama or LM Studio every request starts over budget, and trimming cuts tool outputs to bare markers. A fix is in progress.
-21. **Peek Definition, Ctrl+T workspace symbols and inlay hints never show language-server results.** `EditorState` gets fresh signals for `peek_def_*`, `workspace_symbols` and the split state. The main editor's inlay data is a signal nothing sets, instead of the LSP's.
-22. **The editor does not take keyboard input until clicked**, after a file opens from the picker or an overlay closes with Escape. Nothing requests focus for the editor view.
+20. **Fixed (PR #17):** project instructions take at most a quarter of the context budget (`fit_instructions`, `system_prompt.rs`).
+21. **Fixed (PR #56):** Peek Definition, Ctrl+T and inlay hints show the language server's results (main pane only; see "Partly real").
+22. **Fixed (PRs #55, #57):** the editor takes focus when its tab becomes active and when an overlay closes; the app's shortcuts, F-keys, Vim keys, Tab-to-accept and the find box work while typing. Not driven in the real IDE: Tab accepting a real AI suggestion (needs a model), and each editing shortcut that moved into the editor (Ctrl+Shift+K, folding, Alt+Up/Down ...).
 23. `session.toml` (`SessionState`) has no test that calls production code.
 
 **P2: hygiene and packaging**
 
-13. The public repo contains personal or tool-generated content: `AGENTS.md` (another tool's memory, with absolute home and storage paths); home-directory paths with the author's username in `install.sh`, `script/launch_phaze.sh`, `assets/PhazeAI.desktop` and some tests; a media path in `python/training/strip_quant_config.py`; the author's Supabase project reference in `.mcp.json` **and** hard-coded in `telemetry.rs` (scrubbing `.mcp.json` alone does not remove it); a personal hardware write-up in `HARDWARE.md`. The anon key in `telemetry.rs` is public by design, but `supabase/setup.sql` grants the anon role INSERT **and SELECT** on the raw telemetry table, so anyone holding the key can read every row and flood the table. Git history also contains the author's machine hostname in commit emails; removing that needs a history rewrite, which the rules forbid. Rotating the key or restricting the policy is an owner action.
-14. **No packaging path is verified.** `install.sh` builds, copies the `phazeai` binary, then aborts copying `target/release/phazeai-ide`, which no longer exists. `scripts/build-deb.sh` and `scripts/build-appimage.sh` run `cargo build -p phazeai-ide` (a deleted package) and die. `release.yml` builds an AppImage and `.deb` from `phazeai-ui` and was not tested here; the AppImage always embeds a 1x1 placeholder icon and the `.deb` ships no icon (`assets/icons/phazeai-256.png` does not exist; the real icons are in `assets/branding/`). `cargo run` and `cargo install --path crates/phazeai-ui` (`make install-ide`) are the paths that exist.
-15. **Stale docs:** `BETA_AUDIT_TODO.md` (sidecar), `CONTRIBUTING.md` (cloud crate, "WASM" plugins), the README status table (shows DAP as planned and `ai_panel` as pending; both done), README lines on the multi-agent pipeline and Account panel, `CLAUDE.md` (its panel list still names `ai_panel`), and `ROADMAP.md` current-state notes for 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2 (which also gives the wrong storage path) and 3.1.
+13. The public repo contains personal or tool-generated content (`install.sh` cleaned in #22): `AGENTS.md` (another tool's memory, with absolute home and storage paths); home-directory paths with the author's username in `script/launch_phaze.sh`, `assets/PhazeAI.desktop` and some tests; a media path in `python/training/strip_quant_config.py`; the author's Supabase project reference in `.mcp.json` **and** hard-coded in `telemetry.rs` (scrubbing `.mcp.json` alone does not remove it); a personal hardware write-up in `HARDWARE.md`. The anon key in `telemetry.rs` is public by design, but `supabase/setup.sql` grants the anon role INSERT **and SELECT** on the raw telemetry table, so anyone holding the key can read every row and flood the table. Git history also contains the author's machine hostname in commit emails; removing that needs a history rewrite, which the rules forbid. Rotating the key or restricting the policy is an owner action.
+14. **Partly fixed (PR #22):** `install.sh`, `scripts/build-deb.sh` and `scripts/build-appimage.sh` build `phazeai-ui` (not run in CI). **Still open:** `release.yml` looks for the missing `assets/icons/phazeai-256.png`, so its AppImage embeds a 1x1 placeholder icon and its `.deb` ships no icon (the real icons are in `assets/branding/`). Changing the workflow needs the owner's approval.
+15. **Partly fixed (PR #29, README):** still stale: `BETA_AUDIT_TODO.md` (sidecar), `CONTRIBUTING.md` (cloud crate, "WASM" plugins), `ROADMAP.md` (~134, the cloud crate skeleton, plus the current-state notes listed before) and `CLAUDE.md` (its panel list still names `ai_panel`, which does not exist).
 16. **Fixed (PR #7):** the tab-bar panics came from signals created inside a re-running effect. A tab's unsaved flag now lives in the panel's scope (0 panics in 16 runs).
 
 *Found 2026-10-31:*
 
-24. **Killed language servers are never reaped.** `lsp/client.rs` kills without `wait()`, so each killed server stays a zombie process until PhazeAI exits. A fix is in progress.
-25. **The model router matches keywords as substrings.** "Explanation" contains "plan", so any prompt saying "no explanation" goes to the reasoning route. A fix is in progress.
+24. **Fixed (PR #23):** language servers, debug adapters and MCP servers are reaped (`process::ChildSlot`).
+25. **Fixed (PR #19):** keywords match at word starts, so "no explanation" no longer routes to Reasoning ("planet" still does, on purpose).
 26. **MCP client gaps.** It does not answer requests the server sends (such as `ping`). Pending requests wait 30 s when a server dies. `McpToolDef.description` is required, though MCP makes it optional.
-27. **Stop drops the response stream, not the request.** The OpenAI client's spawned SSE reader keeps the HTTP response open until the provider finishes. In the CLI's long-lived runtime the request carries on in the background.
-28. **Settings saves can land out of order.** Each change spawns its own save thread.
+27. **Stop drops the response stream, not the request.** The spawned SSE readers (`openai.rs` ~401, `claude.rs` ~411) never check whether the receiver is gone, so they keep the HTTP response open until the provider finishes. In the CLI's long-lived runtime the request carries on in the background.
+28. **Settings saves can land out of order.** Each change spawns its own save thread; `SETTINGS_WRITE_LOCK` stops overlapping writes but not reordering.
 29. **The commit-message request's audit entry lists no files**, though the request carries the staged diff.
 30. `plugin_canary_e2e` hard-codes `<workspace>/target/debug`, so it fails when `CARGO_TARGET_DIR` is set.
+
+*Found 2026-11-12:*
+
+31. **Opening another folder does not move the agent's file sandbox** (`set_workspace_root` runs only at startup, `app.rs` ~474), while privacy and code search follow the new folder. Detail under "Roots after Open Folder".
+32. **The terminal is a line/block renderer**, so full-screen programs (`vim`, `htop`, `less`) inside it draw wrongly.
+33. **No end-to-end run with a real model** (cloud key or built-in) has been recorded for the chat, agent or Composer paths; their tests use mocks.
 
 ## Build and test on Linux (Linux Mint / Ubuntu)
 
