@@ -1170,6 +1170,24 @@ pub(crate) fn code_actions_overlay(state: IdeState) -> impl IntoView {
 
 // ── Rename overlay (F2) ──────────────────────────────────────────────────────
 
+/// Write every tab with unsaved edits to disk; returns the names of those that
+/// could not be written.
+fn save_unsaved_tabs(panes: &[EditorPaneHandle]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for pane in panes {
+        for (index, tab) in (pane.tabs)().iter().enumerate() {
+            if !tab.dirty {
+                continue;
+            }
+            match (pane.save_tab)(index) {
+                super::ex_command::SaveOutcome::Saved => {}
+                _ => failed.push(tab.name.clone()),
+            }
+        }
+    }
+    failed
+}
+
 pub(crate) fn rename_overlay(state: IdeState) -> impl IntoView {
     let open = state.editor.rename_open;
     let query = state.editor.rename_query;
@@ -1178,12 +1196,49 @@ pub(crate) fn rename_overlay(state: IdeState) -> impl IntoView {
     let cursor = state.editor.active_cursor;
     let ws = state.project.workspace_root.get_untracked();
 
+    // Rename the symbol: Enter in the box or the Rename button.
+    let submit: std::rc::Rc<dyn Fn()> = {
+        let lsp_cmd2 = lsp_cmd.clone();
+        let panes = state.editor.panes;
+        let toast = state.workbench.status_toast;
+        std::rc::Rc::new(move || {
+            let new_name = query.get_untracked().trim().to_string();
+            open.set(false);
+            if new_name.is_empty() {
+                return;
+            }
+            let Some((path, line, col)) = cursor.get_untracked() else {
+                return;
+            };
+            // The rename rewrites files on disk, from positions the language
+            // server read in the open tabs; save those first so both agree.
+            let failed = save_unsaved_tabs(&panes.get_untracked());
+            if !failed.is_empty() {
+                show_toast(
+                    toast,
+                    format!("Rename cancelled: could not save {}", failed.join(", ")),
+                );
+                return;
+            }
+            let _ = lsp_cmd2.send(LspCommand::RequestRename {
+                path,
+                line,
+                col,
+                new_name,
+                workspace_root: ws.clone(),
+            });
+        })
+    };
+
     let input = text_input(query)
         .focus_when_open(move || open.get())
+        .on_enter({
+            let submit = submit.clone();
+            move || submit()
+        })
         .style(|s| s.width(320.0).padding(8.0).font_size(14.0));
 
     let confirm = {
-        let lsp_cmd2 = lsp_cmd.clone();
         label(|| "Rename".to_string())
             .style(move |s| {
                 let pal = &state.workbench.theme.get().palette;
@@ -1194,20 +1249,7 @@ pub(crate) fn rename_overlay(state: IdeState) -> impl IntoView {
                     .border_radius(4.0)
                     .cursor(floem::style::CursorStyle::Pointer)
             })
-            .on_click_stop(move |_| {
-                let new_name = query.get_untracked();
-                let _old = target.get_untracked();
-                if let Some((path, line, col)) = cursor.get_untracked() {
-                    let _ = lsp_cmd2.send(LspCommand::RequestRename {
-                        path,
-                        line,
-                        col,
-                        new_name,
-                        workspace_root: ws.clone(),
-                    });
-                }
-                open.set(false);
-            })
+            .on_click_stop(move |_| submit())
     };
 
     let cancel = label(|| "Cancel".to_string())

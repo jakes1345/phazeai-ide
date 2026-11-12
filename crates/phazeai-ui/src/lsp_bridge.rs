@@ -360,11 +360,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                 let _ = evt_tx.send(LspEvent::References(
                                                     entries.into_iter().filter_map(|e| {
                                                         use lsp_types::{Location, Range, Position};
-                                                        let uri_str = format!("file://{}", e.path.display());
-                                                        let fallback = match "file:///unknown".parse() {
-                                                            Ok(u) => u,
-                                                            Err(_) => return None};
-                                                        let uri = uri_str.parse().unwrap_or(fallback);
+                                                        let uri = phazeai_core::lsp::text::path_to_uri(&e.path).ok()?;
                                                         Some(Location {
                                                             uri,
                                                             range: Range {
@@ -428,8 +424,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 tokio::spawn(async move {
                                     // Try LSP textDocument/codeAction first
                                     if let Some(client) = client_opt {
-                                        let uri_str = format!("file://{}", path2.display());
-                                        if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+                                        if let Ok(uri) = phazeai_core::lsp::text::path_to_uri(&path2) {
                                             let params = lsp_types::CodeActionParams {
                                                 text_document: lsp_types::TextDocumentIdentifier { uri },
                                                 range: lsp_types::Range {
@@ -452,11 +447,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                                     let mut edits = Vec::new();
                                                                     if let Some(changes) = we.changes {
                                                                         for (uri, text_edits) in changes {
-                                                                            let uri_str = uri.to_string();
-                                                                            let fpath = uri_str
-                                                                                .strip_prefix("file://")
-                                                                                .map(std::path::PathBuf::from)
-                                                                                .unwrap_or_else(|| std::path::PathBuf::from(&uri_str));
+                                                                            let fpath = uri_path(&uri);
                                                                             if let Ok(content) = std::fs::read_to_string(&fpath) {
                                                                                 let mut new_content = content;
                                                                                 // Apply edits in reverse order
@@ -543,11 +534,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                         match client.goto_definition(&path2, line, col).await {
                                             Ok(locs) => {
                                                 if let Some(loc) = locs.into_iter().next() {
-                                                    let uri_str = loc.uri.to_string();
-                                                    let target_path = uri_str
-                                                        .strip_prefix("file://")
-                                                        .map(std::path::PathBuf::from)
-                                                        .unwrap_or_else(|| std::path::PathBuf::from(&uri_str));
+                                                    let target_path = uri_path(&loc.uri);
                                                     let target_line = loc.range.start.line as usize; // 0-based
                                                     // Read 15 lines centered on the target
                                                     let lines_snapshot: Vec<String> =
@@ -666,8 +653,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                     let path2 = path.clone();
                                     tokio::spawn(async move {
                                         // Build a codeAction request with only source.organizeImports
-                                        let uri_str = format!("file://{}", path2.display());
-                                        let uri: lsp_types::Uri = match uri_str.parse() {
+                                        let uri = match phazeai_core::lsp::text::path_to_uri(&path2) {
                                             Ok(u) => u,
                                             Err(_) => return};
                                         let params = lsp_types::CodeActionParams {
@@ -751,10 +737,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                         match event {
                             Some(LspEvent::Diagnostics { uri, diagnostics }) => {
                                 let uri_str = uri.to_string();
-                                let path = uri_str
-                                    .strip_prefix("file://")
-                                    .map(PathBuf::from)
-                                    .unwrap_or_else(|| PathBuf::from(&uri_str));
+                                let path = uri_path(&uri);
 
                                 if diagnostics.is_empty() {
                                     all_diags.remove(&uri_str);
@@ -797,11 +780,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
 
                             Some(LspEvent::Definition(locs)) => {
                                 if let Some(loc) = locs.into_iter().next() {
-                                    let uri_str = loc.uri.to_string();
-                                    let path = uri_str
-                                        .strip_prefix("file://")
-                                        .map(std::path::PathBuf::from)
-                                        .unwrap_or_else(|| std::path::PathBuf::from(&uri_str));
+                                    let path = uri_path(&loc.uri);
                                     let result = DefinitionResult {
                                         path,
                                         line: loc.range.start.line + 1,
@@ -817,11 +796,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                             }
                             Some(LspEvent::References(locs)) => {
                                 let entries: Vec<ReferenceEntry> = locs.into_iter().map(|loc| {
-                                    let uri_str = loc.uri.to_string();
-                                    let path = uri_str
-                                        .strip_prefix("file://")
-                                        .map(PathBuf::from)
-                                        .unwrap_or_else(|| PathBuf::from(&uri_str));
+                                    let path = uri_path(&loc.uri);
                                     ReferenceEntry {
                                         path,
                                         line: loc.range.start.line + 1,
@@ -1220,126 +1195,67 @@ fn replace_whole_word(text: &str, old: &str, new_name: &str) -> String {
     result
 }
 
-/// Apply an LSP `WorkspaceEdit` by rewriting files on disk.
-/// Falls back to whole-word replace when workspace edit is empty.
+/// The local path a URI from the language server names (the URI's text when
+/// it is not a `file://` URI).
+fn uri_path(uri: &lsp_types::Uri) -> PathBuf {
+    phazeai_core::lsp::text::uri_to_path(uri).unwrap_or_else(|| PathBuf::from(uri.as_str()))
+}
+
+/// Apply an LSP `WorkspaceEdit` by rewriting files on disk. A file whose edits
+/// cannot be applied (unreadable, or a position the file does not have) is
+/// left as it was, and so is everything else in that file.
 fn apply_workspace_edit(edit: lsp_types::WorkspaceEdit, old_word: &str, new_name: &str) {
-    // Prefer document_changes (newer LSP); fall back to changes map.
+    let mut files: Vec<(lsp_types::Uri, Vec<lsp_types::TextEdit>)> = Vec::new();
+    let flatten =
+        |edits: Vec<lsp_types::OneOf<lsp_types::TextEdit, lsp_types::AnnotatedTextEdit>>| {
+            edits
+                .into_iter()
+                .map(|e| match e {
+                    lsp_types::OneOf::Left(t) => t,
+                    lsp_types::OneOf::Right(a) => a.text_edit,
+                })
+                .collect::<Vec<_>>()
+        };
+    // Prefer document_changes (newer LSP); fall back to the changes map.
     if let Some(doc_changes) = edit.document_changes {
-        use lsp_types::DocumentChanges;
+        use lsp_types::{DocumentChangeOperation, DocumentChanges};
         match doc_changes {
             DocumentChanges::Edits(edits) => {
                 for te in edits {
-                    let uri_str = te.text_document.uri.to_string();
-                    let path = uri_str
-                        .strip_prefix("file://")
-                        .map(std::path::Path::new)
-                        .unwrap_or_else(|| std::path::Path::new(&uri_str));
-                    apply_text_edits(path, &te.edits);
+                    files.push((te.text_document.uri, flatten(te.edits)));
                 }
             }
             DocumentChanges::Operations(ops) => {
-                use lsp_types::DocumentChangeOperation;
                 for op in ops {
                     if let DocumentChangeOperation::Edit(te) = op {
-                        let uri_str = te.text_document.uri.to_string();
-                        let path = uri_str
-                            .strip_prefix("file://")
-                            .map(std::path::Path::new)
-                            .unwrap_or_else(|| std::path::Path::new(&uri_str));
-                        apply_text_edits(path, &te.edits);
+                        files.push((te.text_document.uri, flatten(te.edits)));
                     }
                 }
             }
         }
-        return;
+    } else if let Some(changes) = edit.changes {
+        files.extend(changes);
     }
-
-    if let Some(changes) = edit.changes {
-        for (uri, edits) in changes {
-            let uri_str = uri.to_string();
-            let path = uri_str
-                .strip_prefix("file://")
-                .map(std::path::Path::new)
-                .unwrap_or_else(|| std::path::Path::new(&uri_str));
-            let wrapped: Vec<lsp_types::OneOf<lsp_types::TextEdit, lsp_types::AnnotatedTextEdit>> =
-                edits.into_iter().map(lsp_types::OneOf::Left).collect();
-            apply_text_edits(path, &wrapped);
+    if files.is_empty() {
+        tracing::debug!(target: "phazeai_ui::lsp", "apply_workspace_edit: no edits (old={old_word} new={new_name})");
+    }
+    for (uri, edits) in files {
+        let path = uri_path(&uri);
+        if let Err(e) = apply_text_edits(&path, &edits) {
+            tracing::warn!(target: "phazeai_ui::lsp", "edit of {} not applied: {e}", path.display());
         }
-        return;
     }
-
-    // No edits from LSP — should not happen, but guard anyway
-    tracing::debug!(target: "phazeai_ui::lsp", "apply_workspace_edit: no edits (old={old_word} new={new_name})");
 }
 
-/// Apply a list of LSP TextEdits to a file on disk (sort descending by range so
-/// offsets stay valid after each replacement).
-fn apply_text_edits(
-    path: &std::path::Path,
-    edits: &[lsp_types::OneOf<lsp_types::TextEdit, lsp_types::AnnotatedTextEdit>],
-) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Flatten into (start_line, start_char, end_line, end_char, new_text)
-    let mut flat: Vec<(u32, u32, u32, u32, String)> = edits
-        .iter()
-        .map(|e| {
-            let te = match e {
-                lsp_types::OneOf::Left(t) => t.clone(),
-                lsp_types::OneOf::Right(a) => a.text_edit.clone(),
-            };
-            (
-                te.range.start.line,
-                te.range.start.character,
-                te.range.end.line,
-                te.range.end.character,
-                te.new_text.clone(),
-            )
-        })
-        .collect();
-
-    // Apply in reverse order so earlier positions aren't shifted
-    flat.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-
-    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-    for (sl, sc, el, ec, new_text) in flat {
-        let sl = sl as usize;
-        let el = el as usize;
-        if sl >= new_lines.len() {
-            continue;
-        }
-        if sl == el {
-            let line = &new_lines[sl];
-            let sc = sc as usize;
-            let ec = ec as usize;
-            if sc <= line.len() && ec <= line.len() {
-                let mut l = new_lines[sl].clone();
-                l.replace_range(sc..ec, &new_text);
-                new_lines[sl] = l;
-            }
-        } else {
-            // Multi-line edit: rebuild affected range
-            let start_line = new_lines[sl].clone();
-            let sc = (sc as usize).min(start_line.len());
-            let prefix = start_line[..sc].to_string();
-            let end_line = if el < new_lines.len() {
-                new_lines[el].clone()
-            } else {
-                String::new()
-            };
-            let ec = (ec as usize).min(end_line.len());
-            let suffix = end_line[ec..].to_string();
-            let replacement = format!("{prefix}{new_text}{suffix}");
-            new_lines.drain(sl..=el.min(new_lines.len() - 1));
-            new_lines.insert(sl, replacement);
-        }
+/// Apply LSP `edits` to the file at `path`. The positions are the protocol's
+/// (lines and UTF-16 units); line breaks and the final newline are kept.
+fn apply_text_edits(path: &std::path::Path, edits: &[lsp_types::TextEdit]) -> Result<(), String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let new_content = phazeai_core::lsp::text::apply_text_edits(&content, edits)?;
+    if new_content != content {
+        std::fs::write(path, new_content).map_err(|e| e.to_string())?;
     }
-
-    let new_content = new_lines.join("\n");
-    let _ = std::fs::write(path, new_content);
+    Ok(())
 }
 
 /// Parse an lsp_types::SignatureHelp into our simplified struct.
