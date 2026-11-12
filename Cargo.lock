@@ -4281,6 +4281,7 @@ dependencies = [
  "tempfile",
  "tiktoken-rs",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",

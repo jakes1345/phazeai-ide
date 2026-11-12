@@ -3,6 +3,7 @@ use clap::Parser;
 
 use phazeai_cli::app;
 use phazeai_cli::oneshot::{self, Allow};
+use phazeai_cli::output::OutputFormat;
 use phazeai_cli::setup;
 use phazeai_cli::theme::{ColorMode, Theme};
 
@@ -45,6 +46,13 @@ struct Cli {
     /// refused when input is piped.
     #[arg(long, value_enum, default_value_t = Allow::Read)]
     allow: Allow,
+
+    /// How -p mode writes its answer: text (default), json (one object with
+    /// the answer, token usage and cost at the end) or stream-json (one
+    /// object per line as the run goes, the result last). The JSON follows
+    /// Claude Code's `--output-format`.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
 
     /// Path to custom instructions file
     #[arg(long)]
@@ -260,6 +268,7 @@ async fn run(cli: Cli) -> Result<()> {
             color,
             cli.allow,
             oneshot::can_ask(stdin_piped),
+            cli.output_format,
         )
         .await?;
     } else if stdin_piped {
@@ -273,6 +282,7 @@ async fn run(cli: Cli) -> Result<()> {
             color,
             cli.allow,
             false,
+            cli.output_format,
         )
         .await?;
     } else {

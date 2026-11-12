@@ -18,6 +18,7 @@ Useful flags:
 |---|---|
 | `-p, --prompt <text>` | Run one prompt and exit. Piped stdin is appended as context. |
 | `--allow read\|edit\|all` | What `-p` mode may do without asking. `read` (the default) allows reading files and read-only commands, `edit` adds the file tools, `all` adds any shell command. Anything above that is asked about on the terminal, or refused when stdin is piped. |
+| `--output-format text\|json\|stream-json` | How `-p` mode writes its answer. `json` prints one object when the run ends: `result`, `is_error`, `num_turns`, `duration_ms`, `usage` (uncached input, cache reads and writes, output), `total_cost_usd` (`null` when no price is known) and `permission_denials`. `stream-json` prints a `system` line first, then `text`, `tool_use`, `tool_result` and `usage` lines as they happen, and the same result object last. The exit code is still non-zero when the run fails. |
 | `--provider <name>` | `anthropic`, `openai`, `gemini`, `groq`, `together`, `openrouter`, `ollama`, `lmstudio` or `builtin`. |
 | `-m, --model <name>` | Model for this run. |
 | `-c, --continue` / `--resume <id>` | Pick up the last conversation, or one by ID prefix. |
