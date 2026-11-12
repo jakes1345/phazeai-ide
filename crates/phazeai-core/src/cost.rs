@@ -352,9 +352,73 @@ pub fn dollars(amount: f64) -> String {
     }
 }
 
+/// One model call an agent run reports, with the model to price it at:
+/// `billed` (`Settings::billed_model`) for the agent's own calls, and a
+/// `subagent` helper's own model, at the same `provider`, for its calls.
+/// `None` for every other event. A panel that runs an agent feeds the token
+/// and cost meter from this, pricing the calls the way the chat does.
+pub fn metered_call(
+    event: &crate::agent::AgentEvent,
+    provider: &ProviderId,
+    billed: Option<&(ProviderId, String)>,
+) -> Option<(Usage, Option<(ProviderId, String)>)> {
+    use crate::agent::AgentEvent;
+    match event {
+        AgentEvent::CallUsage(usage) => Some((usage.clone(), billed.cloned())),
+        AgentEvent::SubagentUsage { model, usage } => {
+            Some((usage.clone(), Some((provider.clone(), model.clone()))))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_s_calls_are_priced_at_its_model_and_a_helper_s_at_its_own() {
+        use crate::agent::AgentEvent;
+        let billed = (ProviderId::Claude, "claude-sonnet-4-5".to_string());
+        let call = usage(1_000, 200, 600, 0);
+
+        let own = metered_call(
+            &AgentEvent::CallUsage(call.clone()),
+            &ProviderId::Claude,
+            Some(&billed),
+        );
+        assert_eq!(own, Some((call.clone(), Some(billed.clone()))));
+
+        // With routing on, the agent's own model isn't known: no price.
+        let routed = metered_call(
+            &AgentEvent::CallUsage(call.clone()),
+            &ProviderId::Claude,
+            None,
+        );
+        assert_eq!(routed, Some((call.clone(), None)));
+
+        let helper = metered_call(
+            &AgentEvent::SubagentUsage {
+                model: "claude-haiku-4-5".into(),
+                usage: call.clone(),
+            },
+            &ProviderId::Claude,
+            Some(&billed),
+        );
+        assert_eq!(
+            helper,
+            Some((call, Some((ProviderId::Claude, "claude-haiku-4-5".into()))))
+        );
+
+        assert_eq!(
+            metered_call(
+                &AgentEvent::TextDelta("hi".into()),
+                &ProviderId::Claude,
+                Some(&billed)
+            ),
+            None
+        );
+    }
 
     fn usage(input: u32, output: u32, read: u32, write: u32) -> Usage {
         Usage {
