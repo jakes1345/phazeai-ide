@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -582,6 +583,7 @@ fn write_notice(core: &Mutex<TermCore>, text: &str) {
 /// Spawn the shell in a PTY and run the reader loop (on its own thread).
 fn spawn_pty(
     shell: String,
+    cwd: PathBuf,
     core: Arc<Mutex<TermCore>>,
     pty_writer: SharedPtyWriter,
     pty_master: SharedMaster,
@@ -609,6 +611,11 @@ fn spawn_pty(
         };
 
         let mut cmd = CommandBuilder::new(&shell);
+        // Start in the project, as other editors do; without a folder
+        // portable-pty starts the shell in the home directory.
+        if cwd.is_dir() {
+            cmd.cwd(&cwd);
+        }
         cmd.env("TERM", term_consts::TERM_TYPE);
         cmd.env("COLORTERM", term_consts::COLOR_TERM);
         let mut child = match slave.spawn_command(cmd) {
@@ -736,6 +743,7 @@ fn single_terminal(
     let update_signal = create_signal_from_channel(update_rx);
     spawn_pty(
         shell,
+        state.project.workspace_root.get_untracked(),
         Arc::clone(&core),
         Arc::clone(&pty_writer),
         Arc::clone(&pty_master),
