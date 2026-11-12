@@ -4,7 +4,7 @@ use crate::lsp_bridge::{
     LspBridgeSignals, ReferenceEntry, SymbolEntry,
 };
 use crate::theme::PhazeTheme;
-use floem::reactive::{create_effect, create_rw_signal, RwSignal, SignalGet};
+use floem::reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate};
 use phazeai_core::config::EditorSettings;
 use std::path::PathBuf;
 
@@ -269,6 +269,16 @@ impl EditorState {
         line_ending: RwSignal<&'static str>,
         active_readonly: RwSignal<bool>,
     ) -> Self {
+        // Peek Definition opens when the language server's answer arrives.
+        let peek_def_open = create_rw_signal(false);
+        {
+            let lines = lsp.peek_def_lines;
+            create_effect(move |_| {
+                if !lines.get().is_empty() {
+                    peek_def_open.set(true);
+                }
+            });
+        }
         Self {
             open_file,
             open_tabs,
@@ -334,11 +344,12 @@ impl EditorState {
             sig_help: lsp.sig_help,
             ws_syms_open: create_rw_signal(false),
             ws_syms_query: create_rw_signal(String::new()),
-            workspace_symbols: create_rw_signal(Vec::new()),
+            // The language server's results, the signals the bridge writes.
+            workspace_symbols: lsp.workspace_symbols,
             goto_overlay_open: create_rw_signal(false),
             goto_overlay_input: create_rw_signal(String::new()),
-            peek_def_open: create_rw_signal(false),
-            peek_def_lines: create_rw_signal(Vec::new()),
+            peek_def_open,
+            peek_def_lines: lsp.peek_def_lines,
             col_cursor_up_nonce: create_rw_signal(0),
             col_cursor_down_nonce: create_rw_signal(0),
             sticky_lines: create_rw_signal(Vec::new()),
@@ -347,7 +358,7 @@ impl EditorState {
             save_no_format_nonce: create_rw_signal(0),
             code_lens_visible: prefs.code_lens,
             organize_imports_on_save: prefs.organize_imports_on_save,
-            inlay_hints_sig: create_rw_signal(Vec::new()),
+            inlay_hints_sig: lsp.inlay_hints,
             inlay_hints_toggle: prefs.inlay_hints,
             ai_completions: prefs.ai_completions,
             minimap_visible: create_rw_signal(true),
@@ -411,6 +422,52 @@ mod tests {
             create_rw_signal(false),
         );
         (prefs, editor)
+    }
+
+    #[test]
+    fn language_server_results_reach_the_overlays_that_show_them() {
+        let lsp = detached_lsp();
+        let editor = EditorState::new(
+            EditorPrefs::new(&EditorSettings::default()),
+            &lsp,
+            create_rw_signal(None),
+            create_rw_signal(Vec::new()),
+            create_rw_signal(false),
+            create_rw_signal(0),
+            create_rw_signal("LF"),
+            create_rw_signal(false),
+        );
+
+        // Ctrl+T: the bridge's workspace symbols are the overlay's list.
+        lsp.workspace_symbols
+            .set(vec![crate::lsp_bridge::SymbolEntry {
+                name: "parse_config".into(),
+                kind: "fn".into(),
+                line: 12,
+                depth: 0,
+            }]);
+        let names: Vec<String> = editor
+            .workspace_symbols
+            .get_untracked()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["parse_config"]);
+
+        // Peek Definition: the answer's lines are shown, and the popup opens.
+        assert!(!editor.peek_def_open.get_untracked());
+        lsp.peek_def_lines
+            .set(vec!["fn parse_config() -> Config {".into()]);
+        assert_eq!(editor.peek_def_lines.get_untracked().len(), 1);
+        assert!(editor.peek_def_open.get_untracked(), "peek must open");
+
+        // Inlay hints: the server's hints are the editor's.
+        lsp.inlay_hints.set(vec![crate::lsp_bridge::InlayHintEntry {
+            line: 3,
+            col: 9,
+            label: ": u64".into(),
+        }]);
+        assert_eq!(editor.inlay_hints_sig.get_untracked().len(), 1);
     }
 
     fn toggles(organize: bool, inlay: bool, lens: bool, ai: bool) -> EditorSettings {

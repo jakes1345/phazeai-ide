@@ -706,10 +706,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 let path2 = path.clone();
                                 let client_opt = manager.client_for_file(&path).cloned();
                                 tokio::spawn(async move {
-                                    // Try LSP first (textDocument/inlayHint)
+                                    // Only the language server's own hints: a
+                                    // guess (every integer `: i32`) would be
+                                    // wrong as often as not.
+                                    let mut entries = Vec::new();
                                     if let Some(client) = client_opt {
                                         if let Ok(hints) = client.inlay_hints(&path2, start_line, end_line).await {
-                                            let entries: Vec<InlayHintEntry> = hints.into_iter().map(|h| {
+                                            entries = hints.into_iter().map(|h| {
                                                 let label = match &h.label {
                                                     lsp_types::InlayHintLabel::String(s) => s.clone(),
                                                     lsp_types::InlayHintLabel::LabelParts(parts) => {
@@ -721,15 +724,10 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                                     col: h.position.character,
                                                     label}
                                             }).collect();
-                                            if !entries.is_empty() {
-                                                let _ = inlay_tx2.try_send(entries);
-                                                return;
-                                            }
                                         }
                                     }
-                                    // Fallback: regex-based hints for common Rust patterns
-                                    let hints = inlay_hints_from_file(&path2, start_line, end_line);
-                                    let _ = inlay_tx2.try_send(hints);
+                                    // Sent even when empty, so old hints go.
+                                    let _ = inlay_tx2.try_send(entries);
                                 });
                             }
                             Some(LspCommand::Shutdown) | None => break}
@@ -1660,70 +1658,4 @@ fn code_lens_from_file(path: &PathBuf) -> Vec<CodeLensEntry> {
     }
 
     lenses
-}
-
-/// Regex-based inlay hint generator for common patterns when no LSP server is available.
-/// Produces type/parameter hints for Rust `let x =` and function calls.
-fn inlay_hints_from_file(path: &PathBuf, start_line: u32, end_line: u32) -> Vec<InlayHintEntry> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return vec![];
-    };
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext != "rs" {
-        return vec![];
-    }
-
-    let mut hints = Vec::new();
-    for (line_idx, line) in content.lines().enumerate() {
-        let line_num = line_idx as u32;
-        if line_num < start_line || line_num > end_line {
-            continue;
-        }
-
-        let trimmed = line.trim();
-
-        // `let x = <literal>` — show type after variable name
-        if let Some(rest) = trimmed.strip_prefix("let ") {
-            // Extract variable name (stop at whitespace, :, =)
-            let var_end = rest
-                .find(|c: char| c == ':' || c == '=' || c.is_whitespace())
-                .unwrap_or(rest.len());
-            let var_name = &rest[..var_end];
-            if var_name.is_empty() || var_name == "_" || var_name == "mut" {
-                continue;
-            }
-
-            // Determine type from rhs
-            let rhs = if let Some(eq_pos) = rest.find('=') {
-                rest[eq_pos + 1..].trim()
-            } else {
-                continue;
-            };
-            let type_hint = if rhs.starts_with('"') {
-                ": &str"
-            } else if rhs.starts_with("vec![") || rhs.starts_with("Vec::") {
-                ": Vec<_>"
-            } else if rhs.parse::<i64>().is_ok() {
-                ": i32"
-            } else if rhs.parse::<f64>().is_ok() && rhs.contains('.') {
-                ": f64"
-            } else if rhs == "true" || rhs == "false" {
-                ": bool"
-            } else if rhs.starts_with("HashMap::") || rhs.starts_with("std::collections::HashMap") {
-                ": HashMap<_, _>"
-            } else {
-                continue;
-            };
-
-            // Column after the variable name in the original line
-            if let Some(col) = line.find(var_name) {
-                hints.push(InlayHintEntry {
-                    line: line_num,
-                    col: (col + var_name.len()) as u32,
-                    label: type_hint.to_string(),
-                });
-            }
-        }
-    }
-    hints
 }

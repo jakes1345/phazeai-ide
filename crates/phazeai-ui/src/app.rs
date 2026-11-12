@@ -528,21 +528,7 @@ impl IdeState {
         let lsp = start_lsp_bridge(workspace.clone());
         let lsp_cmd = lsp.cmd_tx.clone();
         let goto_definition = lsp.goto_definition;
-        let _workspace_symbols = lsp.workspace_symbols;
         let lsp_progress = lsp.lsp_progress;
-        let peek_def_lines = lsp.peek_def_lines;
-
-        // Watch peek_def_lines: when it becomes non-empty, open the peek popup.
-        let peek_def_open_sig: RwSignal<bool> = create_rw_signal(false);
-        {
-            let peek_lines = peek_def_lines;
-            let peek_open = peek_def_open_sig;
-            create_effect(move |_| {
-                if !peek_lines.get().is_empty() {
-                    peek_open.set(true);
-                }
-            });
-        }
 
         // When a definition result arrives, navigate to the target file + line.
         let goto_line_sig: RwSignal<u32> = create_rw_signal(0u32);
