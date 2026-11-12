@@ -1092,6 +1092,31 @@ fn single_terminal(
                 }
             }
         })
+        // Floem does not capture the pointer for this view, so a release
+        // outside it never arrives: end a drag when the pointer leaves.
+        .on_event_cont(EventListener::PointerLeave, {
+            let term_mode = term_mode.clone();
+            let send_to_pty = send_to_pty.clone();
+            move |_| {
+                selecting.set(false);
+                if let Some(code) = mouse_down.get_untracked() {
+                    mouse_down.set(None);
+                    let (row, col) = last_mouse_cell.get_untracked();
+                    let mode = term_mode();
+                    if mode.intersects(TermMode::MOUSE_MODE) && row != usize::MAX {
+                        send_to_pty(&mouse_report(
+                            code,
+                            false,
+                            false,
+                            col,
+                            row,
+                            Mods::default(),
+                            mode,
+                        ));
+                    }
+                }
+            }
+        })
         .on_event_stop(EventListener::PointerWheel, {
             let core = Arc::clone(&core);
             let cell_at = cell_at.clone();
