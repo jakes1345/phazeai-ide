@@ -287,3 +287,24 @@ fn headers_are_not_sent_unencrypted_to_another_machine() {
     .expect("must fail");
     assert!(err.contains("use https"), "{err}");
 }
+
+#[test]
+fn a_local_only_project_refuses_a_remote_server() {
+    // Other tests here use servers on 127.0.0.1, which local-only allows,
+    // so turning it on for this process doesn't affect them.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    phazeai_core::privacy::set_active_project(&root);
+    phazeai_core::privacy::write_local_only(&root, true).unwrap();
+    assert!(phazeai_core::privacy::active().local_only());
+
+    let err = McpClient::connect(&McpServerConfig {
+        name: "remote".into(),
+        url: Some("https://mcp.example.com/mcp".into()),
+        ..Default::default()
+    })
+    .err()
+    .expect("a remote server must be refused while local-only");
+    phazeai_core::privacy::clear_active_project();
+    assert!(err.contains("local-only"), "{err}");
+}
