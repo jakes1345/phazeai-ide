@@ -41,7 +41,7 @@ Type `/` to see the slash commands with descriptions, and Tab to complete one. `
 
 Other keys: Ctrl+O opens the session picker, Ctrl+B toggles the file list, Ctrl+E opens the prompt in your external editor, Ctrl+L clears the screen (the model keeps the conversation; `/clear` forgets it).
 
-The header and status line show provider, model, directory, git branch, token usage, estimated cost, context usage and approval mode.
+The header and status line show provider, model, directory, git branch, token usage (with the share served from the provider's prompt cache), estimated cost, context usage and approval mode. Tokens and cost are counted call by call as the provider reports them, so a run you stop still counts. Prices come from each provider's own pricing page (see `phazeai-core/src/cost.rs`); a model without a checked price shows tokens only, and a total marked `+` leaves some calls unpriced.
 
 If a key is missing or a local server isn't reachable, the error says what to do about it. `/key <api-key>` stores a key in the OS keyring. Keys are never echoed or written to history.
 
@@ -65,7 +65,7 @@ The TUI logs to `~/.config/phazeai/cli.log` (set `RUST_LOG` for more detail). `-
 - `input.rs`: the multi-line prompt editor and history.
 - `commands.rs`: slash command registry and parsing.
 - `tool_view.rs`: tool labels, result digests, diff previews, approval rules.
-- `setup.rs`: provider parsing, cost estimates, setup and error guidance.
+- `setup.rs`: provider parsing, setup and error guidance.
 - `term.rs`: terminal setup and restore, including on panic.
 - `theme.rs`: themes and colour capability detection.
 - `companion.rs`: the small character shown on tall terminals.

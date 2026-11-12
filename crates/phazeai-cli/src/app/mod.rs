@@ -204,11 +204,9 @@ pub(crate) struct AppState {
     /// Input lines, as typed (`/add path`, `/skill name`, or a message),
     /// waiting for the current run to finish; see [`Self::drain_queue`].
     queued: VecDeque<String>,
-    tokens_in: u64,
-    tokens_out: u64,
-    /// Of `tokens_in`, the tokens the provider served from its prompt cache.
-    tokens_cached: u64,
-    cost: f64,
+    /// Tokens and cost of every model call this conversation, counted as
+    /// each call reports them.
+    meter: phazeai_core::cost::Meter,
     context_tokens: Option<usize>,
     /// Conversation tokens the agent may send before compacting.
     context_budget: usize,
@@ -607,26 +605,13 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                  budget (~{tokens_before} → ~{tokens_after} tokens)."
             ));
         }
-        AgentEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-        } => {
-            state.tokens_in += input_tokens;
-            state.tokens_out += output_tokens;
-            state.tokens_cached += cache_read_tokens;
-            state.cost += setup::estimate_cached_cost(
-                &state.settings.llm.provider,
-                &state.settings.llm.model,
-                setup::RunTokens {
-                    input: input_tokens,
-                    output: output_tokens,
-                    cache_read: cache_read_tokens,
-                    cache_write: cache_write_tokens,
-                },
-            );
+        AgentEvent::CallUsage(usage) => {
+            let billed = state.settings.billed_model();
+            let billed = billed.as_ref().map(|(p, m)| (p, m.as_str()));
+            state.meter.add(billed, &usage);
         }
+        // The run's totals: already counted call by call.
+        AgentEvent::TokenUsage { .. } => {}
         AgentEvent::Complete { .. } => {
             state.companion.on_complete();
         }
@@ -701,10 +686,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         status_text: String::new(),
         pending_approval: None,
         queued: VecDeque::new(),
-        tokens_in: 0,
-        tokens_out: 0,
-        tokens_cached: 0,
-        cost: 0.0,
+        meter: phazeai_core::cost::Meter::default(),
         context_tokens: None,
         context_budget,
         git_branch: None,
@@ -1001,10 +983,7 @@ mod tests {
             status_text: String::new(),
             pending_approval: None,
             queued: VecDeque::new(),
-            tokens_in: 0,
-            tokens_out: 0,
-            tokens_cached: 0,
-            cost: 0.0,
+            meter: phazeai_core::cost::Meter::default(),
             context_tokens: None,
             context_budget,
             git_branch: None,

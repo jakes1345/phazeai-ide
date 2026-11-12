@@ -136,7 +136,11 @@ enum ChatUpdate {
         slot: DiffApproveSlot,
     },
     /// Cumulative token counts for the completed run.
-    TokenUsage { input: u64, output: u64 },
+    /// One model call's usage, and what it is billed as (`None`: not known).
+    CallUsage {
+        usage: phazeai_core::llm::Usage,
+        billed: Option<(phazeai_core::ProviderId, String)>,
+    },
     /// The run folded earlier messages into a summary; the next send starts
     /// from this state instead of re-summarising them.
     Compacted(CompactionState),
@@ -436,6 +440,7 @@ fn send_to_ai(job: SendToAiJob) {
                 }),
             );
             // #endregion
+            let billed_model = settings.billed_model();
             let client = match settings.build_llm_client() {
                 Ok(c) => c,
                 Err(e) => {
@@ -589,14 +594,10 @@ fn send_to_ai(job: SendToAiJob) {
                                  the context budget (~{tokens_before} → ~{tokens_after} tokens)"
                             )));
                         }
-                        AgentEvent::TokenUsage {
-                            input_tokens,
-                            output_tokens,
-                            ..
-                        } => {
-                            let _ = update_tx.send(ChatUpdate::TokenUsage {
-                                input: input_tokens,
-                                output: output_tokens,
+                        AgentEvent::CallUsage(usage) => {
+                            let _ = update_tx.send(ChatUpdate::CallUsage {
+                                usage,
+                                billed: billed_model.clone(),
                             });
                         }
                         AgentEvent::Complete { .. } => {
@@ -777,8 +778,7 @@ pub fn chat_panel(
     workspace_root: RwSignal<std::path::PathBuf>,
     code_search: Option<CodeSearch>,
     status_toast: RwSignal<Option<String>>,
-    token_usage_input: RwSignal<u64>,
-    token_usage_output: RwSignal<u64>,
+    token_meter: RwSignal<phazeai_core::cost::Meter>,
     global_model_sig: RwSignal<String>,
 ) -> impl IntoView {
     let mut initial_messages = vec![ChatMessage {
@@ -1107,9 +1107,9 @@ pub fn chat_panel(
                     approval_params.set(params_display);
                     approval_slot.set(Some(slot));
                 }
-                ChatUpdate::TokenUsage { input, output } => {
-                    token_usage_input.update(|v| *v += input);
-                    token_usage_output.update(|v| *v += output);
+                ChatUpdate::CallUsage { usage, billed } => {
+                    let billed = billed.as_ref().map(|(p, m)| (p, m.as_str()));
+                    token_meter.update(|m| m.add(billed, &usage));
                 }
                 ChatUpdate::Cancelled(partial) => {
                     // Stop also ends a wait for approval or diff review, so a

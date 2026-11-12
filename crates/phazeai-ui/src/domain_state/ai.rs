@@ -9,6 +9,7 @@ pub struct AiState {
     pub pending_chat_inject: RwSignal<Option<String>>,
     pub inline_edit_open: RwSignal<bool>,
     pub inline_edit_query: RwSignal<String>,
-    pub token_usage_input: RwSignal<u64>,
-    pub token_usage_output: RwSignal<u64>,
+    /// Tokens and cost of every chat model call this session, counted as
+    /// each call reports them.
+    pub token_meter: RwSignal<phazeai_core::cost::Meter>,
 }
