@@ -62,9 +62,7 @@ pub fn provider_slug(p: &LlmProvider) -> &'static str {
 
 /// Text for `/local`: what the built-in local AI would run, and whether it can.
 pub fn local_ai_status_text(settings: &Settings) -> String {
-    use phazeai_core::local_ai::{
-        self, catalog, download, install, server, HardwareInfo, LOCAL_AI,
-    };
+    use phazeai_core::local_ai::{self, catalog, install, server, HardwareInfo, LOCAL_AI};
     let models_dir = local_ai::models_dir();
     let hw = HardwareInfo::probe(&models_dir);
     let mut out = String::from("PhazeAI Local (built-in llama.cpp)\n");
@@ -73,13 +71,16 @@ pub fn local_ai_status_text(settings: &Settings) -> String {
         LOCAL_AI.status().describe()
     ));
     match server::selected_model(&settings.local_ai, &models_dir) {
-        Ok(e) => {
-            let state = if download::is_downloaded(e, &models_dir) {
+        Ok(choice) => {
+            let state = if choice.downloaded {
                 "downloaded"
             } else {
                 "not downloaded"
             };
-            out.push_str(&format!("  Model:        {} ({state})\n", e.display_name));
+            out.push_str(&format!(
+                "  Model:        {} ({state})\n",
+                choice.display_name
+            ));
         }
         Err(e) => out.push_str(&format!("  Model:        {e}\n")),
     }

@@ -5,13 +5,17 @@
 //! - [`hardware`] — RAM / CPU / disk probe.
 //! - [`catalog`] — the curated, hash-pinned model list and the fit rules.
 //! - [`download`] — resumable, SHA-256-verified downloads.
+//! - [`hub`] — any GGUF model on Hugging Face, sized to the machine.
+//! - [`gguf`] — reading a model's shape from its GGUF header.
 //! - [`install`] — finding or installing `llama-server`.
 //! - [`server`] — running `llama-server` and the process-wide server handle the
 //!   `BuiltIn` provider talks to.
 
 pub mod catalog;
 pub mod download;
+pub mod gguf;
 pub mod hardware;
+pub mod hub;
 pub mod install;
 pub mod server;
 
@@ -28,7 +32,9 @@ pub use server::{readiness_problem, ServerStatus, LOCAL_AI};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalAiSettings {
-    /// Catalog id of the model to run. Unset: the largest downloaded model.
+    /// Catalog id, or `hf:<repo>:<file>` for a Hugging Face model, of the
+    /// model to run. Unset: the largest downloaded catalog model, else the
+    /// smallest downloaded Hugging Face one.
     pub model: Option<String>,
     /// Explicit `llama-server` binary; skips PATH and the managed install.
     pub server_path: Option<PathBuf>,
@@ -46,7 +52,7 @@ impl LocalAiSettings {
             return ctx;
         }
         server::selected_model(self, &models_dir())
-            .map(|entry| entry.ctx_size)
+            .map(|choice| choice.ctx_size)
             .unwrap_or(catalog::DEFAULT_CTX_SIZE)
     }
 }

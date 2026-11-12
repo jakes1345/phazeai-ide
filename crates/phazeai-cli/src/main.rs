@@ -73,6 +73,9 @@ enum Command {
     /// Run coding tasks against an agent (this one, Claude Code, or any
     /// other) and report how many it solved and what that cost.
     Eval(phazeai_cli::eval::EvalArgs),
+    /// Find, download and pick the model PhazeAI Local runs: any GGUF model
+    /// on Hugging Face, sized to this machine.
+    Models(phazeai_cli::models_cmd::ModelsArgs),
 }
 
 /// In the TUI, log to a file: anything written to stderr would corrupt the
@@ -160,9 +163,16 @@ async fn start_local_ai_if_selected(
 
 async fn run(cli: Cli) -> Result<()> {
     use std::io::{IsTerminal, Read};
-    if let Some(Command::Eval(args)) = cli.command {
-        init_tracing(false);
-        return phazeai_cli::eval::run(args).await;
+    match cli.command {
+        Some(Command::Eval(args)) => {
+            init_tracing(false);
+            return phazeai_cli::eval::run(args).await;
+        }
+        Some(Command::Models(args)) => {
+            init_tracing(false);
+            return phazeai_cli::models_cmd::run(args).await;
+        }
+        None => {}
     }
     let stdin_piped = !std::io::stdin().is_terminal();
     let tui = cli.prompt.is_none() && !stdin_piped;

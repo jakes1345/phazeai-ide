@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use super::catalog::{self, CatalogEntry};
 use super::download::{is_downloaded, model_path};
+use super::hub;
 use super::install::{find_server_binary, manual_install_hint, FoundServer};
 use super::LocalAiSettings;
 
@@ -43,11 +44,7 @@ pub enum ServerStatus {
 
 impl ServerStatus {
     pub fn describe(&self) -> String {
-        let name = |id: &str| {
-            catalog::find(id)
-                .map(|e| e.display_name.to_string())
-                .unwrap_or_else(|| id.to_string())
-        };
+        let name = |id: &str| display_name(id, &super::models_dir());
         match self {
             Self::Stopped => "Stopped".into(),
             Self::Starting { model_id } => format!("Starting — loading {}…", name(model_id)),
@@ -278,11 +275,11 @@ pub fn resolve_launch(
     install_root: &Path,
     path_env: Option<&std::ffi::OsStr>,
 ) -> Result<LaunchSpec, String> {
-    let entry = selected_model(settings, models_dir)?;
-    if !is_downloaded(entry, models_dir) {
+    let choice = selected_model(settings, models_dir)?;
+    if !choice.downloaded {
         return Err(format!(
             "{} isn't downloaded yet. Download it in Settings → Local AI.",
-            entry.display_name
+            choice.display_name
         ));
     }
     let found: Option<FoundServer> =
@@ -296,28 +293,107 @@ pub fn resolve_launch(
     };
     Ok(LaunchSpec {
         binary: found.path,
-        model_path: model_path(entry, models_dir),
-        model_id: entry.id.to_string(),
-        ctx_size: settings.ctx_size.unwrap_or(entry.ctx_size),
+        model_path: choice.path,
+        model_id: choice.id,
+        ctx_size: settings.ctx_size.unwrap_or(choice.ctx_size),
     })
 }
 
+/// The model the built-in server runs: a catalog model or a Hugging Face
+/// model pulled with `phazeai models pull`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// Catalog id, or `hf:<repo>:<file>`.
+    pub id: String,
+    pub display_name: String,
+    /// The GGUF file passed to llama-server.
+    pub path: PathBuf,
+    /// Whether every byte is on disk and verified.
+    pub downloaded: bool,
+    /// Context size it runs with unless `[local_ai] ctx_size` says.
+    pub ctx_size: u32,
+}
+
+impl ModelChoice {
+    fn from_catalog(entry: &CatalogEntry, models_dir: &Path) -> Self {
+        Self {
+            id: entry.id.to_string(),
+            display_name: entry.display_name.to_string(),
+            path: model_path(entry, models_dir),
+            downloaded: is_downloaded(entry, models_dir),
+            ctx_size: entry.ctx_size,
+        }
+    }
+
+    fn from_hub(model: &hub::InstalledModel, models_dir: &Path) -> Self {
+        Self {
+            id: model.id.clone(),
+            display_name: model.display_name.clone(),
+            path: model.path(models_dir),
+            downloaded: true,
+            ctx_size: model.ctx_size,
+        }
+    }
+}
+
+/// A model's name for status lines: the catalog's or the GGUF header's,
+/// else its id.
+pub fn display_name(id: &str, models_dir: &Path) -> String {
+    if let Some(entry) = catalog::find(id) {
+        return entry.display_name.to_string();
+    }
+    if hub::parse_id(id).is_some() {
+        if let Some(m) = hub::find_installed(models_dir, id) {
+            return m.display_name;
+        }
+    }
+    id.to_string()
+}
+
 /// The model `[local_ai] model` names, or — when unset — the largest catalog
-/// model already on disk.
+/// model already on disk, else the largest Hugging Face model pulled.
 pub fn selected_model(
     settings: &LocalAiSettings,
     models_dir: &Path,
-) -> Result<&'static CatalogEntry, String> {
-    match settings.model.as_deref().filter(|m| !m.is_empty()) {
-        Some(id) => catalog::find(id).ok_or_else(|| {
-            format!("Unknown built-in model \"{id}\". Pick one in Settings → Local AI.")
-        }),
+) -> Result<ModelChoice, String> {
+    match settings
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        Some(id) if id.starts_with(hub::ID_PREFIX) => {
+            let Some((repo, _)) = hub::parse_id(id) else {
+                return Err(format!(
+                    "\"{id}\" isn't a valid Hugging Face model id. Run `phazeai models list` to see what's installed."
+                ));
+            };
+            hub::find_installed(models_dir, id)
+                .map(|m| ModelChoice::from_hub(&m, models_dir))
+                .ok_or_else(|| {
+                    format!(
+                        "{id} isn't downloaded. Run `phazeai models pull {repo}` or pick another model in Settings → Local AI."
+                    )
+                })
+        }
+        Some(id) => catalog::find(id)
+            .map(|e| ModelChoice::from_catalog(e, models_dir))
+            .ok_or_else(|| {
+                format!("Unknown built-in model \"{id}\". Pick one in Settings → Local AI.")
+            }),
         None => catalog::CATALOG
             .iter()
             .rev()
             .find(|e| is_downloaded(e, models_dir))
+            .map(|e| ModelChoice::from_catalog(e, models_dir))
+            .or_else(|| {
+                hub::installed(models_dir)
+                    .last()
+                    .map(|m| ModelChoice::from_hub(m, models_dir))
+            })
             .ok_or_else(|| {
-                "No built-in model downloaded yet. Open Settings → Local AI and click Download."
+                "No built-in model downloaded yet. Open Settings → Local AI and click Download, \
+                 or run `phazeai models pull <repo>` for any GGUF model on Hugging Face."
                     .to_string()
             }),
     }
@@ -329,25 +405,25 @@ pub fn readiness_problem_in(
     models_dir: &Path,
     status: &ServerStatus,
 ) -> Option<String> {
-    let entry = match selected_model(settings, models_dir) {
-        Ok(e) => e,
+    let choice = match selected_model(settings, models_dir) {
+        Ok(c) => c,
         Err(e) => return Some(e),
     };
-    if !is_downloaded(entry, models_dir) {
+    if !choice.downloaded {
         return Some(format!(
             "{} isn't downloaded yet. Download it in Settings → Local AI.",
-            entry.display_name
+            choice.display_name
         ));
     }
     match status {
-        ServerStatus::Running { model_id, .. } if model_id == entry.id => None,
+        ServerStatus::Running { model_id, .. } if *model_id == choice.id => None,
         ServerStatus::Running { .. } => Some(format!(
             "PhazeAI Local is running a different model; restart it in Settings → Local AI to load {}.",
-            entry.display_name
+            choice.display_name
         )),
         ServerStatus::Starting { .. } => Some(format!(
             "PhazeAI Local is starting (loading {}).",
-            entry.display_name
+            choice.display_name
         )),
         ServerStatus::Failed(e) => Some(format!("PhazeAI Local failed to start: {e}")),
         ServerStatus::Stopped => Some(
@@ -516,7 +592,7 @@ impl LocalAi {
     pub async fn ensure_running(&self, settings: &LocalAiSettings) -> Result<String, String> {
         if let ServerStatus::Running { port, model_id } = self.status() {
             let wanted = selected_model(settings, &super::models_dir()).ok();
-            if wanted.is_none_or(|e| e.id == model_id) {
+            if wanted.is_none_or(|c| c.id == model_id) {
                 return Ok(format!("http://127.0.0.1:{port}"));
             }
         }

@@ -21,6 +21,7 @@
 - Stop and history trimming in the agent loop;
 - permission rules and tool hooks (#49), the per-hunk keep/undo of an agent's edit (#44) and run undo (#45);
 - editor key routing and focus (#55, #57): unit tests plus real-IDE runs under Xvfb.
+- any Hugging Face GGUF model in PhazeAI Local (`phazeai models search|files|pull|list|use|rm`, `local_ai/hub.rs`, `local_ai/gguf.rs`): search, the file listing at a pinned commit (split models grouped), the pick of the best quantization this machine's RAM can run, SHA-256-verified download, the KV-cache size read from the GGUF header, and selection by the server, tested against a fake Hub over real sockets and end to end through the CLI. Not yet run against huggingface.co itself (blocked where it was built). Downloaded models are listed in Settings → Local AI with Use and Delete; searching and pulling are CLI-only so far.
 
 **Implemented, but with little or no test of the real code** (the UI panels and `lsp_bridge.rs` have almost no unit tests, and the older test files mostly test copies; see Known problem 10): editor basics; LSP completions / hover / go-to-definition / diagnostics; DAP (one smoke test that silently skips without a debugger; only `lldb-dap`, `lldb-vscode` and `gdb` 14+); Git panel (parsing helpers are tested, the flows are not); streaming chat panel (retry-shaping and compaction-state helpers are tested; the streaming and cancel path is not); terminal; Composer; the MCP watchdog (restarts lazily on the next MCP tool call; only the restart cap is tested).
 

@@ -22,7 +22,7 @@ use phazeai_core::{
         catalog::{self, CatalogEntry, Fit},
         download::{self, DownloadProgress},
         hardware::HardwareInfo,
-        human_bytes,
+        hub, human_bytes,
         install::{self, FoundServer},
         LocalAiSettings, ServerStatus, LOCAL_AI,
     },
@@ -276,6 +276,7 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
         selected,
         tx: tx.clone(),
     };
+    let hub_list = hub_models(card_state.clone());
     let cards = dyn_stack(
         move || catalog::CATALOG.iter().collect::<Vec<_>>(),
         |e| e.id,
@@ -339,7 +340,7 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
             &Settings::load().local_ai,
             &local_ai::models_dir(),
         )
-        .is_ok_and(|e| download::is_downloaded(e, &local_ai::models_dir()));
+        .is_ok_and(|choice| choice.downloaded);
         model_ready
             && binary.with(|b| matches!(b, Ok(Some(_))))
             && !matches!(
@@ -429,6 +430,7 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
         intro,
         hw_line,
         cards,
+        hub_list,
         container(empty()).style(|s| s.height(space::MD)),
         server_line,
         binary_line,
@@ -471,6 +473,174 @@ fn run_blocking<T>(fut: impl std::future::Future<Output = Result<T, String>>) ->
         .build()
         .map_err(|e| format!("could not start a runtime: {e}"))?
         .block_on(fut)
+}
+
+/// Models pulled from Hugging Face with `phazeai models pull`, each with Use
+/// and Delete.
+fn hub_models(cs: CardState) -> impl IntoView {
+    let theme = cs.state.workbench.theme;
+    let disk_gen = cs.disk_gen;
+    let heading = label(|| "From Hugging Face").style(move |s| {
+        s.font_size(font::UI)
+            .font_weight(floem::text::Weight::BOLD)
+            .color(theme.get().palette.text_primary)
+            .margin_top(space::MD)
+    });
+    let how = caption(theme, || {
+        "Run any GGUF model on Hugging Face: `phazeai models search qwen coder`, then \
+         `phazeai models pull <repo>` downloads the best quantization this machine can run."
+            .to_string()
+    });
+    let rows = dyn_stack(
+        move || {
+            disk_gen.get();
+            hub::installed(&local_ai::models_dir())
+        },
+        |m| m.id.clone(),
+        move |m| hub_row(m, cs.clone()),
+    )
+    .style(|s| s.flex_col().width_full().gap(space::SM));
+    stack((heading, how, rows)).style(|s| s.flex_col().width_full().gap(space::XS))
+}
+
+fn hub_row(model: hub::InstalledModel, cs: CardState) -> impl IntoView {
+    let CardState {
+        state,
+        hardware,
+        message,
+        message_is_error,
+        disk_gen,
+        selected,
+        ..
+    } = cs;
+    let theme = state.workbench.theme;
+    let ai_provider = state.ai.provider;
+    let ai_model = state.ai.model;
+    let id = model.id.clone();
+    let in_use = {
+        let id = id.clone();
+        move || {
+            ai_provider.get() == ProviderId::BuiltIn.name()
+                && selected.with(|s| s.as_deref() == Some(id.as_str()))
+        }
+    };
+    let fit = {
+        let model = model.clone();
+        move || hardware.with(|h| h.as_ref().map(|h| model.fit(h, model.ctx_size)))
+    };
+    let title = stack((
+        label({
+            let name = model.display_name.clone();
+            move || name.clone()
+        })
+        .style(move |s| {
+            s.font_size(font::UI)
+                .font_weight(floem::text::Weight::BOLD)
+                .color(theme.get().palette.text_primary)
+        }),
+        badge("In use", theme, in_use.clone()),
+    ))
+    .style(|s| s.flex_row().items_center().gap(space::SM));
+    let meta = {
+        let fit_text = fit.clone();
+        let line = format!(
+            "{} · {} · {}k context",
+            human_bytes(model.size()),
+            model.repo,
+            model.ctx_size / 1024
+        );
+        label(move || {
+            let verdict = fit_text().map(|r| r.fit.label()).unwrap_or("Checking fit…");
+            format!("{line} · {verdict}")
+        })
+        .style(move |s| {
+            let p = theme.get().palette;
+            let c = match fit().map(|r| r.fit) {
+                Some(Fit::Fits) => p.success,
+                Some(Fit::Tight) => p.warning,
+                Some(Fit::TooBig) => p.error,
+                None => p.text_muted,
+            };
+            s.font_size(font::CAPTION).color(c)
+        })
+    };
+    let use_btn = {
+        let model = model.clone();
+        let in_use = in_use.clone();
+        shown_button(
+            "Use this",
+            ButtonVariant::Primary,
+            theme,
+            move || !in_use(),
+            move || {
+                let local = save_local_ai(|l| l.model = Some(model.id.clone()));
+                selected.set(Some(model.id.clone()));
+                ai_provider.set(ProviderId::BuiltIn.name().to_string());
+                ai_model.set(model.id.clone());
+                let running_this = matches!(
+                    LOCAL_AI.status(),
+                    ServerStatus::Running { ref model_id, .. } | ServerStatus::Starting { ref model_id }
+                        if *model_id == model.id
+                );
+                if !running_this {
+                    LOCAL_AI.start_in_background(local);
+                }
+                message_is_error.set(false);
+                message.set(format!(
+                    "AI provider set to {} with {}.",
+                    ProviderId::BuiltIn.name(),
+                    model.display_name
+                ));
+            },
+        )
+    };
+    let delete_btn = shown_button(
+        "Delete",
+        ButtonVariant::Danger,
+        theme,
+        || true,
+        move || {
+            if matches!(
+                LOCAL_AI.status(),
+                ServerStatus::Running { ref model_id, .. } | ServerStatus::Starting { ref model_id }
+                    if *model_id == model.id
+            ) {
+                LOCAL_AI.stop();
+            }
+            match hub::remove(&local_ai::models_dir(), &model) {
+                Ok(()) => {
+                    if selected.with_untracked(|s| s.as_deref() == Some(model.id.as_str())) {
+                        save_local_ai(|l| l.model = None);
+                        selected.set(None);
+                    }
+                    message_is_error.set(false);
+                    message.set(format!("Deleted {}.", model.display_name));
+                }
+                Err(e) => {
+                    message_is_error.set(true);
+                    message.set(format!("Could not delete {}: {e}", model.display_name));
+                }
+            }
+            disk_gen.update(|g| *g += 1);
+        },
+    );
+    let buttons = stack((use_btn, delete_btn)).style(|s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .gap(space::SM)
+            .margin_top(space::XS)
+    });
+    stack((title, meta, buttons)).style(move |s| {
+        let p = theme.get().palette;
+        s.flex_col()
+            .width_full()
+            .gap(space::XXS)
+            .padding(space::LG)
+            .border_radius(radius::LG)
+            .border(stroke::HAIRLINE)
+            .border_color(p.border)
+            .background(p.bg_surface)
+    })
 }
 
 fn model_card(

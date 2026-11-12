@@ -10,6 +10,7 @@ pub mod companion;
 pub mod eval;
 pub mod input;
 pub mod markdown;
+pub mod models_cmd;
 pub mod oneshot;
 pub mod output;
 pub mod setup;
