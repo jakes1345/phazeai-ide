@@ -1099,7 +1099,18 @@ fn editor_keys(
     move |editor, press, mods| {
         if let KeyInput::Keyboard(key, _) = &press.key {
             let chord = mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT);
-            if (chord && panel_shortcut(key, &mods)) || app_shortcut(key, &mods) {
+            if chord && panel_shortcut(key, &mods) {
+                return CommandExecuted::Yes;
+            }
+            if app_shortcut(key, &mods) {
+                if !chord
+                    && matches!(
+                        key,
+                        Key::Character(_) | Key::Named(floem::keyboard::NamedKey::Space)
+                    )
+                {
+                    skip_typing(editor);
+                }
                 return CommandExecuted::Yes;
             }
         }
@@ -1107,6 +1118,21 @@ fn editor_keys(
         let handler = slot.get_or_insert_with(|| Box::new(default_key_handler(editor)));
         handler(press, mods)
     }
+}
+
+/// Keep the press being handled from also typing text. Floem's editor types a
+/// plain character (or a space) after the key handler returns, whatever the
+/// handler did with it, so a Vim normal-mode `j` would both move the cursor
+/// and insert a "j". A read-only editor types nothing; it is writable again
+/// once this event is over. Edits made through the document (Vim's `x`,
+/// `dd` ...) are not affected by the flag.
+fn skip_typing(editor: RwSignal<floem::views::editor::Editor>) {
+    let read_only = editor.get_untracked().read_only;
+    if read_only.get_untracked() {
+        return;
+    }
+    read_only.set(true);
+    floem::action::exec_after(std::time::Duration::ZERO, move |_| read_only.set(false));
 }
 
 /// Write `tab`'s document (looked up in `docs` by path) to disk. Only on success is the tab
@@ -6758,7 +6784,7 @@ mod tab_tests {
 mod editor_key_tests {
     use super::{editor_keys, ShortcutFn};
     use floem::keyboard::{Key, KeyCode, Modifiers, NamedKey, PhysicalKey};
-    use floem::reactive::create_rw_signal;
+    use floem::reactive::{create_rw_signal, SignalGet};
     use floem::views::editor::command::CommandExecuted;
     use floem::views::editor::keypress::key::KeyInput;
     use floem::views::editor::keypress::press::KeyPress;
@@ -6803,6 +6829,15 @@ mod editor_key_tests {
             *seen.borrow(),
             expected,
             "every press must reach the IDE's key bindings"
+        );
+
+        // Floem types a plain character after the handler returns, whatever the
+        // handler did; a press the IDE used must not also type text.
+        editor.get_untracked().receive_char("j");
+        assert_eq!(
+            editor.get_untracked().doc().text().to_string(),
+            "",
+            "a key the IDE used must not also be typed"
         );
     }
 }
