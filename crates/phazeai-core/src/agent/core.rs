@@ -635,43 +635,60 @@ impl Agent {
                                 };
                                 // Some hunks kept: write those, and tell the
                                 // model which parts were not written.
-                                let (approved, write) = match answer {
-                                    DiffAnswer::Approve => (true, write),
-                                    DiffAnswer::Reject => (false, write),
+                                const REJECTED: &str = "File change rejected by user";
+                                let (refused, write) = match answer {
+                                    DiffAnswer::Approve => (None, write),
+                                    DiffAnswer::Reject => (Some(REJECTED.to_string()), write),
                                     DiffAnswer::Keep(keep) => {
                                         let total = crate::review::hunks(&before, &after).len();
                                         let kept = keep.iter().take(total).filter(|k| **k).count();
                                         if kept == 0 {
-                                            (false, write)
+                                            (Some(REJECTED.to_string()), write)
                                         } else if kept == total {
-                                            (true, write)
+                                            (None, write)
+                                        } else if !write.before_is_exact() {
+                                            // The review saw the file as lossy
+                                            // text; rebuilding the parts left
+                                            // alone from it would rewrite bytes
+                                            // nobody approved changing.
+                                            (
+                                                Some(format!(
+                                                    "Only part of the change to '{path}' was \
+                                                     kept, but the file is not valid UTF-8, so \
+                                                     a partial write could not keep its other \
+                                                     bytes exactly. Nothing was written: the \
+                                                     user can approve or reject the whole change.",
+                                                    path = write.target().display()
+                                                )),
+                                                write,
+                                            )
                                         } else {
                                             let content =
                                                 crate::review::apply(&before, &after, &keep);
                                             let note =
                                                 crate::review::partial_note(&before, &after, &keep);
-                                            (true, write.keep_only(content, note))
+                                            (None, write.keep_only(content, note))
                                         }
                                     }
                                 };
-                                if !approved {
+                                if let Some(why) = refused {
                                     let _ = event_tx.send(AgentEvent::ToolResult {
                                         name: tool_name.clone(),
                                         success: false,
-                                        summary: "File change rejected by user".to_string(),
+                                        summary: why.clone(),
                                     });
                                     {
                                         let mut conversation = self.conversation.lock().await;
                                         conversation.add_tool_result(
                                             &tool_call.id,
-                                            "Error: File change rejected by user",
+                                            format!("Error: {why}"),
                                         );
                                     }
                                     tool_executions.push(ToolExecution {
                                         tool_name: tool_name.clone(),
                                         params: tool_call.parse_arguments().unwrap_or(Value::Null),
                                         success: false,
-                                        result_summary: "File change rejected by user".to_string(),
+                                        result_summary: why,
                                     });
                                     continue;
                                 }
