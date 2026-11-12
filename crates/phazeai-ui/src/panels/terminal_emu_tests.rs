@@ -131,16 +131,18 @@ fn device_attributes_are_answered() {
 #[test]
 fn background_colour_query_is_answered_with_the_theme() {
     let mut c = core(20, 4);
-    let mut p = TermPalette::default();
-    p.bg = Rgb {
-        r: 0x12,
-        g: 0x34,
-        b: 0x56,
-    };
-    p.fg = Rgb {
-        r: 0xee,
-        g: 0xdd,
-        b: 0xcc,
+    let p = TermPalette {
+        bg: Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        },
+        fg: Rgb {
+            r: 0xee,
+            g: 0xdd,
+            b: 0xcc,
+        },
+        ..TermPalette::default()
     };
     c.set_palette(p);
     let out = c.feed(b"\x1b]11;?\x07");
