@@ -71,7 +71,9 @@ impl Tool for GrepTool {
         let regex = Regex::new(pattern)
             .map_err(|e| PhazeError::tool("grep", format!("Invalid regex: {e}")))?;
 
-        let path = Path::new(search_path);
+        // A relative path is read from the open project (see `resolve_relative`).
+        let resolved = crate::tools::sandbox::resolve_relative(Path::new(search_path));
+        let path = resolved.as_path();
         let mut matches = Vec::new();
         // Files the privacy policy hides; only the count is reported.
         let skipped = Arc::new(AtomicUsize::new(0));

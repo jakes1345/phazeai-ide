@@ -1,6 +1,7 @@
 pub mod ex_command;
 mod menu;
 mod overlays;
+mod tool_root;
 use menu::menu_bar;
 use overlays::{
     branch_picker_overlay, code_actions_overlay, command_palette, completion_popup, file_picker,
@@ -3357,6 +3358,8 @@ pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
 fn ide_root(state: IdeState) -> impl IntoView {
     // Keep the AI privacy policy in sync with the workspace root.
     crate::panels::privacy::install(&state);
+    // And the agent's file sandbox, its relative paths and its shell.
+    tool_root::install(state.project.workspace_root);
 
     // ── Inline completions ───────────────────────────────────────────────────
     // Each editor asks `phazeai_core::fim` after a typing pause and shows the
@@ -4044,6 +4047,17 @@ pub fn launch_phaze_ide() {
                         };
                         show_toast(state.workbench.status_toast, msg);
                     }
+                }
+
+                // A settings file that can't be read: PhazeAI runs on the
+                // defaults and won't save over it (Settings → top says why).
+                if let Some(problem) = Settings::file_problem() {
+                    show_toast(
+                        state.workbench.status_toast,
+                        format!(
+                            "Settings file has an error ({problem}); using defaults. See Settings."
+                        ),
+                    );
                 }
 
                 // Overlay layers — rendered after IDE content so they paint on top.

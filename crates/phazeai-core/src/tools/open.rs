@@ -37,15 +37,21 @@ impl Tool for OpenTool {
         // Check if it's a URL or file path
         let is_url = path_str.starts_with("http://") || path_str.starts_with("https://");
 
-        if !is_url {
-            let path = Path::new(path_str);
+        // A relative file path is read from the open project (see
+        // `resolve_relative`), so the opener gets that file and not one in the
+        // folder the process started in.
+        let target = if is_url {
+            path_str.to_string()
+        } else {
+            let path = crate::tools::sandbox::resolve_relative(Path::new(path_str));
             if !path.exists() {
                 return Err(PhazeError::tool(
                     "open",
                     format!("Path does not exist: {path_str}"),
                 ));
             }
-        }
+            path.to_string_lossy().into_owned()
+        };
 
         // Use the platform-appropriate open command.
         let opener = if cfg!(target_os = "macos") {
@@ -58,9 +64,9 @@ impl Tool for OpenTool {
 
         let mut cmd = crate::process::tokio_command(opener);
         if cfg!(target_os = "windows") {
-            cmd.args(["/C", "start", "", path_str]);
+            cmd.args(["/C", "start", "", target.as_str()]);
         } else {
-            cmd.arg(path_str);
+            cmd.arg(&target);
         }
 
         let output = cmd

@@ -50,7 +50,9 @@ impl Tool for ListFilesTool {
 
         let max_depth = if recursive { None } else { Some(1) };
 
-        let mut builder = WalkBuilder::new(path);
+        // A relative path is read from the open project (see `resolve_relative`).
+        let root = crate::tools::sandbox::resolve_relative(std::path::Path::new(path));
+        let mut builder = WalkBuilder::new(&root);
         builder.hidden(false).git_ignore(true).git_global(true);
         let policy = crate::privacy::active();
         builder.filter_entry(move |e| {
@@ -71,7 +73,7 @@ impl Tool for ListFilesTool {
 
             let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
             let entry_path = entry.path();
-            let relative = entry_path.strip_prefix(path).unwrap_or(entry_path);
+            let relative = entry_path.strip_prefix(&root).unwrap_or(entry_path);
 
             files.push(serde_json::json!({
                 "name": relative.to_string_lossy(),
@@ -96,5 +98,38 @@ impl Tool for ListFilesTool {
             out["limit"] = Value::from(MAX_ENTRIES);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::sandbox::{set_workspace_root, tests::SERIAL, workspace_root};
+
+    #[test]
+    fn a_relative_path_lists_the_open_project_not_the_process_directory() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/only_here.rs"), "").unwrap();
+
+        let _lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = workspace_root();
+        set_workspace_root(Some(root.clone()));
+        // A runtime of its own, so the lock is not held across an `.await`.
+        let listed = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(ListFilesTool.execute(serde_json::json!({ "path": "src" })));
+        set_workspace_root(prev);
+
+        let listed = listed.unwrap();
+        let names: Vec<&str> = listed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert_eq!(names, ["only_here.rs"], "{listed}");
     }
 }

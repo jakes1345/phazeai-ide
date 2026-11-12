@@ -19,7 +19,9 @@ use std::path::Path;
 
 /// The text the model gets for `value`, the successful result of `tool`.
 pub fn for_model(tool: &str, value: &Value) -> String {
-    let cwd = std::env::current_dir().ok();
+    // Paths are shown relative to the folder relative tool paths are read
+    // from, which is the open project once the host has set one.
+    let cwd = Some(crate::tools::sandbox::base_dir());
     let rendered = match tool {
         "read_file" => read_file(value),
         "bash" => bash(value),

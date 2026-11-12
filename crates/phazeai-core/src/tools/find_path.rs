@@ -64,7 +64,9 @@ impl Tool for FindPathTool {
         let regex = Regex::new(pattern)
             .map_err(|e| PhazeError::tool("find_path", format!("Invalid regex: {e}")))?;
 
-        let mut builder = WalkBuilder::new(base_path);
+        // A relative path is read from the open project (see `resolve_relative`).
+        let base = crate::tools::sandbox::resolve_relative(std::path::Path::new(base_path));
+        let mut builder = WalkBuilder::new(&base);
         builder.hidden(false).git_ignore(true).git_global(true);
         let policy = crate::privacy::active();
         builder.filter_entry(move |e| {
