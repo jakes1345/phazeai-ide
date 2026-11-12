@@ -3357,6 +3357,19 @@ pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
 fn ide_root(state: IdeState) -> impl IntoView {
     // Keep the AI privacy policy in sync with the workspace root.
     crate::panels::privacy::install(&state);
+    // Open Folder: the agent's tools move to the new folder too, as the
+    // privacy policy and code search do. (At start the workspace was set up
+    // with them already.)
+    {
+        let root = state.project.workspace_root;
+        create_effect(move |before: Option<PathBuf>| {
+            let now = root.get();
+            if before.is_some_and(|before| before != now) {
+                use_workspace_for_tools(&now);
+            }
+            now
+        });
+    }
 
     // ── Inline completions ───────────────────────────────────────────────────
     // Each editor asks `phazeai_core::fim` after a typing pause and shows the
@@ -3952,6 +3965,19 @@ fn ide_root(state: IdeState) -> impl IntoView {
             })
             .color(p.text_primary)
     })
+}
+
+/// Point the agent's tools at `root`, the folder just opened: the sandbox
+/// that file and shell tools may not leave, and the current directory that
+/// relative paths, the shell's starting folder and searches without a path
+/// (`grep`, `glob`, `list`, `find_path`) are taken from. Before, both stayed
+/// on the folder the IDE started in, so after Open Folder the agent was told
+/// about the new project but refused or missed its files.
+pub fn use_workspace_for_tools(root: &std::path::Path) {
+    phazeai_core::tools::sandbox::set_workspace_root(Some(root.to_path_buf()));
+    if let Err(e) = std::env::set_current_dir(root) {
+        tracing::warn!("could not change into {}: {e}", root.display());
+    }
 }
 
 /// Ask the IDE to quit (File > Exit, the Vim ex bar's `:q` and friends). `install_quit_handler`

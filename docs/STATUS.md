@@ -47,7 +47,7 @@
 - *First run:* a readiness card exists (provider ready, rust-analyzer found).
 - *Memory:* a global `memory` tool stores `~/.phazeai/memory.json`; there is no per-project memory.
 - *Smallest built-in model (1.5B):* its catalog notes say it writes tool calls as plain text, so agent actions are unreliable on it. That matters for the "works without a strong machine" goal.
-- *Roots after "Open Folder":* the agent's **file sandbox root is fixed at startup** (from the git root of the cwd, or the cwd) and is not updated, so the file tools refuse paths in a newly opened folder outside it. The workspace, the **privacy policy root and the code-search root do follow** Open Folder, so the sandbox and the privacy policy can name different projects.
+- *Roots after "Open Folder":* the workspace, the privacy policy root, the code-search root and the agent's file sandbox all follow Open Folder. The IDE's current directory moves with them, so relative tool paths, the shell's starting folder and searches without a path are taken from the opened folder (`use_workspace_for_tools`).
 
 **Claimed as shipped but absent:** the README is accurate since #29. `CONTRIBUTING.md` (~35) still names the removed `phazeai-cloud` crate and "WASM" plugins, and `ROADMAP.md` (~134) its skeleton.
 **Honestly marked as planned:** cloud tier (architecture undecided), real-time collaboration, ACP client, mobile companion, plugin marketplace.
@@ -104,7 +104,7 @@
 
 *Found 2026-11-12:*
 
-31. **Opening another folder does not move the agent's file sandbox** (`set_workspace_root` runs only at startup, `app.rs` ~474), while privacy and code search follow the new folder. Detail under "Roots after Open Folder".
+31. **Fixed:** Open Folder moves the agent's file sandbox and the IDE's current directory to the opened folder.
 32. **The terminal is a line/block renderer**, so full-screen programs (`vim`, `htop`, `less`) inside it draw wrongly.
 33. **No end-to-end run with a real model** (cloud key or built-in) has been recorded for the chat, agent or Composer paths; their tests use mocks.
 
