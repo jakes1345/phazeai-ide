@@ -47,7 +47,9 @@ pub enum CommandResult {
     /// Search files with glob pattern.
     SearchFiles(String),
     /// List available models for current provider or discover local models.
-    ListModels,
+    /// `/models [refresh | <text>]`: the provider's list, read again with
+    /// `refresh`, or only the models whose id or name holds `<text>`.
+    ListModels { refresh: bool, filter: String },
     /// Discover local model providers.
     DiscoverModels,
     /// Show project context information.
@@ -191,8 +193,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     cmd!(
         "/models",
         [],
-        "",
-        "List known models for the active provider",
+        "[refresh | <text>]",
+        "List the active provider's models, from its own list",
         Model
     ),
     cmd!(
@@ -555,7 +557,14 @@ pub fn handle_command(input: &str) -> CommandResult {
             }
         }
         "/version" => CommandResult::Message(format!("PhazeAI CLI v{}", env!("CARGO_PKG_VERSION"))),
-        "/models" => CommandResult::ListModels,
+        "/models" => CommandResult::ListModels {
+            refresh: arg.eq_ignore_ascii_case("refresh"),
+            filter: if arg.eq_ignore_ascii_case("refresh") {
+                String::new()
+            } else {
+                arg.to_string()
+            },
+        },
         "/discover" => CommandResult::DiscoverModels,
         "/local" => CommandResult::Message(crate::setup::local_ai_status_text(
             &phazeai_core::Settings::load(),

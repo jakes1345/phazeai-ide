@@ -871,7 +871,9 @@ impl ProviderRegistry {
 pub fn small_model_for(provider: &ProviderId) -> Option<&'static str> {
     match provider {
         ProviderId::Claude => Some("claude-haiku-4-5-20251001"),
-        ProviderId::OpenAI | ProviderId::Azure => Some("gpt-4o-mini"),
+        // OpenAI's cheapest model on its pricing page (November 10, 2026).
+        // Azure's models go by the deployment names each user picks.
+        ProviderId::OpenAI => Some("gpt-6-luna"),
         ProviderId::Gemini => Some("gemini-2.5-flash"),
         // xAI's cheapest current model, built for agentic coding.
         ProviderId::Xai => Some("grok-build-0.1"),

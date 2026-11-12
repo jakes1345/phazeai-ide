@@ -23,6 +23,11 @@ pub fn context_window(provider: &ProviderId, model: &str) -> usize {
     {
         return info.context_window;
     }
+    // A model the table doesn't know: the window its provider's own model
+    // list gave, when that list has been read.
+    if let Some(window) = crate::llm::model_list::cached_context_window(provider, model) {
+        return window;
+    }
     match provider {
         // Every current Claude model has at least a 200k window.
         ProviderId::Claude => 200_000,

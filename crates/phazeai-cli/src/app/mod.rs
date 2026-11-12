@@ -233,6 +233,8 @@ pub(crate) struct AppState {
     policy: Arc<Mutex<ApprovalPolicy>>,
     cancel: Arc<AtomicBool>,
     worker_tx: mpsc::UnboundedSender<WorkerCommand>,
+    /// For work done off the main loop (reading a model list) to report back.
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
 
     ai_mode: String,
     last_user_input: String,
@@ -494,6 +496,11 @@ fn handle_ui_event(state: &mut AppState, event: UiEvent) {
             state.follow = true;
         }
         UiEvent::Context(tokens) => state.context_tokens = Some(tokens),
+        UiEvent::Models {
+            provider,
+            filter,
+            result,
+        } => actions::show_models(state, &provider, &filter, result),
         UiEvent::RunFinished { cancelled } => {
             state.processing = false;
             state.pending_approval = None;
@@ -710,6 +717,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         policy: policy.clone(),
         cancel: cancel.clone(),
         worker_tx,
+        ui_tx: ui_tx.clone(),
         ai_mode: "chat".into(),
         last_user_input: String::new(),
         companion: Companion::new(),
@@ -1018,6 +1026,7 @@ mod tests {
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             worker_tx,
+            ui_tx: mpsc::unbounded_channel().0,
             ai_mode: "chat".into(),
             last_user_input: String::new(),
             companion: Companion::new(),

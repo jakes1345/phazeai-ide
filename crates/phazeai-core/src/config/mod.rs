@@ -601,15 +601,40 @@ impl Settings {
             return self.llm.model.clone();
         };
         let price = |model: &str| {
-            crate::llm::ProviderRegistry::known_models(&provider)
-                .into_iter()
-                .find(|m| m.id == model)
-                .map(|m| m.input_cost_per_m)
+            crate::cost::price(&provider, model, 0)
+                .map(|p| p.input)
+                .or_else(|| {
+                    crate::llm::ProviderRegistry::known_models(&provider)
+                        .into_iter()
+                        .find(|m| m.id == model)
+                        .map(|m| m.input_cost_per_m)
+                })
         };
         match (price(&self.llm.model), price(small)) {
             (Some(main), Some(cheap)) if main <= cheap => self.llm.model.clone(),
             _ => small.to_string(),
         }
+    }
+
+    /// The active provider's models as its own model list gives them (see
+    /// [`crate::llm::model_list`]), at the address and with the key the
+    /// agent uses. A day-old list is reused unless `refresh` is set.
+    pub async fn live_models(
+        &self,
+        refresh: bool,
+    ) -> Result<crate::llm::model_list::ModelList, crate::error::PhazeError> {
+        // The same checks a chat request passes: the key never goes to
+        // another machine over plain http, and `local_only` allows only a
+        // server on this machine.
+        self.check_base_url()?;
+        let registry = self.build_provider_registry();
+        let config = registry.active_config().cloned().ok_or_else(|| {
+            crate::error::PhazeError::Config("No provider is configured.".to_string())
+        })?;
+        let base_url = crate::llm::provider::request_base_url(&config)?;
+        crate::privacy::check_provider(&config.id, &base_url, "model list")?;
+        let key = config.api_key();
+        crate::llm::model_list::live_models(&config.id, &base_url, key.as_deref(), refresh).await
     }
 
     /// A client for side jobs: the active provider at the same address as
@@ -867,8 +892,10 @@ auto_start = false
         // The family's small model when the main one costs more.
         let sonnet = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", None);
         assert_eq!(sonnet.small_model(), "claude-haiku-4-5-20251001");
-        let gpt = with_model(LlmProvider::OpenAI, "gpt-4o", None);
-        assert_eq!(gpt.small_model(), "gpt-4o-mini");
+        let gpt = with_model(LlmProvider::OpenAI, "gpt-6-sol", None);
+        assert_eq!(gpt.small_model(), "gpt-6-luna");
+        let luna = with_model(LlmProvider::OpenAI, "gpt-6-luna", None);
+        assert_eq!(luna.small_model(), "gpt-6-luna");
         // A main model Phaze has no price for: the small one.
         let newer = with_model(LlmProvider::Claude, "claude-opus-9", None);
         assert_eq!(newer.small_model(), "claude-haiku-4-5-20251001");
