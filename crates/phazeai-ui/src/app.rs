@@ -538,6 +538,7 @@ impl IdeState {
             create_effect(move |_| {
                 if let Some(result) = goto_definition.get() {
                     open_file2.set(Some(result.path.clone()));
+                    crate::panels::editor::goto_column_next(result.col);
                     goto_line2.set(result.line);
                     // Reset so the same definition won't re-trigger on the next
                     // reactive cycle that happens to read this signal.

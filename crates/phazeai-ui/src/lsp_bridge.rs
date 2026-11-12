@@ -288,11 +288,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 change_deadline = tokio::time::Instant::now() + debounce_ms;
                             }
                             Some(LspCommand::RequestCompletions { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2    = path.clone();
                                     let evt_tx   = event_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.completion(&path2, line, col).await {
+                                        match client.completion(&path2, line, col16).await {
                                             Ok(items) => {
                                                 let _ = evt_tx.send(LspEvent::Completions(items));
                                             }
@@ -301,11 +303,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestDefinition { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2  = path.clone();
                                     let evt_tx = event_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.goto_definition(&path2, line, col).await {
+                                        match client.goto_definition(&path2, line, col16).await {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
@@ -314,11 +318,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestHover { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2  = path.clone();
                                     let evt_tx = event_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.hover(&path2, line, col).await {
+                                        match client.hover(&path2, line, col16).await {
                                             Ok(Some(hover)) => {
                                                 let _ = evt_tx.send(LspEvent::Hover(Some(hover)));
                                             }
@@ -328,11 +334,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestSignatureHelp { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2   = path.clone();
                                     let sig_tx2 = sig_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.signature_help(&path2, line, col).await {
+                                        match client.signature_help(&path2, line, col16).await {
                                             Ok(Some(sh)) => {
                                                 if let Some(result) = parse_signature_help(sh) {
                                                     let _ = sig_tx2.try_send(result);
@@ -344,13 +352,15 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestReferences { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 // Try LSP first, fall back to ripgrep word-search.
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2      = path.clone();
                                     let evt_tx     = event_tx.clone();
                                     let ws_root2   = ws_root_for_refs.clone();
                                     tokio::spawn(async move {
-                                        match client.find_references(&path2, line, col).await {
+                                        match client.find_references(&path2, line, col16).await {
                                             Ok(locs) if !locs.is_empty() => {
                                                 let _ = evt_tx.send(LspEvent::References(locs));
                                             }
@@ -383,13 +393,15 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestRename { path, line, col, new_name, workspace_root: ws }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 // Try LSP workspace/rename; fall back to project-wide text replace.
                                 let did_lsp = if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2     = path.clone();
                                     let new_name2 = new_name.clone();
                                     let old_word2 = word_at_position(&path, line, col).unwrap_or_default();
                                     // Ask LSP for workspace edits; apply by rewriting files directly.
-                                    match client.rename_symbol(&path2, line, col, new_name2).await {
+                                    match client.rename_symbol(&path2, line, col16, new_name2).await {
                                         Ok(Some(workspace_edit)) => {
                                             apply_workspace_edit(workspace_edit, &old_word2, &new_name);
                                             true
@@ -418,6 +430,8 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestCodeActions { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 let actions_tx2 = actions_tx.clone();
                                 let path2 = path.clone();
                                 let client_opt = manager.client_for_file(&path).cloned();
@@ -428,8 +442,8 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                             let params = lsp_types::CodeActionParams {
                                                 text_document: lsp_types::TextDocumentIdentifier { uri },
                                                 range: lsp_types::Range {
-                                                    start: lsp_types::Position { line, character: col },
-                                                    end: lsp_types::Position { line, character: col }},
+                                                    start: lsp_types::Position { line, character: col16 },
+                                                    end: lsp_types::Position { line, character: col16 }},
                                                 context: lsp_types::CodeActionContext {
                                                     diagnostics: vec![],
                                                     only: None,
@@ -526,12 +540,14 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 manager.did_save(&path);
                             }
                             Some(LspCommand::RequestPeekDefinition { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2  = path.clone();
                                     let evt_tx = event_tx.clone();
                                     let peek_tx2 = peek_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.goto_definition(&path2, line, col).await {
+                                        match client.goto_definition(&path2, line, col16).await {
                                             Ok(locs) => {
                                                 if let Some(loc) = locs.into_iter().next() {
                                                     let target_path = uri_path(&loc.uri);
@@ -617,11 +633,13 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 });
                             }
                             Some(LspCommand::RequestImplementation { path, line, col }) => {
+                                // The server counts columns in UTF-16 units; `col` is a byte offset.
+                                let col16 = lsp_column(&manager, pending_change.as_ref(), &path, line, col);
                                 if let Some(client) = manager.client_for_file(&path).cloned() {
                                     let path2  = path.clone();
                                     let evt_tx = event_tx.clone();
                                     tokio::spawn(async move {
-                                        match client.goto_implementation(&path2, line, col).await {
+                                        match client.goto_implementation(&path2, line, col16).await {
                                             Ok(locs) => {
                                                 let _ = evt_tx.send(LspEvent::Definition(locs));
                                             }
@@ -688,6 +706,10 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                 }
                             }
                             Some(LspCommand::RequestInlayHints { path, start_line, end_line }) => {
+                                // The end of the range, clamped to the end of the
+                                // document the server has: a line or column past
+                                // it fails the whole request ("Invalid offset").
+                                let end = document_end(&manager, pending_change.as_ref(), &path, end_line);
                                 let inlay_tx2 = inlay_tx.clone();
                                 let path2 = path.clone();
                                 let client_opt = manager.client_for_file(&path).cloned();
@@ -697,7 +719,7 @@ pub fn start_lsp_bridge(workspace_root: PathBuf) -> LspBridgeSignals {
                                     // wrong as often as not.
                                     let mut entries = Vec::new();
                                     if let Some(client) = client_opt {
-                                        if let Ok(hints) = client.inlay_hints(&path2, start_line, end_line).await {
+                                        if let Ok(hints) = client.inlay_hints(&path2, start_line, end).await {
                                             entries = hints.into_iter().map(|h| {
                                                 let label = match &h.label {
                                                     lsp_types::InlayHintLabel::String(s) => s.clone(),
@@ -1193,6 +1215,57 @@ fn replace_whole_word(text: &str, old: &str, new_name: &str) -> String {
     }
     result.push_str(remaining);
     result
+}
+
+/// The LSP column (UTF-16 units) of byte column `col` on `line` of `path`,
+/// from the text the server has (or is about to get) for it; the disk copy
+/// when the file is not open. `col` unchanged when the line is unknown.
+fn lsp_column(
+    manager: &LspManager,
+    pending: Option<&(PathBuf, String, i32)>,
+    path: &std::path::Path,
+    line: u32,
+    col: u32,
+) -> u32 {
+    use phazeai_core::lsp::text::{line_text, utf16_col};
+    let disk;
+    let text = match pending
+        .filter(|(p, _, _)| p == path)
+        .map(|(_, text, _)| text.as_str())
+        .or_else(|| manager.document_text(path))
+    {
+        Some(text) => text,
+        None => {
+            disk = std::fs::read_to_string(path).unwrap_or_default();
+            disk.as_str()
+        }
+    };
+    line_text(text, line)
+        .map(|l| utf16_col(l, col as usize))
+        .unwrap_or(col)
+}
+
+/// The end of line `line` of `path` as an LSP position, or the end of the
+/// document when it has fewer lines; from the same text as [`lsp_column`].
+fn document_end(
+    manager: &LspManager,
+    pending: Option<&(PathBuf, String, i32)>,
+    path: &std::path::Path,
+    line: u32,
+) -> (u32, u32) {
+    let disk;
+    let text = match pending
+        .filter(|(p, _, _)| p == path)
+        .map(|(_, text, _)| text.as_str())
+        .or_else(|| manager.document_text(path))
+    {
+        Some(text) => text,
+        None => {
+            disk = std::fs::read_to_string(path).unwrap_or_default();
+            disk.as_str()
+        }
+    };
+    phazeai_core::lsp::text::end_of_line_or_text(text, line)
 }
 
 /// The local path a URI from the language server names (the URI's text when
