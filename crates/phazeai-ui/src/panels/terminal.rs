@@ -34,7 +34,9 @@ use floem::{
     views::{canvas, container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
     IntoView, Renderer, View,
 };
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize, PtySystem};
+use portable_pty::{
+    ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize, PtySystem,
+};
 
 use super::terminal_emu::{
     key_bytes, mouse_report, paste_bytes, process_pty_output, text_key_bytes, FindHit, FindMark,
@@ -75,6 +77,7 @@ const PROMPT_COMMAND_INJECT: &str = "export PROMPT_COMMAND='printf \"\\033]133;D
 /// can write to the shell once the PTY is ready.
 type SharedPtyWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 type SharedMaster = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
+type SharedKiller = Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>;
 
 /// `Write` adapter over the shared PTY writer (drops bytes until it is set).
 struct SharedWriterRef<'a>(&'a SharedPtyWriter);
@@ -582,6 +585,7 @@ fn spawn_pty(
     core: Arc<Mutex<TermCore>>,
     pty_writer: SharedPtyWriter,
     pty_master: SharedMaster,
+    killer: SharedKiller,
     update_tx: std::sync::mpsc::SyncSender<()>,
 ) {
     thread::spawn(move || {
@@ -617,6 +621,10 @@ fn spawn_pty(
         };
         // Only the child holds the slave now, so reads end when it exits.
         drop(slave);
+        if let Ok(mut k) = killer.lock() {
+            *k = Some(child.clone_killer());
+        }
+        drop(killer);
 
         match master.take_writer() {
             Ok(w) => {
@@ -717,6 +725,7 @@ fn single_terminal(
     )));
     let pty_writer: SharedPtyWriter = Arc::new(Mutex::new(None));
     let pty_master: SharedMaster = Arc::new(Mutex::new(None));
+    let killer: SharedKiller = Arc::new(Mutex::new(None));
 
     if let Some(out_sig) = pty_writer_out {
         out_sig.set(Some(Arc::clone(&pty_writer)));
@@ -730,6 +739,7 @@ fn single_terminal(
         Arc::clone(&core),
         Arc::clone(&pty_writer),
         Arc::clone(&pty_master),
+        Arc::clone(&killer),
         update_tx,
     );
 
@@ -1581,14 +1591,23 @@ fn single_terminal(
     let body = stack((output_area, blocks_panel))
         .style(|s| s.flex_row().flex_grow(1.0).min_height(0.0).width_full());
 
-    stack((find_bar, body)).style(move |s| {
-        let p = theme.get().palette;
-        s.flex_col()
-            .flex_grow(1.0)
-            .min_height(0.0)
-            .width_full()
-            .background(p.bg_base)
-    })
+    stack((find_bar, body))
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.flex_col()
+                .flex_grow(1.0)
+                .min_height(0.0)
+                .width_full()
+                .background(p.bg_base)
+        })
+        // Closing the tab ends its shell.
+        .on_cleanup(move || {
+            if let Ok(mut k) = killer.lock() {
+                if let Some(k) = k.as_mut() {
+                    let _ = k.kill();
+                }
+            }
+        })
 }
 
 // ── Multi-tab terminal panel ───────────────────────────────────────────────────
