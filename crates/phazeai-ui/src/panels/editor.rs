@@ -1823,6 +1823,30 @@ pub fn editor_panel(
             let raw_editor = text_editor(content);
             let cursor_sig = raw_editor.editor().cursor; // RwSignal<Cursor>
             let editor_ref = raw_editor.editor().clone(); // Clone for reactive updates
+
+            // Keyboard focus: the view that takes keys is focused by a click
+            // only, so a file opened from the picker or a tab switched to
+            // ignored typing until clicked. This tab's editor takes focus when
+            // it becomes the active tab, and (main pane only, so a split
+            // can't take it) when an overlay closes.
+            {
+                let view_id = editor_ref.editor_view_id;
+                let refocus = crate::components::editor_refocus_requests();
+                create_effect(move |_| {
+                    if is_primary_pane {
+                        refocus.get();
+                    }
+                    if active_idx.get() != Some(i) {
+                        return;
+                    }
+                    if let Some(id) = view_id.get_untracked() {
+                        floem::action::exec_after(
+                            crate::components::focus::FOCUS_DELAY,
+                            move |_| id.request_focus(),
+                        );
+                    }
+                });
+            }
             let doc = raw_editor.doc().clone();
             // Clone doc ref for the LSP update callback (same Rc — UI-thread only).
             let doc_for_lsp = doc.clone();
