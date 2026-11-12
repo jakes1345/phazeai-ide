@@ -796,7 +796,7 @@ impl TermCore {
             {
                 continue;
             }
-            s.push(cell.c);
+            s.push(cell_char(cell));
             if let Some(zw) = cell.zerowidth() {
                 s.extend(zw.iter());
             }
@@ -1095,7 +1095,7 @@ impl TermCore {
             {
                 continue;
             }
-            chars.push(fold_char(cell.c));
+            chars.push(fold_char(cell_char(cell)));
             cols.push(col);
         }
         let mut out = Vec::new();
@@ -1148,7 +1148,7 @@ impl TermCore {
                 let cell = &row[Column(c)];
                 let point = Point::new(line, Column(c));
                 out_row.push(SnapCell {
-                    c: cell.c,
+                    c: cell_char(cell),
                     zerowidth: cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default(),
                     style: cell_style(cell, palette, colors),
                     wide: cell.flags.contains(Flags::WIDE_CHAR),
@@ -1234,6 +1234,16 @@ pub fn process_pty_output(
         let _ = reply_to.flush();
     }
     outcome
+}
+
+/// The character a cell shows. The emulator keeps a TAB in the cell where
+/// the tab started; it is blank on screen.
+fn cell_char(cell: &Cell) -> char {
+    if cell.c == '\t' {
+        ' '
+    } else {
+        cell.c
+    }
 }
 
 fn fold_char(c: char) -> char {

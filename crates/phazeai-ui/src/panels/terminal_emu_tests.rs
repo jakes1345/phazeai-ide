@@ -60,6 +60,15 @@ fn csi_k_erases_parts_of_a_line() {
 }
 
 #[test]
+fn tabs_are_blank_cells() {
+    let c = fed(20, 2, b"a\tb");
+    assert_eq!(screen(&c)[0], "a       b");
+    let snap = c.snapshot(None, None);
+    assert_eq!(snap.cells[0][1].c, ' ');
+    assert_eq!(snap.cells[0][8].c, 'b');
+}
+
+#[test]
 fn carriage_return_overwrites_like_a_progress_bar() {
     let c = fed(20, 3, b"10%\r50%\r100%");
     assert_eq!(screen(&c)[0], "100%");
