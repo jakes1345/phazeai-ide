@@ -1085,9 +1085,10 @@ pub type ShortcutFn = Rc<dyn Fn(&Key, &Modifiers) -> bool>;
 /// key press it gets, so while the editor had focus neither the panel's key
 /// handler nor the app's ever ran: no global shortcut worked (Ctrl+P, Ctrl+T,
 /// Ctrl+B ...), and Ctrl+S, Ctrl+F and Ctrl+H did nothing (a save came only
-/// from auto-save). A press with Ctrl or Alt first goes to `panel_shortcut`,
-/// then `app_shortcut`; anything neither claims gets the editor's usual key
-/// bindings.
+/// from auto-save), and neither did F12, Vim mode or Tab-to-accept. A press
+/// with Ctrl or Alt first goes to `panel_shortcut`; then every press goes to
+/// `app_shortcut` (the IDE's key bindings); anything neither claims gets the
+/// editor's usual key bindings.
 fn editor_keys(
     panel_shortcut: ShortcutFn,
     app_shortcut: ShortcutFn,
@@ -1097,9 +1098,8 @@ fn editor_keys(
     let default: Rc<RefCell<Option<Handler>>> = Rc::new(RefCell::new(None));
     move |editor, press, mods| {
         if let KeyInput::Keyboard(key, _) = &press.key {
-            if (mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT))
-                && (panel_shortcut(key, &mods) || app_shortcut(key, &mods))
-            {
+            let chord = mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT);
+            if (chord && panel_shortcut(key, &mods)) || app_shortcut(key, &mods) {
                 return CommandExecuted::Yes;
             }
         }
@@ -6751,5 +6751,58 @@ mod tab_tests {
             "let x = 1;  (+1 more lines)"
         );
         assert_eq!(ghost_preview("\n  \n"), "");
+    }
+}
+
+#[cfg(test)]
+mod editor_key_tests {
+    use super::{editor_keys, ShortcutFn};
+    use floem::keyboard::{Key, KeyCode, Modifiers, NamedKey, PhysicalKey};
+    use floem::reactive::create_rw_signal;
+    use floem::views::editor::command::CommandExecuted;
+    use floem::views::editor::keypress::key::KeyInput;
+    use floem::views::editor::keypress::press::KeyPress;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn the_ides_keys_run_while_the_editor_has_focus() {
+        let seen: Rc<RefCell<Vec<Key>>> = Rc::default();
+        let app: ShortcutFn = {
+            let seen = seen.clone();
+            Rc::new(move |key: &Key, _: &Modifiers| {
+                seen.borrow_mut().push(key.clone());
+                true
+            })
+        };
+        let panel: ShortcutFn = Rc::new(|_: &Key, _: &Modifiers| false);
+        let keys = editor_keys(panel, app);
+        let editor = create_rw_signal(floem::views::text_editor("").editor().clone());
+
+        // F12 (go to definition), Tab (accept an AI suggestion) and a bare
+        // letter (a Vim normal-mode motion) carry no Ctrl or Alt.
+        let presses = [
+            (Key::Named(NamedKey::F12), KeyCode::F12),
+            (Key::Named(NamedKey::Tab), KeyCode::Tab),
+            (Key::Character("j".into()), KeyCode::KeyJ),
+        ];
+        for (key, code) in presses.iter().cloned() {
+            let press = KeyPress::new(
+                KeyInput::Keyboard(key, PhysicalKey::Code(code)),
+                Modifiers::empty(),
+            );
+            assert!(
+                matches!(
+                    keys(editor, &press, Modifiers::empty()),
+                    CommandExecuted::Yes
+                ),
+                "a key the IDE uses must not reach the editor's own bindings"
+            );
+        }
+        let expected: Vec<Key> = presses.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(
+            *seen.borrow(),
+            expected,
+            "every press must reach the IDE's key bindings"
+        );
     }
 }

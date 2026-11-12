@@ -3382,19 +3382,11 @@ fn ide_root(state: IdeState) -> impl IntoView {
         });
     }
 
-    // The editors run the app's global shortcuts themselves: while one has
-    // focus, key presses never reach the handler at the root.
+    // The editors run the IDE's key bindings themselves: while one has focus,
+    // key presses never reach the handler at the root.
     let app_shortcut: crate::panels::editor::ShortcutFn = {
         let state = state.clone();
-        std::rc::Rc::new(move |key: &Key, mods: &Modifiers| {
-            match match_global_shortcut(key, mods) {
-                Some(cmd) => {
-                    execute_command(&cmd, &state);
-                    true
-                }
-                None => false,
-            }
-        })
+        std::rc::Rc::new(move |key: &Key, mods: &Modifiers| handle_ide_key(&state, key, mods))
     };
 
     let raw_editor = editor_panel(
@@ -4124,10 +4116,6 @@ pub fn launch_phaze_ide() {
                 });
 
                 // First-run readiness banner — shown once if any checks fail.
-                // Set when an Escape key-down reaches the root handler. A focused
-                // text box swallows Escape (Floem clears its focus and stops the
-                // event), so then only the key-up arrives; see the KeyUp handler.
-                let escape_down_seen = std::rc::Rc::new(std::cell::Cell::new(false));
                 let readiness_banner = {
                     let items = readiness_items.clone();
                     let has_issues = items.iter().any(|(_, ok, _)| !ok);
@@ -4270,12 +4258,11 @@ pub fn launch_phaze_ide() {
                 })
                 .on_event_cont(EventListener::KeyUp, {
                     let state = state.clone();
-                    let escape_down_seen = escape_down_seen.clone();
                     move |event| {
                         if let Event::KeyUp(key_event) = event {
                             if key_event.key.logical_key
                                 == Key::Named(floem::keyboard::NamedKey::Escape)
-                                && !escape_down_seen.replace(false)
+                                && !ESCAPE_DOWN_SEEN.with(|seen| seen.replace(false))
                             {
                                 close_topmost_overlay(&state);
                             }
@@ -4284,977 +4271,13 @@ pub fn launch_phaze_ide() {
                 })
                 .on_event_stop(EventListener::KeyDown, {
                     let state = state.clone();
-                    let escape_down_seen = escape_down_seen.clone();
                     move |event| {
                         if let Event::KeyDown(key_event) = event {
-                            if key_event.key.logical_key
-                                == Key::Named(floem::keyboard::NamedKey::Escape)
-                            {
-                                escape_down_seen.set(true);
-                            }
-                            let ctrl = key_event.modifiers.contains(Modifiers::CONTROL);
-                            let shift = key_event.modifiers.contains(Modifiers::SHIFT);
-                            let alt = key_event.modifiers.contains(Modifiers::ALT);
-
-                            // ── Global shortcut dispatch (unified via execute_command) ──
-                            if let Some(cmd) = match_global_shortcut(
+                            handle_ide_key(
+                                &state,
                                 &key_event.key.logical_key,
                                 &key_event.modifiers,
-                            ) {
-                                execute_command(&cmd, &state);
-                                return;
-                            }
-
-                            // ── Named keys ───────────────────────────────────────
-                            if let Key::Named(ref named) = key_event.key.logical_key {
-                                match named {
-                                    floem::keyboard::NamedKey::Escape => {
-                                        if close_topmost_overlay(&state) {
-                                            return;
-                                        }
-                                        // Vim: Escape enters Normal mode / exits ex/visual
-                                        if state.editor.vim_mode.get() {
-                                            if state.editor.vim_ex_open.get() {
-                                                state.editor.vim_ex_open.set(false);
-                                                state.editor.vim_ex_input.set(String::new());
-                                                return;
-                                            }
-                                            if state.editor.vim_visual_mode.get() {
-                                                state.editor.vim_visual_mode.set(false);
-                                            }
-                                            state.editor.vim_normal_mode.set(true);
-                                            state.editor.vim_pending_key.set(None);
-                                            return;
-                                        }
-                                    }
-                                    floem::keyboard::NamedKey::Tab => {
-                                        // Tab accepts ghost text (FIM) suggestion first.
-                                        if let Some(suggestion) = state.ai.ghost_text.get() {
-                                            // Ghost text: insert at cursor, no prefix to delete.
-                                            state
-                                                .editor
-                                                .pending_completion
-                                                .set(Some((suggestion, 0)));
-                                            state.ai.ghost_text.set(None);
-                                            return;
-                                        }
-                                        // Tab also accepts LSP completion popup.
-                                        if state.editor.completion_open.get() {
-                                            let items = state.editor.completions.get();
-                                            let sel = state.editor.completion_selected.get();
-                                            let prefix_b =
-                                                state.editor.completion_filter_text.get().len();
-                                            if let Some(entry) = items.get(sel) {
-                                                let text = if entry.insert_text.is_empty() {
-                                                    entry.label.clone()
-                                                } else {
-                                                    entry.insert_text.clone()
-                                                };
-                                                state
-                                                    .editor
-                                                    .pending_completion
-                                                    .set(Some((text, prefix_b)));
-                                            }
-                                            state.editor.completion_open.set(false);
-                                            state.editor.completion_filter_text.set(String::new());
-                                            return;
-                                        }
-                                    }
-                                    floem::keyboard::NamedKey::Enter => {
-                                        if state.editor.completion_open.get() {
-                                            let items = state.editor.completions.get();
-                                            let sel = state.editor.completion_selected.get();
-                                            let prefix_b =
-                                                state.editor.completion_filter_text.get().len();
-                                            if let Some(entry) = items.get(sel) {
-                                                let text = if entry.insert_text.is_empty() {
-                                                    entry.label.clone()
-                                                } else {
-                                                    entry.insert_text.clone()
-                                                };
-                                                state
-                                                    .editor
-                                                    .pending_completion
-                                                    .set(Some((text, prefix_b)));
-                                            }
-                                            state.editor.completion_open.set(false);
-                                            state.editor.completion_filter_text.set(String::new());
-                                            return;
-                                        }
-                                    }
-                                    // F8 / Shift+F8 — navigate to next / previous diagnostic
-                                    floem::keyboard::NamedKey::F8 => {
-                                        let all_diags = state.editor.diagnostics.get();
-                                        if all_diags.is_empty() {
-                                            return;
-                                        }
-                                        // Sort by (path, line) for stable navigation order.
-                                        let mut sorted = all_diags.clone();
-                                        sorted.sort_by(|a, b| {
-                                            a.path.cmp(&b.path).then(a.line.cmp(&b.line))
-                                        });
-                                        // Find current position: the first diag strictly
-                                        // after (or before for Shift+F8) the active cursor.
-                                        let cur_line = state
-                                            .editor
-                                            .active_cursor
-                                            .get()
-                                            .map(|(_, l, _)| l + 1) // DiagEntry.line is 1-based
-                                            .unwrap_or(0);
-                                        let cur_path =
-                                            state.editor.active_cursor.get().map(|(p, _, _)| p);
-
-                                        let target = if shift {
-                                            // Shift+F8: previous
-                                            sorted
-                                                .iter()
-                                                .rev()
-                                                .find(|d| {
-                                                    Some(&d.path) < cur_path.as_ref()
-                                                        || (Some(&d.path) == cur_path.as_ref()
-                                                            && d.line < cur_line)
-                                                })
-                                                .or_else(|| sorted.last())
-                                        } else {
-                                            // F8: next
-                                            sorted
-                                                .iter()
-                                                .find(|d| {
-                                                    Some(&d.path) > cur_path.as_ref()
-                                                        || (Some(&d.path) == cur_path.as_ref()
-                                                            && d.line > cur_line)
-                                                })
-                                                .or_else(|| sorted.first())
-                                        };
-
-                                        if let Some(d) = target {
-                                            let path = d.path.clone();
-                                            let line = d.line; // 1-based
-                                            state.editor.open_file.set(Some(path));
-                                            state.editor.goto_line.set(line);
-                                        }
-                                        return;
-                                    }
-                                    // F9 — toggle breakpoint on the cursor line
-                                    floem::keyboard::NamedKey::F9 => {
-                                        if let Some((path, line, _col)) =
-                                            state.editor.active_cursor.get()
-                                        {
-                                            let line1 = line as u64 + 1; // DAP lines are 1-based
-                                            state.project.breakpoints.update(|bps| {
-                                                if let Some(pos) = bps
-                                                    .iter()
-                                                    .position(|(p, l)| *p == path && *l == line1)
-                                                {
-                                                    bps.remove(pos);
-                                                } else {
-                                                    bps.push((path.clone(), line1));
-                                                }
-                                            });
-                                        }
-                                        return;
-                                    }
-                                    // F5 — continue; Shift+F5 — stop debug session
-                                    floem::keyboard::NamedKey::F5 => {
-                                        if let Some(tx) = state.project.debug_cmd.get() {
-                                            let _ = tx.send(if shift {
-                                                crate::debug_session::DebugCmd::Stop
-                                            } else {
-                                                crate::debug_session::DebugCmd::Continue
-                                            });
-                                        }
-                                        return;
-                                    }
-                                    // F10 — step over
-                                    floem::keyboard::NamedKey::F10 => {
-                                        if let Some(tx) = state.project.debug_cmd.get() {
-                                            let _ =
-                                                tx.send(crate::debug_session::DebugCmd::StepOver);
-                                        }
-                                        return;
-                                    }
-                                    // F11 — step into; Shift+F11 — step out
-                                    floem::keyboard::NamedKey::F11 => {
-                                        if let Some(tx) = state.project.debug_cmd.get() {
-                                            let _ = tx.send(if shift {
-                                                crate::debug_session::DebugCmd::StepOut
-                                            } else {
-                                                crate::debug_session::DebugCmd::StepIn
-                                            });
-                                            return;
-                                        }
-                                    }
-                                    // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition; Ctrl+F12 — go to implementation
-                                    floem::keyboard::NamedKey::F12 => {
-                                        if let Some((path, line, col)) =
-                                            state.editor.active_cursor.get()
-                                        {
-                                            if ctrl {
-                                                // Ctrl+F12: go to implementation
-                                                let _ = state.project.lsp_cmd.send(
-                                                    LspCommand::RequestImplementation {
-                                                        path,
-                                                        line,
-                                                        col,
-                                                    },
-                                                );
-                                            } else if shift {
-                                                // Shift+F12: find all references
-                                                let _ = state.project.lsp_cmd.send(
-                                                    LspCommand::RequestReferences {
-                                                        path,
-                                                        line,
-                                                        col,
-                                                    },
-                                                );
-                                                state.editor.references_visible.set(true);
-                                                state.workbench.show_bottom_panel.set(true);
-                                                state
-                                                    .workbench
-                                                    .bottom_panel_tab
-                                                    .set(Tab::References);
-                                            } else if alt {
-                                                // Alt+F12: peek definition
-                                                state.editor.peek_def_lines.set(vec![]);
-                                                state.editor.peek_def_open.set(false);
-                                                let _ = state.project.lsp_cmd.send(
-                                                    LspCommand::RequestPeekDefinition {
-                                                        path,
-                                                        line,
-                                                        col,
-                                                    },
-                                                );
-                                            } else {
-                                                // F12: go to definition
-                                                let _ = state.project.lsp_cmd.send(
-                                                    LspCommand::RequestDefinition {
-                                                        path,
-                                                        line,
-                                                        col,
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        return;
-                                    }
-                                    // F1 with Ctrl — show hover documentation
-                                    floem::keyboard::NamedKey::F1 => {
-                                        if ctrl {
-                                            if let Some((path, line, col)) =
-                                                state.editor.active_cursor.get()
-                                            {
-                                                let _ = state.project.lsp_cmd.send(
-                                                    LspCommand::RequestHover { path, line, col },
-                                                );
-                                            }
-                                            return;
-                                        }
-                                    }
-                                    // F2 — rename symbol at cursor
-                                    floem::keyboard::NamedKey::F2 => {
-                                        if let Some((path, line, col)) =
-                                            state.editor.active_cursor.get()
-                                        {
-                                            let word = std::fs::read_to_string(&path)
-                                                .ok()
-                                                .and_then(|content| {
-                                                    let target_line =
-                                                        content.lines().nth(line as usize)?;
-                                                    let col = (col as usize).min(target_line.len());
-                                                    let start = target_line[..col]
-                                                        .char_indices()
-                                                        .rev()
-                                                        .take_while(|(_, c)| {
-                                                            c.is_alphanumeric() || *c == '_'
-                                                        })
-                                                        .last()
-                                                        .map(|(i, _)| i)
-                                                        .unwrap_or(col);
-                                                    let end = target_line[col..]
-                                                        .char_indices()
-                                                        .take_while(|(_, c)| {
-                                                            c.is_alphanumeric() || *c == '_'
-                                                        })
-                                                        .last()
-                                                        .map(|(i, c)| i + col + c.len_utf8())
-                                                        .unwrap_or(target_line.len());
-                                                    Some(target_line[start..end].to_string())
-                                                })
-                                                .unwrap_or_default();
-                                            state.editor.rename_target.set(word.clone());
-                                            state.editor.rename_query.set(word);
-                                            state.editor.rename_open.set(true);
-                                        }
-                                        return;
-                                    }
-                                    // Up/Down — navigate completion popup when open
-                                    floem::keyboard::NamedKey::ArrowDown
-                                        if !alt && state.editor.completion_open.get() =>
-                                    {
-                                        let items = state.editor.completions.get();
-                                        let f = state
-                                            .editor
-                                            .completion_filter_text
-                                            .get()
-                                            .to_lowercase();
-                                        let filtered: Vec<usize> = items
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, e)| {
-                                                f.is_empty() || e.label.to_lowercase().contains(&f)
-                                            })
-                                            .map(|(i, _)| i)
-                                            .collect();
-                                        if !filtered.is_empty() {
-                                            let sel = state.editor.completion_selected.get();
-                                            let cur = filtered
-                                                .iter()
-                                                .position(|&i| i == sel)
-                                                .unwrap_or(0);
-                                            let next = (cur + 1).min(filtered.len() - 1);
-                                            state.editor.completion_selected.set(filtered[next]);
-                                        }
-                                        return;
-                                    }
-                                    floem::keyboard::NamedKey::ArrowUp
-                                        if !alt && state.editor.completion_open.get() =>
-                                    {
-                                        let items = state.editor.completions.get();
-                                        let f = state
-                                            .editor
-                                            .completion_filter_text
-                                            .get()
-                                            .to_lowercase();
-                                        let filtered: Vec<usize> = items
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, e)| {
-                                                f.is_empty() || e.label.to_lowercase().contains(&f)
-                                            })
-                                            .map(|(i, _)| i)
-                                            .collect();
-                                        if !filtered.is_empty() {
-                                            let sel = state.editor.completion_selected.get();
-                                            let cur = filtered
-                                                .iter()
-                                                .position(|&i| i == sel)
-                                                .unwrap_or(0);
-                                            let prev = cur.saturating_sub(1);
-                                            state.editor.completion_selected.set(filtered[prev]);
-                                        }
-                                        return;
-                                    }
-                                    // Alt+Up/Down — move or duplicate line
-                                    floem::keyboard::NamedKey::ArrowUp
-                                        if alt && !ctrl && !shift =>
-                                    {
-                                        state.editor.move_line_up_nonce.update(|n| *n += 1);
-                                        return;
-                                    }
-                                    floem::keyboard::NamedKey::ArrowDown if alt && !ctrl => {
-                                        if shift {
-                                            state.editor.duplicate_line_nonce.update(|n| *n += 1);
-                                        } else {
-                                            state.editor.move_line_down_nonce.update(|n| *n += 1);
-                                        }
-                                        return;
-                                    }
-                                    // Ctrl+Alt+Up/Down — add column cursor on adjacent line
-                                    floem::keyboard::NamedKey::ArrowUp if ctrl && alt && !shift => {
-                                        state.editor.col_cursor_up_nonce.update(|n| *n += 1);
-                                        return;
-                                    }
-                                    floem::keyboard::NamedKey::ArrowDown
-                                        if ctrl && alt && !shift =>
-                                    {
-                                        state.editor.col_cursor_down_nonce.update(|n| *n += 1);
-                                        return;
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // Ctrl+Space → request LSP completions and open popup
-                            if ctrl
-                                && key_event.key.logical_key
-                                    == Key::Named(floem::keyboard::NamedKey::Space)
-                            {
-                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
-                                    // Compute word before cursor as the filter prefix.
-                                    let prefix = std::fs::read_to_string(&path)
-                                        .ok()
-                                        .and_then(|content| {
-                                            let lines: Vec<&str> = content.lines().collect();
-                                            let line_str = lines.get(line as usize)?;
-                                            let col = (col as usize).min(line_str.len());
-                                            let prefix: String = line_str[..col]
-                                                .chars()
-                                                .rev()
-                                                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                                .collect::<String>()
-                                                .chars()
-                                                .rev()
-                                                .collect();
-                                            Some(prefix)
-                                        })
-                                        .unwrap_or_default();
-                                    state.editor.completion_filter_text.set(prefix);
-                                    let _ = state
-                                        .project
-                                        .lsp_cmd
-                                        .send(LspCommand::RequestCompletions { path, line, col });
-                                }
-                                state.editor.completion_selected.set(0);
-                                state.editor.completion_open.set(true);
-                                return;
-                            }
-
-                            // Ctrl+G → goto line/col overlay
-                            if ctrl
-                                && !shift
-                                && !alt
-                                && key_event.key.logical_key == Key::Character("g".into())
-                            {
-                                state.editor.goto_overlay_open.set(true);
-                                state.editor.goto_overlay_input.set(String::new());
-                                return;
-                            }
-
-                            // Ctrl+Alt+S → save without formatting
-                            if ctrl
-                                && !shift
-                                && alt
-                                && key_event.key.logical_key == Key::Character("s".into())
-                            {
-                                state.editor.save_no_format_nonce.update(|v| *v += 1);
-                                return;
-                            }
-
-                            // Ctrl+Alt+I → toggle inlay hints
-                            if ctrl
-                                && !shift
-                                && alt
-                                && key_event.key.logical_key == Key::Character("i".into())
-                            {
-                                state.editor.inlay_hints_toggle.update(|v| *v = !*v);
-                                let msg = if state.editor.inlay_hints_toggle.get() {
-                                    "Inlay Hints: on"
-                                } else {
-                                    "Inlay Hints: off"
-                                };
-                                show_toast(state.workbench.status_toast, msg);
-                                return;
-                            }
-
-                            // Ctrl+N → new scratch file (untitled buffer)
-                            if ctrl
-                                && !shift
-                                && !alt
-                                && key_event.key.logical_key == Key::Character("n".into())
-                            {
-                                let n = state.project.scratch_counter.get() + 1;
-                                state.project.scratch_counter.set(n);
-                                let scratch_path =
-                                    std::path::PathBuf::from(format!("scratch://untitled-{n}"));
-                                state
-                                    .project
-                                    .scratch_paths
-                                    .update(|v: &mut Vec<PathBuf>| v.push(scratch_path.clone()));
-                                state.editor.open_file.set(Some(scratch_path));
-                                return;
-                            }
-
-                            // Ctrl+T → workspace symbols overlay
-                            if ctrl
-                                && !shift
-                                && key_event.key.logical_key == Key::Character("t".into())
-                            {
-                                let open = state.editor.ws_syms_open.get();
-                                state.editor.ws_syms_open.set(!open);
-                                if !open {
-                                    state.editor.ws_syms_query.set(String::new());
-                                    // Kick off an empty-query search to pre-populate list.
-                                    let _ = state.project.lsp_cmd.send(
-                                        LspCommand::RequestWorkspaceSymbols {
-                                            query: String::new(),
-                                        },
-                                    );
-                                }
-                                return;
-                            }
-
-                            // Ctrl+. → code actions
-                            if ctrl && key_event.key.logical_key == Key::Character(".".into()) {
-                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
-                                    let _ = state
-                                        .project
-                                        .lsp_cmd
-                                        .send(LspCommand::RequestCodeActions { path, line, col });
-                                }
-                                state.editor.code_actions_open.set(true);
-                                return;
-                            }
-
-                            // Ctrl+Shift+Space → signature help
-                            if ctrl
-                                && shift
-                                && key_event.key.logical_key
-                                    == Key::Named(floem::keyboard::NamedKey::Space)
-                            {
-                                if let Some((path, line, col)) = state.editor.active_cursor.get() {
-                                    let _ = state
-                                        .project
-                                        .lsp_cmd
-                                        .send(LspCommand::RequestSignatureHelp { path, line, col });
-                                }
-                                return;
-                            }
-
-                            if let Key::Character(ref ch) = key_event.key.logical_key {
-                                let ch = ch.clone();
-
-                                // Alt+Z — toggle word wrap
-                                if alt && !ctrl && !shift && ch.as_str() == "z" {
-                                    state.editor.word_wrap.update(|v| *v = !*v);
-                                    let msg = if state.editor.word_wrap.get() {
-                                        "Word wrap on"
-                                    } else {
-                                        "Word wrap off"
-                                    };
-                                    show_toast(state.workbench.status_toast, msg);
-                                    return;
-                                }
-
-                                if ctrl && !shift && !alt {
-                                    match ch.as_str() {
-                                        // Ctrl+= / Ctrl++ — zoom in editor font
-                                        "=" | "+" => {
-                                            state
-                                                .editor
-                                                .font_size
-                                                .update(|v| *v = (*v + 1).min(40));
-                                            return;
-                                        }
-                                        // Ctrl+- — zoom out editor font
-                                        "-" => {
-                                            state
-                                                .editor
-                                                .font_size
-                                                .update(|v| *v = v.saturating_sub(1).max(8));
-                                            return;
-                                        }
-                                        // Ctrl+0 — reset editor font to default
-                                        "0" => {
-                                            state.editor.font_size.set(14);
-                                            return;
-                                        }
-                                        // Ctrl+D — vim half-page down OR multi-cursor
-                                        "d" => {
-                                            if state.editor.vim_mode.get()
-                                                && state.editor.vim_normal_mode.get()
-                                            {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::HalfPageDown));
-                                            } else {
-                                                state.editor.ctrl_d_nonce.update(|v| *v += 1);
-                                            }
-                                            return;
-                                        }
-                                        // Ctrl+U — vim half-page up
-                                        "u" => {
-                                            if state.editor.vim_mode.get()
-                                                && state.editor.vim_normal_mode.get()
-                                            {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::HalfPageUp));
-                                                return;
-                                            }
-                                        }
-                                        // Ctrl+K — open inline AI edit overlay
-                                        "k" => {
-                                            state.ai.inline_edit_open.set(true);
-                                            state.ai.inline_edit_query.set(String::new());
-                                        }
-                                        // Ctrl+/ — toggle line comment
-                                        "/" => {
-                                            state.editor.comment_toggle_nonce.update(|v| *v += 1);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                // Ctrl+Shift+Z is handled above by match_global_shortcut → execute_command.
-                                if ctrl && shift && !alt {
-                                    // Ctrl+Shift+[ → fold block at cursor
-                                    if ch.as_str() == "[" {
-                                        state.editor.fold_nonce.update(|v| *v += 1);
-                                        show_toast(state.workbench.status_toast, "Folded");
-                                        return;
-                                    }
-                                    // Ctrl+Shift+] → unfold block at cursor
-                                    if ch.as_str() == "]" {
-                                        state.editor.unfold_nonce.update(|v| *v += 1);
-                                        show_toast(state.workbench.status_toast, "Unfolded");
-                                        return;
-                                    }
-                                    // Ctrl+Shift+K → delete entire line
-                                    if ch.as_str() == "k" {
-                                        state.editor.delete_line_nonce.update(|v| *v += 1);
-                                        return;
-                                    }
-                                    // Ctrl+Shift+U → transform uppercase
-                                    if ch.as_str() == "u" {
-                                        state.editor.transform_upper_nonce.update(|v| *v += 1);
-                                        return;
-                                    }
-                                    // Ctrl+Shift+L → transform lowercase
-                                    if ch.as_str() == "l" {
-                                        state.editor.transform_lower_nonce.update(|v| *v += 1);
-                                        return;
-                                    }
-                                    // Ctrl+Shift+T → transform title case
-                                    if ch.as_str() == "t" {
-                                        state.editor.transform_title_nonce.update(|v| *v += 1);
-                                        return;
-                                    }
-                                    // Ctrl+Shift+J → join lines
-                                    if ch.as_str() == "j" {
-                                        state.editor.join_line_nonce.update(|v| *v += 1);
-                                        return;
-                                    }
-                                    // Ctrl+Shift+V → cycle yank ring and paste
-                                    if ch.as_str() == "v" {
-                                        let ring = state.editor.yank_ring.get();
-                                        if !ring.is_empty() {
-                                            let idx =
-                                                (state.editor.yank_ring_idx.get() + 1) % ring.len();
-                                            state.editor.yank_ring_idx.set(idx);
-                                            let text = ring[idx].clone();
-                                            state.editor.pending_completion.set(Some((text, 0)));
-                                        }
-                                        return;
-                                    }
-                                }
-
-                                // Ctrl+Shift+F → open global search (Find in Files)
-                                if ctrl && shift && !alt && ch.as_str() == "f" {
-                                    state.workbench.show_left_panel.set(true);
-                                    state.workbench.left_panel_tab.set(Tab::Search);
-                                    return;
-                                }
-
-                                // Ctrl+Shift+A → Explain Selection with AI (same path as
-                                // the context-menu entry: privacy gate + audit attach only
-                                // when the selection is sent). Not Ctrl+Shift+E: that is
-                                // Focus Explorer in the global shortcut table, which runs first.
-                                if ctrl && shift && !alt && ch.as_str() == "a" {
-                                    send_editor_ai_action(
-                                        &state,
-                                        "Explain this code",
-                                        "Explain the code",
-                                    );
-                                    return;
-                                }
-
-                                // Ctrl+Alt+Shift+D → split editor down toggle
-                                if ctrl && alt && shift && ch.as_str() == "d" {
-                                    state.editor.split_editor_down.update(|v| *v = !*v);
-                                    return;
-                                }
-
-                                // ── Vim normal-mode keys (no Ctrl) ───────────────
-                                if state.editor.vim_mode.get()
-                                    && state.editor.vim_normal_mode.get()
-                                    && !ctrl
-                                    && !alt
-                                {
-                                    let pending = state.editor.vim_pending_key.get();
-                                    let ch_str = ch.as_str();
-
-                                    // Two-key sequences
-                                    if let Some(prev) = pending {
-                                        state.editor.vim_pending_key.set(None);
-                                        match (prev, ch_str) {
-                                            ('d', "d") => {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::DeleteLine));
-                                                state
-                                                    .editor
-                                                    .vim_last_motion
-                                                    .set(Some(VimMotion::DeleteLine));
-                                            }
-                                            ('g', "g") => {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::GotoFileTop));
-                                            }
-                                            ('y', "y") => {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::YankLine));
-                                            }
-                                            ('c', "c") => {
-                                                state.editor.vim_normal_mode.set(false);
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::ChangeWholeLine));
-                                                state
-                                                    .editor
-                                                    .vim_last_motion
-                                                    .set(Some(VimMotion::ChangeWholeLine));
-                                            }
-                                            ('c', "w") => {
-                                                state.editor.vim_normal_mode.set(false);
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::ChangeWord));
-                                                state
-                                                    .editor
-                                                    .vim_last_motion
-                                                    .set(Some(VimMotion::ChangeWord));
-                                            }
-                                            ('r', _) => {
-                                                if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .editor
-                                                        .vim_motion
-                                                        .set(Some(VimMotion::ReplaceChar(c)));
-                                                    state
-                                                        .editor
-                                                        .vim_last_motion
-                                                        .set(Some(VimMotion::ReplaceChar(c)));
-                                                }
-                                            }
-                                            ('m', _) => {
-                                                if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .editor
-                                                        .vim_motion
-                                                        .set(Some(VimMotion::SetMark(c)));
-                                                }
-                                            }
-                                            ('`', _) => {
-                                                if let Some(c) = ch_str.chars().next() {
-                                                    state
-                                                        .editor
-                                                        .vim_motion
-                                                        .set(Some(VimMotion::GotoMark(c)));
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        return;
-                                    }
-
-                                    // Visual mode intercepts d/y/c to operate on selection
-                                    if state.editor.vim_visual_mode.get_untracked() {
-                                        match ch_str {
-                                            "d" | "x" => {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::DeleteVisualSelection));
-                                                state.editor.vim_visual_mode.set(false);
-                                                state
-                                                    .editor
-                                                    .vim_last_motion
-                                                    .set(Some(VimMotion::DeleteVisualSelection));
-                                                return;
-                                            }
-                                            "y" => {
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::YankVisualSelection));
-                                                state.editor.vim_visual_mode.set(false);
-                                                return;
-                                            }
-                                            "c" => {
-                                                state.editor.vim_visual_mode.set(false);
-                                                state.editor.vim_normal_mode.set(false);
-                                                state
-                                                    .editor
-                                                    .vim_motion
-                                                    .set(Some(VimMotion::ChangeVisualSelection));
-                                                state
-                                                    .editor
-                                                    .vim_last_motion
-                                                    .set(Some(VimMotion::ChangeVisualSelection));
-                                                return;
-                                            }
-                                            _ => {} // fall through to normal motion handling
-                                        }
-                                    }
-
-                                    // Single-key normal mode commands
-                                    match ch_str {
-                                        "h" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::Left));
-                                        }
-                                        "j" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::Down));
-                                        }
-                                        "k" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::Up));
-                                        }
-                                        "l" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::Right));
-                                        }
-                                        "w" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::WordForward));
-                                        }
-                                        "b" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::WordBackward));
-                                        }
-                                        "0" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::LineStart));
-                                        }
-                                        "$" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::LineEnd));
-                                        }
-                                        "x" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::DeleteChar));
-                                        }
-                                        "i" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::EnterInsert));
-                                        }
-                                        "a" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::EnterInsertAfter));
-                                        }
-                                        "o" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::EnterInsertNewlineBelow));
-                                        }
-                                        // p / P — paste from vim register
-                                        "p" => {
-                                            state.editor.vim_motion.set(Some(VimMotion::Paste));
-                                        }
-                                        "P" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::PasteBefore));
-                                        }
-                                        // G — go to end of file
-                                        "G" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::GotoFileBottom));
-                                        }
-                                        // A — insert at end of line
-                                        "A" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::InsertAtLineEnd));
-                                        }
-                                        // I — insert at start of line
-                                        "I" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::InsertAtLineStart));
-                                        }
-                                        // C — change to end of line (delete + insert)
-                                        "C" => {
-                                            state.editor.vim_normal_mode.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::ChangeToLineEnd));
-                                        }
-                                        // D — delete to end of line
-                                        "D" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::DeleteToLineEnd));
-                                            state
-                                                .editor
-                                                .vim_last_motion
-                                                .set(Some(VimMotion::DeleteToLineEnd));
-                                        }
-                                        // % — jump to matching bracket
-                                        "%" => {
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::JumpMatchingBracket));
-                                        }
-                                        // v — start char-wise visual mode
-                                        "v" => {
-                                            state.editor.vim_visual_mode.set(true);
-                                            state.editor.vim_visual_line.set(false);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::VisualCharStart));
-                                        }
-                                        // V — start line-wise visual mode
-                                        "V" => {
-                                            state.editor.vim_visual_mode.set(true);
-                                            state.editor.vim_visual_line.set(true);
-                                            state
-                                                .editor
-                                                .vim_motion
-                                                .set(Some(VimMotion::VisualLineStart));
-                                        }
-                                        // Escape in visual mode — return to normal
-                                        // (handled in NamedKey::Escape section below)
-                                        // . — repeat last change
-                                        "." => {
-                                            if let Some(last) = state.editor.vim_last_motion.get() {
-                                                state.editor.vim_motion.set(Some(last));
-                                            }
-                                        }
-                                        // : — open ex command bar
-                                        ":" => {
-                                            state.editor.vim_ex_open.set(true);
-                                            state.editor.vim_ex_input.set(String::new());
-                                        }
-                                        // d, g, y, c, r, m, ` — pending keys for two-key sequences
-                                        "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
-                                            if let Some(ch) = ch_str.chars().next() {
-                                                state.editor.vim_pending_key.set(Some(ch));
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
+                            );
                         }
                     }
                 })
@@ -5476,4 +4499,831 @@ mod provider_problem_tests {
             assert!(msg.contains("isn't running"), "{msg}");
         }
     }
+}
+
+thread_local! {
+    /// Set when an Escape key-down reaches `handle_ide_key`. A focused text box
+    /// swallows Escape (Floem clears its focus and stops the event), so then
+    /// only the key-up arrives, and the root's KeyUp handler closes the topmost
+    /// overlay instead.
+    static ESCAPE_DOWN_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run the IDE's key bindings for one key press. Returns whether the press
+/// was used. The root view calls this for presses no focused view used, and
+/// the editors call it before their own bindings: Floem sends a key press to
+/// the focused view only, and an editor uses every press it gets, so without
+/// that F12, Vim mode, Tab-to-accept and the rest never ran while typing.
+pub(crate) fn handle_ide_key(state: &IdeState, key: &Key, modifiers: &Modifiers) -> bool {
+    if *key == Key::Named(floem::keyboard::NamedKey::Escape) {
+        ESCAPE_DOWN_SEEN.with(|seen| seen.set(true));
+    }
+    let ctrl = modifiers.contains(Modifiers::CONTROL);
+    let shift = modifiers.contains(Modifiers::SHIFT);
+    let alt = modifiers.contains(Modifiers::ALT);
+
+    // ── Global shortcut dispatch (unified via execute_command) ──
+    if let Some(cmd) = match_global_shortcut(key, modifiers) {
+        execute_command(&cmd, state);
+        return true;
+    }
+
+    // ── Named keys ───────────────────────────────────────
+    if let Key::Named(ref named) = *key {
+        match named {
+            floem::keyboard::NamedKey::Escape => {
+                if close_topmost_overlay(state) {
+                    return true;
+                }
+                // Vim: Escape enters Normal mode / exits ex/visual
+                if state.editor.vim_mode.get() {
+                    if state.editor.vim_ex_open.get() {
+                        state.editor.vim_ex_open.set(false);
+                        state.editor.vim_ex_input.set(String::new());
+                        return true;
+                    }
+                    if state.editor.vim_visual_mode.get() {
+                        state.editor.vim_visual_mode.set(false);
+                    }
+                    state.editor.vim_normal_mode.set(true);
+                    state.editor.vim_pending_key.set(None);
+                    return true;
+                }
+            }
+            floem::keyboard::NamedKey::Tab => {
+                // Tab accepts ghost text (FIM) suggestion first.
+                if let Some(suggestion) = state.ai.ghost_text.get() {
+                    // Ghost text: insert at cursor, no prefix to delete.
+                    state.editor.pending_completion.set(Some((suggestion, 0)));
+                    state.ai.ghost_text.set(None);
+                    return true;
+                }
+                // Tab also accepts LSP completion popup.
+                if state.editor.completion_open.get() {
+                    let items = state.editor.completions.get();
+                    let sel = state.editor.completion_selected.get();
+                    let prefix_b = state.editor.completion_filter_text.get().len();
+                    if let Some(entry) = items.get(sel) {
+                        let text = if entry.insert_text.is_empty() {
+                            entry.label.clone()
+                        } else {
+                            entry.insert_text.clone()
+                        };
+                        state.editor.pending_completion.set(Some((text, prefix_b)));
+                    }
+                    state.editor.completion_open.set(false);
+                    state.editor.completion_filter_text.set(String::new());
+                    return true;
+                }
+            }
+            floem::keyboard::NamedKey::Enter => {
+                if state.editor.completion_open.get() {
+                    let items = state.editor.completions.get();
+                    let sel = state.editor.completion_selected.get();
+                    let prefix_b = state.editor.completion_filter_text.get().len();
+                    if let Some(entry) = items.get(sel) {
+                        let text = if entry.insert_text.is_empty() {
+                            entry.label.clone()
+                        } else {
+                            entry.insert_text.clone()
+                        };
+                        state.editor.pending_completion.set(Some((text, prefix_b)));
+                    }
+                    state.editor.completion_open.set(false);
+                    state.editor.completion_filter_text.set(String::new());
+                    return true;
+                }
+            }
+            // F8 / Shift+F8 — navigate to next / previous diagnostic
+            floem::keyboard::NamedKey::F8 => {
+                let all_diags = state.editor.diagnostics.get();
+                if all_diags.is_empty() {
+                    return true;
+                }
+                // Sort by (path, line) for stable navigation order.
+                let mut sorted = all_diags.clone();
+                sorted.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+                // Find current position: the first diag strictly
+                // after (or before for Shift+F8) the active cursor.
+                let cur_line = state
+                    .editor
+                    .active_cursor
+                    .get()
+                    .map(|(_, l, _)| l + 1) // DiagEntry.line is 1-based
+                    .unwrap_or(0);
+                let cur_path = state.editor.active_cursor.get().map(|(p, _, _)| p);
+
+                let target = if shift {
+                    // Shift+F8: previous
+                    sorted
+                        .iter()
+                        .rev()
+                        .find(|d| {
+                            Some(&d.path) < cur_path.as_ref()
+                                || (Some(&d.path) == cur_path.as_ref() && d.line < cur_line)
+                        })
+                        .or_else(|| sorted.last())
+                } else {
+                    // F8: next
+                    sorted
+                        .iter()
+                        .find(|d| {
+                            Some(&d.path) > cur_path.as_ref()
+                                || (Some(&d.path) == cur_path.as_ref() && d.line > cur_line)
+                        })
+                        .or_else(|| sorted.first())
+                };
+
+                if let Some(d) = target {
+                    let path = d.path.clone();
+                    let line = d.line; // 1-based
+                    state.editor.open_file.set(Some(path));
+                    state.editor.goto_line.set(line);
+                }
+                return true;
+            }
+            // F9 — toggle breakpoint on the cursor line
+            floem::keyboard::NamedKey::F9 => {
+                if let Some((path, line, _col)) = state.editor.active_cursor.get() {
+                    let line1 = line as u64 + 1; // DAP lines are 1-based
+                    state.project.breakpoints.update(|bps| {
+                        if let Some(pos) = bps.iter().position(|(p, l)| *p == path && *l == line1) {
+                            bps.remove(pos);
+                        } else {
+                            bps.push((path.clone(), line1));
+                        }
+                    });
+                }
+                return true;
+            }
+            // F5 — continue; Shift+F5 — stop debug session
+            floem::keyboard::NamedKey::F5 => {
+                if let Some(tx) = state.project.debug_cmd.get() {
+                    let _ = tx.send(if shift {
+                        crate::debug_session::DebugCmd::Stop
+                    } else {
+                        crate::debug_session::DebugCmd::Continue
+                    });
+                }
+                return true;
+            }
+            // F10 — step over
+            floem::keyboard::NamedKey::F10 => {
+                if let Some(tx) = state.project.debug_cmd.get() {
+                    let _ = tx.send(crate::debug_session::DebugCmd::StepOver);
+                }
+                return true;
+            }
+            // F11 — step into; Shift+F11 — step out
+            floem::keyboard::NamedKey::F11 => {
+                if let Some(tx) = state.project.debug_cmd.get() {
+                    let _ = tx.send(if shift {
+                        crate::debug_session::DebugCmd::StepOut
+                    } else {
+                        crate::debug_session::DebugCmd::StepIn
+                    });
+                    return true;
+                }
+            }
+            // F12 — go to definition; Shift+F12 — find all references; Alt+F12 — peek definition; Ctrl+F12 — go to implementation
+            floem::keyboard::NamedKey::F12 => {
+                if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                    if ctrl {
+                        // Ctrl+F12: go to implementation
+                        let _ = state
+                            .project
+                            .lsp_cmd
+                            .send(LspCommand::RequestImplementation { path, line, col });
+                    } else if shift {
+                        // Shift+F12: find all references
+                        let _ = state.project.lsp_cmd.send(LspCommand::RequestReferences {
+                            path,
+                            line,
+                            col,
+                        });
+                        state.editor.references_visible.set(true);
+                        state.workbench.show_bottom_panel.set(true);
+                        state.workbench.bottom_panel_tab.set(Tab::References);
+                    } else if alt {
+                        // Alt+F12: peek definition
+                        state.editor.peek_def_lines.set(vec![]);
+                        state.editor.peek_def_open.set(false);
+                        let _ = state
+                            .project
+                            .lsp_cmd
+                            .send(LspCommand::RequestPeekDefinition { path, line, col });
+                    } else {
+                        // F12: go to definition
+                        let _ = state.project.lsp_cmd.send(LspCommand::RequestDefinition {
+                            path,
+                            line,
+                            col,
+                        });
+                    }
+                }
+                return true;
+            }
+            // F1 with Ctrl — show hover documentation
+            floem::keyboard::NamedKey::F1 => {
+                if ctrl {
+                    if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                        let _ = state.project.lsp_cmd.send(LspCommand::RequestHover {
+                            path,
+                            line,
+                            col,
+                        });
+                    }
+                    return true;
+                }
+            }
+            // F2 — rename symbol at cursor
+            floem::keyboard::NamedKey::F2 => {
+                if let Some((path, line, col)) = state.editor.active_cursor.get() {
+                    let word = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|content| {
+                            let target_line = content.lines().nth(line as usize)?;
+                            let col = (col as usize).min(target_line.len());
+                            let start = target_line[..col]
+                                .char_indices()
+                                .rev()
+                                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                                .last()
+                                .map(|(i, _)| i)
+                                .unwrap_or(col);
+                            let end = target_line[col..]
+                                .char_indices()
+                                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                                .last()
+                                .map(|(i, c)| i + col + c.len_utf8())
+                                .unwrap_or(target_line.len());
+                            Some(target_line[start..end].to_string())
+                        })
+                        .unwrap_or_default();
+                    state.editor.rename_target.set(word.clone());
+                    state.editor.rename_query.set(word);
+                    state.editor.rename_open.set(true);
+                }
+                return true;
+            }
+            // Up/Down — navigate completion popup when open
+            floem::keyboard::NamedKey::ArrowDown if !alt && state.editor.completion_open.get() => {
+                let items = state.editor.completions.get();
+                let f = state.editor.completion_filter_text.get().to_lowercase();
+                let filtered: Vec<usize> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| f.is_empty() || e.label.to_lowercase().contains(&f))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !filtered.is_empty() {
+                    let sel = state.editor.completion_selected.get();
+                    let cur = filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                    let next = (cur + 1).min(filtered.len() - 1);
+                    state.editor.completion_selected.set(filtered[next]);
+                }
+                return true;
+            }
+            floem::keyboard::NamedKey::ArrowUp if !alt && state.editor.completion_open.get() => {
+                let items = state.editor.completions.get();
+                let f = state.editor.completion_filter_text.get().to_lowercase();
+                let filtered: Vec<usize> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| f.is_empty() || e.label.to_lowercase().contains(&f))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !filtered.is_empty() {
+                    let sel = state.editor.completion_selected.get();
+                    let cur = filtered.iter().position(|&i| i == sel).unwrap_or(0);
+                    let prev = cur.saturating_sub(1);
+                    state.editor.completion_selected.set(filtered[prev]);
+                }
+                return true;
+            }
+            // Alt+Up/Down — move or duplicate line
+            floem::keyboard::NamedKey::ArrowUp if alt && !ctrl && !shift => {
+                state.editor.move_line_up_nonce.update(|n| *n += 1);
+                return true;
+            }
+            floem::keyboard::NamedKey::ArrowDown if alt && !ctrl => {
+                if shift {
+                    state.editor.duplicate_line_nonce.update(|n| *n += 1);
+                } else {
+                    state.editor.move_line_down_nonce.update(|n| *n += 1);
+                }
+                return true;
+            }
+            // Ctrl+Alt+Up/Down — add column cursor on adjacent line
+            floem::keyboard::NamedKey::ArrowUp if ctrl && alt && !shift => {
+                state.editor.col_cursor_up_nonce.update(|n| *n += 1);
+                return true;
+            }
+            floem::keyboard::NamedKey::ArrowDown if ctrl && alt && !shift => {
+                state.editor.col_cursor_down_nonce.update(|n| *n += 1);
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    // Ctrl+Space → request LSP completions and open popup
+    if ctrl && *key == Key::Named(floem::keyboard::NamedKey::Space) {
+        if let Some((path, line, col)) = state.editor.active_cursor.get() {
+            // Compute word before cursor as the filter prefix.
+            let prefix = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|content| {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let line_str = lines.get(line as usize)?;
+                    let col = (col as usize).min(line_str.len());
+                    let prefix: String = line_str[..col]
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    Some(prefix)
+                })
+                .unwrap_or_default();
+            state.editor.completion_filter_text.set(prefix);
+            let _ = state
+                .project
+                .lsp_cmd
+                .send(LspCommand::RequestCompletions { path, line, col });
+        }
+        state.editor.completion_selected.set(0);
+        state.editor.completion_open.set(true);
+        return true;
+    }
+
+    // Ctrl+G → goto line/col overlay
+    if ctrl && !shift && !alt && *key == Key::Character("g".into()) {
+        state.editor.goto_overlay_open.set(true);
+        state.editor.goto_overlay_input.set(String::new());
+        return true;
+    }
+
+    // Ctrl+Alt+S → save without formatting
+    if ctrl && !shift && alt && *key == Key::Character("s".into()) {
+        state.editor.save_no_format_nonce.update(|v| *v += 1);
+        return true;
+    }
+
+    // Ctrl+Alt+I → toggle inlay hints
+    if ctrl && !shift && alt && *key == Key::Character("i".into()) {
+        state.editor.inlay_hints_toggle.update(|v| *v = !*v);
+        let msg = if state.editor.inlay_hints_toggle.get() {
+            "Inlay Hints: on"
+        } else {
+            "Inlay Hints: off"
+        };
+        show_toast(state.workbench.status_toast, msg);
+        return true;
+    }
+
+    // Ctrl+N → new scratch file (untitled buffer)
+    if ctrl && !shift && !alt && *key == Key::Character("n".into()) {
+        let n = state.project.scratch_counter.get() + 1;
+        state.project.scratch_counter.set(n);
+        let scratch_path = std::path::PathBuf::from(format!("scratch://untitled-{n}"));
+        state
+            .project
+            .scratch_paths
+            .update(|v: &mut Vec<PathBuf>| v.push(scratch_path.clone()));
+        state.editor.open_file.set(Some(scratch_path));
+        return true;
+    }
+
+    // Ctrl+T → workspace symbols overlay
+    if ctrl && !shift && *key == Key::Character("t".into()) {
+        let open = state.editor.ws_syms_open.get();
+        state.editor.ws_syms_open.set(!open);
+        if !open {
+            state.editor.ws_syms_query.set(String::new());
+            // Kick off an empty-query search to pre-populate list.
+            let _ = state
+                .project
+                .lsp_cmd
+                .send(LspCommand::RequestWorkspaceSymbols {
+                    query: String::new(),
+                });
+        }
+        return true;
+    }
+
+    // Ctrl+. → code actions
+    if ctrl && *key == Key::Character(".".into()) {
+        if let Some((path, line, col)) = state.editor.active_cursor.get() {
+            let _ = state
+                .project
+                .lsp_cmd
+                .send(LspCommand::RequestCodeActions { path, line, col });
+        }
+        state.editor.code_actions_open.set(true);
+        return true;
+    }
+
+    // Ctrl+Shift+Space → signature help
+    if ctrl && shift && *key == Key::Named(floem::keyboard::NamedKey::Space) {
+        if let Some((path, line, col)) = state.editor.active_cursor.get() {
+            let _ = state
+                .project
+                .lsp_cmd
+                .send(LspCommand::RequestSignatureHelp { path, line, col });
+        }
+        return true;
+    }
+
+    if let Key::Character(ref ch) = *key {
+        let ch = ch.clone();
+
+        // Alt+Z — toggle word wrap
+        if alt && !ctrl && !shift && ch.as_str() == "z" {
+            state.editor.word_wrap.update(|v| *v = !*v);
+            let msg = if state.editor.word_wrap.get() {
+                "Word wrap on"
+            } else {
+                "Word wrap off"
+            };
+            show_toast(state.workbench.status_toast, msg);
+            return true;
+        }
+
+        if ctrl && !shift && !alt {
+            match ch.as_str() {
+                // Ctrl+= / Ctrl++ — zoom in editor font
+                "=" | "+" => {
+                    state.editor.font_size.update(|v| *v = (*v + 1).min(40));
+                    return true;
+                }
+                // Ctrl+- — zoom out editor font
+                "-" => {
+                    state
+                        .editor
+                        .font_size
+                        .update(|v| *v = v.saturating_sub(1).max(8));
+                    return true;
+                }
+                // Ctrl+0 — reset editor font to default
+                "0" => {
+                    state.editor.font_size.set(14);
+                    return true;
+                }
+                // Ctrl+D — vim half-page down OR multi-cursor
+                "d" => {
+                    if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
+                        state.editor.vim_motion.set(Some(VimMotion::HalfPageDown));
+                    } else {
+                        state.editor.ctrl_d_nonce.update(|v| *v += 1);
+                    }
+                    return true;
+                }
+                // Ctrl+U — vim half-page up
+                "u" => {
+                    if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() {
+                        state.editor.vim_motion.set(Some(VimMotion::HalfPageUp));
+                        return true;
+                    }
+                }
+                // Ctrl+K — open inline AI edit overlay
+                "k" => {
+                    state.ai.inline_edit_open.set(true);
+                    state.ai.inline_edit_query.set(String::new());
+                    return true;
+                }
+                // Ctrl+/ — toggle line comment
+                "/" => {
+                    state.editor.comment_toggle_nonce.update(|v| *v += 1);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        // Ctrl+Shift+Z is handled above by match_global_shortcut → execute_command.
+        if ctrl && shift && !alt {
+            // Ctrl+Shift+[ → fold block at cursor
+            if ch.as_str() == "[" {
+                state.editor.fold_nonce.update(|v| *v += 1);
+                show_toast(state.workbench.status_toast, "Folded");
+                return true;
+            }
+            // Ctrl+Shift+] → unfold block at cursor
+            if ch.as_str() == "]" {
+                state.editor.unfold_nonce.update(|v| *v += 1);
+                show_toast(state.workbench.status_toast, "Unfolded");
+                return true;
+            }
+            // Ctrl+Shift+K → delete entire line
+            if ch.as_str() == "k" {
+                state.editor.delete_line_nonce.update(|v| *v += 1);
+                return true;
+            }
+            // Ctrl+Shift+U → transform uppercase
+            if ch.as_str() == "u" {
+                state.editor.transform_upper_nonce.update(|v| *v += 1);
+                return true;
+            }
+            // Ctrl+Shift+L → transform lowercase
+            if ch.as_str() == "l" {
+                state.editor.transform_lower_nonce.update(|v| *v += 1);
+                return true;
+            }
+            // Ctrl+Shift+T → transform title case
+            if ch.as_str() == "t" {
+                state.editor.transform_title_nonce.update(|v| *v += 1);
+                return true;
+            }
+            // Ctrl+Shift+J → join lines
+            if ch.as_str() == "j" {
+                state.editor.join_line_nonce.update(|v| *v += 1);
+                return true;
+            }
+            // Ctrl+Shift+V → cycle yank ring and paste
+            if ch.as_str() == "v" {
+                let ring = state.editor.yank_ring.get();
+                if !ring.is_empty() {
+                    let idx = (state.editor.yank_ring_idx.get() + 1) % ring.len();
+                    state.editor.yank_ring_idx.set(idx);
+                    let text = ring[idx].clone();
+                    state.editor.pending_completion.set(Some((text, 0)));
+                }
+                return true;
+            }
+        }
+
+        // Ctrl+Shift+F → open global search (Find in Files)
+        if ctrl && shift && !alt && ch.as_str() == "f" {
+            state.workbench.show_left_panel.set(true);
+            state.workbench.left_panel_tab.set(Tab::Search);
+            return true;
+        }
+
+        // Ctrl+Shift+A → Explain Selection with AI (same path as
+        // the context-menu entry: privacy gate + audit attach only
+        // when the selection is sent). Not Ctrl+Shift+E: that is
+        // Focus Explorer in the global shortcut table, which runs first.
+        if ctrl && shift && !alt && ch.as_str() == "a" {
+            send_editor_ai_action(state, "Explain this code", "Explain the code");
+            return true;
+        }
+
+        // Ctrl+Alt+Shift+D → split editor down toggle
+        if ctrl && alt && shift && ch.as_str() == "d" {
+            state.editor.split_editor_down.update(|v| *v = !*v);
+            return true;
+        }
+
+        // ── Vim normal-mode keys (no Ctrl) ───────────────
+        if state.editor.vim_mode.get() && state.editor.vim_normal_mode.get() && !ctrl && !alt {
+            let pending = state.editor.vim_pending_key.get();
+            let ch_str = ch.as_str();
+
+            // Two-key sequences
+            if let Some(prev) = pending {
+                state.editor.vim_pending_key.set(None);
+                match (prev, ch_str) {
+                    ('d', "d") => {
+                        state.editor.vim_motion.set(Some(VimMotion::DeleteLine));
+                        state
+                            .editor
+                            .vim_last_motion
+                            .set(Some(VimMotion::DeleteLine));
+                    }
+                    ('g', "g") => {
+                        state.editor.vim_motion.set(Some(VimMotion::GotoFileTop));
+                    }
+                    ('y', "y") => {
+                        state.editor.vim_motion.set(Some(VimMotion::YankLine));
+                    }
+                    ('c', "c") => {
+                        state.editor.vim_normal_mode.set(false);
+                        state
+                            .editor
+                            .vim_motion
+                            .set(Some(VimMotion::ChangeWholeLine));
+                        state
+                            .editor
+                            .vim_last_motion
+                            .set(Some(VimMotion::ChangeWholeLine));
+                    }
+                    ('c', "w") => {
+                        state.editor.vim_normal_mode.set(false);
+                        state.editor.vim_motion.set(Some(VimMotion::ChangeWord));
+                        state
+                            .editor
+                            .vim_last_motion
+                            .set(Some(VimMotion::ChangeWord));
+                    }
+                    ('r', _) => {
+                        if let Some(c) = ch_str.chars().next() {
+                            state.editor.vim_motion.set(Some(VimMotion::ReplaceChar(c)));
+                            state
+                                .editor
+                                .vim_last_motion
+                                .set(Some(VimMotion::ReplaceChar(c)));
+                        }
+                    }
+                    ('m', _) => {
+                        if let Some(c) = ch_str.chars().next() {
+                            state.editor.vim_motion.set(Some(VimMotion::SetMark(c)));
+                        }
+                    }
+                    ('`', _) => {
+                        if let Some(c) = ch_str.chars().next() {
+                            state.editor.vim_motion.set(Some(VimMotion::GotoMark(c)));
+                        }
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+
+            // Visual mode intercepts d/y/c to operate on selection
+            if state.editor.vim_visual_mode.get_untracked() {
+                match ch_str {
+                    "d" | "x" => {
+                        state
+                            .editor
+                            .vim_motion
+                            .set(Some(VimMotion::DeleteVisualSelection));
+                        state.editor.vim_visual_mode.set(false);
+                        state
+                            .editor
+                            .vim_last_motion
+                            .set(Some(VimMotion::DeleteVisualSelection));
+                        return true;
+                    }
+                    "y" => {
+                        state
+                            .editor
+                            .vim_motion
+                            .set(Some(VimMotion::YankVisualSelection));
+                        state.editor.vim_visual_mode.set(false);
+                        return true;
+                    }
+                    "c" => {
+                        state.editor.vim_visual_mode.set(false);
+                        state.editor.vim_normal_mode.set(false);
+                        state
+                            .editor
+                            .vim_motion
+                            .set(Some(VimMotion::ChangeVisualSelection));
+                        state
+                            .editor
+                            .vim_last_motion
+                            .set(Some(VimMotion::ChangeVisualSelection));
+                        return true;
+                    }
+                    _ => {} // fall through to normal motion handling
+                }
+            }
+
+            // Single-key normal mode commands
+            match ch_str {
+                "h" => {
+                    state.editor.vim_motion.set(Some(VimMotion::Left));
+                }
+                "j" => {
+                    state.editor.vim_motion.set(Some(VimMotion::Down));
+                }
+                "k" => {
+                    state.editor.vim_motion.set(Some(VimMotion::Up));
+                }
+                "l" => {
+                    state.editor.vim_motion.set(Some(VimMotion::Right));
+                }
+                "w" => {
+                    state.editor.vim_motion.set(Some(VimMotion::WordForward));
+                }
+                "b" => {
+                    state.editor.vim_motion.set(Some(VimMotion::WordBackward));
+                }
+                "0" => {
+                    state.editor.vim_motion.set(Some(VimMotion::LineStart));
+                }
+                "$" => {
+                    state.editor.vim_motion.set(Some(VimMotion::LineEnd));
+                }
+                "x" => {
+                    state.editor.vim_motion.set(Some(VimMotion::DeleteChar));
+                }
+                "i" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state.editor.vim_motion.set(Some(VimMotion::EnterInsert));
+                }
+                "a" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::EnterInsertAfter));
+                }
+                "o" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::EnterInsertNewlineBelow));
+                }
+                // p / P — paste from vim register
+                "p" => {
+                    state.editor.vim_motion.set(Some(VimMotion::Paste));
+                }
+                "P" => {
+                    state.editor.vim_motion.set(Some(VimMotion::PasteBefore));
+                }
+                // G — go to end of file
+                "G" => {
+                    state.editor.vim_motion.set(Some(VimMotion::GotoFileBottom));
+                }
+                // A — insert at end of line
+                "A" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::InsertAtLineEnd));
+                }
+                // I — insert at start of line
+                "I" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::InsertAtLineStart));
+                }
+                // C — change to end of line (delete + insert)
+                "C" => {
+                    state.editor.vim_normal_mode.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::ChangeToLineEnd));
+                }
+                // D — delete to end of line
+                "D" => {
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::DeleteToLineEnd));
+                    state
+                        .editor
+                        .vim_last_motion
+                        .set(Some(VimMotion::DeleteToLineEnd));
+                }
+                // % — jump to matching bracket
+                "%" => {
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::JumpMatchingBracket));
+                }
+                // v — start char-wise visual mode
+                "v" => {
+                    state.editor.vim_visual_mode.set(true);
+                    state.editor.vim_visual_line.set(false);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::VisualCharStart));
+                }
+                // V — start line-wise visual mode
+                "V" => {
+                    state.editor.vim_visual_mode.set(true);
+                    state.editor.vim_visual_line.set(true);
+                    state
+                        .editor
+                        .vim_motion
+                        .set(Some(VimMotion::VisualLineStart));
+                }
+                // Escape in visual mode — return to normal
+                // (handled in NamedKey::Escape section below)
+                // . — repeat last change
+                "." => {
+                    if let Some(last) = state.editor.vim_last_motion.get() {
+                        state.editor.vim_motion.set(Some(last));
+                    }
+                }
+                // : — open ex command bar
+                ":" => {
+                    state.editor.vim_ex_open.set(true);
+                    state.editor.vim_ex_input.set(String::new());
+                }
+                // d, g, y, c, r, m, ` — pending keys for two-key sequences
+                "d" | "g" | "y" | "c" | "r" | "m" | "`" => {
+                    if let Some(ch) = ch_str.chars().next() {
+                        state.editor.vim_pending_key.set(Some(ch));
+                    }
+                }
+                _ => {}
+            }
+            // Normal mode never types text, whether or not the key is bound.
+            return true;
+        }
+    }
+    false
 }
