@@ -1238,7 +1238,8 @@ fn single_terminal(
             }
         })
         .on_resize(move |rect| {
-            let px = (rect.width(), rect.height());
+            // The canvas sits inside a 1px border on each side.
+            let px = (rect.width() - 2.0, rect.height() - 2.0);
             last_px.set(px);
             apply_size(px, metrics.get_untracked());
         })
