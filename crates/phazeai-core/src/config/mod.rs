@@ -428,30 +428,70 @@ impl Settings {
             .join(paths::CONFIG_FILE)
     }
 
+    /// The settings in the config file, or the defaults when there is no file
+    /// or it cannot be read ([`Settings::file_problem`] says why).
     pub fn load() -> Self {
-        let config_path = Self::config_path();
-        if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
-                }
-                eprintln!(
-                    "Warning: failed to parse settings at '{}'; using defaults",
-                    config_path.display()
-                );
-            }
-        }
-        Self::default()
+        Self::load_from(&Self::config_path())
     }
 
+    fn load_from(config_path: &std::path::Path) -> Self {
+        match Self::read_file(config_path) {
+            Ok(Some(config)) => config,
+            Ok(None) => Self::default(),
+            Err(problem) => {
+                eprintln!(
+                    "Warning: settings at '{}' not used ({problem}); using defaults",
+                    config_path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// What is wrong with the config file, when it exists and cannot be read
+    /// as settings: the line and the reason, as in "line 4, column 9: invalid
+    /// string". `None` when it reads fine or there is none.
+    ///
+    /// While this is `Some`, PhazeAI runs on the defaults and [`Settings::save`]
+    /// refuses to write, so a typo never costs the rest of the file.
+    pub fn file_problem() -> Option<String> {
+        Self::read_file(&Self::config_path()).err()
+    }
+
+    /// `Ok(None)` when there is no file.
+    fn read_file(path: &std::path::Path) -> Result<Option<Self>, String> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("it can't be read: {e}")),
+        };
+        toml::from_str(&content)
+            .map(Some)
+            .map_err(|e| describe_toml_error(&content, &e))
+    }
+
+    /// Write the settings to the config file. Refused while the file on disk
+    /// cannot be read ([`Settings::file_problem`]): these settings were then
+    /// loaded as defaults, and writing them would replace everything the
+    /// person had in the file because of one mistake in it.
     pub fn save(&self) -> Result<(), crate::error::PhazeError> {
-        let config_path = Self::config_path();
+        self.save_to(&Self::config_path())
+    }
+
+    fn save_to(&self, config_path: &std::path::Path) -> Result<(), crate::error::PhazeError> {
+        if let Err(problem) = Self::read_file(config_path) {
+            return Err(crate::error::PhazeError::Config(format!(
+                "settings not saved: '{}' has an error ({problem}). Fix it, or move it \
+                 aside to start from the defaults.",
+                config_path.display()
+            )));
+        }
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self)
             .map_err(|e| crate::error::PhazeError::Config(e.to_string()))?;
-        std::fs::write(&config_path, content)?;
+        std::fs::write(config_path, content)?;
         Ok(())
     }
 
@@ -774,6 +814,19 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// "line L, column C: message" for a TOML error in `content` (1-based, as an
+/// editor shows them), or the message alone when the error has no place.
+fn describe_toml_error(content: &str, e: &toml::de::Error) -> String {
+    let message = e.message().trim();
+    let Some(span) = e.span() else {
+        return message.to_string();
+    };
+    let before = content.get(..span.start).unwrap_or(content);
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("line {line}, column {column}: {message}")
 }
 
 #[cfg(test)]
@@ -1313,5 +1366,65 @@ auto_start = false
             back.llm.model, s.llm.model,
             "the rest of the file round-trips"
         );
+    }
+
+    #[test]
+    fn a_settings_file_with_a_mistake_says_where_and_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // The person's file: a model of their own, and a typo further down.
+        let mut mine = Settings::default();
+        mine.llm.model = "my-own-model".into();
+        let good = toml::to_string_pretty(&mine).unwrap();
+        let typo_line = good
+            .lines()
+            .position(|l| l.starts_with("font_size"))
+            .expect("the editor table has a font size")
+            + 1;
+        let font_line = good.lines().nth(typo_line - 1).unwrap().to_string();
+        let theirs = good.replace(&font_line, "font_size = ");
+        std::fs::write(&path, &theirs).unwrap();
+
+        let problem = Settings::read_file(&path).unwrap_err();
+        assert!(
+            problem.starts_with(&format!("line {typo_line}, column ")),
+            "{problem}"
+        );
+
+        // Loading falls back to the defaults...
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.llm.model, Settings::default().llm.model);
+        // ...and saving those defaults must not replace the person's file.
+        let err = loaded.save_to(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("settings not saved") && err.contains(&format!("line {typo_line}")),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+
+        // Once fixed, it loads and saves as usual.
+        std::fs::write(&path, &good).unwrap();
+        let fixed = Settings::load_from(&path);
+        assert_eq!(fixed.llm.model, "my-own-model");
+        fixed.save_to(&path).unwrap();
+        assert!(Settings::read_file(&path).is_ok());
+    }
+
+    #[test]
+    fn no_settings_file_is_not_a_problem_and_saving_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("phazeai").join("config.toml");
+        assert!(Settings::read_file(&path).unwrap().is_none());
+        Settings::default().save_to(&path).unwrap();
+        assert!(Settings::read_file(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_toml_error_names_its_line_and_column_as_an_editor_counts_them() {
+        let content = "a = 1\nbé = \"x\nc = 3\n";
+        let e = toml::from_str::<toml::Table>(content).unwrap_err();
+        let shown = describe_toml_error(content, &e);
+        assert!(shown.starts_with("line 2, column "), "{shown}");
+        assert!(!shown.contains('\n'), "one line: {shown}");
     }
 }

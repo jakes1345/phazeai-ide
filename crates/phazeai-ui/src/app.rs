@@ -4039,6 +4039,17 @@ pub fn launch_phaze_ide() {
                     }
                 }
 
+                // A settings file that can't be read: PhazeAI runs on the
+                // defaults and won't save over it (Settings → top says why).
+                if let Some(problem) = Settings::file_problem() {
+                    show_toast(
+                        state.workbench.status_toast,
+                        format!(
+                            "Settings file has an error ({problem}); using defaults. See Settings."
+                        ),
+                    );
+                }
+
                 // Overlay layers — rendered after IDE content so they paint on top.
                 let palette = command_palette(state.clone());
                 let picker = file_picker(state.clone());
