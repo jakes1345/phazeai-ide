@@ -22,6 +22,7 @@ use floem::{
     views::{
         canvas, container, dyn_stack,
         editor::{
+            command::CommandExecuted,
             core::{
                 buffer::rope_text::RopeText,
                 cursor::{Cursor, CursorMode},
@@ -29,11 +30,12 @@ use floem::{
                 selection::{SelRegion, Selection},
             },
             id::EditorId,
+            keypress::{default_key_handler, key::KeyInput, press::KeyPress},
             layout::{LineExtraStyle, TextLayoutLine},
             text::{default_dark_color, Document, SimpleStylingBuilder, Styling, WrapMethod},
             EditorStyle,
         },
-        label, scroll, stack, text_editor, text_input, Decorators,
+        label, scroll, stack, text_editor_keys, text_input, Decorators,
     },
     IntoView, Renderer,
 };
@@ -1073,6 +1075,40 @@ fn mark_modified(dirty: RwSignal<bool>) {
     }
 }
 
+/// A shortcut table: runs the shortcut a key press names and says whether
+/// there was one (see [`editor_keys`]).
+pub type ShortcutFn = Rc<dyn Fn(&Key, &Modifiers) -> bool>;
+
+/// The key handler of an editor view.
+///
+/// Floem sends a key press to the focused view only, and the editor uses every
+/// key press it gets, so while the editor had focus neither the panel's key
+/// handler nor the app's ever ran: no global shortcut worked (Ctrl+P, Ctrl+T,
+/// Ctrl+B ...), and Ctrl+S, Ctrl+F and Ctrl+H did nothing (a save came only
+/// from auto-save). A press with Ctrl or Alt first goes to `panel_shortcut`,
+/// then `app_shortcut`; anything neither claims gets the editor's usual key
+/// bindings.
+fn editor_keys(
+    panel_shortcut: ShortcutFn,
+    app_shortcut: ShortcutFn,
+) -> impl Fn(RwSignal<floem::views::editor::Editor>, &KeyPress, Modifiers) -> CommandExecuted + 'static
+{
+    type Handler = Box<dyn Fn(&KeyPress, Modifiers) -> CommandExecuted>;
+    let default: Rc<RefCell<Option<Handler>>> = Rc::new(RefCell::new(None));
+    move |editor, press, mods| {
+        if let KeyInput::Keyboard(key, _) = &press.key {
+            if (mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::ALT))
+                && (panel_shortcut(key, &mods) || app_shortcut(key, &mods))
+            {
+                return CommandExecuted::Yes;
+            }
+        }
+        let mut slot = default.borrow_mut();
+        let handler = slot.get_or_insert_with(|| Box::new(default_key_handler(editor)));
+        handler(press, mods)
+    }
+}
+
 /// Write `tab`'s document (looked up in `docs` by path) to disk. Only on success is the tab
 /// marked saved and its crash-recovery shadow removed; on failure both stay as they were, so
 /// the edits are neither lost nor shown as saved.
@@ -1261,6 +1297,9 @@ pub fn editor_panel(
     ex_panes: RwSignal<Vec<EditorPaneHandle>>,
     // The main editor (not a split): `:w` / `:wq` act on its active tab.
     is_primary_pane: bool,
+    // The app's global shortcuts (Ctrl+P, Ctrl+T, Ctrl+B ...): runs the one
+    // a key press names and says whether there was one. See `editor_keys`.
+    app_shortcut: ShortcutFn,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -1584,6 +1623,38 @@ pub fn editor_panel(
     let save_fn_bar = save_fn.clone();
     let save_fn_key = save_fn.clone();
 
+    // This panel's own shortcuts (Ctrl+S, Ctrl+F, Ctrl+H): runs the one a key
+    // press names and says whether there was one. Used by the editor's key
+    // handler (`editor_keys`) and by the panel's, for focus elsewhere in it.
+    let panel_shortcut: ShortcutFn = Rc::new(move |key, mods| {
+        let ctrl = mods.contains(Modifiers::CONTROL);
+        let shift = mods.contains(Modifiers::SHIFT);
+        if !ctrl || shift {
+            return false;
+        }
+        let Key::Character(ref ch) = key else {
+            return false;
+        };
+        match ch.as_str() {
+            "s" => save_fn_key(),
+            "f" => {
+                find_open.set(true);
+                replace_open.set(false);
+                find_cur_match.set(0);
+                // Snapshot the selection so the Sel toggle applies to it.
+                find_sel_range.set(active_sel_range.get_untracked());
+            }
+            "h" => {
+                find_open.set(true);
+                replace_open.set(true);
+                find_cur_match.set(0);
+                find_sel_range.set(active_sel_range.get_untracked());
+            }
+            _ => return false,
+        }
+        true
+    });
+
     // ── Auto-save debounce ─────────────────────────────────────────────────
     // A global cancel-token counter; each keystroke increments it and starts
     // a 1.5 s timer thread.  When the timer fires it checks the token still
@@ -1723,6 +1794,7 @@ pub fn editor_panel(
     let lsp_cmd_bctx_goto = lsp_cmd.clone();
     let lsp_cmd_bctx_refs = lsp_cmd.clone();
 
+    let panel_shortcut_tabs = panel_shortcut.clone();
     let editor_body = dyn_stack(
         move || tabs.get().into_iter().enumerate().collect::<Vec<_>>(),
         |(_i, tab)| format!("{}", tab.path.to_string_lossy()),
@@ -1820,7 +1892,10 @@ pub fn editor_panel(
             };
 
             // Build the raw editor first so we can grab the doc and cursor.
-            let raw_editor = text_editor(content);
+            let raw_editor = text_editor_keys(
+                content,
+                editor_keys(panel_shortcut_tabs.clone(), app_shortcut.clone()),
+            );
             let cursor_sig = raw_editor.editor().cursor; // RwSignal<Cursor>
             let editor_ref = raw_editor.editor().clone(); // Clone for reactive updates
 
@@ -4458,12 +4533,16 @@ pub fn editor_panel(
                         // Auto-trigger: completions on `.` / `::` / `(`; sig help on `(` / `,`.
                         {
                             let offset = cursor_sig.get_untracked().offset();
-                            if offset > 0 {
-                                let trigger = text[..offset].chars().last();
+                            // On undo the document changes before the cursor
+                            // moves back, so `offset` can be past the new
+                            // text's end (or inside a character): slicing it
+                            // crashed the IDE. Such an edit triggers nothing.
+                            if let Some(before) = text.get(..offset).filter(|b| !b.is_empty()) {
+                                let trigger = before.chars().last();
                                 if let Some(ch) = trigger {
                                     let is_completion_trigger =
                                         ch == '.' || ch == '(' || ch == ','
-                                        || (ch == ':' && text[..offset].ends_with("::"));
+                                        || (ch == ':' && before.ends_with("::"));
                                     if is_completion_trigger {
                                         let rope = doc_for_lsp.rope_text();
                                         let ln = rope.line_of_offset(offset);
@@ -5586,33 +5665,13 @@ pub fn editor_panel(
             }
         }
     })
-    .on_event_cont(EventListener::KeyDown, move |event| {
-        // Editor-specific shortcuts only. Global shortcuts (Ctrl+B/J/P/\/Shift+P,
-        // font zoom, Alt+Up/Down, etc.) bubble to the root handler in app.rs.
-        if let Event::KeyDown(e) = event {
-            let ctrl = e.modifiers.contains(Modifiers::CONTROL);
-            let shift = e.modifiers.contains(Modifiers::SHIFT);
-
-            if ctrl && !shift {
-                if let Key::Character(ref ch) = e.key.logical_key {
-                    match ch.as_str() {
-                        "s" => save_fn_key(),
-                        "f" => {
-                            find_open.set(true);
-                            replace_open.set(false);
-                            find_cur_match.set(0);
-                            // Snapshot the selection so the Sel toggle applies to it.
-                            find_sel_range.set(active_sel_range.get_untracked());
-                        }
-                        "h" => {
-                            find_open.set(true);
-                            replace_open.set(true);
-                            find_cur_match.set(0);
-                            find_sel_range.set(active_sel_range.get_untracked());
-                        }
-                        _ => {}
-                    }
-                }
+    .on_event_cont(EventListener::KeyDown, {
+        let panel_shortcut = panel_shortcut.clone();
+        move |event| {
+            // Editor-specific shortcuts only. Global shortcuts (Ctrl+B/J/P/\/Shift+P,
+            // font zoom, Alt+Up/Down, etc.) bubble to the root handler in app.rs.
+            if let Event::KeyDown(e) = event {
+                panel_shortcut(&e.key.logical_key, &e.modifiers);
             }
         }
     })
