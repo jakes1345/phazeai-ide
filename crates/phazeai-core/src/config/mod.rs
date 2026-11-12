@@ -499,6 +499,24 @@ impl Settings {
                 "builtin" | "built-in" | "phazeai-local" => ProviderId::BuiltIn,
                 other => ProviderId::Custom(other.to_string()),
             };
+            // An entry named after a provider PhazeAI knows changes that
+            // provider (an empty field keeps its own value); any other name
+            // is a provider of its own.
+            if !matches!(id, ProviderId::Custom(_)) {
+                if let Some(mut config) = registry.get_config(&id).cloned() {
+                    let set = |field: &mut String, value: &str| {
+                        if !value.trim().is_empty() {
+                            *field = value.trim().to_string();
+                        }
+                    };
+                    config.enabled = entry.enabled;
+                    set(&mut config.api_key_env, &entry.api_key_env);
+                    set(&mut config.base_url, &entry.base_url);
+                    set(&mut config.default_model, &entry.default_model);
+                    registry.set_config(config);
+                    continue;
+                }
+            }
             let config = ProviderConfig {
                 id: id.clone(),
                 enabled: entry.enabled,
@@ -703,28 +721,37 @@ impl Settings {
     ///   has no address of its own, as each resource has its own host.
     pub fn check_base_url(&self) -> Result<(), crate::error::PhazeError> {
         let id = self.llm.provider.to_provider_id();
-        let Some(url) = self.llm.base_url_override() else {
-            let registry = self.build_provider_registry();
-            let address = registry.active_config().map(|c| c.base_url.trim());
-            if id != ProviderId::BuiltIn && address.is_none_or(str::is_empty) {
-                return Err(crate::error::PhazeError::Config(format!(
-                    "{} has no address of its own. Set [llm] base_url in config.toml to your \
-                     resource's address, for example \
-                     https://<resource>.openai.azure.com/openai/v1, and [llm] model to your \
-                     deployment's name.",
-                    id.name()
-                )));
-            }
-            return Ok(());
-        };
         if id == ProviderId::BuiltIn {
             return Ok(());
         }
+        // The address requests go to, and the setting that put it there: a
+        // `[[providers]]` entry for this provider changes its address too.
+        let (url, setting) = match self.llm.base_url_override() {
+            Some(url) => (url.to_string(), "[llm] base_url"),
+            None => {
+                let registry = self.build_provider_registry();
+                let address = registry
+                    .active_config()
+                    .map(|c| c.base_url.trim().to_string())
+                    .unwrap_or_default();
+                if address.is_empty() {
+                    return Err(crate::error::PhazeError::Config(format!(
+                        "{} has no address of its own. Set [llm] base_url in config.toml to \
+                         your resource's address, for example \
+                         https://<resource>.openai.azure.com/openai/v1, and [llm] model to \
+                         your deployment's name.",
+                        id.name()
+                    )));
+                }
+                (address, "[[providers]] base_url")
+            }
+        };
+        let url = url.as_str();
         let Some(parsed) = reqwest::Url::parse(url).ok().filter(|u| {
             matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
         }) else {
             return Err(crate::error::PhazeError::Config(format!(
-                "[llm] base_url = \"{url}\" in config.toml is not a full http:// or https:// \
+                "{setting} = \"{url}\" in config.toml is not a full http:// or https:// \
                  address (for example http://localhost:11434). Fix it, or remove it to use the \
                  default address of {}.",
                 id.name()
@@ -738,7 +765,7 @@ impl Settings {
             // Not "API key": the CLI reads that as a missing key
             // (`setup::explain_build_error`).
             return Err(crate::error::PhazeError::Config(format!(
-                "[llm] base_url = \"{url}\" in config.toml would send your {name} key and \
+                "{setting} = \"{url}\" in config.toml would send your {name} key and \
                  prompts to {host} unencrypted. If it is left from a local server you used \
                  before, remove the line to use {name}'s own address; otherwise use an \
                  https:// address or a server on this machine.",
@@ -1034,6 +1061,61 @@ auto_start = false
                 assert_eq!(active_url(&s), default, "{provider:?}, base_url {unset:?}");
             }
         }
+    }
+
+    fn entry(name: &str, api_key_env: &str, base_url: &str, model: &str) -> ProviderEntry {
+        ProviderEntry {
+            name: name.into(),
+            enabled: true,
+            api_key_env: api_key_env.into(),
+            base_url: base_url.into(),
+            default_model: model.into(),
+        }
+    }
+
+    #[test]
+    fn a_providers_entry_named_after_a_known_provider_changes_that_provider() {
+        let mut s = llm(LlmProvider::Groq, None);
+        s.providers.push(entry(
+            "Groq",
+            "MY_GROQ_KEY",
+            "https://groq-proxy.example/v1",
+            "",
+        ));
+        let registry = s.build_provider_registry();
+        let groq = registry.get_config(&ProviderId::Groq).unwrap();
+        assert_eq!(groq.base_url, "https://groq-proxy.example/v1");
+        assert_eq!(groq.api_key_env, "MY_GROQ_KEY");
+        // An empty field keeps Groq's own value.
+        let default_model = ProviderRegistry::new()
+            .get_config(&ProviderId::Groq)
+            .unwrap()
+            .default_model
+            .clone();
+        assert_eq!(groq.default_model, default_model);
+        // The requests go there.
+        assert_eq!(active_url(&s), "https://groq-proxy.example/v1");
+        // No stray custom provider is left beside it.
+        assert!(registry
+            .get_config(&ProviderId::Custom("Groq".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn a_providers_entry_cannot_send_the_key_unencrypted() {
+        let mut s = llm(LlmProvider::Groq, None);
+        s.providers
+            .push(entry("groq", "", "http://groq-proxy.example/v1", ""));
+        let err = s.check_base_url().unwrap_err().to_string();
+        assert!(
+            err.contains("unencrypted") && err.contains("[[providers]]"),
+            "{err}"
+        );
+        // On this machine, or over https, it is fine.
+        s.providers[0].base_url = "http://localhost:8080/v1".into();
+        assert!(s.check_base_url().is_ok());
+        s.providers[0].base_url = "https://groq-proxy.example/v1".into();
+        assert!(s.check_base_url().is_ok());
     }
 
     #[test]
