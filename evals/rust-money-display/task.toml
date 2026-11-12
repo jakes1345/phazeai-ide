@@ -1,0 +1,4 @@
+about = "Implement a trait in Rust from its documentation, with edge cases"
+prompt = "Implement std::fmt::Display for Money in src/lib.rs, as the doc comment on Money describes."
+check = "cargo test --quiet --offline"
+timeout_secs = 900

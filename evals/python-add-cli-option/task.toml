@@ -1,0 +1,4 @@
+about = "Add a feature that follows an existing pattern in a CLI"
+prompt = "Add a --words option to wc.py that prints the number of words instead of lines, the way --chars prints characters. A word is a run of characters that aren't whitespace. Update the usage text in README.md too."
+check = "python3 -m unittest -q test_words_hidden"
+timeout_secs = 600

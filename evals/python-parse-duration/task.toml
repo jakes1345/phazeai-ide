@@ -1,0 +1,4 @@
+about = "Implement a small parser from its docstring"
+prompt = "Implement parse_duration in timeparse.py as its docstring describes. Keep its name and signature."
+check = "python3 -m unittest -q test_timeparse_hidden"
+timeout_secs = 600
