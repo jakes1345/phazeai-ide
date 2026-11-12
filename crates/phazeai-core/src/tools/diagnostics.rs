@@ -44,7 +44,9 @@ impl Tool for DiagnosticsTool {
     async fn execute(&self, params: Value) -> ToolResult {
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-        let path = Path::new(path_str);
+        // A relative path is read from the open project (see `resolve_relative`).
+        let resolved = crate::tools::sandbox::resolve_relative(Path::new(path_str));
+        let path = resolved.as_path();
         if !path.exists() {
             return Err(PhazeError::tool(
                 "diagnostics",
@@ -65,10 +67,11 @@ impl Tool for DiagnosticsTool {
             language.to_string()
         };
 
+        let shown_path = path.to_string_lossy();
         let (command, args) = match detected_language.as_str() {
             "rust" => ("cargo", vec!["check", "--message-format=short"]),
             "typescript" => ("npx", vec!["tsc", "--noEmit", "--pretty", "false"]),
-            "python" => ("python3", vec!["-m", "py_compile", path_str]),
+            "python" => ("python3", vec!["-m", "py_compile", shown_path.as_ref()]),
             other => {
                 return Err(PhazeError::tool(
                     "diagnostics",
@@ -78,7 +81,7 @@ impl Tool for DiagnosticsTool {
         };
 
         let mut cmd = crate::process::tokio_command(command);
-        cmd.args(&args).current_dir(path_str);
+        cmd.args(&args).current_dir(path);
         // Stop drops this future, which kills the checker and everything it
         // started (cargo's rustc and build scripts); so does the timeout.
         let output = crate::process::output_or_kill(cmd, CHECK_TIMEOUT)

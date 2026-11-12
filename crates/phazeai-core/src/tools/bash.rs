@@ -12,20 +12,48 @@ use tokio::sync::Mutex;
 const MAX_OUTPUT_BYTES: usize = 30_000;
 
 pub struct BashTool {
-    cwd: Arc<Mutex<PathBuf>>,
+    shell: Arc<Mutex<Shell>>,
+}
+
+/// Where the shell is, and the workspace root it was in when it got there.
+struct Shell {
+    cwd: PathBuf,
+    root: Option<PathBuf>,
+}
+
+impl Shell {
+    /// The directory the next command runs in. When the host has opened another
+    /// folder since (the workspace root changed), the shell starts over at the
+    /// new root: a `cd` made in the old project means nothing in the new one,
+    /// and the sandbox would refuse the old directory anyway.
+    fn cwd_now(&mut self) -> PathBuf {
+        let root = sandbox::workspace_root();
+        if root != self.root {
+            if let Some(new_root) = &root {
+                self.cwd = new_root.clone();
+            }
+            self.root = root;
+        }
+        self.cwd.clone()
+    }
 }
 
 impl BashTool {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
-            cwd: Arc::new(Mutex::new(cwd)),
+            shell: Arc::new(Mutex::new(Shell {
+                cwd,
+                root: sandbox::workspace_root(),
+            })),
         }
     }
 }
 
 impl Default for BashTool {
+    /// A shell in the workspace root when one is set, else in the process's
+    /// current directory.
     fn default() -> Self {
-        Self::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        Self::new(sandbox::base_dir())
     }
 }
 
@@ -68,7 +96,7 @@ impl Tool for BashTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(120);
 
-        let cwd = self.cwd.lock().await.clone();
+        let cwd = self.shell.lock().await.cwd_now();
         // If a workspace root is configured, refuse to run commands whose cwd
         // already lies outside it. Defends against the agent doing `cd /etc &&
         // rm -rf foo` over multiple turns. Per-command shell escapes are not
@@ -141,7 +169,7 @@ impl Tool for BashTool {
             };
             stdout = format!("{}{}", &stdout[..strip_from], &stdout[strip_to..]);
             if !new_pwd.is_empty() {
-                *self.cwd.lock().await = PathBuf::from(new_pwd);
+                self.shell.lock().await.cwd = PathBuf::from(new_pwd);
             }
         }
 
@@ -157,3 +185,52 @@ impl Tool for BashTool {
 // Tests live in `tests/bash_cancel.rs` (interrupt, timeout, output capture
 // and long output) and `tests/tool_tests.rs`: they need a shell in a temp
 // dir, which the lib tests that set the global workspace sandbox would refuse.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::sandbox::{set_workspace_root, tests::SERIAL, workspace_root};
+
+    /// Holds the process-wide workspace root at `root` until dropped.
+    struct Root {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<PathBuf>,
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            set_workspace_root(self.prev.take());
+        }
+    }
+
+    fn hold_root(root: &std::path::Path) -> Root {
+        let lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = workspace_root();
+        set_workspace_root(Some(root.to_path_buf()));
+        Root { _lock: lock, prev }
+    }
+
+    #[test]
+    fn the_shell_starts_in_the_open_folder_and_moves_when_another_is_opened() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_root = first.path().canonicalize().unwrap();
+        let second_root = second.path().canonicalize().unwrap();
+        std::fs::create_dir_all(first_root.join("sub")).unwrap();
+
+        let held = hold_root(&first_root);
+        let bash = BashTool::default();
+        let mut shell = bash.shell.try_lock().unwrap();
+        assert_eq!(shell.cwd_now(), first_root);
+
+        // A `cd` inside the project is kept while the project stays open.
+        shell.cwd = first_root.join("sub");
+        assert_eq!(shell.cwd_now(), first_root.join("sub"));
+
+        // Open Folder: the next command runs at the new root, not in `sub`.
+        set_workspace_root(Some(second_root.clone()));
+        assert_eq!(shell.cwd_now(), second_root);
+        drop(shell);
+        drop(held);
+    }
+}

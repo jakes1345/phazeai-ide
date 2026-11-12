@@ -47,9 +47,10 @@ pub const PROTECTED_SYSTEM_PATHS: &[&str] = &[
 
 static WORKSPACE_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 
-/// Set the workspace root used by all sandboxed tool calls. Call once at app
-/// startup with the canonical path of the project root. Subsequent calls
-/// overwrite. Pass `None` to disable sandboxing (matches default).
+/// Set the workspace root used by all sandboxed tool calls: the IDE calls it at
+/// startup and again whenever another folder is opened; the CLI once. Relative
+/// tool paths are read from it too (see [`resolve_relative`]). Pass `None` to
+/// disable sandboxing (matches default).
 pub fn set_workspace_root(root: Option<PathBuf>) {
     let canonical = root.and_then(|p| p.canonicalize().ok());
     if let Ok(mut guard) = WORKSPACE_ROOT.write() {
@@ -60,6 +61,25 @@ pub fn set_workspace_root(root: Option<PathBuf>) {
 /// Current workspace root, if configured.
 pub fn workspace_root() -> Option<PathBuf> {
     WORKSPACE_ROOT.read().ok().and_then(|g| g.clone())
+}
+
+/// The folder a tool's relative path is read from: the workspace root when the
+/// host set one, so that `src/main.rs` means the open project's file even after
+/// the IDE opened another folder than the one it started in. With no root set,
+/// the path is left relative and the process's directory applies, as before.
+pub fn resolve_relative(path: &Path) -> PathBuf {
+    match workspace_root() {
+        Some(root) if path.is_relative() => root.join(path),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The directory relative paths are read from: the workspace root, else the
+/// process's current directory (or `.` when even that is unknown).
+pub fn base_dir() -> PathBuf {
+    workspace_root()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Returns true if `canonical` matches any path in [`PROTECTED_SYSTEM_PATHS`]
@@ -111,7 +131,7 @@ pub fn resolve_within_workspace(tool_name: &str, input: &str) -> Result<PathBuf,
     // Resolve to a canonical absolute path. For non-existent paths we
     // canonicalise the closest existing ancestor and re-append the rest,
     // which still defeats `..` and symlink escapes from the parent.
-    let canonical = canonicalize_or_parent(raw).map_err(|e| {
+    let canonical = canonicalize_or_parent(&resolve_relative(raw)).map_err(|e| {
         PhazeError::tool(tool_name, format!("cannot resolve path '{}': {}", input, e))
     })?;
 
@@ -282,5 +302,47 @@ pub(crate) mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_relative_path_is_read_from_the_workspace_root_not_the_process_directory() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        assert_ne!(std::env::current_dir().unwrap(), root);
+
+        with_workspace(Some(root.clone()), || {
+            assert_eq!(base_dir(), root);
+            assert_eq!(
+                resolve_relative(Path::new("src/main.rs")),
+                root.join("src/main.rs")
+            );
+            // An absolute path is left as it is.
+            assert_eq!(resolve_relative(Path::new("/x/y")), PathBuf::from("/x/y"));
+            // Reading and creating both land in the project.
+            assert_eq!(
+                resolve_within_workspace("read_file", "src/main.rs").unwrap(),
+                root.join("src/main.rs")
+            );
+            assert_eq!(
+                resolve_target_path("write_file", "src/new.rs").unwrap(),
+                root.join("src/new.rs")
+            );
+            // `..` out of the project is still refused.
+            let err = resolve_within_workspace("read_file", "../elsewhere.txt").unwrap_err();
+            assert!(err.to_string().contains("outside the workspace"), "{err}");
+        });
+    }
+
+    #[test]
+    fn with_no_workspace_root_a_relative_path_keeps_the_process_directory() {
+        with_workspace(None, || {
+            assert_eq!(
+                resolve_relative(Path::new("a/b.rs")),
+                PathBuf::from("a/b.rs")
+            );
+            assert_eq!(base_dir(), std::env::current_dir().unwrap());
+        });
     }
 }
