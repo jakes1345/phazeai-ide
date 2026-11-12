@@ -30,6 +30,7 @@ pub mod telemetry;
 pub mod text;
 pub mod tools;
 pub mod updater;
+pub mod worktree;
 
 pub mod debug_ndjson;
 
