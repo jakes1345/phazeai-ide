@@ -78,7 +78,8 @@ pub struct SearchHit {
     pub start_line: usize,
     /// Last line of `snippet`, 1-based and inclusive.
     pub end_line: usize,
-    /// BM25 score of the best chunk in the file, rounded to 4 decimals.
+    /// BM25 score of the best chunk in the file, rounded to 4 decimals; with
+    /// meaning-based matching on, the fused rank score instead.
     #[serde(serialize_with = "serialize_score")]
     pub score: f32,
     pub snippet: String,
@@ -126,4 +127,6 @@ pub enum SearchError {
     RootTooBroad(std::path::PathBuf),
     #[error("search worker failed: {0}")]
     Worker(String),
+    #[error("embedding failed: {0}")]
+    Embedding(String),
 }

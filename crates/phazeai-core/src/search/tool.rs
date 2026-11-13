@@ -56,12 +56,21 @@ impl Tool for CodeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the codebase by keywords. Source files are cut into ~40-line chunks and ranked with \
-         BM25 keyword scoring; identifiers are split into words, so 'json config' finds \
-         parseJsonConfig and parse_json_config, and file and folder names count as keywords too. \
-         It matches the words you give it, not their meaning: use words that appear in the code. \
-         Respects .gitignore. Returns up to top_k files, each with its best matching line range \
-         (start_line..end_line), a score and a snippet."
+        if self.search.embedding_status().is_some() {
+            "Search the codebase by keywords and by meaning. Source files are cut into ~40-line \
+             chunks; each is ranked both with BM25 keyword scoring (identifiers are split into \
+             words, file and folder names count) and by similarity of meaning to the query, so \
+             a plain description like 'where failed requests are retried' finds code that never \
+             uses those words. Respects .gitignore. Returns up to top_k files, each with its best \
+             matching line range (start_line..end_line), a score and a snippet."
+        } else {
+            "Search the codebase by keywords. Source files are cut into ~40-line chunks and ranked with \
+             BM25 keyword scoring; identifiers are split into words, so 'json config' finds \
+             parseJsonConfig and parse_json_config, and file and folder names count as keywords too. \
+             It matches the words you give it, not their meaning: use words that appear in the code. \
+             Respects .gitignore. Returns up to top_k files, each with its best matching line range \
+             (start_line..end_line), a score and a snippet."
+        }
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -105,6 +114,8 @@ impl Tool for CodeSearchTool {
                 "The search index hit its size limits, so some files are not searchable; \
                  results may be incomplete.",
             );
+        } else if let Some(note) = self.search.embedding_status().and_then(|s| s.note()) {
+            out["note"] = Value::from(note);
         }
         Ok(out)
     }

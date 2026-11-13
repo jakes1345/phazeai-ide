@@ -13,7 +13,7 @@
 
 ## Where we are
 
-**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (16 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
+**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (16 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests; optional matching by meaning through an embedding endpoint the user runs, tested against a real local HTTP server that speaks the Ollama and OpenAI formats, not against a real model); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
 - the MCP client, against the official filesystem server in CI;
 - the Vim ex bar's save and quit commands;
 - the text-only AI helpers;

@@ -151,7 +151,12 @@ pub fn start_build(p: &ProjectState) {
             scope.dispose();
             running.store(false, Ordering::Release);
             match result {
-                Ok(stats) => p.code_search_notice.set(build_notice(&stats)),
+                Ok(stats) => {
+                    p.code_search_notice.set(build_notice(&stats));
+                    // Embed what changed, in the background, when an
+                    // embedding model is set.
+                    p.code_search.start_embeddings();
+                }
                 // The folder changed under the build; the new root's own build
                 // reports for itself.
                 Err(SearchError::RootChanged) => {}

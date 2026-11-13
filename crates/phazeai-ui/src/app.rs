@@ -650,6 +650,11 @@ impl IdeState {
         // the AI tools all share this one handle. Indexing starts below, once
         // the project state exists (see `code_search::init`).
         let code_search = phazeai_core::CodeSearch::new(workspace.clone());
+        // Match by meaning too when `[search] embedding_model` is set; the
+        // chunks are embedded after the index is built (`code_search`).
+        if settings.search.enabled {
+            code_search.set_embeddings(settings.search.embedding_config());
+        }
 
         // AI provider / model signals — initialized from current settings file.
         let ai_provider_sig =
