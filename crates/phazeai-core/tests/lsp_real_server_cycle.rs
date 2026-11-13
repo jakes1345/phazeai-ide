@@ -371,10 +371,12 @@ async fn rust_analyzer_definition_lands_on_the_name() {
     manager.shutdown_all().await;
 }
 
-/// Inlay hints through a real rust-analyzer: the request's range must end
-/// inside the document. The IDE asked for lines 0..2000 ending at column
-/// u32::MAX, which rust-analyzer rejects ("Invalid offset") for any shorter
-/// file, so no hints ever showed.
+/// Inlay hints through a real rust-analyzer, for a range that ends at the
+/// document's real end. The IDE used to ask for lines 0..2000 ending at
+/// column u32::MAX, which rust-analyzer rejected ("Invalid offset") for a
+/// shorter file once it had analysed it, so no hints showed. Whether it
+/// rejects that range depends on its state, so only the fixed range is
+/// asserted here.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "needs a working rust-analyzer; fails (never skips) without one"]
 async fn rust_analyzer_inlay_hints_for_a_short_file() {
@@ -430,13 +432,6 @@ async fn rust_analyzer_inlay_hints_for_a_short_file() {
     assert!(
         labels.iter().any(|l| l.contains("i32")),
         "hints: {labels:?}"
-    );
-    assert!(
-        client
-            .inlay_hints(&main, 0, (2000, u32::MAX))
-            .await
-            .is_err(),
-        "the old range, past the end of the file, is refused"
     );
 
     drop(client);
