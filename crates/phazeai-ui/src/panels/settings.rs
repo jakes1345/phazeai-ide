@@ -126,6 +126,11 @@ fn divider(state: IdeState) -> impl IntoView {
 }
 
 /// An uppercase section header label.
+/// [`section_header`] for sections that live in other modules.
+pub(crate) fn section_header_pub(text: &'static str, state: IdeState) -> impl IntoView {
+    section_header(text, state)
+}
+
 fn section_header(text: &'static str, state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
     label(move || text).style(move |s| {
@@ -1483,7 +1488,13 @@ pub fn settings_panel(state: IdeState) -> impl IntoView {
         divider(state.clone()),
         ai_section(state.clone()),
         divider(state.clone()),
-        crate::panels::local_ai::local_ai_section(state.clone()),
+        stack((
+            crate::panels::local_ai::local_ai_section(state.clone()),
+            divider(state.clone()),
+            crate::panels::search_settings::code_search_section(state.clone()),
+            divider(state.clone()),
+        ))
+        .style(|s| s.flex_col().width_full()),
         crate::panels::privacy::privacy_section(state.clone()),
         divider(state.clone()),
         keybindings_section(state.clone()),

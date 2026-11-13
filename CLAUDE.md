@@ -80,7 +80,8 @@ Key files:
 - `domain_state/mod.rs` — `IdeState` decomposition (`WorkbenchState`, `EditorState`, `AiState`, `ProjectState`)
 - `app.rs` — overlay views (command palette, file picker, completion popup, Ctrl+K inline edit), key handler, `launch_phaze_ide()`
 - `panels/editor.rs` — multi-tab code editor with syntect highlighting, LSP, find/replace, reactive font-size
-- `panels/terminal.rs` — PTY via `portable-pty` + VTE parser, 256-color rendering, clipboard
+- `panels/terminal.rs` — terminal panel (tabs, split, zoom, find, AI command bar, command-block list) and the canvas that paints the cell grid; the PTY is `portable-pty`, read on its own thread
+- `panels/terminal_emu.rs` — terminal screen model: `alacritty_terminal::Term` driven by its `vte` `Processor` (alacritty's tty/event_loop are not used), replies to queries written back to the PTY, OSC 133/7 shell integration with exact absolute rows (history is trimmed here, not by alacritty), `GridSnapshot` for painting, key/mouse/paste encoding
 - `panels/chat.rs` — AI chat with real streaming via `Agent::run_with_events()`
 - `panels/git.rs` — git status, stage/commit UI
 - `lsp_bridge.rs` — LSP manager, completions, diagnostics signals
@@ -248,7 +249,7 @@ F5/F10/F11/⇧F11 = continue/step-over/step-into/step-out.
 | GUI | `floem` (rev `e0dd862`, Lapce fork) |
 | TUI | `ratatui 0.29` |
 | PTY | `portable-pty` |
-| Terminal parsing | `vte` |
+| Terminal emulation | `alacritty_terminal` (cell grid + its `vte` processor) |
 | Syntax highlighting | `syntect` |
 | LSP | `lsp-types 0.97` |
 | HTTP | `reqwest 0.12` (json + stream) |

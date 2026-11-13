@@ -18,6 +18,7 @@ pub mod term;
 pub mod text;
 pub mod theme;
 pub mod tool_view;
+pub mod worktrees;
 
 // Re-export commonly used items for easier testing
 pub use commands::{handle_command, CommandResult};

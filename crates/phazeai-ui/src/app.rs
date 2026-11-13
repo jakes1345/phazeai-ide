@@ -539,6 +539,7 @@ impl IdeState {
             create_effect(move |_| {
                 if let Some(result) = goto_definition.get() {
                     open_file2.set(Some(result.path.clone()));
+                    crate::panels::editor::goto_column_next(result.col);
                     goto_line2.set(result.line);
                     // Reset so the same definition won't re-trigger on the next
                     // reactive cycle that happens to read this signal.
@@ -649,6 +650,11 @@ impl IdeState {
         // the AI tools all share this one handle. Indexing starts below, once
         // the project state exists (see `code_search::init`).
         let code_search = phazeai_core::CodeSearch::new(workspace.clone());
+        // Match by meaning too when `[search] embedding_model` is set; the
+        // chunks are embedded after the index is built (`code_search`).
+        if settings.search.enabled {
+            code_search.set_embeddings(settings.search.embedding_config());
+        }
 
         // AI provider / model signals — initialized from current settings file.
         let ai_provider_sig =

@@ -1133,6 +1133,26 @@ fn mark_modified(dirty: RwSignal<bool>) {
 /// there was one (see [`editor_keys`]).
 pub type ShortcutFn = Rc<dyn Fn(&Key, &Modifiers) -> bool>;
 
+thread_local! {
+    /// Column (1-based, in UTF-16 units, as LSP counts) for the next jump to
+    /// a line; see [`goto_column_next`].
+    static GOTO_COLUMN: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Put the cursor at LSP column `col` (1-based, UTF-16 units) on the line of
+/// the next go-to-line jump, instead of at the line's start. Set it just
+/// before the line: go to definition lands on the name, not its line's start.
+pub fn goto_column_next(col: u32) {
+    GOTO_COLUMN.with(|c| c.set(Some(col)));
+}
+
+/// The byte offset of the cursor for a jump to `line_text` at LSP column
+/// `col` (1-based UTF-16 units; `None` is the line's start).
+fn goto_offset_in_line(line_text: &str, col: Option<u32>) -> usize {
+    col.map(|c| phazeai_core::lsp::text::byte_col(line_text, c.saturating_sub(1)))
+        .unwrap_or(0)
+}
+
 /// The key handler of an editor view.
 ///
 /// Floem sends a key press to the focused view only, and the editor uses every
@@ -2121,7 +2141,10 @@ pub fn editor_panel(
                     let rope = doc_for_goto.rope_text();
                     let line_0 = goto_line.get().saturating_sub(1);
                     let max_line = rope.num_lines().saturating_sub(1);
-                    let offset = rope.offset_of_line(line_0.min(max_line));
+                    let line_0 = line_0.min(max_line);
+                    let col = GOTO_COLUMN.with(|c| c.take());
+                    let offset = rope.offset_of_line(line_0)
+                        + goto_offset_in_line(&rope.line_content(line_0), col);
                     cursor_sig.set(Cursor::new(
                         CursorMode::Insert(Selection::caret(offset)),
                         None,
@@ -4708,8 +4731,10 @@ pub fn editor_panel(
                                         let rope = doc_for_lsp.rope_text();
                                         let ln = rope.line_of_offset(offset);
                                         let ls = rope.offset_of_line(ln);
-                                        let (line, col) =
-                                            (ln as u32 + 1, (offset - ls) as u32 + 1);
+                                        // 0-based line and byte column, as
+                                        // `active_cursor`; the bridge makes the
+                                        // column UTF-16 for the server.
+                                        let (line, col) = (ln as u32, (offset - ls) as u32);
                                         let _ = lsp_tx.send(
                                             crate::lsp_bridge::LspCommand::RequestCompletions {
                                                 path: lsp_path.clone(),
@@ -7050,5 +7075,25 @@ mod typing_tests {
         typing.closer = Some(3);
         typing.record(None); // a deletion, a paste over a selection ...
         assert_eq!(typing.closer, None);
+    }
+}
+
+#[cfg(test)]
+mod goto_column_tests {
+    use super::goto_offset_in_line;
+
+    #[test]
+    fn a_jump_with_a_column_lands_on_it_counting_utf16_units() {
+        let line = "    let s = \"😀\"; parse_config(s);";
+        let name = line.find("parse_config").unwrap();
+        // LSP column (1-based): the emoji is one character but two units.
+        let col = line[..name].encode_utf16().count() as u32 + 1;
+        assert_eq!(goto_offset_in_line(line, Some(col)), name);
+        assert_eq!(
+            goto_offset_in_line(line, None),
+            0,
+            "no column: the line's start"
+        );
+        assert_eq!(goto_offset_in_line(line, Some(999)), line.len());
     }
 }

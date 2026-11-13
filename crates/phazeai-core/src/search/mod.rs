@@ -38,20 +38,26 @@
 //! [`CodeSearch::refresh_file`], which always re-reads.
 
 mod chunk;
+mod embed;
 mod engine;
 mod index;
 mod paths;
 mod project;
 mod scan;
+mod semantic;
 mod snippet;
 mod tokenize;
 mod tool;
 mod types;
 
 #[cfg(test)]
+mod semantic_tests;
+#[cfg(test)]
 mod tests;
 
+pub use embed::{EmbeddingApi, EmbeddingConfig, DEFAULT_URL as DEFAULT_EMBEDDING_URL};
 pub use engine::CodeSearch;
 pub use project::looks_like_project;
+pub use semantic::EmbeddingStatus;
 pub use tool::{BuildIndexTool, CodeSearchTool};
 pub use types::{BuildStats, IndexStatus, SearchError, SearchHit, SearchLimits, SearchResults};
