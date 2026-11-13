@@ -81,6 +81,9 @@ enum Command {
     /// Run coding tasks against an agent (this one, Claude Code, or any
     /// other) and report how many it solved and what that cost.
     Eval(phazeai_cli::eval::EvalArgs),
+    /// Find, download and pick the model PhazeAI Local runs: any GGUF model
+    /// on Hugging Face, sized to this machine.
+    Models(phazeai_cli::models_cmd::ModelsArgs),
     /// Review a change like a careful senior engineer: this branch's
     /// commits, or the uncommitted or staged changes. Can fail CI and post
     /// inline comments to a GitHub pull request.
@@ -179,6 +182,10 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Eval(args)) => {
             init_tracing(false);
             return phazeai_cli::eval::run(args).await;
+        }
+        Some(Command::Models(args)) => {
+            init_tracing(false);
+            return phazeai_cli::models_cmd::run(args).await;
         }
         Some(Command::Review(args)) => {
             init_tracing(false);

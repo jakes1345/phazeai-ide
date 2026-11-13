@@ -21,6 +21,7 @@
 - Stop and history trimming in the agent loop;
 - permission rules and tool hooks (#49), the per-hunk keep/undo of an agent's edit (#44) and run undo (#45);
 - editor key routing and focus (#55, #57): unit tests plus real-IDE runs under Xvfb.
+- any Hugging Face GGUF model in PhazeAI Local (`phazeai models search|files|pull|list|use|rm`, `local_ai/hub.rs`, `local_ai/gguf.rs`): search, the file listing at a pinned commit (split models grouped), the pick of the best quantization this machine's RAM can run, SHA-256-verified download, the KV-cache size read from the GGUF header, and selection by the server, tested against a fake Hub over real sockets and end to end through the CLI. Not yet run against huggingface.co itself (blocked where it was built). Downloaded models are listed in Settings → Local AI with Use and Delete; searching and pulling are CLI-only so far.
 - the review bot (`phazeai review`, see [`review-bot.md`](review-bot.md)): diff parsing, batching and checking findings against the diff, plus end-to-end runs of the binary against a local fake model and a local stand-in for GitHub's review API. It has not been run against a real model or a real pull request yet. CLI only; the IDE has no button for it yet.
 - agents in their own git worktrees (`phazeai worktree run|list|merge|remove`, `phazeai --worktree`): the git operations against real repositories, and an end-to-end run of two CLI agents at once against a local fake model. CLI only; the IDE has no panel for them yet.
 

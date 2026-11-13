@@ -228,11 +228,15 @@ pub struct FitReport {
 /// ≥ the entry's tier (`min_ram` ≥ need + 4 GiB for OS + IDE) **and** the RAM
 /// available right now ≥ need; otherwise *Tight*.
 pub fn fit(entry: &CatalogEntry, hw: &HardwareInfo, ctx: u32) -> FitReport {
+    fit_need(entry.size, entry.runtime_bytes(ctx), entry.min_ram, hw)
+}
+
+/// Fit verdict for a model file of `size` bytes that needs `need` bytes of
+/// RAM while serving and is recommended from `min_ram` of installed RAM (the
+/// rule of [`fit`]).
+pub fn fit_need(size: u64, need: u64, min_ram: u64, hw: &HardwareInfo) -> FitReport {
     use super::hardware::gib;
-    let need = entry.runtime_bytes(ctx);
-    let disk_ok = hw
-        .free_disk
-        .map(|d| d >= entry.size + disk_margin(entry.size));
+    let disk_ok = hw.free_disk.map(|d| d >= size + disk_margin(size));
     let (fit, reason) = if hw.total_ram < need + MIN_SYSTEM_RESERVE {
         (
             Fit::TooBig,
@@ -242,17 +246,17 @@ pub fn fit(entry: &CatalogEntry, hw: &HardwareInfo, ctx: u32) -> FitReport {
                 gib(hw.total_ram)
             ),
         )
-    } else if hw.total_ram >= entry.min_ram && hw.available_ram >= need {
+    } else if hw.total_ram >= min_ram && hw.available_ram >= need {
         (
             Fit::Fits,
             format!("Uses about {} of RAM while running.", gib(need)),
         )
-    } else if hw.total_ram < entry.min_ram {
+    } else if hw.total_ram < min_ram {
         (
             Fit::Tight,
             format!(
                 "Recommended for {}+ of RAM; this machine has {}. It will run, but leaves little room for other apps.",
-                gib(entry.min_ram),
+                gib(min_ram),
                 gib(hw.total_ram)
             ),
         )
