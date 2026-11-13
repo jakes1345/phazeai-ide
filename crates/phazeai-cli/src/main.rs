@@ -81,6 +81,10 @@ enum Command {
     /// Run coding tasks against an agent (this one, Claude Code, or any
     /// other) and report how many it solved and what that cost.
     Eval(phazeai_cli::eval::EvalArgs),
+    /// Review a change like a careful senior engineer: this branch's
+    /// commits, or the uncommitted or staged changes. Can fail CI and post
+    /// inline comments to a GitHub pull request.
+    Review(phazeai_cli::review_cmd::ReviewArgs),
     /// Agents in their own git worktrees: run several at once, list them,
     /// merge or remove one.
     Worktree(phazeai_cli::worktrees::WorktreeArgs),
@@ -175,6 +179,10 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Eval(args)) => {
             init_tracing(false);
             return phazeai_cli::eval::run(args).await;
+        }
+        Some(Command::Review(args)) => {
+            init_tracing(false);
+            return phazeai_cli::review_cmd::run(args).await;
         }
         Some(Command::Worktree(args)) => {
             init_tracing(false);

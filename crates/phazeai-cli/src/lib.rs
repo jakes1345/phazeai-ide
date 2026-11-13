@@ -12,6 +12,7 @@ pub mod input;
 pub mod markdown;
 pub mod oneshot;
 pub mod output;
+pub mod review_cmd;
 pub mod setup;
 pub mod term;
 pub mod text;
