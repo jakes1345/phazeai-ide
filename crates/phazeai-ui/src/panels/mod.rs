@@ -17,4 +17,5 @@ pub mod search;
 pub mod search_settings;
 pub mod settings;
 pub mod terminal;
+pub mod terminal_emu;
 pub mod tests;
