@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_event;
 pub mod analysis;
 pub mod checkpoint;
+pub mod code_review;
 pub mod companion;
 pub mod config;
 pub mod constants;
@@ -30,6 +31,7 @@ pub mod telemetry;
 pub mod text;
 pub mod tools;
 pub mod updater;
+pub mod worktree;
 
 pub mod debug_ndjson;
 

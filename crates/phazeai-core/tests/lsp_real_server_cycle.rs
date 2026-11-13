@@ -298,3 +298,147 @@ async fn rust_analyzer_rename_applies_cleanly() {
     drop(client);
     manager.shutdown_all().await;
 }
+
+/// Go to definition through a real rust-analyzer, from a call that follows
+/// non-ASCII text on its line: the column sent is UTF-16 units, and the
+/// answer names the function's name, not the start of its line.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "needs a working rust-analyzer; fails (never skips) without one"]
+async fn rust_analyzer_definition_lands_on_the_name() {
+    use phazeai_core::lsp::text::{line_text, utf16_col};
+
+    let tmp = tempfile::tempdir().expect("create tmpdir");
+    let root: PathBuf = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"def_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let main_src = "mod util;\nfn main() {\n    let s = \"😀😀😀😀😀😀😀😀\"; let n = util::parse_config(s);\n    println!(\"{n}\");\n}\n";
+    std::fs::write(root.join("src/main.rs"), main_src).unwrap();
+    std::fs::write(
+        root.join("src/util.rs"),
+        "/// Doc.\npub fn parse_config(s: &str) -> usize {\n    s.len()\n}\n",
+    )
+    .unwrap();
+    let version = require_rust_analyzer(&root);
+    eprintln!("using {version}");
+    let main = root.join("src/main.rs");
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<LspEvent>();
+    let mut manager = LspManager::new(root.clone(), tx);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    manager
+        .ensure_server_for_file(&main)
+        .await
+        .expect("spawn rust-analyzer");
+    manager.did_open(&main, main_src);
+    let client = manager
+        .client_for_language("rust")
+        .expect("rust client")
+        .clone();
+
+    // Byte column of `parse_config` on line 2, then the UTF-16 column the
+    // server expects (the emoji are 4 bytes but 2 units each).
+    let line = line_text(main_src, 2).unwrap();
+    let byte = line.find("parse_config").unwrap() + 2;
+    let col = utf16_col(line, byte);
+    assert!(
+        col < byte as u32,
+        "the line must hold non-ASCII text before the call"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let locs = loop {
+        match client.goto_definition(&main, 2, col).await {
+            Ok(locs) if !locs.is_empty() => break locs,
+            other => {
+                assert!(Instant::now() < deadline, "no definition: {other:?}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    };
+    let loc = &locs[0];
+    assert!(loc.uri.as_str().ends_with("src/util.rs"), "{loc:?}");
+    assert_eq!(
+        (loc.range.start.line, loc.range.start.character),
+        (1, 7),
+        "the definition's name (`parse_config` after `pub fn `), not the doc comment or `pub`"
+    );
+
+    drop(client);
+    manager.shutdown_all().await;
+}
+
+/// Inlay hints through a real rust-analyzer: the request's range must end
+/// inside the document. The IDE asked for lines 0..2000 ending at column
+/// u32::MAX, which rust-analyzer rejects ("Invalid offset") for any shorter
+/// file, so no hints ever showed.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "needs a working rust-analyzer; fails (never skips) without one"]
+async fn rust_analyzer_inlay_hints_for_a_short_file() {
+    use phazeai_core::lsp::text::end_of_line_or_text;
+
+    let tmp = tempfile::tempdir().expect("create tmpdir");
+    let root: PathBuf = tmp.path().to_path_buf();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"hint_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let src = "fn main() {\n    let total = 40 + 2;\n    println!(\"{total}\");\n}\n";
+    let main = root.join("src/main.rs");
+    std::fs::write(&main, src).unwrap();
+    let version = require_rust_analyzer(&root);
+    eprintln!("using {version}");
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<LspEvent>();
+    let mut manager = LspManager::new(root.clone(), tx);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    manager
+        .ensure_server_for_file(&main)
+        .await
+        .expect("spawn rust-analyzer");
+    manager.did_open(&main, src);
+    let client = manager
+        .client_for_language("rust")
+        .expect("rust client")
+        .clone();
+
+    let end = end_of_line_or_text(src, 2000);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let hints = loop {
+        match client.inlay_hints(&main, 0, end).await {
+            Ok(hints) if !hints.is_empty() => break hints,
+            other => {
+                assert!(Instant::now() < deadline, "no inlay hints: {other:?}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    };
+    let labels: Vec<String> = hints
+        .iter()
+        .map(|h| match &h.label {
+            lsp_types::InlayHintLabel::String(s) => s.clone(),
+            lsp_types::InlayHintLabel::LabelParts(p) => {
+                p.iter().map(|p| p.value.as_str()).collect()
+            }
+        })
+        .collect();
+    assert!(
+        labels.iter().any(|l| l.contains("i32")),
+        "hints: {labels:?}"
+    );
+    assert!(
+        client
+            .inlay_hints(&main, 0, (2000, u32::MAX))
+            .await
+            .is_err(),
+        "the old range, past the end of the file, is refused"
+    );
+
+    drop(client);
+    manager.shutdown_all().await;
+}

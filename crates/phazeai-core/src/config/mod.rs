@@ -381,6 +381,25 @@ pub struct SearchSettings {
     /// indexes on the first search.
     #[serde(alias = "auto_start")]
     pub auto_index: bool,
+    /// An embedding model to also match code by meaning, e.g.
+    /// `nomic-embed-text` on Ollama. Unset: keyword search only. Every chunk
+    /// of indexed code is sent to it once (vectors are kept on disk), so the
+    /// privacy deny rules and `local_only` apply as for chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// Where the embedding model runs. Unset: Ollama on this machine
+    /// (`http://localhost:11434`). An address ending in `/v1`, or on port
+    /// 8080 (llama-server) or 1234 (LM Studio), is spoken to as an
+    /// OpenAI-compatible `/v1/embeddings` endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_url: Option<String>,
+    /// `ollama` or `openai`, when the guess from the address is wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_api: Option<String>,
+    /// The environment variable holding a key for the embedding endpoint,
+    /// for a hosted one. Local servers need none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_api_key_env: Option<String>,
 }
 
 impl Default for SearchSettings {
@@ -388,7 +407,30 @@ impl Default for SearchSettings {
         Self {
             enabled: true,
             auto_index: true,
+            embedding_model: None,
+            embedding_url: None,
+            embedding_api: None,
+            embedding_api_key_env: None,
         }
+    }
+}
+
+impl SearchSettings {
+    /// The embedding endpoint to match code by meaning, or `None` when no
+    /// embedding model is set.
+    pub fn embedding_config(&self) -> Option<crate::search::EmbeddingConfig> {
+        let cfg = crate::search::EmbeddingConfig::new(
+            self.embedding_model.as_deref()?,
+            self.embedding_url.as_deref(),
+            self.embedding_api.as_deref(),
+        )?;
+        let key = self
+            .embedding_api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|v| std::env::var(v).ok());
+        Some(cfg.with_api_key(key))
     }
 }
 
@@ -860,6 +902,40 @@ auto_start = false
         let s = Settings::default();
         assert!(s.search.enabled);
         assert!(s.search.auto_index);
+    }
+
+    #[test]
+    fn an_embedding_model_turns_on_matching_by_meaning() {
+        assert!(Settings::default().search.embedding_config().is_none());
+        let search: SearchSettings =
+            toml::from_str("embedding_model = \"nomic-embed-text\"\n").unwrap();
+        assert!(search.enabled && search.auto_index);
+        let cfg = search.embedding_config().unwrap();
+        assert_eq!(cfg.endpoint(), "http://localhost:11434/api/embed");
+        assert!(cfg.api_key.is_none());
+
+        let search: SearchSettings = toml::from_str(
+            "embedding_model = \"e5\"\nembedding_url = \"http://localhost:9000\"\n\
+             embedding_api = \"openai\"\nembedding_api_key_env = \"PHAZE_TEST_UNSET_EMBED_KEY\"\n",
+        )
+        .unwrap();
+        let cfg = search.embedding_config().unwrap();
+        assert_eq!(cfg.endpoint(), "http://localhost:9000/v1/embeddings");
+        assert!(cfg.api_key.is_none(), "an unset variable gives no key");
+        // Saved back with its keys; a config without them gains none.
+        let s = Settings {
+            search,
+            ..Settings::default()
+        };
+        let saved = toml::to_string_pretty(&s).unwrap();
+        assert!(saved.contains("embedding_model = \"e5\""), "{saved}");
+        let back: Settings = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            back.search.embedding_url.as_deref(),
+            Some("http://localhost:9000")
+        );
+        let plain = toml::to_string_pretty(&Settings::default()).unwrap();
+        assert!(!plain.contains("embedding"), "{plain}");
     }
 
     #[test]

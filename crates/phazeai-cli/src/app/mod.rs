@@ -996,7 +996,9 @@ pub(crate) fn code_search(settings: &Settings) -> Option<CodeSearch> {
         return None;
     }
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    Some(CodeSearch::new(root))
+    let search = CodeSearch::new(root);
+    search.set_embeddings(settings.search.embedding_config());
+    Some(search)
 }
 
 /// Give the agent `code_search`, and `build_search_index` behind `more_tools`

@@ -13,11 +13,13 @@ pub mod markdown;
 pub mod models_cmd;
 pub mod oneshot;
 pub mod output;
+pub mod review_cmd;
 pub mod setup;
 pub mod term;
 pub mod text;
 pub mod theme;
 pub mod tool_view;
+pub mod worktrees;
 
 // Re-export commonly used items for easier testing
 pub use commands::{handle_command, CommandResult};

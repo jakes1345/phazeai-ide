@@ -155,6 +155,12 @@ impl LspManager {
     }
 
     /// Notify all relevant servers that a file was opened
+    /// The text the language server has for `path` (its last did_open or
+    /// did_change), if the file is open.
+    pub fn document_text(&self, path: &Path) -> Option<&str> {
+        self.open_docs.get(path).map(|d| d.text.as_str())
+    }
+
     pub fn did_open(&mut self, path: &Path, text: &str) {
         let language_id = Self::language_id_from_path(path);
         self.open_docs.insert(

@@ -66,6 +66,14 @@ struct Cli {
     /// 200). A turn is one model response and the tools it asked for.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     max_turns: Option<u32>,
+
+    /// Work in an agent worktree of this repository: a separate checkout on
+    /// the branch `phaze/NAME`, so your own files stay untouched. Made if it
+    /// doesn't exist; the name comes from the prompt when left out. What the
+    /// agent changed is committed on that branch when it finishes; merge it
+    /// with `phazeai worktree merge NAME`.
+    #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    worktree: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -76,6 +84,13 @@ enum Command {
     /// Find, download and pick the model PhazeAI Local runs: any GGUF model
     /// on Hugging Face, sized to this machine.
     Models(phazeai_cli::models_cmd::ModelsArgs),
+    /// Review a change like a careful senior engineer: this branch's
+    /// commits, or the uncommitted or staged changes. Can fail CI and post
+    /// inline comments to a GitHub pull request.
+    Review(phazeai_cli::review_cmd::ReviewArgs),
+    /// Agents in their own git worktrees: run several at once, list them,
+    /// merge or remove one.
+    Worktree(phazeai_cli::worktrees::WorktreeArgs),
 }
 
 /// In the TUI, log to a file: anything written to stderr would corrupt the
@@ -172,6 +187,14 @@ async fn run(cli: Cli) -> Result<()> {
             init_tracing(false);
             return phazeai_cli::models_cmd::run(args).await;
         }
+        Some(Command::Review(args)) => {
+            init_tracing(false);
+            return phazeai_cli::review_cmd::run(args).await;
+        }
+        Some(Command::Worktree(args)) => {
+            init_tracing(false);
+            return phazeai_cli::worktrees::run(args).await;
+        }
         None => {}
     }
     let stdin_piped = !std::io::stdin().is_terminal();
@@ -188,6 +211,22 @@ async fn run(cli: Cli) -> Result<()> {
             Theme::all_names().join(", ")
         );
     }
+
+    // Move into the agent worktree first, so the sandbox, the privacy policy
+    // and everything else below see it as the project.
+    let worktree = match cli.worktree.as_deref() {
+        Some(name) => {
+            let wt = phazeai_cli::worktrees::enter(Some(name), cli.prompt.as_deref())?;
+            eprintln!(
+                "Working in the agent worktree {} ({}) on {}",
+                wt.name,
+                wt.path.display(),
+                wt.branch
+            );
+            Some(wt)
+        }
+        None => None,
+    };
 
     // Sandbox tool filesystem access to the project root (git toplevel, falling
     // back to current dir). Tools refuse paths outside this root, including `..`
@@ -279,6 +318,30 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
 
+    let prompt_for_commit = cli.prompt.clone();
+    let result = run_mode(
+        cli,
+        settings,
+        stdin_piped,
+        stdin_data,
+        extra_instructions,
+        color,
+    )
+    .await;
+    if let Some(wt) = &worktree {
+        phazeai_cli::worktrees::leave(wt, prompt_for_commit.as_deref());
+    }
+    result
+}
+
+async fn run_mode(
+    cli: Cli,
+    settings: phazeai_core::Settings,
+    stdin_piped: bool,
+    stdin_data: String,
+    extra_instructions: Option<String>,
+    color: ColorMode,
+) -> Result<()> {
     if let Some(prompt) = cli.prompt {
         let final_prompt = if stdin_data.is_empty() {
             prompt

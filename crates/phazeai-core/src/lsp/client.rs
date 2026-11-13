@@ -290,7 +290,15 @@ impl LspClient {
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
             Some(GotoDefinitionResponse::Array(locs)) => Ok(locs),
-            Some(GotoDefinitionResponse::Link(_links)) => Ok(vec![]),
+            // A link marks the target's name (`target_selection_range`);
+            // jumping there puts the cursor on it, not on the item's first line.
+            Some(GotoDefinitionResponse::Link(links)) => Ok(links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_selection_range,
+                })
+                .collect()),
             None => Ok(vec![]),
         }
     }
@@ -436,18 +444,29 @@ impl LspClient {
         match result {
             Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
             Some(GotoDefinitionResponse::Array(locs)) => Ok(locs),
-            Some(GotoDefinitionResponse::Link(_links)) => Ok(vec![]),
+            // A link marks the target's name (`target_selection_range`);
+            // jumping there puts the cursor on it, not on the item's first line.
+            Some(GotoDefinitionResponse::Link(links)) => Ok(links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_selection_range,
+                })
+                .collect()),
             None => Ok(vec![]),
         }
     }
 
     /// Request folding ranges for a document (textDocument/foldingRange).
     /// Request inlay hints for a range of lines (textDocument/inlayHint).
+    /// Inlay hints from the start of `start_line` to `end` (line, UTF-16
+    /// column). The end must be a position the document has: rust-analyzer
+    /// rejects the whole request otherwise.
     pub async fn inlay_hints(
         &self,
         path: &Path,
         start_line: u32,
-        end_line: u32,
+        end: (u32, u32),
     ) -> Result<Vec<InlayHint>, String> {
         let uri = path_to_uri(path)?;
         let params = InlayHintParams {
@@ -458,8 +477,8 @@ impl LspClient {
                     character: 0,
                 },
                 end: Position {
-                    line: end_line,
-                    character: u32::MAX,
+                    line: end.0,
+                    character: end.1,
                 },
             },
             work_done_progress_params: Default::default(),

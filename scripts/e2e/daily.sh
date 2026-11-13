@@ -142,11 +142,10 @@ else
 
     xdotool key ctrl+Home Down Down Down Down; xdotool key --repeat 27 --delay 20 Right; sleep 3
     xdotool key F12; sleep 5; xdotool type --delay 80 "Z"; xdotool key ctrl+s; sleep 3
-    # The cursor lands on the definition's first line (at `pub fn`, not
-    # yet on the name).
-    head -1 "$P/src/util.rs" | grep -q "^Z\?pub fn Z\?load_settings\|^Zpub fn load_settings" \
-        && pass "F12 opens the definition in another file" \
-        || fail "F12 opens the definition in another file" "util.rs: $(oneline "$P/src/util.rs")"
+    # The cursor lands on the definition's name.
+    grep -q "pub fn Zload_settings" "$P/src/util.rs" \
+        && pass "F12 opens the definition in another file, on its name" \
+        || fail "F12 opens the definition in another file, on its name" "util.rs: $(oneline "$P/src/util.rs")"
 
     open_file main.rs
     [ -n "${SHOTS:-}" ] && import -window root "$SHOTS/fmt-1-open.png"
