@@ -59,6 +59,47 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     Some(PathBuf::from(decoded))
 }
 
+/// The LSP column (UTF-16 units) of byte offset `byte` in `line`. A byte
+/// offset inside a character counts as that character's start; one past the
+/// end counts as the end.
+pub fn utf16_col(line: &str, byte: usize) -> u32 {
+    let mut end = byte.min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].encode_utf16().count() as u32
+}
+
+/// The byte offset in `line` of LSP column `col` (UTF-16 units), clamped to
+/// the line's end. A column inside a character gives that character's start.
+pub fn byte_col(line: &str, col: u32) -> usize {
+    let mut units = 0u32;
+    for (i, ch) in line.char_indices() {
+        let next = units + ch.len_utf16() as u32;
+        if next > col {
+            return i;
+        }
+        units = next;
+    }
+    line.len()
+}
+
+/// The text of line `line` (0-based) of `text`, without its line break.
+pub fn line_text(text: &str, line: u32) -> Option<&str> {
+    text.split('\n')
+        .nth(line as usize)
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+}
+
+/// The LSP position (line, UTF-16 column) of the end of line `line` of
+/// `text`, or of the end of the text when it has fewer lines.
+pub fn end_of_line_or_text(text: &str, line: u32) -> (u32, u32) {
+    let last = text.split('\n').count().saturating_sub(1) as u32;
+    let line = line.min(last);
+    let len = line_text(text, line).map_or(0, |l| l.encode_utf16().count() as u32);
+    (line, len)
+}
+
 /// Byte offsets where each line of `text` starts. Lines end at `\n`, `\r\n`
 /// or a lone `\r`, as LSP counts them.
 fn line_starts(text: &str) -> Vec<usize> {
@@ -228,6 +269,24 @@ mod tests {
         let text = "abcdef";
         let edits = [edit(0, 0, 0, 3, "x"), edit(0, 2, 0, 4, "y")];
         assert!(apply_text_edits(text, &edits).is_err());
+    }
+
+    #[test]
+    fn columns_convert_between_bytes_and_utf16_units() {
+        let line = "let é = \"😀\"; x";
+        let x = line.find('x').unwrap();
+        assert_eq!(utf16_col(line, x), 14);
+        assert_eq!(byte_col(line, 14), x);
+        // Inside `😀` (two units, four bytes): its start either way.
+        let emoji = line.find('😀').unwrap();
+        assert_eq!(utf16_col(line, emoji + 2), utf16_col(line, emoji));
+        assert_eq!(byte_col(line, utf16_col(line, emoji) + 1), emoji);
+        assert_eq!(byte_col(line, 999), line.len());
+        assert_eq!(line_text("a\r\nbc\n", 1), Some("bc"));
+        assert_eq!(line_text("a", 3), None);
+        assert_eq!(end_of_line_or_text("ab\nc😀\n", 2000), (2, 0));
+        assert_eq!(end_of_line_or_text("ab\nc😀", 2000), (1, 3));
+        assert_eq!(end_of_line_or_text("ab\r\nc", 0), (0, 2));
     }
 
     #[test]
