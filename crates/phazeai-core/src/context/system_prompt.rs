@@ -536,7 +536,8 @@ and run commands. Do the task; don't just describe it.
 ## How to work
 - Find code with `grep` and `glob`, and read a file with `read_file` before you edit it.
 - Make the smallest change that does the job, in the style of the code around it.
-- Use `edit_file` for existing files; `write_file` is for new ones.
+- Change files only with `edit_file` (existing files) and `write_file` (new ones), never from \
+`bash` (`sed -i`, `cat >`): the user reviews those edits as a diff; a shell write skips that.
 - Make independent reads and searches in the same turn.
 - After a change, run the build or tests that cover it with `bash` and fix what fails.
 - For a task of several steps, give a short plan first.
@@ -612,6 +613,14 @@ pub(crate) mod tests {
         for name in named {
             assert!(tools.get(name).is_some(), "the prompt names `{name}`");
         }
+    }
+
+    #[test]
+    fn the_prompt_keeps_file_changes_out_of_the_shell() {
+        // Writes through the edit tools are shown as a diff to approve (chat,
+        // Composer); a `bash` heredoc or `sed -i` is not.
+        assert!(CORE_PROMPT.contains("never from `bash`"));
+        assert!(CORE_PROMPT.contains("`edit_file`") && CORE_PROMPT.contains("`write_file`"));
     }
 
     #[test]
