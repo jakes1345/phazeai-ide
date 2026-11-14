@@ -3746,6 +3746,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         let p = &t.palette;
         s.width(320.0)
             .height_full()
+            .min_height(0.0)
             .min_width(320.0)
             .max_width(320.0)
             .background(p.glass_bg)
@@ -3801,7 +3802,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
     let divider_wrap = container(divider)
         .style(move |s| s.apply_if(zen.get(), |s| s.display(floem::style::Display::None)));
-    let chat_zen_wrap = container(chat_wrap).style(|s| s);
+    let chat_zen_wrap = container(chat_wrap).style(|s| s.height_full().min_height(0.0));
 
     // ── Horizontal (down) split editor pane ──────────────────────────────────
     let down_raw = editor_panel(
@@ -3976,6 +3977,8 @@ fn ide_root(state: IdeState) -> impl IntoView {
         s.flex_col()
             .width_full()
             .height_full()
+            // Never taller than the window, whatever the panels hold.
+            .min_height(0.0)
             .background(if t.is_cosmic() {
                 floem::peniko::Color::TRANSPARENT
             } else {
@@ -4137,8 +4140,12 @@ pub fn launch_phaze_ide() {
                 };
 
                 // Root: cosmic canvas + menu bar + IDE + overlays (overlays use z_index)
-                let ide_with_menu = stack((menu_bar(state.clone()), ide_root(state.clone())))
-                    .style(|s| s.flex_col().width_full().height_full());
+                let ide_with_menu = stack((
+                    menu_bar(state.clone()),
+                    container(ide_root(state.clone()))
+                        .style(|s| s.flex_grow(1.0).min_height(0.0).width_full()),
+                ))
+                .style(|s| s.flex_col().width_full().height_full());
 
                 // Floem stack() supports up to 16 children; nest into two groups.
                 let overlays_b = stack((
