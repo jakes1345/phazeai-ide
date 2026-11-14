@@ -494,6 +494,34 @@ pub fn choose<'a>(listing: &'a HubListing, hw: &HardwareInfo) -> Option<&'a HubF
     best(Fit::Fits).or_else(|| best(Fit::Tight))
 }
 
+/// What [`best_pick`] found: the repository's files and the one to download.
+#[derive(Debug, Clone)]
+pub struct BestPick {
+    pub listing: HubListing,
+    pub file: HubFile,
+    pub fit: FitReport,
+}
+
+/// The file of `repo` that [`choose`] picks for this machine, with how it
+/// fits, ready for [`pull`]. An error says why there is nothing to download:
+/// no GGUF files, or every one too big for this machine's RAM.
+pub async fn best_pick(hub: &Hub, repo: &str, hw: &HardwareInfo) -> Result<BestPick, LocalAiError> {
+    let listing = listing(hub, repo).await?;
+    if listing.files.is_empty() {
+        return Err(LocalAiError::Other(format!(
+            "{repo} has no GGUF model files"
+        )));
+    }
+    let file = choose(&listing, hw).cloned().ok_or_else(|| {
+        LocalAiError::Other(format!(
+            "every file in {repo} is too big for this machine ({} of RAM); try a smaller model",
+            gib(hw.total_ram)
+        ))
+    })?;
+    let fit = fit_file(&listing, &file, hw, default_ctx(listing.context_length));
+    Ok(BestPick { listing, file, fit })
+}
+
 /// A downloaded Hub model, as recorded in its manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledModel {

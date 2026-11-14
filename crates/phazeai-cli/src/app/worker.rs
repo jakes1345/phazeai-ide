@@ -76,6 +76,8 @@ pub struct WorkerConfig {
     pub approval_manager: Arc<Mutex<ToolApprovalManager>>,
     pub policy: Arc<Mutex<ApprovalPolicy>>,
     pub cancel: Arc<AtomicBool>,
+    /// Plan and Ask modes' read-only switch, shared with every agent.
+    pub read_only: Arc<AtomicBool>,
     /// Conversation tokens the agent may send before compacting, for the
     /// current model.
     pub context_budget: usize,
@@ -168,7 +170,8 @@ fn build_agent(
         .with_context_budget(cfg.context_budget)
         .with_max_iterations(cfg.max_iterations)
         .with_approval(approval)
-        .with_cancel_token(cfg.cancel.clone());
+        .with_cancel_token(cfg.cancel.clone())
+        .with_read_only(cfg.read_only.clone());
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mcp_configs = phazeai_core::mcp::McpManager::load_config(&cwd);

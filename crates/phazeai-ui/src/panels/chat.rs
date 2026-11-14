@@ -53,6 +53,12 @@ impl AiMode {
         }
     }
 
+    /// Plan and Ask may only read: the agent refuses any call that would
+    /// change something (see `Agent::with_read_only`).
+    pub fn is_read_only(self) -> bool {
+        matches!(self, AiMode::Plan | AiMode::Ask)
+    }
+
     /// Returns a brief system-prompt prefix injected before the user message.
     /// Empty string for the default Chat mode so no prefix is added.
     pub fn system_hint(self) -> &'static str {
@@ -60,7 +66,11 @@ impl AiMode {
             AiMode::Chat => "",
             AiMode::Ask => "Answer concisely and precisely. No extra prose.\n\n",
             AiMode::Debug => "You are a debugging expert. Focus on root causes and fixes.\n\n",
-            AiMode::Plan => "You are a software architect. Produce clear step-by-step plans.\n\n",
+            AiMode::Plan => {
+                "You are a software architect in Plan mode. Read the code you need (you can \
+                 read but not change anything here), then reply with a clear, numbered, \
+                 step-by-step plan. The user carries it out with Run plan.\n\n"
+            }
             AiMode::Edit => "You are a code editor. Produce only code changes, no commentary.\n\n",
         }
     }
@@ -362,6 +372,8 @@ struct SendToAiJob {
     settings: Settings,
     workspace_root: std::path::PathBuf,
     mode_hint: &'static str,
+    /// Plan and Ask: the agent may only read (`Agent::with_read_only`).
+    read_only: bool,
     /// An explicitly-activated skill, or None.
     active_skill: Option<Skill>,
     /// Brief skill menu for auto-select; injected when no skill is explicitly active.
@@ -442,6 +454,7 @@ fn send_to_ai(job: SendToAiJob) {
         settings,
         workspace_root,
         mode_hint,
+        read_only,
         active_skill,
         skills_menu,
         update_tx,
@@ -581,6 +594,7 @@ fn send_to_ai(job: SendToAiJob) {
                 .with_context_budget(settings.context_budget())
                 .with_max_iterations(settings.agent.max_iterations())
                 .with_cancel_token(cancel_token)
+                .with_read_only(Arc::new(std::sync::atomic::AtomicBool::new(read_only)))
                 .with_shared_conversation(shared_conversation)
                 .with_diff_hook(diff_hook)
                 .with_checkpoints(checkpoints)
@@ -1495,6 +1509,7 @@ pub fn chat_panel(
                 settings: live_settings,
                 workspace_root: root,
                 mode_hint: hint,
+                read_only: mode.get_untracked().is_read_only(),
                 active_skill: resolved_skill,
                 skills_menu: skills_menu_str,
                 update_tx: (*update_tx).clone(),
@@ -1838,12 +1853,60 @@ pub fn chat_panel(
             })
     };
 
+    // After a reply in Plan mode: carry the plan out (the agent may act again).
+    let run_plan_btn = {
+        let do_send = do_send.clone();
+        let hov = create_rw_signal(false);
+        let plan_ready = move || {
+            mode.get() == AiMode::Plan
+                && !is_loading.get()
+                && floem::prelude::SignalWith::with(&messages, |list: &Vec<ChatMessage>| {
+                    list.last().is_some_and(|m| {
+                        m.role == ChatRole::Assistant
+                            && !m.loading
+                            && !m.is_error
+                            && !m.content.trim().is_empty()
+                    })
+                })
+        };
+        container(label(|| "▶ Run plan"))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.margin_left(floem::unit::PxPctAuto::Auto)
+                    .padding_horiz(9.0)
+                    .padding_vert(3.0)
+                    .font_size(11.0)
+                    .color(p.accent)
+                    .border(1.0)
+                    .border_color(p.accent)
+                    .border_radius(4.0)
+                    .cursor(floem::style::CursorStyle::Pointer)
+                    .background(if hov.get() {
+                        p.accent_dim
+                    } else {
+                        floem::peniko::Color::TRANSPARENT
+                    })
+                    .apply_if(!plan_ready(), |s| s.hide())
+            })
+            .on_event_stop(EventListener::PointerEnter, move |_| hov.set(true))
+            .on_event_stop(EventListener::PointerLeave, move |_| hov.set(false))
+            .on_click_stop(move |_| {
+                if !plan_ready() {
+                    return;
+                }
+                mode.set(AiMode::Chat);
+                input_text.set(phazeai_core::RUN_PLAN_PROMPT.to_string());
+                (do_send)();
+            })
+    };
+
     let mode_tabs = stack((
         mode_tab(all_modes[0]),
         mode_tab(all_modes[1]),
         mode_tab(all_modes[2]),
         mode_tab(all_modes[3]),
         mode_tab(all_modes[4]),
+        run_plan_btn,
     ))
     .style(move |s| {
         let t = theme.get();
@@ -1943,6 +2006,7 @@ pub fn chat_panel(
                     settings: live_settings,
                     workspace_root: root,
                     mode_hint: hint,
+                    read_only: mode.get_untracked().is_read_only(),
                     active_skill: None,
                     skills_menu: retry_skills_menu,
                     update_tx: (*update_tx).clone(),

@@ -312,6 +312,9 @@ pub(crate) struct AppState {
     approval_manager: Arc<Mutex<ToolApprovalManager>>,
     policy: Arc<Mutex<ApprovalPolicy>>,
     cancel: Arc<AtomicBool>,
+    /// Set in Plan and Ask modes: the agent may only read (see
+    /// `Agent::with_read_only`). Shared with the worker's agents.
+    read_only: Arc<AtomicBool>,
     worker_tx: mpsc::UnboundedSender<WorkerCommand>,
     /// For work done off the main loop (reading a model list) to report back.
     ui_tx: mpsc::UnboundedSender<UiEvent>,
@@ -801,6 +804,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
     let approval_manager = Arc::new(Mutex::new(ToolApprovalManager::default()));
     let policy = Arc::new(Mutex::new(ApprovalPolicy::default()));
     let cancel = Arc::new(AtomicBool::new(false));
+    let read_only = Arc::new(AtomicBool::new(false));
 
     let context_budget = settings.context_budget();
     let mut state = AppState {
@@ -844,6 +848,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         approval_manager: approval_manager.clone(),
         policy: policy.clone(),
         cancel: cancel.clone(),
+        read_only: read_only.clone(),
         worker_tx,
         ui_tx: ui_tx.clone(),
         ai_mode: "chat".into(),
@@ -890,6 +895,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
             approval_manager,
             policy,
             cancel,
+            read_only,
             context_budget: state.context_budget,
             max_iterations: state.settings.agent.max_iterations(),
             code_search: code_search(&state.settings),
@@ -1156,6 +1162,7 @@ mod tests {
             approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
             policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
             cancel: Arc::new(AtomicBool::new(false)),
+            read_only: Arc::new(AtomicBool::new(false)),
             worker_tx,
             ui_tx: mpsc::unbounded_channel().0,
             ai_mode: "chat".into(),
@@ -1294,6 +1301,34 @@ mod tests {
         // Only one run at a time: the rest waits for it to finish.
         assert!(run_input(&mut rx).is_none());
         assert_eq!(state.queued, ["and then"]);
+    }
+
+    #[test]
+    fn plan_mode_is_read_only_until_go_carries_the_plan_out() {
+        let tmp = TempDir::new("plan");
+        let (mut state, mut rx) = test_state(tmp.path());
+        let read_only = state.read_only.clone();
+
+        // /go outside Plan mode sends nothing.
+        actions::submit_line(&mut state, "/go");
+        assert!(run_input(&mut rx).is_none());
+
+        actions::submit_line(&mut state, "/plan");
+        assert!(read_only.load(Ordering::Relaxed));
+        actions::submit_line(&mut state, "add a cache");
+        assert!(run_input(&mut rx).unwrap().starts_with("[PLANNING MODE]"));
+        state.processing = false;
+
+        actions::submit_line(&mut state, "/go");
+        assert_eq!(run_input(&mut rx).unwrap(), phazeai_core::RUN_PLAN_PROMPT);
+        assert!(!read_only.load(Ordering::Relaxed));
+        assert_eq!(state.ai_mode, "chat");
+        state.processing = false;
+
+        actions::submit_line(&mut state, "/ask");
+        assert!(read_only.load(Ordering::Relaxed));
+        actions::submit_line(&mut state, "/edit");
+        assert!(!read_only.load(Ordering::Relaxed));
     }
 
     // ── The system prompt fits the model's context budget ───────────────────
@@ -1505,6 +1540,7 @@ mod tests {
                 approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
                 policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
                 cancel: Arc::new(AtomicBool::new(false)),
+                read_only: Arc::new(AtomicBool::new(false)),
                 context_budget: 60_000,
                 max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
                 code_search: None,
