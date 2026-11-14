@@ -201,7 +201,12 @@ pub async fn run_single_prompt(
         eprintln!("\n{}", paint("33", &note));
     }
     let outcome = match &result {
-        Ok(response) => Ok(response),
+        Ok(response) => {
+            match crate::oneshot::empty_reply_error(&response.content, response.iterations) {
+                Some(msg) => Err(msg),
+                None => Ok(response),
+            }
+        }
         Err(e) => {
             let raw = last_error.clone().unwrap_or_else(|| e.to_string());
             Err(
@@ -222,7 +227,9 @@ pub async fn run_single_prompt(
                 Ok(response) => Ok(response.content.as_str()),
                 Err(msg) => Err(msg.as_str()),
             },
-            num_turns: outcome.as_ref().map_or(0, |r| r.iterations),
+            // From the run itself: an empty reply is reported as an error
+            // but still took its model call.
+            num_turns: result.as_ref().map_or(0, |r| r.iterations),
             duration_ms: started.elapsed().as_millis(),
             provider: provider_slug,
             model: &model,

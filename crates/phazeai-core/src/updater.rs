@@ -80,7 +80,9 @@ struct GhAsset {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-const GITHUB_REPO: &str = "jakes1345/phazeai-ide";
+/// The project's GitHub repository (`owner/name`): where releases are
+/// checked and where Settings › About links.
+pub const GITHUB_REPO: &str = "jakes1345/phazeai-ide";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Whether the IDE may ask GitHub for a newer release when it starts: the

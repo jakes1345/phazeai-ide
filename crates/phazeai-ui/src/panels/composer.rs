@@ -86,6 +86,9 @@ enum ComposerUpdate {
     ToolApprovalRequest {
         name: String,
         params: Value,
+        /// For a file write: the change it would make, to review before
+        /// answering (the agent's diff hook). `None` for other tools.
+        diff: Option<Vec<DiffLine>>,
         reply: SyncSender<ApprovalResponse>,
     },
     /// Agent run completed.
@@ -140,6 +143,8 @@ enum EventKind {
 struct PendingApproval {
     tool_name: String,
     params: Value,
+    /// The change a file write would make (see `ToolApprovalRequest`).
+    diff: Option<Vec<DiffLine>>,
     /// The waiting call's own answer channel.
     reply: SyncSender<ApprovalResponse>,
 }
@@ -173,14 +178,19 @@ fn approval_fn(mode: ComposerApprovalMode, updates: SyncSender<ComposerUpdate>) 
         let updates = updates.clone();
         // An `ask` rule asks whatever the mode would do.
         let must_ask = phazeai_core::permissions::rule_says_ask();
+        // Outside "Auto-approve all", a file write is put to the user by the
+        // diff hook (`diff_hook`), with the change itself to look at; asking
+        // here as well would only ask twice, the first time blind.
+        let reviewed = reviews_writes(mode) && is_reviewed_write(&tool_name);
         Box::pin(async move {
-            if !must_ask && !mode.needs_approval(&tool_name, &params) {
+            if reviewed || (!must_ask && !mode.needs_approval(&tool_name, &params)) {
                 return true;
             }
             let (reply, answer) = std::sync::mpsc::sync_channel(1);
             let _ = updates.send(ComposerUpdate::ToolApprovalRequest {
                 name: tool_name,
                 params,
+                diff: None,
                 reply,
             });
             // Wait off the runtime's thread; no answer in time counts as Deny.
@@ -192,6 +202,108 @@ fn approval_fn(mode: ComposerApprovalMode, updates: SyncSender<ComposerUpdate>) 
             .await
             .unwrap_or(ApprovalResponse::Denied);
             matches!(answer, ApprovalResponse::Approved)
+        })
+    })
+}
+
+/// Whether a run in `mode` shows file writes as a diff to approve. In
+/// "Auto-approve all" nothing is asked, writes included.
+fn reviews_writes(mode: ComposerApprovalMode) -> bool {
+    mode != ComposerApprovalMode::AutoAll
+}
+
+/// The tools whose writes the agent's diff hook gates: it plans the write
+/// (`Tool::plan_write`), shows the change and commits that same plan.
+fn is_reviewed_write(tool_name: &str) -> bool {
+    matches!(tool_name, "write_file" | "edit_file")
+}
+
+/// One line of a change as the approval prompt shows it: `'-'` removed,
+/// `'+'` added, `' '` unchanged, `'…'` a run of unchanged lines left out.
+type DiffLine = (char, String);
+
+/// Unchanged lines shown on each side of a change.
+const DIFF_CONTEXT: usize = 2;
+
+/// The change from `before` to `after` as lines to show: every removed and
+/// added line, with a little unchanged context around each hunk and longer
+/// unchanged runs folded into one line.
+fn diff_lines(before: &str, after: &str) -> Vec<DiffLine> {
+    use phazeai_core::review::Row;
+    let rows = phazeai_core::review::rows(before, after);
+    let line = |kind: char, text: &str| (kind, text.trim_end_matches(['\n', '\r']).to_string());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        match &rows[i] {
+            Row::Hunk { removed, added, .. } => {
+                out.extend(removed.iter().map(|t| line('-', t)));
+                out.extend(added.iter().map(|t| line('+', t)));
+                i += 1;
+            }
+            Row::Same(_) => {
+                // A run of unchanged lines, between hunks (or at an end).
+                let start = i;
+                while i < rows.len() && matches!(rows[i], Row::Same(_)) {
+                    i += 1;
+                }
+                let run: Vec<&str> = rows[start..i]
+                    .iter()
+                    .map(|r| match r {
+                        Row::Same(t) => t.as_str(),
+                        Row::Hunk { .. } => unreachable!(),
+                    })
+                    .collect();
+                let lead = if start == 0 { 0 } else { DIFF_CONTEXT };
+                let trail = if i == rows.len() { 0 } else { DIFF_CONTEXT };
+                if run.len() <= lead + trail + 1 {
+                    out.extend(run.iter().map(|t| line(' ', t)));
+                } else {
+                    out.extend(run[..lead].iter().map(|t| line(' ', t)));
+                    let folded = run.len() - lead - trail;
+                    out.push(('…', format!("{folded} unchanged lines")));
+                    out.extend(run[run.len() - trail..].iter().map(|t| line(' ', t)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The agent's diff hook for a run that reviews writes: each planned file
+/// write is put to the user as its diff and waits for the answer, exactly as
+/// other tool calls do (its own reply channel, Deny on timeout). Approve
+/// writes the change shown; anything else writes nothing.
+fn diff_hook(
+    updates: SyncSender<ComposerUpdate>,
+    root: std::path::PathBuf,
+) -> phazeai_core::agent::DiffHookFn {
+    Box::new(move |path: String, before: String, after: String| {
+        let updates = updates.clone();
+        // Shown relative to the workspace, as the rest of the panel does.
+        let shown = std::path::Path::new(&path)
+            .strip_prefix(&root)
+            .map(|p| p.display().to_string())
+            .unwrap_or(path);
+        Box::pin(async move {
+            let (reply, answer) = std::sync::mpsc::sync_channel(1);
+            let _ = updates.send(ComposerUpdate::ToolApprovalRequest {
+                name: "write".to_string(),
+                params: serde_json::json!({ "path": shown }),
+                diff: Some(diff_lines(&before, &after)),
+                reply,
+            });
+            let answer = tokio::task::spawn_blocking(move || {
+                answer
+                    .recv_timeout(APPROVAL_TIMEOUT)
+                    .unwrap_or(ApprovalResponse::Denied)
+            })
+            .await
+            .unwrap_or(ApprovalResponse::Denied);
+            match answer {
+                ApprovalResponse::Approved => phazeai_core::agent::DiffAnswer::Approve,
+                ApprovalResponse::Denied => phazeai_core::agent::DiffAnswer::Reject,
+            }
         })
     })
 }
@@ -289,11 +401,13 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                 ComposerUpdate::ToolApprovalRequest {
                     name,
                     params,
+                    diff,
                     reply,
                 } => {
                     let pending = PendingApproval {
                         tool_name: name,
                         params,
+                        diff,
                         reply,
                     };
                     // Stop was clicked while this request was on its way: deny
@@ -469,6 +583,10 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     // an `ask` rule may need to ask even then.
                     if mode != ComposerApprovalMode::AutoAll || ask_rules {
                         agent = agent.with_approval(approval_fn(mode, tx.clone()));
+                    }
+                    // File writes are shown as a diff to approve.
+                    if reviews_writes(mode) {
+                        agent = agent.with_diff_hook(diff_hook(tx.clone(), ws.clone()));
                     }
 
                     let (agent_tx, mut agent_rx) =
@@ -821,6 +939,12 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
             // Description
             label(move || {
                 if let Some(pa) = pending_approval.get() {
+                    if pa.diff.is_some() {
+                        return format!(
+                            "Review change: {}",
+                            extract_path_from_params("write_file", &pa.params).unwrap_or_default()
+                        );
+                    }
                     format!(
                         "Allow tool: {}   {}",
                         pa.tool_name,
@@ -838,6 +962,53 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                     .color(p.warning)
                     .font_weight(floem::text::Weight::BOLD)
                     .margin_bottom(6.0)
+            }),
+            // The change a file write would make, when the prompt is one.
+            scroll(
+                dyn_stack(
+                    move || {
+                        pending_approval
+                            .get()
+                            .and_then(|pa| pa.diff)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .enumerate()
+                    },
+                    |(i, (kind, text))| (*i, *kind, text.clone()),
+                    move |(_, (kind, text))| {
+                        let shown = if kind == '…' {
+                            format!("  … {text}")
+                        } else {
+                            format!("{kind} {text}")
+                        };
+                        label(move || shown.clone()).style(move |s| {
+                            let p = theme.get().palette;
+                            let (color, bg) = match kind {
+                                '-' => (p.error, p.error.with_alpha(0.10)),
+                                '+' => (p.success, p.success.with_alpha(0.10)),
+                                _ => (p.text_muted, floem::peniko::Color::TRANSPARENT),
+                            };
+                            s.font_size(11.0)
+                                .font_family("monospace".to_string())
+                                .color(color)
+                                .background(bg)
+                                .width_full()
+                                .min_width(0.0)
+                        })
+                    },
+                )
+                .style(|s| s.flex_col().width_full()),
+            )
+            .style(move |s| {
+                let p = theme.get().palette;
+                let has_diff = pending_approval.get().is_some_and(|pa| pa.diff.is_some());
+                s.width_full()
+                    .max_height(260.0)
+                    .margin_bottom(8.0)
+                    .background(p.bg_base)
+                    .border(1.0)
+                    .border_color(p.glass_border)
+                    .apply_if(!has_diff, |s| s.display(floem::style::Display::None))
             }),
             // Allow / Deny buttons
             h_stack((
@@ -1225,10 +1396,12 @@ mod tests {
             Ok(ComposerUpdate::ToolApprovalRequest {
                 name,
                 params,
+                diff,
                 reply,
             }) => PendingApproval {
                 tool_name: name,
                 params,
+                diff,
                 reply,
             },
             other => panic!("expected a prompt, got {other:?}"),
@@ -1248,15 +1421,16 @@ mod tests {
         );
 
         // A write waits for the answer to its own prompt.
-        let write = json!({"path": "src/main.rs", "content": "x"});
-        let write = tokio::spawn(approve("write_file".into(), write));
+        let write = json!({"command": "touch notes.txt"});
+        let write = tokio::spawn(approve("bash".into(), write));
         let write_prompt = next_prompt(&shown);
-        assert_eq!(write_prompt.tool_name, "write_file");
+        assert_eq!(write_prompt.tool_name, "bash");
         write_prompt.answer(ApprovalResponse::Denied);
         assert!(!write.await.unwrap(), "Deny let the write run");
 
         // Allow clicked on that prompt afterwards (still on screen, or clicked
         // twice) must not answer the next call: that one waits for its own.
+        // (A file tool's write is asked about by the diff hook instead.)
         write_prompt.answer(ApprovalResponse::Approved);
         let remove = json!({"command": "rm -rf target"});
         let remove = tokio::spawn(approve("bash".into(), remove));
@@ -1265,7 +1439,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !remove.is_finished(),
-            "a click on the write_file prompt answered the rm call"
+            "a click on the touch prompt answered the rm call"
         );
         remove_prompt.answer(ApprovalResponse::Approved);
         assert!(remove.await.unwrap());
@@ -1350,5 +1524,69 @@ mod tests {
         );
         assert!(rules.contains("Rule 0000: be careful."));
         assert!(!rules.contains("Rule 1999"));
+    }
+
+    /// Outside "Auto-approve all", a file tool's write is not asked about
+    /// blind: the approval lets it through to the diff hook, which shows the
+    /// change and writes only on Allow.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_writes_are_reviewed_as_a_diff_not_asked_blind() {
+        use phazeai_core::agent::DiffAnswer;
+        let (updates, shown) = sync_channel(16);
+        for mode in [ApproveDestructive, ApproveAll] {
+            let approve = approval_fn(mode, updates.clone());
+            for tool in ["write_file", "edit_file"] {
+                let params = json!({"path": "src/lib.rs", "content": "x"});
+                assert!(approve(tool.into(), params).await, "{tool} in {mode:?}");
+                assert!(shown.try_recv().is_err(), "blind prompt for {tool}");
+            }
+        }
+
+        let hook = super::diff_hook(updates, "/work".into());
+        let before = "fn a() {}\nlet x = a + b;\n".to_string();
+        let after = "fn a() {}\nlet x = a * b;\n".to_string();
+        let review = tokio::spawn(hook(
+            "/work/src/lib.rs".into(),
+            before.clone(),
+            after.clone(),
+        ));
+        let prompt = next_prompt(&shown);
+        assert_eq!(prompt.params["path"], "src/lib.rs");
+        let diff = prompt
+            .diff
+            .clone()
+            .expect("a write's prompt shows its diff");
+        assert!(diff.contains(&('-', "let x = a + b;".into())));
+        assert!(diff.contains(&('+', "let x = a * b;".into())));
+        prompt.answer(ApprovalResponse::Approved);
+        assert_eq!(review.await.unwrap(), DiffAnswer::Approve);
+
+        let review = tokio::spawn(hook("src/lib.rs".into(), before, after));
+        next_prompt(&shown).answer(ApprovalResponse::Denied);
+        assert_eq!(review.await.unwrap(), DiffAnswer::Reject);
+    }
+
+    /// The diff shows every changed line with two lines of context and folds
+    /// a longer unchanged run.
+    #[test]
+    fn diff_lines_keep_context_and_fold_long_unchanged_runs() {
+        let before: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+        let after = before.replace("line 6\n", "line six\n");
+        let lines = super::diff_lines(&before, &after);
+        let kinds: String = lines.iter().map(|(k, _)| *k).collect();
+        // 5 lines before the change fold to "…" + 2 context; 6 after to 2 + "…".
+        assert_eq!(kinds, "…  -+  …");
+        assert_eq!(lines[0].1, "3 unchanged lines");
+        assert_eq!(lines[1].1, "line 4");
+        assert_eq!(lines[3], ('-', "line 6".into()));
+        assert_eq!(lines[4], ('+', "line six".into()));
+        assert_eq!(lines[7].1, "4 unchanged lines");
+
+        // A short file shows whole.
+        let lines = super::diff_lines("a\nb\n", "a\nc\n");
+        assert_eq!(
+            lines,
+            vec![(' ', "a".into()), ('-', "b".into()), ('+', "c".into())]
+        );
     }
 }

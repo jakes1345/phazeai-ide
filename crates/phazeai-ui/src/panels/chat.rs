@@ -5,7 +5,7 @@ use std::sync::Arc;
 use floem::{
     event::{Event, EventListener},
     ext_event::create_signal_from_channel,
-    keyboard::{Key, Modifiers},
+    keyboard::Key,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
@@ -93,6 +93,73 @@ pub struct ChatMessage {
     /// True while AI is still generating this message.
     pub loading: bool,
     pub is_error: bool,
+}
+
+/// What a tool row says while its tool runs.
+fn running_label(name: &str) -> String {
+    format!("Running tool: {name}...")
+}
+
+/// Add a running row for a tool. It goes above the reply still being
+/// written, so that reply stays the last message: the text the model writes
+/// after its tools, and the end of the run, update the last message.
+fn push_tool_start(list: &mut Vec<ChatMessage>, name: &str) {
+    let row = ChatMessage {
+        role: ChatRole::Tool,
+        content: running_label(name),
+        loading: true,
+        is_error: false,
+    };
+    match list.last() {
+        Some(last) if last.role == ChatRole::Assistant && last.loading => {
+            let at = list.len() - 1;
+            list.insert(at, row);
+        }
+        _ => list.push(row),
+    }
+}
+
+/// Mark a tool's row done. Tools of one round run together and may finish
+/// in any order, so this finds the oldest running row of the same tool
+/// rather than the last row.
+fn apply_tool_result(list: &mut [ChatMessage], name: &str, summary: &str) {
+    let running = running_label(name);
+    if let Some(row) = list
+        .iter_mut()
+        .find(|m| m.role == ChatRole::Tool && m.loading && m.content == running)
+    {
+        row.content = format!("{name}: {summary}");
+        row.loading = false;
+    }
+}
+
+/// At the end of a run (done, failed or stopped) no tool is running any
+/// more, so no row may still say it is.
+fn settle_tool_rows(list: &mut [ChatMessage]) {
+    for row in list
+        .iter_mut()
+        .filter(|m| m.role == ChatRole::Tool && m.loading)
+    {
+        row.loading = false;
+        if let Some(name) = row
+            .content
+            .strip_prefix("Running tool: ")
+            .and_then(|r| r.strip_suffix("..."))
+        {
+            row.content = format!("{name}: did not finish");
+        }
+    }
+}
+
+/// The message list's key for a row. A row is built from a copy of its
+/// message, so the key must change whenever what the row shows changes
+/// (the text streaming in, the end of loading, an error, which row is last);
+/// with the index alone, Floem keeps the old row and the reply never shows.
+fn row_key(index: usize, msg: &ChatMessage, is_last: bool) -> (usize, u64, bool, bool, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    msg.content.hash(&mut h);
+    (index, h.finish(), msg.loading, msg.is_error, is_last)
 }
 
 /// Compaction carried from one send to the next.
@@ -1218,24 +1285,10 @@ pub fn chat_panel(
                     });
                 }
                 ChatUpdate::ToolStart { name } => {
-                    messages.update(|list| {
-                        list.push(ChatMessage {
-                            role: ChatRole::Tool,
-                            content: format!("Running tool: {}...", name),
-                            loading: true,
-                            is_error: false,
-                        });
-                    });
+                    messages.update(|list| push_tool_start(list, &name));
                 }
                 ChatUpdate::ToolResult { name, summary } => {
-                    messages.update(|list| {
-                        if let Some(last) = list.last_mut() {
-                            if last.role == ChatRole::Tool && last.loading {
-                                last.content = format!("{}: {}", name, summary);
-                                last.loading = false;
-                            }
-                        }
-                    });
+                    messages.update(|list| apply_tool_result(list, &name, &summary));
                     let msgs = messages.get_untracked();
                     save_conversation(
                         &msgs,
@@ -1246,6 +1299,7 @@ pub fn chat_panel(
                 }
                 ChatUpdate::Done(text) => {
                     messages.update(|list| {
+                        settle_tool_rows(list);
                         // Ensure we finalize any "hanging" assistant message
                         if let Some(last) = list.last_mut() {
                             if last.role == ChatRole::Assistant && last.loading {
@@ -1270,6 +1324,7 @@ pub fn chat_panel(
                 }
                 ChatUpdate::Err(e) => {
                     messages.update(|list| {
+                        settle_tool_rows(list);
                         // Remove any in-flight loading assistant message so the
                         // error bubble appears cleanly (no empty ghost bubble).
                         if let Some(last) = list.last() {
@@ -1338,6 +1393,7 @@ pub fn chat_panel(
                     diff_slot.set(None);
                     diff_keep.set(Vec::new());
                     messages.update(|list| {
+                        settle_tool_rows(list);
                         // Finalise the loading assistant message (may be empty or partial).
                         if let Some(last) = list.last_mut() {
                             if last.role == ChatRole::Assistant && last.loading {
@@ -2057,7 +2113,7 @@ pub fn chat_panel(
                 .map(|(i, msg)| (i, msg, i == len - 1))
                 .collect::<Vec<_>>()
         },
-        |(i, _, _)| *i,
+        |(i, msg, is_last)| row_key(*i, msg, *is_last),
         move |(i, msg, is_last)| {
             let is_user = msg.role == ChatRole::User;
             let content = msg.content.clone();
@@ -2219,22 +2275,33 @@ pub fn chat_panel(
                                         p.text_secondary
                                     })
                                     .max_width_pct(100.0)
+                                    // Flex items default to their content's
+                                    // width; without this a long line pushes
+                                    // the bubble past the panel instead of
+                                    // wrapping.
+                                    .min_width(0.0)
+                                    .flex_shrink(1.0)
                                     .line_height(1.5)
                                     .apply_if(is_tool, |s| {
                                         s.font_weight(floem::text::Weight::MEDIUM)
                                     })
                             }),
                         ))
-                        .style(|s| s.items_center().flex_grow(1.0)),
+                        .style(|s| s.items_center().flex_grow(1.0).min_width(0.0)),
                         // Retry icon (non-error AI messages) + dismiss ✕ (error messages)
                         stack((undo_btn, icon_retry_btn, dismiss_btn))
                             .style(|s| s.items_center().gap(2.0)),
                     ))
-                    .style(|s| s.items_center().justify_between().width_full()),
+                    .style(|s| {
+                        s.items_center()
+                            .justify_between()
+                            .width_full()
+                            .min_width(0.0)
+                    }),
                     // Error retry button below the error text (only for error bubbles)
                     error_retry_btn,
                 ))
-                .style(|s| s.flex_col().width_full()),
+                .style(|s| s.flex_col().width_full().min_width(0.0)),
             )
             .style(move |s| {
                 let t = theme.get();
@@ -2361,7 +2428,12 @@ pub fn chat_panel(
         }
     });
 
+    // Floem's text_input handles Enter and Escape itself on KeyDown and
+    // stops the event there, so a KeyDown listener never sees them: Enter
+    // goes through `on_enter`, and Escape (Stop) is read on KeyUp, which the
+    // input passes on.
     let input_widget = text_input(input_text)
+        .on_enter(move || (do_send_key)())
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
@@ -2376,25 +2448,13 @@ pub fn chat_panel(
                 .font_size(13.0)
                 .min_width(0.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |event| {
-            if let Event::KeyDown(e) = event {
-                match &e.key.logical_key {
-                    Key::Named(floem::keyboard::NamedKey::Escape) => {
-                        if is_loading.get() {
-                            if let Some(token) = current_cancel_token.get_untracked() {
-                                token.store(true, std::sync::atomic::Ordering::SeqCst);
-                            }
-                        }
-                    }
-                    key => {
-                        let enter = match key {
-                            Key::Character(ch) => ch.as_str() == "\r" || ch.as_str() == "\n",
-                            Key::Named(floem::keyboard::NamedKey::Enter) => true,
-                            _ => false,
-                        };
-                        if enter && !e.modifiers.contains(Modifiers::SHIFT) {
-                            (do_send_key)();
-                        }
+        .on_event_stop(EventListener::KeyUp, move |event| {
+            if let Event::KeyUp(e) = event {
+                if e.key.logical_key == Key::Named(floem::keyboard::NamedKey::Escape)
+                    && is_loading.get_untracked()
+                {
+                    if let Some(token) = current_cancel_token.get_untracked() {
+                        token.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -2999,7 +3059,11 @@ pub fn chat_panel(
         tool_approval_overlay,
         input_bar,
     ))
-    .style(move |s| s.flex_col().width_full().height_full())
+    // min_height(0): a flex item's minimum is otherwise its content, so a
+    // long conversation or a tall review would make the panel, and with it
+    // the window's column, taller than the window, pushing the input bar
+    // and the status bar off the bottom.
+    .style(move |s| s.flex_col().width_full().height_full().min_height(0.0))
 }
 
 /// One row of the file-change review.
@@ -3663,5 +3727,68 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), rows.len());
+    }
+
+    fn row(role: ChatRole, content: &str, loading: bool) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.to_string(),
+            loading,
+            is_error: false,
+        }
+    }
+
+    /// A run that calls two tools at once, then answers: the tool rows sit
+    /// above the reply, each finishes under its own name in any order, and
+    /// the reply is still the last message for the text and the end of run.
+    #[test]
+    fn tool_rows_go_above_the_reply_and_finish_by_name() {
+        use super::{apply_tool_result, push_tool_start, settle_tool_rows};
+        let mut list = vec![
+            row(ChatRole::User, "is it correct?", false),
+            row(ChatRole::Assistant, "", true),
+        ];
+        push_tool_start(&mut list, "read_file");
+        push_tool_start(&mut list, "grep");
+        assert_eq!(list.len(), 4);
+        assert!(list[3].role == ChatRole::Assistant && list[3].loading);
+
+        // grep finishes first.
+        apply_tool_result(&mut list, "grep", "1 match");
+        apply_tool_result(&mut list, "read_file", "12 lines");
+        assert_eq!(list[1].content, "read_file: 12 lines");
+        assert_eq!(list[2].content, "grep: 1 match");
+        assert!(!list[1].loading && !list[2].loading);
+        assert!(list.last().unwrap().role == ChatRole::Assistant);
+
+        // A row whose result never came is not left "running".
+        push_tool_start(&mut list, "bash");
+        settle_tool_rows(&mut list);
+        let bash = list.iter().find(|m| m.content.starts_with("bash")).unwrap();
+        assert_eq!(bash.content, "bash: did not finish");
+        assert!(!bash.loading);
+    }
+
+    /// Without a reply waiting (e.g. after an error), a tool row is appended.
+    #[test]
+    fn tool_row_without_a_pending_reply_is_appended() {
+        let mut list = vec![row(ChatRole::User, "hi", false)];
+        super::push_tool_start(&mut list, "grep");
+        assert_eq!(list.len(), 2);
+        assert!(list[1].role == ChatRole::Tool);
+    }
+
+    /// The list key changes whenever a row would draw differently, so the
+    /// streamed reply and the end of loading reach the screen.
+    #[test]
+    fn row_key_changes_when_the_message_changes() {
+        use super::row_key;
+        let loading = row(ChatRole::Assistant, "", true);
+        let partial = row(ChatRole::Assistant, "It adds", true);
+        let done = row(ChatRole::Assistant, "It adds", false);
+        assert_ne!(row_key(2, &loading, true), row_key(2, &partial, true));
+        assert_ne!(row_key(2, &partial, true), row_key(2, &done, true));
+        assert_ne!(row_key(2, &done, true), row_key(2, &done, false));
+        assert_eq!(row_key(2, &done, true), row_key(2, &done.clone(), true));
     }
 }

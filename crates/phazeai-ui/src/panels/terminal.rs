@@ -69,10 +69,44 @@ const PAD_RIGHT: f64 = 6.0;
 const MIN_COLS: usize = 4;
 const MIN_ROWS: usize = 2;
 
-/// Shell integration typed into the shell once it starts: OSC 133;D;$? (exit
-/// code of the last command), OSC 133;A (prompt start), OSC 7 (cwd). D comes
-/// before A so each block gets its own code.
-const PROMPT_COMMAND_INJECT: &str = "export PROMPT_COMMAND='printf \"\\033]133;D;$?\\007\\033]133;A\\007\\033]7;file://${HOSTNAME}${PWD}\\007\"'\n";
+/// Shell integration for bash, given to it as `--rcfile`: the user's usual
+/// startup files, then a prompt hook printing OSC 133;D;$? (exit code of the
+/// last command), OSC 133;A (prompt start) and OSC 7 (cwd). D comes before A
+/// so each block gets its own code. The hook runs first, while `$?` is still
+/// the command's, and the user's own PROMPT_COMMAND is kept after it.
+///
+/// It used to be typed into the shell once it started, which showed the
+/// line on screen, put it in the user's history, and sent bash syntax to
+/// zsh and fish.
+const BASH_INTEGRATION: &str = r#"# Written by PhazeAI for its terminal: your usual bash setup, then the
+# prompt marks the terminal uses for command blocks and the working folder.
+if [ -r /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi
+if [ -r "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+__phazeai_prompt() {
+    printf '\033]133;D;%s\007\033]133;A\007\033]7;file://%s%s\007' "$1" "$HOSTNAME" "$PWD"
+}
+PROMPT_COMMAND="__phazeai_prompt \"\$?\"${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+"#;
+
+/// Write [`BASH_INTEGRATION`] to PhazeAI's config folder (never a shared
+/// temporary folder another user could plant a file in) and return its path.
+fn bash_integration_file() -> Option<PathBuf> {
+    let dir = dirs::config_dir()?.join("phazeai").join("shell");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("bash-integration.sh");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(BASH_INTEGRATION) {
+        std::fs::write(&path, BASH_INTEGRATION).ok()?;
+    }
+    Some(path)
+}
+
+/// Whether `shell` (a name or a path) is bash.
+fn is_bash(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "bash")
+}
 
 /// Shared PTY writer — `Arc` so callers (Run in Terminal, the AI command bar)
 /// can write to the shell once the PTY is ready.
@@ -611,6 +645,13 @@ fn spawn_pty(
         };
 
         let mut cmd = CommandBuilder::new(&shell);
+        // Shell integration (bash only): read at startup, nothing typed.
+        if is_bash(&shell) {
+            if let Some(rc) = bash_integration_file() {
+                cmd.arg("--rcfile");
+                cmd.arg(rc);
+            }
+        }
         // Start in the project, as other editors do; without a folder
         // portable-pty starts the shell in the home directory.
         if cwd.is_dir() {
@@ -642,15 +683,6 @@ fn spawn_pty(
             Err(e) => {
                 tracing::error!(target: "phazeai_ui::terminal", "PTY take_writer error: {e}")
             }
-        }
-
-        // Shell integration: OSC 7 (cwd) and OSC 133 (blocks, exit codes).
-        {
-            let w = Arc::clone(&pty_writer);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(300));
-                write_shared(&w, PROMPT_COMMAND_INJECT.as_bytes());
-            });
         }
 
         let mut reader = match master.try_clone_reader() {
@@ -2375,6 +2407,54 @@ pub fn terminal_panel(
 
 #[cfg(test)]
 mod tests {
+    /// The bash integration file, run as bash runs it at startup: it keeps
+    /// the user's own PROMPT_COMMAND, and the prompt hook reports the last
+    /// command's exit code, then the prompt start and the folder.
+    #[test]
+    fn bash_integration_marks_prompts_and_keeps_the_users_setup() {
+        if std::process::Command::new("bash")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            return; // no bash on this machine
+        }
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".bashrc"),
+            "PROMPT_COMMAND='echo users-hook'\n",
+        )
+        .unwrap();
+        let rc = home.path().join("integration.sh");
+        std::fs::write(&rc, super::BASH_INTEGRATION).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(r#". "$1"; false; eval "$PROMPT_COMMAND""#)
+            .arg("bash")
+            .arg(&rc)
+            .env("HOME", home.path())
+            .env("HOSTNAME", "box")
+            .current_dir(home.path())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+        let marks = format!(
+            "\x1b]133;D;1\x07\x1b]133;A\x07\x1b]7;file://box{}\x07",
+            home.path().display()
+        );
+        assert!(
+            out.starts_with(&marks),
+            "marks missing or out of order: {out:?}"
+        );
+        assert!(
+            out.ends_with("users-hook\n"),
+            "user's PROMPT_COMMAND lost: {out:?}"
+        );
+        assert!(super::is_bash("/usr/bin/bash") && super::is_bash("bash"));
+        assert!(!super::is_bash("zsh") && !super::is_bash("/bin/fish"));
+    }
+
     use super::*;
 
     #[test]
