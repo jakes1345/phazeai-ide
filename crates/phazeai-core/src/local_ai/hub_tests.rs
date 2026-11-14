@@ -22,6 +22,7 @@ fn hw(total_gib: u64, free_gib: u64) -> HardwareInfo {
         free_disk: Some(500 * GIB),
         os: "linux".into(),
         arch: "x86_64".into(),
+        gpus: Vec::new(),
     }
 }
 

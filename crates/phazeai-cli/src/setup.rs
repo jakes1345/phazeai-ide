@@ -62,9 +62,9 @@ pub fn provider_slug(p: &LlmProvider) -> &'static str {
 
 /// Text for `/local`: what the built-in local AI would run, and whether it can.
 pub fn local_ai_status_text(settings: &Settings) -> String {
-    use phazeai_core::local_ai::{self, catalog, install, server, HardwareInfo, LOCAL_AI};
+    use phazeai_core::local_ai::{self, catalog, install, server, LOCAL_AI};
     let models_dir = local_ai::models_dir();
-    let hw = HardwareInfo::probe(&models_dir);
+    let hw = local_ai::probe_machine(&settings.local_ai);
     let mut out = String::from("PhazeAI Local (built-in llama.cpp)\n");
     out.push_str(&format!(
         "  Server:       {}\n",

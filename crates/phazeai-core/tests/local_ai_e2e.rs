@@ -178,11 +178,87 @@ async fn github_lists_an_installable_build() {
         ("windows", "x86_64"),
         ("macos", "aarch64"),
     ] {
-        match choose_release(&releases, os, arch) {
-            ReleaseChoice::Ready { release, asset, .. } => {
-                println!("{os}/{arch}: {} → {}", release.tag_name, asset.name)
+        match choose_release(&releases, os, arch, true) {
+            ReleaseChoice::Ready {
+                release,
+                asset,
+                build,
+                ..
+            } => {
+                println!(
+                    "{os}/{arch}: {} → {} ({build:?})",
+                    release.tag_name, asset.name
+                );
+                assert!(build.uses_gpu(), "{os}/{arch}: no verified GPU build");
             }
             other => panic!("{os}/{arch}: {other:?}"),
         }
     }
+}
+
+/// Installs this platform's GPU build from GitHub into a scratch folder with
+/// PhazeAI's own installer, then asks it which GPUs it can use. On a machine
+/// with a GPU and drivers, at least one must be listed.
+///
+/// ```text
+/// PHAZEAI_E2E_INSTALL_ROOT=/some/empty/dir \
+///   cargo test -p phazeai-core --test local_ai_e2e installs_the_gpu_build -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "network: downloads llama.cpp (~50 MB) and runs it"]
+async fn installs_the_gpu_build_and_lists_this_machines_gpus() {
+    use phazeai_core::local_ai::{hardware, install};
+    let root = PathBuf::from(
+        std::env::var("PHAZEAI_E2E_INSTALL_ROOT").expect("set PHAZEAI_E2E_INSTALL_ROOT"),
+    );
+    let found = install::install_latest(&root, true, Arc::new(AtomicBool::new(false)), |_| {})
+        .await
+        .expect("install");
+    println!("installed: {}", found.describe());
+    assert!(found.build.is_some_and(|b| b.uses_gpu()), "{found:?}");
+    let gpus = hardware::list_devices(&found.path).expect("--list-devices");
+    for g in &gpus {
+        println!(
+            "GPU: {} {} ({} MiB, {} MiB free)",
+            g.name,
+            g.description,
+            g.vram_total >> 20,
+            g.vram_free >> 20
+        );
+    }
+    assert!(!gpus.is_empty(), "the GPU build sees no GPU");
+}
+
+/// Starts a real `llama-server` on a GGUF and checks that the GPU offload it
+/// logs is what PhazeAI reports.
+///
+/// ```text
+/// PHAZEAI_E2E_LLAMA_SERVER=/path/to/llama-server PHAZEAI_E2E_GGUF=/path/to/model.gguf \
+///   cargo test -p phazeai-core --test local_ai_e2e reports_gpu_offload -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a llama-server binary and a GGUF model"]
+async fn reports_gpu_offload_from_a_real_server() {
+    use phazeai_core::local_ai::server::{free_port, LaunchSpec, LlamaServer};
+    let spec = LaunchSpec {
+        binary: PathBuf::from(
+            std::env::var("PHAZEAI_E2E_LLAMA_SERVER").expect("set PHAZEAI_E2E_LLAMA_SERVER"),
+        ),
+        model_path: PathBuf::from(std::env::var("PHAZEAI_E2E_GGUF").expect("set PHAZEAI_E2E_GGUF")),
+        model_id: "e2e".into(),
+        ctx_size: 4096,
+    };
+    let mut server = LlamaServer::spawn(&spec, free_port().unwrap(), None).expect("spawn");
+    server
+        .wait_healthy(std::time::Duration::from_secs(180))
+        .await
+        .expect("healthy");
+    let Some(offload) = server.offload() else {
+        panic!(
+            "llama-server logged no offload line; its last lines:\n{}",
+            server.stderr_tail(40)
+        );
+    };
+    println!("offload: {}", offload.describe());
+    assert!(offload.gpu_layers > 0, "{}", offload.describe());
 }

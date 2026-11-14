@@ -85,7 +85,7 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
         ModelsAction::Files { repo } => {
             let hub = Hub::from_env()?;
             let listing = hub::listing(&hub, &repo).await?;
-            let hw = HardwareInfo::probe(&models_dir);
+            let hw = phazeai_core::local_ai::probe_machine(&Settings::load().local_ai);
             print!("{}", files_table(&listing, &hw));
         }
         ModelsAction::Pull {
@@ -97,7 +97,7 @@ pub async fn run(args: ModelsArgs) -> Result<()> {
         } => {
             let hub = Hub::from_env()?;
             let listing = hub::listing(&hub, &repo).await?;
-            let hw = HardwareInfo::probe(&models_dir);
+            let hw = phazeai_core::local_ai::probe_machine(&Settings::load().local_ai);
             let pick = pick_file(&listing, &hw, quant.as_deref(), file.as_deref())?;
             let ctx = hub::default_ctx(listing.context_length);
             let fit = hub::fit_file(&listing, pick, &hw, ctx);

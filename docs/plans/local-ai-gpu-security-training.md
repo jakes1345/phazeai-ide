@@ -45,6 +45,8 @@ The Vulkan backend found the card's matrix cores (`KHR_coopmat`), bf16 and resiz
 
 ## Phase 1: the GPU (about 1–2 weeks)
 
+**Done (items 1–4 below), in the PR after #89.** Checked on the owner's RX 9060 XT: PhazeAI installs `b12383` Vulkan, `--list-devices` sees the card (16,304 MiB), a 16 GiB card is now recommended gpt-oss 20B (13.5 GiB with headroom), and a real server reports "all 29 layers on the GPU". **Not done:** a click-through of Settings › Local AI in the running IDE, and a measured tokens/s in the panel (item 4's last part).
+
 From the research doc's PR series, items 1–2, in order:
 
 1. **Pick a GPU build.** `asset_suffixes` only ever returns CPU builds (`install.rs:190`, and a test asserts "never the Vulkan build"). Choose Vulkan on Linux and Windows, Metal on Apple Silicon, CUDA only when an NVIDIA card is found, and CPU as the fallback. If the GPU build fails its first health check, fall back to the CPU build automatically and say so in Settings › Local AI.

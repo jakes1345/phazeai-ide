@@ -117,6 +117,23 @@ pub fn llama_cpp_dir() -> PathBuf {
     data_root().join("llama.cpp")
 }
 
+/// This machine's resources, GPUs included: probes RAM, cores and disk, then
+/// asks the `llama-server` that `settings` would run which GPUs it can use
+/// ([`hardware::list_devices`]). Without a server, `gpus` is empty. Blocks for
+/// up to 20 s; call it off the UI thread.
+pub fn probe_machine(settings: &LocalAiSettings) -> HardwareInfo {
+    let hw = HardwareInfo::probe(&models_dir());
+    let path = std::env::var_os("PATH");
+    match install::find_server_binary(
+        settings.server_path.as_deref(),
+        path.as_deref(),
+        &llama_cpp_dir(),
+    ) {
+        Ok(Some(found)) => hw.with_gpus(&found.path),
+        _ => hw,
+    }
+}
+
 /// `1.0 GB`, `512 MB`, ... (decimal units, as disk and download sizes are shown).
 pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
