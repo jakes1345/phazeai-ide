@@ -592,6 +592,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
                 Err(e) => state.error(format!("Couldn't read '{path_str}': {e}")),
             }
         }
+        CommandResult::AttachImage(path_str) => state.attach_image(&path_str),
         CommandResult::Retry => {
             let last = state.last_user_input.clone();
             if last.is_empty() {

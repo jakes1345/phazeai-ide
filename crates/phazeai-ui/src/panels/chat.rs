@@ -374,6 +374,8 @@ struct SendToAiJob {
     code_search: Option<CodeSearch>,
     /// Files whose contents are in `user_message` (for the privacy audit log).
     attached_files: Vec<std::path::PathBuf>,
+    /// Pictures sent with the message, for a vision model.
+    images: Vec<phazeai_core::llm::ImageInput>,
 }
 
 /// What the chat's system prompt is built from, besides the model's budget.
@@ -447,6 +449,7 @@ fn send_to_ai(job: SendToAiJob) {
         checkpoints,
         code_search,
         attached_files,
+        images,
     } = job;
 
     std::thread::spawn(move || {
@@ -613,7 +616,7 @@ fn send_to_ai(job: SendToAiJob) {
 
             let run_fut = phazeai_core::privacy::audit::scope(
                 attached_files,
-                agent.run_with_events(&user_message, agent_tx),
+                agent.run_with_images_and_events(&user_message, images, agent_tx),
             );
             // Forwards events to the panel and returns the update that ends
             // the run (sent last, after the compaction state below).
@@ -749,6 +752,108 @@ struct ExpandedMentions {
     attached: Vec<std::path::PathBuf>,
     /// Mentions left out by the privacy policy: (mention, reason).
     blocked: Vec<(String, String)>,
+    /// Pictures mentioned (`@docs/shot.png`), sent to the model as images.
+    images: Vec<phazeai_core::llm::ImageInput>,
+    /// Pictures that couldn't be sent: (mention, reason).
+    unreadable: Vec<(String, String)>,
+}
+
+/// Add newly picked pictures to those already waiting, leaving out repeats
+/// and any past the per-message limit. Returns the list and how many were
+/// left out for the limit.
+fn merge_picked(
+    waiting: &[std::path::PathBuf],
+    picked: Vec<std::path::PathBuf>,
+) -> (Vec<std::path::PathBuf>, usize) {
+    let max = phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE;
+    let mut kept = waiting.to_vec();
+    let mut dropped = 0;
+    for path in picked {
+        if kept.contains(&path) {
+            continue;
+        }
+        if kept.len() >= max {
+            dropped += 1;
+        } else {
+            kept.push(path);
+        }
+    }
+    (kept, dropped)
+}
+
+/// Starts the line under a chat message that names the pictures sent with it.
+const PICTURES_NOTE: &str = "\n\n[Pictures: ";
+
+/// The message as the chat shows it: the words, then the pictures sent.
+fn with_pictures_note(text: &str, images: &[phazeai_core::llm::ImageInput]) -> String {
+    if images.is_empty() {
+        return text.to_string();
+    }
+    let labels: Vec<String> = images.iter().map(|i| i.label()).collect();
+    format!("{text}{PICTURES_NOTE}{}]", labels.join(", "))
+}
+
+/// The words of a shown message, without the pictures line (Retry sends the
+/// pictures themselves again, not their names).
+fn strip_pictures_note(shown: &str) -> &str {
+    match shown.rsplit_once(PICTURES_NOTE) {
+        Some((text, labels)) if labels.ends_with(']') && !labels.contains('\n') => text,
+        _ => shown,
+    }
+}
+
+/// Pictures picked with the chat's attach button, read for sending.
+#[derive(Debug, Default)]
+struct PickedImages {
+    images: Vec<phazeai_core::llm::ImageInput>,
+    /// Files read (for the privacy audit log).
+    attached: Vec<std::path::PathBuf>,
+    /// Files left out: (file name, reason).
+    refused: Vec<(String, String)>,
+}
+
+/// Read the pictures picked with the attach button. Unlike an `@mention`, a
+/// picked file may be outside the workspace (a screenshot in the Pictures
+/// folder): choosing it in the file dialog is the user's own say-so. Every
+/// one still goes through the project's privacy policy, which also holds
+/// the built-in secrets list.
+fn load_picked_images(paths: &[std::path::PathBuf], root: &Path) -> PickedImages {
+    let policy = phazeai_core::privacy::policy_for(root);
+    let mut out = PickedImages::default();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        if let Some(denial) = policy.check(path) {
+            let reason = denial.reason();
+            phazeai_core::privacy::audit::record_blocked_file(
+                &policy.display_path(path),
+                &reason,
+                "attached picture",
+            );
+            out.refused.push((name, reason));
+            continue;
+        }
+        if out.images.len() >= phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE {
+            out.refused.push((
+                name,
+                format!(
+                    "at most {} pictures go with one message",
+                    phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE
+                ),
+            ));
+            continue;
+        }
+        match phazeai_core::llm::ImageInput::from_path(path) {
+            Ok(image) => {
+                out.images.push(image);
+                out.attached.push(path.clone());
+            }
+            Err(reason) => out.refused.push((name, reason)),
+        }
+    }
+    out
 }
 
 /// Expand `@filename` mentions in a chat message into file context blocks.
@@ -794,6 +899,35 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> ExpandedMentio
                 out.blocked.push((mention.to_string(), reason));
                 continue;
             }
+            if phazeai_core::llm::image::is_image_path(&file_path) {
+                let loaded = if out.images.len() >= phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE
+                {
+                    Err(format!(
+                        "at most {} pictures go with one message",
+                        phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE
+                    ))
+                } else {
+                    phazeai_core::llm::ImageInput::from_path(&file_path)
+                };
+                match loaded {
+                    Ok(image) => {
+                        out.attached.push(file_path.clone());
+                        out.images.push(image);
+                        clean_msg = clean_msg.replace(
+                            &format!("@{mention}"),
+                            &format!("`{mention}` (picture attached)"),
+                        );
+                    }
+                    Err(reason) => {
+                        clean_msg = clean_msg.replace(
+                            &format!("@{mention}"),
+                            &format!("`{mention}` (not attached: {reason})"),
+                        );
+                        out.unreadable.push((mention.to_string(), reason));
+                    }
+                }
+                continue;
+            }
             out.attached.push(file_path.clone());
             if let Ok(contents) = std::fs::read_to_string(&file_path) {
                 // Truncate very large files
@@ -818,7 +952,7 @@ fn expand_file_mentions(message: &str, root: &std::path::Path) -> ExpandedMentio
     }
 
     out.prompt = if context_blocks.is_empty() {
-        if out.blocked.is_empty() {
+        if out.blocked.is_empty() && out.images.is_empty() && out.unreadable.is_empty() {
             message.to_string()
         } else {
             clean_msg
@@ -897,6 +1031,10 @@ pub fn chat_panel(
     let conversation_id = create_rw_signal(initial_id);
     let messages: RwSignal<Vec<ChatMessage>> = create_rw_signal(initial_messages);
     let input_text = create_rw_signal(String::new());
+    // Pictures picked with the attach button, sent with the next message.
+    let pending_images: RwSignal<Vec<std::path::PathBuf>> = create_rw_signal(Vec::new());
+    // The pictures picked for the last message, sent again by Retry.
+    let last_picked_images: RwSignal<Vec<std::path::PathBuf>> = create_rw_signal(Vec::new());
     let is_loading = create_rw_signal(false);
     let mode = create_rw_signal(AiMode::Chat);
     let current_cancel_token: RwSignal<Option<Arc<std::sync::atomic::AtomicBool>>> =
@@ -1279,9 +1417,16 @@ pub fn chat_panel(
             // Expand @file mentions into context blocks before sending to AI
             let root = workspace_root.get_untracked();
             let expanded = expand_file_mentions(&resolved_prompt_raw, &root);
+            let picked_paths = pending_images.get_untracked();
+            let picked = load_picked_images(&picked_paths, &root);
+            pending_images.set(Vec::new());
+            last_picked_images.set(picked_paths);
             let prompt = expanded.prompt;
             let mut attached_files = expanded.attached;
+            attached_files.extend(picked.attached);
             attached_files.extend(crate::panels::privacy::take_attachments());
+            let mut images = expanded.images;
+            images.extend(picked.images);
             if !expanded.blocked.is_empty() {
                 let names: Vec<&str> = expanded.blocked.iter().map(|(m, _)| m.as_str()).collect();
                 crate::app::show_toast(
@@ -1289,11 +1434,24 @@ pub fn chat_panel(
                     format!("Not attached (privacy policy): {}", names.join(", ")),
                 );
             }
+            let unsent: Vec<String> = expanded
+                .unreadable
+                .iter()
+                .chain(&picked.refused)
+                .map(|(name, reason)| format!("{name} ({reason})"))
+                .collect();
+            if !unsent.is_empty() {
+                crate::app::show_toast(
+                    status_toast,
+                    format!("Picture not sent: {}", unsent.join(", ")),
+                );
+            }
+            let shown = with_pictures_note(&resolved_prompt_raw, &images);
 
             messages.update(|list| {
                 list.push(ChatMessage {
                     role: ChatRole::User,
-                    content: resolved_prompt_raw.clone(),
+                    content: shown,
                     loading: false,
                     is_error: false,
                 });
@@ -1344,6 +1502,7 @@ pub fn chat_panel(
                 checkpoints: checkpoints.clone(),
                 code_search: code_search.clone(),
                 attached_files,
+                images,
             });
         }
     });
@@ -1751,9 +1910,13 @@ pub fn chat_panel(
                 current_cancel_token.set(Some(token.clone()));
 
                 let root = workspace_root.get_untracked();
-                let expanded = expand_file_mentions(&user_msg, &root);
+                let expanded = expand_file_mentions(strip_pictures_note(&user_msg), &root);
+                let picked = load_picked_images(&last_picked_images.get_untracked(), &root);
                 let prompt = expanded.prompt;
-                let attached_files = expanded.attached;
+                let mut attached_files = expanded.attached;
+                attached_files.extend(picked.attached);
+                let mut images = expanded.images;
+                images.extend(picked.images);
                 let live_settings = Settings::load();
                 let hint = mode.get_untracked().system_hint();
                 // #region agent log
@@ -1787,6 +1950,7 @@ pub fn chat_panel(
                     checkpoints: checkpoints.clone(),
                     code_search: code_search.clone(),
                     attached_files,
+                    images,
                 });
             } else {
                 // #region agent log
@@ -2154,8 +2318,104 @@ pub fn chat_panel(
             }
         });
 
+    // Attach pictures (a screenshot of a bug, a design to match) for a
+    // vision model; they go with the next message.
+    let attach_btn = container(phaze_icon(
+        icons::IMAGE,
+        15.0,
+        move |p| p.text_secondary,
+        theme,
+    ))
+    .style(move |s| {
+        let p = &theme.get().palette;
+        s.width(32.0)
+            .height(32.0)
+            .items_center()
+            .justify_center()
+            .border_radius(8.0)
+            .margin_right(8.0)
+            .border(1.0)
+            .border_color(p.glass_border)
+            .cursor(floem::style::CursorStyle::Pointer)
+            .hover(|s| s.background(p.bg_elevated))
+    })
+    .on_click_stop(move |_| {
+        let picked = rfd::FileDialog::new()
+            .set_title("Attach pictures")
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp"])
+            .pick_files();
+        if let Some(paths) = picked {
+            let (kept, dropped) = merge_picked(&pending_images.get_untracked(), paths);
+            pending_images.set(kept);
+            if dropped > 0 {
+                crate::app::show_toast(
+                    status_toast,
+                    format!(
+                        "At most {} pictures go with one message; {dropped} left out",
+                        phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE
+                    ),
+                );
+            }
+        }
+    });
+
+    // The pictures waiting to go, each with a button that takes it off.
+    let pending_row = dyn_stack(
+        move || pending_images.get(),
+        |path: &std::path::PathBuf| path.clone(),
+        move |path: std::path::PathBuf| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let remove = path.clone();
+            stack((
+                label(move || name.clone())
+                    .style(move |s| s.font_size(11.0).color(theme.get().palette.text_primary)),
+                container(phaze_icon(
+                    icons::CLOSE,
+                    9.0,
+                    move |p| p.text_secondary,
+                    theme,
+                ))
+                .style(|s| {
+                    s.margin_left(6.0)
+                        .padding(2.0)
+                        .cursor(floem::style::CursorStyle::Pointer)
+                })
+                .on_click_stop(move |_| {
+                    pending_images.update(|list| list.retain(|p| *p != remove));
+                }),
+            ))
+            .style(move |s| {
+                let p = &theme.get().palette;
+                s.items_center()
+                    .padding_horiz(8.0)
+                    .padding_vert(3.0)
+                    .margin_right(6.0)
+                    .border_radius(6.0)
+                    .background(p.bg_elevated)
+                    .border(1.0)
+                    .border_color(p.glass_border)
+            })
+        },
+    )
+    .style(move |s| {
+        s.flex_row()
+            .flex_wrap(floem::style::FlexWrap::Wrap)
+            .width_full()
+            .margin_bottom(6.0)
+            .apply_if(pending_images.get().is_empty(), |s| {
+                s.display(floem::style::Display::None)
+            })
+    });
+
     let input_bar = container(
-        stack((input_widget, send_btn)).style(|s| s.items_center().width_full()),
+        stack((
+            pending_row,
+            stack((attach_btn, input_widget, send_btn)).style(|s| s.items_center().width_full()),
+        ))
+        .style(|s| s.flex_col().width_full()),
     )
     .style(move |s| {
         let t = theme.get();
@@ -2763,6 +3023,7 @@ mod tests {
         CompactionState,
     };
     use super::{diff_view_rows, DiffViewRow};
+    use super::{load_picked_images, merge_picked, strip_pictures_note, with_pictures_note};
     use phazeai_core::context::system_prompt::instructions_allowance;
 
     /// The chat's prompt for a folder that is not a git repository.
@@ -2994,6 +3255,115 @@ mod tests {
         assert!(out.attached.is_empty());
         assert!(out.prompt.contains("not attached"));
         assert!(!out.prompt.contains("sk-live-123"));
+    }
+
+    /// A real 1x1 PNG.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn a_mentioned_picture_is_sent_as_an_image_not_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("private")).unwrap();
+        std::fs::create_dir_all(root.join(".phazeai")).unwrap();
+        std::fs::write(
+            root.join(".phazeai/privacy.toml"),
+            "deny = [\"private/**\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/bug.png"), PNG_1X1).unwrap();
+        std::fs::write(root.join("private/mockup.png"), PNG_1X1).unwrap();
+        std::fs::write(root.join("docs/fake.png"), "not a picture").unwrap();
+
+        let out = expand_file_mentions("why does @docs/bug.png look off?", &root);
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].media_type, "image/png");
+        assert_eq!(out.attached, vec![root.join("docs/bug.png")]);
+        // The model is told which file the picture is, and gets no bytes as text.
+        assert!(
+            out.prompt.contains("`docs/bug.png` (picture attached)"),
+            "{}",
+            out.prompt
+        );
+        assert!(!out.prompt.contains("<file"), "{}", out.prompt);
+
+        // A denied picture is never read, and a file that only looks like one
+        // is refused with the reason.
+        let out = expand_file_mentions("compare @private/mockup.png and @docs/fake.png", &root);
+        assert!(out.images.is_empty());
+        assert!(out.attached.is_empty());
+        assert_eq!(out.blocked.len(), 1);
+        assert_eq!(out.unreadable.len(), 1);
+        assert!(
+            out.prompt
+                .contains("`docs/fake.png` (not attached: it isn't a PNG"),
+            "{}",
+            out.prompt
+        );
+    }
+
+    #[test]
+    fn picked_pictures_follow_the_privacy_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("private")).unwrap();
+        std::fs::create_dir_all(root.join(".phazeai")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(
+            root.join(".phazeai/privacy.toml"),
+            "deny = [\"private/**\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("private/secret.png"), PNG_1X1).unwrap();
+        // A screenshot from outside the project, picked in the file dialog.
+        let outside = dir.path().join("Screenshot.png");
+        std::fs::write(&outside, PNG_1X1).unwrap();
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, "hello").unwrap();
+
+        let out = load_picked_images(
+            &[outside.clone(), root.join("private/secret.png"), notes],
+            &root,
+        );
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.attached, vec![outside]);
+        let refused: Vec<&str> = out.refused.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(refused, vec!["secret.png", "notes.txt"]);
+        assert!(
+            out.refused[0].1.contains("privacy.toml"),
+            "{:?}",
+            out.refused
+        );
+    }
+
+    #[test]
+    fn picking_more_pictures_skips_repeats_and_stops_at_the_limit() {
+        let p = |n: usize| std::path::PathBuf::from(format!("/shots/{n}.png"));
+        let max = phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE;
+        let (kept, dropped) = merge_picked(&[p(0)], vec![p(0), p(1)]);
+        assert_eq!((kept, dropped), (vec![p(0), p(1)], 0));
+        let (kept, dropped) = merge_picked(&[], (0..max + 3).map(p).collect());
+        assert_eq!((kept.len(), dropped), (max, 3));
+    }
+
+    #[test]
+    fn the_pictures_line_is_shown_and_left_out_when_retrying() {
+        let img = phazeai_core::llm::ImageInput::from_bytes(PNG_1X1).unwrap();
+        let shown = with_pictures_note("why is it cut off?", &[img.clone(), img]);
+        assert_eq!(shown, "why is it cut off?\n\n[Pictures: PNG 1x1, PNG 1x1]");
+        assert_eq!(strip_pictures_note(&shown), "why is it cut off?");
+        assert_eq!(with_pictures_note("plain", &[]), "plain");
+        assert_eq!(strip_pictures_note("plain"), "plain");
+        // A message that merely contains the words is left alone.
+        let typed = "see below\n\n[Pictures: none\nmore text";
+        assert_eq!(strip_pictures_note(typed), typed);
     }
 
     fn msg(role: ChatRole, content: &str, loading: bool, is_error: bool) -> ChatMessage {

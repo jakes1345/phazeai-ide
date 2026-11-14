@@ -279,6 +279,8 @@ pub(crate) struct AppState {
     cancel_requested: bool,
     status_text: String,
     pending_approval: Option<PendingApproval>,
+    /// Pictures attached with `/image`, sent with the next message.
+    pending_images: Vec<phazeai_core::llm::ImageInput>,
     /// Input lines, as typed (`/add path`, `/skill name`, or a message),
     /// waiting for the current run to finish; see [`Self::drain_queue`].
     queued: VecDeque<String>,
@@ -386,6 +388,12 @@ impl AppState {
             self.notify("Queued — it will be sent when the current response finishes");
             return;
         }
+        let display = if self.pending_images.is_empty() {
+            display
+        } else {
+            let labels: Vec<String> = self.pending_images.iter().map(|i| i.label()).collect();
+            format!("{display}\n[Pictures: {}]", labels.join(", "))
+        };
         self.push(ChatItem::message(MessageRole::User, display));
         self.start_run(agent_input);
     }
@@ -409,7 +417,48 @@ impl AppState {
         self.status_text = "Thinking".into();
         self.follow = true;
         self.companion.on_user_message();
-        let _ = self.worker_tx.send(WorkerCommand::Run(agent_input));
+        let command = if self.pending_images.is_empty() {
+            WorkerCommand::Run(agent_input)
+        } else {
+            WorkerCommand::RunWithImages {
+                prompt: agent_input,
+                images: std::mem::take(&mut self.pending_images),
+            }
+        };
+        let _ = self.worker_tx.send(command);
+    }
+
+    /// Attach a picture to the next message (`/image <path>`), after the
+    /// privacy policy has had its say.
+    fn attach_image(&mut self, path_str: &str) {
+        let path = std::path::Path::new(path_str);
+        let abs = phazeai_core::privacy::absolutize(path);
+        if let Err(reason) = phazeai_core::privacy::check_and_record(&abs, "/image") {
+            self.error(format!(
+                "Not attached: '{path_str}' is {reason}. See /privacy."
+            ));
+            return;
+        }
+        if self.pending_images.len() >= phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE {
+            self.error(format!(
+                "At most {} pictures go with one message.",
+                phazeai_core::llm::image::MAX_IMAGES_PER_MESSAGE
+            ));
+            return;
+        }
+        match phazeai_core::llm::ImageInput::from_path(&abs) {
+            Ok(image) => {
+                phazeai_core::privacy::audit::attach_to_next_scope(&abs);
+                let label = image.label();
+                self.pending_images.push(image);
+                let n = self.pending_images.len();
+                self.notify(format!(
+                    "Attached {label} — it goes with your next message ({n} picture{} waiting)",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            Err(reason) => self.error(format!("Couldn't attach '{path_str}': {reason}")),
+        }
     }
 
     /// Interrupt the running request.
@@ -775,6 +824,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         cancel_requested: false,
         status_text: String::new(),
         pending_approval: None,
+        pending_images: Vec::new(),
         queued: VecDeque::new(),
         meter: phazeai_core::cost::Meter::default(),
         context_tokens: None,
@@ -1087,6 +1137,7 @@ mod tests {
             cancel_requested: false,
             status_text: String::new(),
             pending_approval: None,
+            pending_images: Vec::new(),
             queued: VecDeque::new(),
             meter: phazeai_core::cost::Meter::default(),
             context_tokens: None,
@@ -1507,6 +1558,110 @@ mod tests {
         assert_eq!(
             state.settings.llm.base_url, None,
             "the Ollama server's address must not carry over to LM Studio"
+        );
+    }
+
+    /// A real 1x1 PNG.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn an_attached_picture_goes_with_the_next_message_only() {
+        let tmp = TempDir::new("image");
+        let shot = tmp.path().join("My Shot.png");
+        std::fs::write(&shot, PNG_1X1).unwrap();
+        let notes = tmp.path().join("notes.png");
+        std::fs::write(&notes, "not a picture").unwrap();
+        let (mut state, mut rx) = test_state(tmp.path());
+
+        // A text file named like a picture is refused and nothing waits.
+        actions::submit_line(&mut state, &format!("/image {}", notes.display()));
+        assert!(state.pending_images.is_empty());
+
+        // Dropped on the terminal, the path arrives with its space escaped.
+        let dropped = shot.display().to_string().replace(' ', "\\ ");
+        actions::submit_line(&mut state, &format!("/image {dropped}"));
+        assert_eq!(state.pending_images.len(), 1);
+        assert!(run_input(&mut rx).is_none(), "attaching sends nothing yet");
+
+        actions::submit_line(&mut state, "why is the header cut off?");
+        match rx.try_recv() {
+            Ok(WorkerCommand::RunWithImages { prompt, images }) => {
+                assert!(prompt.contains("why is the header cut off?"), "{prompt}");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].media_type, "image/png");
+            }
+            _ => panic!("the message was not sent with its picture"),
+        }
+        assert!(state.pending_images.is_empty());
+        let shown = state
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ChatItem::Message(m) if m.role == MessageRole::User => Some(m.content.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(shown.ends_with("[Pictures: PNG 1x1]"), "{shown}");
+
+        // The next message goes without it.
+        state.processing = false;
+        actions::submit_line(&mut state, "thanks");
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::Run(_))));
+    }
+
+    #[tokio::test]
+    async fn the_worker_sends_the_picture_to_the_model() {
+        let tmp = TempDir::new("image-worker");
+        let (url, bodies) = fake_provider(Vec::new()).await;
+        let (worker_tx, worker_rx) = mpsc::unbounded_channel();
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let _worker = worker::spawn(
+            WorkerConfig {
+                llm: Some(fake_client(&url)),
+                prompt: system_prompt_builder(tmp.path(), None),
+                restore: Vec::new(),
+                approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
+                policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
+                cancel: Arc::new(AtomicBool::new(false)),
+                context_budget: 60_000,
+                max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
+                code_search: None,
+                subagents: None,
+                permissions: None,
+            },
+            worker_rx,
+            ui_tx,
+        );
+        let image = phazeai_core::llm::ImageInput::from_bytes(PNG_1X1).unwrap();
+        worker_tx
+            .send(WorkerCommand::RunWithImages {
+                prompt: "what is in this picture?".into(),
+                images: vec![image.clone()],
+            })
+            .unwrap();
+        run_finished(&mut ui_rx).await;
+
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        let last = sent[0]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            last["content"],
+            json!([
+                { "type": "text", "text": "what is in this picture?" },
+                { "type": "image_url", "image_url": { "url": image.data_url() } },
+            ])
         );
     }
 }

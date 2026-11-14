@@ -6,6 +6,7 @@ use ollama_rs::generation::chat::{
     ChatMessage as OllamaChatMessage, ChatMessageRequest, ChatToolCall, ChatToolFunction,
     MessageRole,
 };
+use ollama_rs::generation::images::Image;
 use ollama_rs::generation::options::GenerationOptions;
 use ollama_rs::generation::parameters::{KeepAlive, TimeUnit};
 use ollama_rs::Ollama;
@@ -121,7 +122,17 @@ impl OllamaClient {
                         Role::Assistant => MessageRole::Assistant,
                         Role::System => MessageRole::System,
                     };
-                    OllamaChatMessage::new(role, m.content.clone())
+                    let msg = OllamaChatMessage::new(role, m.content.clone());
+                    if m.images.is_empty() {
+                        msg
+                    } else {
+                        msg.with_images(
+                            m.images
+                                .iter()
+                                .map(|img| Image::from_base64(img.data.clone()))
+                                .collect(),
+                        )
+                    }
                 }
             })
             .collect()

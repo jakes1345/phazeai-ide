@@ -58,6 +58,8 @@ pub enum CommandResult {
     SetMode(String),
     /// Add a file to the conversation context (/add <path>).
     AddFile(String),
+    /// `/image <path>`: a picture to send with the next message.
+    AttachImage(String),
     /// Retry the last user message.
     Retry,
     /// Cancel the current agent run.
@@ -281,6 +283,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         [],
         "<file>",
         "Add a file's contents to the context",
+        Project
+    ),
+    cmd!(
+        "/image",
+        ["/img"],
+        "<picture>",
+        "Send a picture (PNG, JPEG, GIF, WebP) with your next message",
         Project
     ),
     cmd!(
@@ -604,6 +613,18 @@ pub fn handle_command(input: &str) -> CommandResult {
                 CommandResult::AddFile(arg.to_string())
             }
         }
+        "/image" | "/img" => {
+            if arg.is_empty() {
+                CommandResult::Message(
+                    "Usage: /image <picture>\nSends a screenshot or other picture (PNG, JPEG, \
+                     GIF or WebP) with your next message, for a model that can see. Drop the \
+                     file into the terminal to paste its path."
+                        .into(),
+                )
+            } else {
+                CommandResult::AttachImage(unquote_path(arg))
+            }
+        }
         "/retry" => CommandResult::Retry,
         "/cancel" | "/stop" => CommandResult::Cancel,
         "/undo" => {
@@ -666,6 +687,55 @@ pub fn handle_command(input: &str) -> CommandResult {
 }
 
 /// Build the `/help` text from [`COMMANDS`] and [`SHORTCUTS`].
+/// A file path as a terminal pastes it when a file is dropped on it: maybe
+/// in quotes (`'/home/me/My Shot.png'`), with spaces escaped
+/// (`My\ Shot.png`) or as a `file://` URL with `%20` for spaces.
+pub fn unquote_path(raw: &str) -> String {
+    let s = raw.trim();
+    for q in ['\'', '"'] {
+        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    if let Some(rest) = s.strip_prefix("file://") {
+        return percent_decode(rest);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if matches!(next, ' ' | '(' | ')' | '\'' | '"' | '&' | '\\') {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `%XX` escapes decoded (as in a `file://` URL); anything malformed is kept.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let Some(Ok(b)) = s.get(i + 1..i + 3).map(|h| u8::from_str_radix(h, 16)) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub fn help_text() -> String {
     let synopsis = |c: &CommandSpec| {
         if c.args.is_empty() {
@@ -857,5 +927,33 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(help_text().contains("/privacy"));
+    }
+
+    #[test]
+    fn image_takes_a_path_as_a_terminal_pastes_it() {
+        assert!(matches!(
+            handle_command("/image"),
+            CommandResult::Message(m) if m.contains("Usage: /image")
+        ));
+        for (typed, want) in [
+            ("/image shot.png", "shot.png"),
+            ("/img '/home/me/My Shot.png'", "/home/me/My Shot.png"),
+            ("/image \"/home/me/My Shot.png\"", "/home/me/My Shot.png"),
+            (
+                "/image /home/me/My\\ Shot\\ (2).png",
+                "/home/me/My Shot (2).png",
+            ),
+            (
+                "/image file:///home/me/My%20Shot.png",
+                "/home/me/My Shot.png",
+            ),
+        ] {
+            match handle_command(typed) {
+                CommandResult::AttachImage(path) => assert_eq!(path, want, "{typed}"),
+                _ => panic!("{typed} was not read as /image"),
+            }
+        }
+        assert_eq!(unquote_path("a%2"), "a%2");
+        assert_eq!(unquote_path("file:///x%zz.png"), "/x%zz.png");
     }
 }

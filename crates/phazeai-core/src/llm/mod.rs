@@ -1,6 +1,7 @@
 mod claude;
 pub mod context_budget;
 pub mod discovery;
+pub mod image;
 pub mod key_setup;
 pub mod model_list;
 pub mod model_router;
@@ -15,6 +16,7 @@ mod traits;
 
 pub use claude::ClaudeClient;
 pub use discovery::LocalDiscovery;
+pub use image::ImageInput;
 pub use model_router::{ModelRoute, ModelRouter, TaskType};
 pub use ollama::OllamaClient;
 pub use ollama_manager::OllamaManager;

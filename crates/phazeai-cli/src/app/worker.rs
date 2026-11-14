@@ -21,6 +21,11 @@ use crate::tool_view::{approval_preview, unanswered_tool_calls, ApprovalPolicy, 
 pub enum WorkerCommand {
     /// Run the agent on a prompt.
     Run(String),
+    /// Run the agent on a prompt with pictures attached (`/image`).
+    RunWithImages {
+        prompt: String,
+        images: Vec<phazeai_core::llm::ImageInput>,
+    },
     /// Forget the conversation context.
     Clear,
     /// Replace the LLM client (provider / model / key change) and the
@@ -259,7 +264,12 @@ pub fn spawn(
                         }
                     }
                 }
-                WorkerCommand::Run(prompt) => {
+                command @ (WorkerCommand::Run(_) | WorkerCommand::RunWithImages { .. }) => {
+                    let (prompt, images) = match command {
+                        WorkerCommand::RunWithImages { prompt, images } => (prompt, images),
+                        WorkerCommand::Run(prompt) => (prompt, Vec::new()),
+                        _ => unreachable!("matched above"),
+                    };
                     cfg.cancel.store(false, Ordering::SeqCst);
                     let Some(agent) = agent.as_ref() else {
                         let _ = ui_tx.send(UiEvent::Agent(AgentEvent::Error(
@@ -270,7 +280,7 @@ pub fn spawn(
                     };
 
                     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
-                    let mut run = Box::pin(agent.run_with_events(prompt, ev_tx));
+                    let mut run = Box::pin(agent.run_with_images_and_events(prompt, images, ev_tx));
                     let mut tick = tokio::time::interval(Duration::from_millis(50));
                     loop {
                         tokio::select! {

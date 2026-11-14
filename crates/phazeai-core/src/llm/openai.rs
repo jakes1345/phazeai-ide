@@ -232,6 +232,18 @@ fn chat_message_body(m: &Message) -> Value {
             "content": m.content,
             "tool_calls": tcs,
         })
+    } else if !m.images.is_empty() {
+        let mut parts = vec![serde_json::json!({ "type": "text", "text": m.content })];
+        parts.extend(m.images.iter().map(|img| {
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": img.data_url() },
+            })
+        }));
+        serde_json::json!({
+            "role": m.role,
+            "content": parts,
+        })
     } else {
         serde_json::json!({
             "role": m.role,
