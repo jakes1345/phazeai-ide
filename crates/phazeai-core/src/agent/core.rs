@@ -6,7 +6,8 @@ use crate::hooks::HookOutcome;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
 use crate::permissions::{Decision, Permissions};
 use crate::tools::{
-    render, FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
+    render, FileWrite, MoreToolsCall, ToolApprovalManager, ToolDefinition, ToolPermission,
+    ToolRegistry, ToolResult, MORE_TOOLS,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -111,6 +112,8 @@ pub struct Agent {
     /// Permission rules and hooks (see [`crate::permissions`]). Shared with
     /// `subagent` helpers, so it may be set before or after them.
     permissions: PermissionsSlot,
+    /// While set, only calls that read run (see [`Self::with_read_only`]).
+    read_only: Arc<AtomicBool>,
 }
 
 /// Where an agent keeps its permission rules, shared with its helpers.
@@ -141,7 +144,27 @@ impl Agent {
             system_prompt: None,
             checkpoints: None,
             permissions: Arc::new(StdMutex::new(None)),
+            read_only: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Share a read-only switch with the caller (Plan and Ask modes). While
+    /// it is set, a call the approval classifier does not class as
+    /// [`ToolPermission::ReadOnly`] (a write, a delete, a shell command that
+    /// changes anything, an MCP tool) does not run: the model is told so and
+    /// asked to put that step in its plan instead, and no approval is asked.
+    /// Permission rules that allow a call do not override it. The switch is
+    /// read at each call, so turning it on stops writes from the next call.
+    ///
+    /// The tools offered stay the same, so the prompt cache survives a
+    /// switch between modes.
+    pub fn with_read_only(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.read_only = flag;
+        self
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Relaxed)
     }
 
     /// Attach a cancellation token. Set the `AtomicBool` to `true` from any
@@ -912,6 +935,21 @@ impl Agent {
         let tool_name = &tool_call.function.name;
         let params = tool_call.parse_arguments().unwrap_or(Value::Null);
 
+        if self.is_read_only()
+            && ToolApprovalManager::default().classify_tool(tool_name, &params)
+                != ToolPermission::ReadOnly
+        {
+            self.refuse(
+                tool_call,
+                params,
+                READ_ONLY_REFUSAL.to_string(),
+                event_tx,
+                executions,
+            )
+            .await;
+            return Gate::Deny;
+        }
+
         let decision = self
             .permissions()
             .map_or(Decision::Default, |p| p.decide(tool_name, &params));
@@ -1230,6 +1268,16 @@ async fn cancelled(token: &AtomicBool) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
+
+/// What the model is told about a call that would change something while the
+/// agent is read-only (Plan and Ask modes).
+pub const READ_ONLY_REFUSAL: &str = "Read-only mode (the user chose Plan or Ask): this call \
+     could change files or run something, so it did not run. Keep to reading; put this step \
+     in your plan, and the user will have it carried out after reviewing the plan.";
+
+/// What the user's "run the plan" sends after a reply in Plan mode.
+pub const RUN_PLAN_PROMPT: &str = "Carry out the plan above, step by step. Check each step \
+     works before going on to the next.";
 
 /// The result recorded for a tool call that Stop kept from starting.
 const NOT_RUN: &str = "Cancelled by the user before this tool started; it did not run.";

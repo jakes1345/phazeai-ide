@@ -19,6 +19,7 @@
 - the text-only AI helpers;
 - settings save and load;
 - Stop and history trimming in the agent loop;
+- Plan and Ask modes are read-only for real (`Agent::with_read_only`, `tests/read_only_mode.rs`): a call the approval classifier does not class as read-only is refused without asking, in the IDE chat and the TUI. After a plan, the IDE's **Run plan** button or the TUI's `/go` switches to Chat and has it carried out. The button has no GUI test and was not driven with a real model;
 - permission rules and tool hooks (#49), the per-hunk keep/undo of an agent's edit (#44) and run undo (#45);
 - editor key routing and focus (#55, #57): unit tests plus real-IDE runs under Xvfb.
 - any Hugging Face GGUF model in PhazeAI Local (`phazeai models search|files|pull|list|use|rm`, `local_ai/hub.rs`, `local_ai/gguf.rs`): search, the file listing at a pinned commit (split models grouped), the pick of the best quantization this machine's RAM can run, SHA-256-verified download, the KV-cache size read from the GGUF header, and selection by the server, tested against a fake Hub over real sockets and end to end through the CLI. Not yet run against huggingface.co itself (blocked where it was built). Downloaded models are listed in Settings → Local AI with Use and Delete; searching and pulling are CLI-only so far.
