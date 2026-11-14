@@ -185,6 +185,27 @@ fn conversation_messages(messages: &[Message]) -> Vec<Value> {
                 "role": "assistant",
                 "content": content,
             }));
+        } else if !m.images.is_empty() {
+            // Pictures come before the words about them, as Anthropic
+            // recommends; an empty text block is refused, so it's left out.
+            let mut content: Vec<Value> = m
+                .images
+                .iter()
+                .map(|img| {
+                    serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.media_type,
+                            "data": img.data,
+                        },
+                    })
+                })
+                .collect();
+            if !m.content.is_empty() {
+                content.push(serde_json::json!({ "type": "text", "text": m.content }));
+            }
+            out.push(serde_json::json!({ "role": m.role, "content": content }));
         } else {
             out.push(serde_json::json!({
                 "role": m.role,

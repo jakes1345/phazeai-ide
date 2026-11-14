@@ -65,6 +65,17 @@ impl ConversationHistory {
         self.trim_if_needed();
     }
 
+    /// A user message with pictures for a vision model to look at.
+    pub fn add_user_message_with_images(
+        &mut self,
+        content: impl Into<String>,
+        images: Vec<crate::llm::ImageInput>,
+    ) {
+        self.messages
+            .push_back(Message::user_with_images(content, images));
+        self.trim_if_needed();
+    }
+
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
         self.messages.push_back(Message::assistant(content));
         self.trim_if_needed();
@@ -212,6 +223,11 @@ impl ConversationHistory {
                 ));
             }
             out.push('\n');
+            // The summariser is a text call: it gets a note that pictures were
+            // sent, not the pictures.
+            for img in &msg.images {
+                out.push_str(&format!("[Picture attached: {}]\n", img.label()));
+            }
             if let Some(calls) = &msg.tool_calls {
                 for call in calls {
                     let args = crate::text::truncate_bytes(&call.function.arguments, 400);
@@ -421,7 +437,8 @@ const MIN_MESSAGES_TO_COMPACT: usize = 4;
 const TRANSCRIPT_MESSAGE_LIMIT: usize = 4000;
 
 /// Rough token cost of one message (~3 characters per token for code-heavy
-/// text), including tool-call arguments and the reasoning sent back with it.
+/// text), including tool-call arguments, the reasoning sent back with it and
+/// its pictures (counted by their pixels, not their base64 length).
 fn message_tokens(m: &Message) -> usize {
     let calls: usize = m
         .tool_calls
@@ -430,7 +447,8 @@ fn message_tokens(m: &Message) -> usize {
         .map(|c| c.function.name.len() + c.function.arguments.len())
         .sum();
     let reasoning = m.reasoning.as_ref().map_or(0, String::len);
-    (m.content.len() + calls + reasoning).div_ceil(3)
+    let images: usize = m.images.iter().map(|i| i.estimated_tokens()).sum();
+    (m.content.len() + calls + reasoning).div_ceil(3) + images
 }
 
 /// Appended to the question when trimming removes steps of its turn, so the
@@ -839,6 +857,21 @@ mod tests {
         assert!(h.estimate_tokens() > without + 1);
         h.clear();
         assert_eq!(h.summary(), None);
+    }
+
+    #[test]
+    fn pictures_count_by_pixels_and_show_in_the_transcript() {
+        let png = crate::llm::ImageInput::from_bytes(crate::llm::image::tests::PNG_1X1).unwrap();
+        let mut plain = ConversationHistory::new();
+        plain.add_user_message("look at this");
+        let mut with_picture = ConversationHistory::new();
+        with_picture.add_user_message_with_images("look at this", vec![png.clone()]);
+        // A 1x1 picture costs one token, not its base64 length / 3.
+        assert_eq!(with_picture.estimate_tokens(), plain.estimate_tokens() + 1);
+        assert_eq!(with_picture.get_messages()[0].images, vec![png]);
+        assert!(with_picture
+            .transcript(1)
+            .contains("[Picture attached: PNG 1x1]"));
     }
 
     #[test]

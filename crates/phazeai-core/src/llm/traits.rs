@@ -23,6 +23,9 @@ pub struct Message {
     /// with tools whose earlier assistant turns leave it out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Pictures sent with a user message, for vision models.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<super::ImageInput>,
 }
 
 impl Message {
@@ -33,6 +36,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             reasoning: None,
+            images: Vec::new(),
         }
     }
 
@@ -43,6 +47,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             reasoning: None,
+            images: Vec::new(),
         }
     }
 
@@ -53,6 +58,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             reasoning: None,
+            images: Vec::new(),
         }
     }
 
@@ -63,6 +69,15 @@ impl Message {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             reasoning: None,
+            images: Vec::new(),
+        }
+    }
+
+    /// A user message with pictures for a vision model to look at.
+    pub fn user_with_images(content: impl Into<String>, images: Vec<super::ImageInput>) -> Self {
+        Self {
+            images,
+            ..Self::user(content)
         }
     }
 
@@ -80,6 +95,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             reasoning: None,
+            images: Vec::new(),
         }
     }
 }
