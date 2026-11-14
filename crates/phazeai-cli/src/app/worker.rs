@@ -55,6 +55,13 @@ pub enum UiEvent {
     Approval(ApprovalRequest),
     /// Estimated tokens currently in the context window.
     Context(usize),
+    /// A `/btw` side answer: the text so far, or how it ended.
+    Btw {
+        id: u64,
+        text: String,
+        done: bool,
+        error: bool,
+    },
     /// The current run ended (completed, failed or interrupted).
     RunFinished {
         cancelled: bool,

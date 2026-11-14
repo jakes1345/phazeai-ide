@@ -291,6 +291,8 @@ pub(crate) struct AppState {
     /// Input lines, as typed (`/add path`, `/skill name`, or a message),
     /// waiting for the current run to finish; see [`Self::drain_queue`].
     queued: VecDeque<String>,
+    /// `/btw` side questions; see `actions::btw`.
+    btw: actions::BtwSide,
     /// Tokens and cost of every model call this conversation, counted as
     /// each call reports them.
     meter: phazeai_core::cost::Meter,
@@ -496,6 +498,7 @@ impl AppState {
     /// Clear the view and reset per-conversation counters.
     fn reset_conversation_view(&mut self) {
         self.items.clear();
+        self.btw.open.clear();
         self.scroll = 0;
         self.follow = true;
         self.context_tokens = Some(0);
@@ -633,6 +636,12 @@ fn handle_ui_event(state: &mut AppState, event: UiEvent) {
             state.follow = true;
         }
         UiEvent::Context(tokens) => state.context_tokens = Some(tokens),
+        UiEvent::Btw {
+            id,
+            text,
+            done,
+            error,
+        } => actions::btw_update(state, id, text, done, error),
         UiEvent::Models {
             provider,
             filter,
@@ -837,6 +846,7 @@ pub async fn run_tui(settings: Settings, opts: TuiOptions<'_>) -> Result<()> {
         pending_approval: None,
         pending_images: Vec::new(),
         queued: VecDeque::new(),
+        btw: actions::BtwSide::default(),
         meter: phazeai_core::cost::Meter::default(),
         context_tokens: None,
         context_budget,
@@ -1152,6 +1162,7 @@ mod tests {
             pending_approval: None,
             pending_images: Vec::new(),
             queued: VecDeque::new(),
+            btw: actions::BtwSide::default(),
             meter: phazeai_core::cost::Meter::default(),
             context_tokens: None,
             context_budget,
@@ -1196,6 +1207,59 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn btw_runs_mid_reply_and_streams_into_its_own_line() {
+        let tmp = TempDir::new("btw");
+        let (mut state, mut rx) = test_state(tmp.path());
+        state.processing = true;
+        // A command, not a prompt: it isn't queued behind the running reply.
+        actions::submit_line(&mut state, "/btw");
+        assert!(state.queued.is_empty());
+        assert!(run_input(&mut rx).is_none());
+        assert!(turns(&state, MessageRole::System)
+            .iter()
+            .any(|t| t.contains("PhazeAI Local")));
+
+        // An answer streams into the line its question made…
+        state.system("btw › what is qty?\nThinking…");
+        let index = state.items.len() - 1;
+        state.btw.open.insert(7, (index, "what is qty?".into()));
+        actions::btw_update(&mut state, 7, "The count".into(), false, false);
+        actions::btw_update(&mut state, 7, "The count in stock.".into(), true, false);
+        assert_eq!(
+            turns(&state, MessageRole::System).last().unwrap(),
+            "btw › what is qty?\nThe count in stock."
+        );
+        // …joins the history later side questions see, and never the agent.
+        assert_eq!(state.btw.history.len(), 1);
+        assert!(run_input(&mut rx).is_none());
+        assert!(turns(&state, MessageRole::User).is_empty());
+
+        // A failure shows as an error and stays out of the history.
+        state.system("btw › again?\nThinking…");
+        state
+            .btw
+            .open
+            .insert(8, (state.items.len() - 1, "again?".into()));
+        actions::btw_update(&mut state, 8, "not set up".into(), true, true);
+        assert_eq!(
+            turns(&state, MessageRole::Error).last().unwrap(),
+            "btw › again?\nnot set up"
+        );
+        assert_eq!(state.btw.history.len(), 1);
+
+        // After the screen is cleared, a late answer lands nowhere.
+        state.system("btw › late?\nThinking…");
+        state
+            .btw
+            .open
+            .insert(9, (state.items.len() - 1, "late?".into()));
+        state.reset_conversation_view();
+        state.system("unrelated");
+        actions::btw_update(&mut state, 9, "late answer".into(), true, false);
+        assert_eq!(turns(&state, MessageRole::System), ["unrelated"]);
     }
 
     #[test]

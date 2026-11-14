@@ -24,5 +24,5 @@ pub use openai::{CacheHints, OpenAIClient};
 pub use provider::{
     small_model_for, ModelInfo, ProviderConfig, ProviderId, ProviderRegistry, UsageTracker,
 };
-pub use text_only::{text_only_reply, TextReply};
+pub use text_only::{text_only_reply, text_only_stream, TextReply};
 pub use traits::*;

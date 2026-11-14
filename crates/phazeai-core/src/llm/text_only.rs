@@ -22,6 +22,16 @@ pub struct TextReply {
 /// Send `prompt` as the only message (no system prompt, no history), offer
 /// no tools, and collect the text the model streams back.
 pub async fn text_only_reply(client: &dyn LlmClient, prompt: &str) -> TextReply {
+    text_only_stream(client, prompt, |_| {}).await
+}
+
+/// [`text_only_reply`], handing each piece of text to `on_text` as it
+/// arrives (for showing a reply while it is written).
+pub async fn text_only_stream(
+    client: &dyn LlmClient,
+    prompt: &str,
+    mut on_text: impl FnMut(&str),
+) -> TextReply {
     let mut reply = TextReply::default();
     let mut stream = match client.chat_stream(&[Message::user(prompt)], &[]).await {
         Ok(stream) => stream,
@@ -32,7 +42,10 @@ pub async fn text_only_reply(client: &dyn LlmClient, prompt: &str) -> TextReply 
     };
     while let Some(event) = stream.next().await {
         match event {
-            StreamEvent::TextDelta(delta) => reply.text.push_str(&delta),
+            StreamEvent::TextDelta(delta) => {
+                on_text(&delta);
+                reply.text.push_str(&delta);
+            }
             StreamEvent::Done => break,
             StreamEvent::Error(e) => {
                 reply.error = Some(e);

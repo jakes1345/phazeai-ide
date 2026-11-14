@@ -243,6 +243,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
         CommandResult::Message(msg) => state.system(msg),
         CommandResult::Quit => state.should_quit = true,
 
+        CommandResult::Btw(question) => btw(state, question.trim()),
         CommandResult::Clear => {
             if busy(state, "clear the conversation") {
                 return;
@@ -1355,4 +1356,123 @@ pub(super) fn set_mode(state: &mut AppState, mode: &str) {
         matches!(mode, "plan" | "ask"),
         std::sync::atomic::Ordering::Relaxed,
     );
+}
+
+/// `/btw` side questions of this session.
+#[derive(Default)]
+pub(super) struct BtwSide {
+    next: u64,
+    /// Answered side questions, which later ones see.
+    pub(super) history: Vec<phazeai_core::btw::Exchange>,
+    /// Questions still being answered: id → (index of their line in
+    /// `state.items`, question). Forgotten when the screen is cleared.
+    pub(super) open: std::collections::HashMap<u64, (usize, String)>,
+}
+
+fn btw_line(question: &str, answer: &str) -> String {
+    format!("btw › {question}\n{answer}")
+}
+
+/// `/btw <question>`: asks PhazeAI Local (free, on this machine) about the
+/// conversation so far. Runs beside a reply that is still going; the answer
+/// is a system line on screen and never reaches the agent.
+fn btw(state: &mut AppState, question: &str) {
+    use phazeai_core::btw::{self, SessionLine, Who};
+    if question.is_empty() {
+        state.system(
+            "/btw <question>: a quick side question about this chat, answered free by \
+             PhazeAI Local while the main reply keeps going. It isn't added to the conversation.",
+        );
+        return;
+    }
+    let session: Vec<SessionLine> = state
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Message(m) => match m.role {
+                MessageRole::User => Some(SessionLine::new(Who::User, m.content.clone())),
+                MessageRole::Assistant => Some(SessionLine::new(Who::Assistant, m.content.clone())),
+                _ => None,
+            },
+            ChatItem::Tool(card) => {
+                let outcome = card
+                    .digest
+                    .as_ref()
+                    .map(|d| d.headline.clone())
+                    .unwrap_or_default();
+                Some(SessionLine::new(
+                    Who::Tool,
+                    format!("{} {} {outcome}", card.name, card.label),
+                ))
+            }
+        })
+        .collect();
+    let id = state.btw.next;
+    state.btw.next += 1;
+    state.system(btw_line(
+        question,
+        "Thinking… (the first question loads the local model)",
+    ));
+    state
+        .btw
+        .open
+        .insert(id, (state.items.len() - 1, question.to_string()));
+
+    let settings = state.settings.clone();
+    let earlier = state.btw.history.clone();
+    let question = question.to_string();
+    let ui_tx = state.ui_tx.clone();
+    tokio::spawn(async move {
+        let prompt = btw::prompt(&session, &earlier, &question, btw::budget_chars(&settings));
+        let mut so_far = String::new();
+        let progress = ui_tx.clone();
+        let result = btw::ask(&settings, &prompt, |piece| {
+            so_far.push_str(piece);
+            let _ = progress.send(super::worker::UiEvent::Btw {
+                id,
+                text: so_far.clone(),
+                done: false,
+                error: false,
+            });
+        })
+        .await;
+        let (text, error) = match result {
+            Ok(answer) if answer.is_empty() => ("(no answer)".to_string(), false),
+            Ok(answer) => (answer, false),
+            Err(e) => (e, true),
+        };
+        let _ = ui_tx.send(super::worker::UiEvent::Btw {
+            id,
+            text,
+            done: true,
+            error,
+        });
+    });
+}
+
+/// Shows a `/btw` answer in its line; a finished one joins the history later
+/// side questions see.
+pub(super) fn btw_update(state: &mut AppState, id: u64, text: String, done: bool, error: bool) {
+    let Some((index, question)) = state.btw.open.get(&id).cloned() else {
+        return; // the screen was cleared meanwhile
+    };
+    let header = btw_line(&question, "");
+    if let Some(ChatItem::Message(m)) = state.items.get_mut(index) {
+        if m.content.starts_with(&header) {
+            m.content = btw_line(&question, &text);
+            if error {
+                m.role = MessageRole::Error;
+            }
+            state.follow = true;
+        }
+    }
+    if done {
+        state.btw.open.remove(&id);
+        if !error {
+            state.btw.history.push(phazeai_core::btw::Exchange {
+                question,
+                answer: text,
+            });
+        }
+    }
 }
