@@ -128,7 +128,7 @@ fn apply_tool_result(list: &mut [ChatMessage], name: &str, summary: &str) {
         .iter_mut()
         .find(|m| m.role == ChatRole::Tool && m.loading && m.content == running)
     {
-        row.content = format!("{name}: {summary}");
+        row.content = format!("{name}: {}", super::chat_markdown::tool_summary(summary));
         row.loading = false;
     }
 }
@@ -149,6 +149,61 @@ fn settle_tool_rows(list: &mut [ChatMessage]) {
             row.content = format!("{name}: did not finish");
         }
     }
+}
+
+/// A model's reply as Markdown blocks (see `chat_markdown`): code in a
+/// monospace box, headings bold, paragraphs and lists as wrapped text.
+fn reply_view(text: &str, theme: RwSignal<PhazeTheme>) -> impl IntoView {
+    use super::chat_markdown::{blocks, Block};
+    floem::views::v_stack_from_iter(blocks(text).into_iter().map(move |block| {
+        match block {
+            Block::Code { text, .. } => container(label(move || text.clone()).style(move |s| {
+                let p = theme.get().palette;
+                s.font_family("monospace".to_string())
+                    .font_size(12.0)
+                    .color(p.text_primary)
+                    .line_height(1.4)
+                    .min_width(0.0)
+            }))
+            .style(move |s| {
+                let p = theme.get().palette;
+                s.width_full()
+                    .min_width(0.0)
+                    .padding(8.0)
+                    .border_radius(6.0)
+                    .background(p.bg_base.with_alpha(0.6))
+                    .border(1.0)
+                    .border_color(p.glass_border)
+            })
+            .into_any(),
+            Block::Heading(text) => label(move || text.clone())
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(14.0)
+                        .font_weight(floem::text::Weight::BOLD)
+                        .color(p.text_primary)
+                        .min_width(0.0)
+                })
+                .into_any(),
+            Block::Text(text) => label(move || text.clone())
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    s.font_size(13.0)
+                        .color(p.text_secondary)
+                        .line_height(1.5)
+                        .min_width(0.0)
+                        .flex_shrink(1.0)
+                })
+                .into_any(),
+        }
+    }))
+    .style(|s| {
+        s.flex_col()
+            .gap(8.0)
+            .width_full()
+            .min_width(0.0)
+            .flex_shrink(1.0)
+    })
 }
 
 /// The message list's key for a row. A row is built from a copy of its
@@ -2246,31 +2301,44 @@ pub fn chat_panel(
                                     s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
                                 },
                             ),
-                            label(move || text_content.clone()).style(move |s| {
-                                let t = theme.get();
-                                let p = &t.palette;
-                                s.font_size(if is_tool { 11.0 } else { 13.0 })
-                                    .color(if is_user {
-                                        p.text_primary
-                                    } else if is_error {
-                                        p.error
-                                    } else if is_typing || is_tool {
-                                        p.accent
-                                    } else {
-                                        p.text_secondary
-                                    })
-                                    .max_width_pct(100.0)
-                                    // Flex items default to their content's
-                                    // width; without this a long line pushes
-                                    // the bubble past the panel instead of
-                                    // wrapping.
-                                    .min_width(0.0)
-                                    .flex_shrink(1.0)
-                                    .line_height(1.5)
-                                    .apply_if(is_tool, |s| {
-                                        s.font_weight(floem::text::Weight::MEDIUM)
-                                    })
-                            }),
+                            {
+                                // A finished or streaming reply is drawn as
+                                // Markdown blocks; questions, tool rows,
+                                // errors and the typing dots stay plain.
+                                let as_markdown = !is_user && !is_tool && !is_error && !is_typing;
+                                let plain_text = text_content.clone();
+                                if as_markdown {
+                                    reply_view(&text_content, theme).into_any()
+                                } else {
+                                    label(move || plain_text.clone())
+                                        .style(move |s| {
+                                            let t = theme.get();
+                                            let p = &t.palette;
+                                            s.font_size(if is_tool { 11.0 } else { 13.0 })
+                                                .color(if is_user {
+                                                    p.text_primary
+                                                } else if is_error {
+                                                    p.error
+                                                } else if is_typing || is_tool {
+                                                    p.accent
+                                                } else {
+                                                    p.text_secondary
+                                                })
+                                                .max_width_pct(100.0)
+                                                // Flex items default to their content's
+                                                // width; without this a long line pushes
+                                                // the bubble past the panel instead of
+                                                // wrapping.
+                                                .min_width(0.0)
+                                                .flex_shrink(1.0)
+                                                .line_height(1.5)
+                                                .apply_if(is_tool, |s| {
+                                                    s.font_weight(floem::text::Weight::MEDIUM)
+                                                })
+                                        })
+                                        .into_any()
+                                }
+                            },
                         ))
                         .style(|s| s.items_center().flex_grow(1.0).min_width(0.0)),
                         // Retry icon (non-error AI messages) + dismiss ✕ (error messages)
