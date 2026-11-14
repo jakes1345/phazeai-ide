@@ -377,17 +377,33 @@ impl Agent {
         user_input: impl Into<String>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
+        self.run_with_images_and_events(user_input, Vec::new(), event_tx)
+            .await
+    }
+
+    /// [`Self::run_with_events`] with pictures sent alongside the question,
+    /// for a vision model to look at (a screenshot of a bug, a design to
+    /// match). They stay in the conversation like any other message, so
+    /// later turns can refer back to them.
+    pub async fn run_with_images_and_events(
+        &self,
+        user_input: impl Into<String>,
+        images: Vec<crate::llm::ImageInput>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
         let user_input = user_input.into();
         if crate::privacy::audit::in_scope() {
-            self.run_loop(user_input, event_tx).await
+            self.run_loop(user_input, images, event_tx).await
         } else {
-            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, event_tx)).await
+            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, images, event_tx))
+                .await
         }
     }
 
     async fn run_loop(
         &self,
         user_input: String,
+        images: Vec<crate::llm::ImageInput>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
         let mut iterations = 0;
@@ -408,7 +424,11 @@ impl Agent {
             if let Some(prompt) = &self.system_prompt {
                 conversation.set_system_prompt(prompt.clone());
             }
-            conversation.add_user_message(&user_input);
+            if images.is_empty() {
+                conversation.add_user_message(&user_input);
+            } else {
+                conversation.add_user_message_with_images(&user_input, images);
+            }
         }
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.lock().unwrap().begin_run(&user_input);

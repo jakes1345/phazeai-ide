@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod blame;
 pub mod chat;
 pub mod composer;
