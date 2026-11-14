@@ -23,13 +23,14 @@ Each phase ends in something a user can use, and each one gates the next.
 | Ollama 0.40.11, `qwen2.5:7b` | **100% CPU**: 8.3 tokens/s generating, 27.8 tokens/s reading the prompt, 80 s to load |
 | PhazeAI Local | No `llama-server` or model installed |
 
-**Still to measure:** the same model on the GPU through llama.cpp's Vulkan build. Build `b12383` is downloaded and checked against GitHub's SHA-256 digest at `/tmp/claude-1000/-home-jack-phazeai-ide/43a088c3-c220-4f28-99ca-d2532948cb51/scratchpad/llama-vk/bin/llama-b12383/`. Running it is the owner's call. The command:
+**The same model on the GPU** (llama.cpp `b12383` Vulkan build, `llama-bench -ngl 99 -p 512 -n 128`, run by the owner):
 
-```bash
-cd /tmp/claude-1000/-home-jack-phazeai-ide/43a088c3-c220-4f28-99ca-d2532948cb51/scratchpad/llama-vk/bin/llama-b12383 && ./llama-bench -m "$(ollama show qwen2.5:7b --modelfile | awk '/^FROM \//{print $2}')" -ngl 99 -p 512 -n 128
-```
+| `qwen2.5:7b` Q4_K_M (4.36 GiB) | CPU (Ollama) | GPU (Vulkan) | Gain |
+|---|---|---|---|
+| Generating | 8.3 tokens/s | **66.7 ± 0.6 tokens/s** | 8× |
+| Reading the prompt | 27.8 tokens/s | **2,044 ± 22 tokens/s** | 73× |
 
-Expect several times the CPU figure. The number is what Phase 1 promises users, so record the real one in `STATUS.md`.
+The Vulkan backend found the card's matrix cores (`KHR_coopmat`), bf16 and resizable BAR on stock Mesa, with no ROCm installed. This is the gain Phase 1 brings every user with a GPU. A 4,000-token file goes from about 2.5 minutes to read to about 2 seconds.
 
 ## Phase 0: the installer is broken (P0, about a day) — lookup fixed
 
