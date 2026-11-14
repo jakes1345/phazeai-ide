@@ -5,8 +5,8 @@ mod tool_root;
 use menu::menu_bar;
 use overlays::{
     branch_picker_overlay, code_actions_overlay, command_palette, completion_popup, file_picker,
-    goto_overlay, hover_tooltip, inline_edit_overlay, peek_def_overlay, rename_overlay,
-    sig_help_overlay, toast_overlay, vim_ex_overlay, workspace_symbols_overlay,
+    goto_overlay, hover_tooltip, inline_edit_overlay, inline_review_bar, peek_def_overlay,
+    rename_overlay, sig_help_overlay, toast_overlay, vim_ex_overlay, workspace_symbols_overlay,
 };
 
 use std::path::PathBuf;
@@ -3358,6 +3358,11 @@ pub(crate) fn close_topmost_overlay(state: &IdeState) -> bool {
         state.ai.inline_edit_query.set(String::new());
         return true;
     }
+    // Escape keeps a Ctrl+K rewrite under review and closes the bar.
+    if state.editor.inline_edit.review.get_untracked().is_some() {
+        state.editor.inline_edit.review.set(None);
+        return true;
+    }
     if state.editor.completion_open.get() {
         state.editor.completion_open.set(false);
         return true;
@@ -3467,6 +3472,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         true,
         app_shortcut.clone(),
         state.workbench.status_toast,
+        state.editor.inline_edit,
     );
 
     // ── Split editor (Ctrl+Alt+\) — second independent editor pane ──────────
@@ -3537,6 +3543,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         false,
         app_shortcut.clone(),
         state.workbench.status_toast,
+        state.editor.inline_edit,
     );
     let split_pane = container(split_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -3863,6 +3870,7 @@ fn ide_root(state: IdeState) -> impl IntoView {
         false,
         app_shortcut.clone(),
         state.workbench.status_toast,
+        state.editor.inline_edit,
     );
     let down_pane = container(down_raw).style(move |s| {
         s.flex_grow(1.0)
@@ -4086,6 +4094,7 @@ pub fn launch_phaze_ide() {
                 let completions_popup = completion_popup(state.clone());
                 let hover_tip = hover_tooltip(state.clone());
                 let inline_edit = inline_edit_overlay(state.clone());
+                let inline_review = inline_review_bar(state.clone());
                 let code_actions_popup = code_actions_overlay(state.clone());
                 let rename_popup = rename_overlay(state.clone());
                 let sig_help_popup = sig_help_overlay(state.clone());
@@ -4274,6 +4283,7 @@ pub fn launch_phaze_ide() {
                     code_actions_popup,  // Z_CODE_ACTIONS(350) — code actions / quick-fix
                     sig_help_popup,      // Z_SIG_HELP(380) — signature help tooltip
                     inline_edit,         // Z_INLINE_EDIT(400) — highest overlay
+                    inline_review,       // Z_INLINE_EDIT(400) — Keep/Undo a Ctrl+K rewrite
                     rename_popup,        // Z_RENAME(420) — rename dialog
                     toast_popup,         // Z_TOAST(450) — toast notifications
                     ws_syms_popup,       // Z_WS_SYMBOLS(460) — workspace symbols (Ctrl+T)

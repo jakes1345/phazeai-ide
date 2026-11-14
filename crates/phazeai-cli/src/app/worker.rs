@@ -21,6 +21,11 @@ use crate::tool_view::{approval_preview, unanswered_tool_calls, ApprovalPolicy, 
 pub enum WorkerCommand {
     /// Run the agent on a prompt.
     Run(String),
+    /// Run the agent on a prompt with pictures attached (`/image`).
+    RunWithImages {
+        prompt: String,
+        images: Vec<phazeai_core::llm::ImageInput>,
+    },
     /// Forget the conversation context.
     Clear,
     /// Replace the LLM client (provider / model / key change) and the
@@ -71,6 +76,8 @@ pub struct WorkerConfig {
     pub approval_manager: Arc<Mutex<ToolApprovalManager>>,
     pub policy: Arc<Mutex<ApprovalPolicy>>,
     pub cancel: Arc<AtomicBool>,
+    /// Plan and Ask modes' read-only switch, shared with every agent.
+    pub read_only: Arc<AtomicBool>,
     /// Conversation tokens the agent may send before compacting, for the
     /// current model.
     pub context_budget: usize,
@@ -163,7 +170,8 @@ fn build_agent(
         .with_context_budget(cfg.context_budget)
         .with_max_iterations(cfg.max_iterations)
         .with_approval(approval)
-        .with_cancel_token(cfg.cancel.clone());
+        .with_cancel_token(cfg.cancel.clone())
+        .with_read_only(cfg.read_only.clone());
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mcp_configs = phazeai_core::mcp::McpManager::load_config(&cwd);
@@ -259,7 +267,12 @@ pub fn spawn(
                         }
                     }
                 }
-                WorkerCommand::Run(prompt) => {
+                command @ (WorkerCommand::Run(_) | WorkerCommand::RunWithImages { .. }) => {
+                    let (prompt, images) = match command {
+                        WorkerCommand::RunWithImages { prompt, images } => (prompt, images),
+                        WorkerCommand::Run(prompt) => (prompt, Vec::new()),
+                        _ => unreachable!("matched above"),
+                    };
                     cfg.cancel.store(false, Ordering::SeqCst);
                     let Some(agent) = agent.as_ref() else {
                         let _ = ui_tx.send(UiEvent::Agent(AgentEvent::Error(
@@ -270,7 +283,7 @@ pub fn spawn(
                     };
 
                     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AgentEvent>();
-                    let mut run = Box::pin(agent.run_with_events(prompt, ev_tx));
+                    let mut run = Box::pin(agent.run_with_images_and_events(prompt, images, ev_tx));
                     let mut tick = tokio::time::interval(Duration::from_millis(50));
                     loop {
                         tokio::select! {

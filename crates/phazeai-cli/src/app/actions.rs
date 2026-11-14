@@ -551,14 +551,23 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
 
         CommandResult::SetMode(mode) => {
             let description = match mode.as_str() {
-                "plan" => "creates structured plans and checklists, no code",
+                "plan" => "reads the code and writes a plan; nothing changes until /go",
                 "debug" => "diagnoses the root cause before fixing",
                 "ask" => "read-only, answers questions about your code",
                 "edit" => "makes minimal, targeted code changes",
                 _ => "general conversation and assistance",
             };
-            state.ai_mode = mode.clone();
+            set_mode(state, &mode);
             state.notify(format!("Mode: {mode} — {description}"));
+        }
+        CommandResult::RunPlan => {
+            if state.ai_mode != "plan" {
+                state.notify("Nothing to carry out: /go runs a plan made in /plan mode");
+                return;
+            }
+            set_mode(state, "chat");
+            state.notify("Mode: chat — carrying out the plan");
+            state.send_prompt("/go".to_string(), phazeai_core::RUN_PLAN_PROMPT.to_string());
         }
         CommandResult::AddFile(path_str) => {
             let path = std::path::Path::new(&path_str);
@@ -592,6 +601,7 @@ pub(super) fn run_command(state: &mut AppState, result: CommandResult) {
                 Err(e) => state.error(format!("Couldn't read '{path_str}': {e}")),
             }
         }
+        CommandResult::AttachImage(path_str) => state.attach_image(&path_str),
         CommandResult::Retry => {
             let last = state.last_user_input.clone();
             if last.is_empty() {
@@ -1335,4 +1345,14 @@ mod workflow_tests {
         assert!(!text.contains("-p \"${{"));
         assert!(!text.contains("phazeai-code-action"));
     }
+}
+
+/// Switch to `mode`. Plan and Ask make the agent read-only (it is told so if
+/// it tries to change anything); every other mode lets it act again.
+pub(super) fn set_mode(state: &mut AppState, mode: &str) {
+    state.ai_mode = mode.to_string();
+    state.read_only.store(
+        matches!(mode, "plan" | "ask"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }

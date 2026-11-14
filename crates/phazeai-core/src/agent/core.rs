@@ -6,7 +6,8 @@ use crate::hooks::HookOutcome;
 use crate::llm::{FunctionCall, LlmClient, Message, StreamEvent, ToolCall};
 use crate::permissions::{Decision, Permissions};
 use crate::tools::{
-    render, FileWrite, MoreToolsCall, ToolDefinition, ToolRegistry, ToolResult, MORE_TOOLS,
+    render, FileWrite, MoreToolsCall, ToolApprovalManager, ToolDefinition, ToolPermission,
+    ToolRegistry, ToolResult, MORE_TOOLS,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -111,6 +112,8 @@ pub struct Agent {
     /// Permission rules and hooks (see [`crate::permissions`]). Shared with
     /// `subagent` helpers, so it may be set before or after them.
     permissions: PermissionsSlot,
+    /// While set, only calls that read run (see [`Self::with_read_only`]).
+    read_only: Arc<AtomicBool>,
 }
 
 /// Where an agent keeps its permission rules, shared with its helpers.
@@ -141,7 +144,27 @@ impl Agent {
             system_prompt: None,
             checkpoints: None,
             permissions: Arc::new(StdMutex::new(None)),
+            read_only: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Share a read-only switch with the caller (Plan and Ask modes). While
+    /// it is set, a call the approval classifier does not class as
+    /// [`ToolPermission::ReadOnly`] (a write, a delete, a shell command that
+    /// changes anything, an MCP tool) does not run: the model is told so and
+    /// asked to put that step in its plan instead, and no approval is asked.
+    /// Permission rules that allow a call do not override it. The switch is
+    /// read at each call, so turning it on stops writes from the next call.
+    ///
+    /// The tools offered stay the same, so the prompt cache survives a
+    /// switch between modes.
+    pub fn with_read_only(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.read_only = flag;
+        self
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Relaxed)
     }
 
     /// Attach a cancellation token. Set the `AtomicBool` to `true` from any
@@ -354,17 +377,33 @@ impl Agent {
         user_input: impl Into<String>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
+        self.run_with_images_and_events(user_input, Vec::new(), event_tx)
+            .await
+    }
+
+    /// [`Self::run_with_events`] with pictures sent alongside the question,
+    /// for a vision model to look at (a screenshot of a bug, a design to
+    /// match). They stay in the conversation like any other message, so
+    /// later turns can refer back to them.
+    pub async fn run_with_images_and_events(
+        &self,
+        user_input: impl Into<String>,
+        images: Vec<crate::llm::ImageInput>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<AgentResponse, PhazeError> {
         let user_input = user_input.into();
         if crate::privacy::audit::in_scope() {
-            self.run_loop(user_input, event_tx).await
+            self.run_loop(user_input, images, event_tx).await
         } else {
-            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, event_tx)).await
+            crate::privacy::audit::scope(Vec::new(), self.run_loop(user_input, images, event_tx))
+                .await
         }
     }
 
     async fn run_loop(
         &self,
         user_input: String,
+        images: Vec<crate::llm::ImageInput>,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<AgentResponse, PhazeError> {
         let mut iterations = 0;
@@ -385,7 +424,11 @@ impl Agent {
             if let Some(prompt) = &self.system_prompt {
                 conversation.set_system_prompt(prompt.clone());
             }
-            conversation.add_user_message(&user_input);
+            if images.is_empty() {
+                conversation.add_user_message(&user_input);
+            } else {
+                conversation.add_user_message_with_images(&user_input, images);
+            }
         }
         if let Some(checkpoints) = &self.checkpoints {
             checkpoints.lock().unwrap().begin_run(&user_input);
@@ -912,6 +955,21 @@ impl Agent {
         let tool_name = &tool_call.function.name;
         let params = tool_call.parse_arguments().unwrap_or(Value::Null);
 
+        if self.is_read_only()
+            && ToolApprovalManager::default().classify_tool(tool_name, &params)
+                != ToolPermission::ReadOnly
+        {
+            self.refuse(
+                tool_call,
+                params,
+                READ_ONLY_REFUSAL.to_string(),
+                event_tx,
+                executions,
+            )
+            .await;
+            return Gate::Deny;
+        }
+
         let decision = self
             .permissions()
             .map_or(Decision::Default, |p| p.decide(tool_name, &params));
@@ -1122,7 +1180,12 @@ impl Agent {
         });
 
         let mut conversation = self.conversation.lock().await;
-        conversation.add_tool_result(&tool_call.id, &result_str);
+        let told = if success {
+            repeat_note(&conversation, tool_name, &result_str)
+        } else {
+            None
+        };
+        conversation.add_tool_result(&tool_call.id, told.as_deref().unwrap_or(&result_str));
     }
 
     async fn execute_tool(&self, tool_call: &ToolCall) -> (bool, String) {
@@ -1229,6 +1292,40 @@ async fn cancelled(token: &AtomicBool) {
     while !token.load(Ordering::Relaxed) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// What the model is told about a call that would change something while the
+/// agent is read-only (Plan and Ask modes).
+pub const READ_ONLY_REFUSAL: &str = "Read-only mode (the user chose Plan or Ask): this call \
+     could change files or run something, so it did not run. Keep to reading; put this step \
+     in your plan, and the user will have it carried out after reviewing the plan.";
+
+/// What the user's "run the plan" sends after a reply in Plan mode.
+pub const RUN_PLAN_PROMPT: &str = "Carry out the plan above, step by step. Check each step \
+     works before going on to the next.";
+
+/// Tools whose result depends only on the files they look at, so the same
+/// text twice means nothing changed in between.
+const REPEATABLE_READS: &[&str] = &["read_file", "grep", "glob", "list_files", "find_path"];
+
+/// A result shorter than this is sent again as it is: the note costs about
+/// as much.
+const REPEAT_NOTE_MIN_LEN: usize = 300;
+
+/// What the model is told instead of `result` when an earlier call of a
+/// read-only tool returned exactly the same text and that text is still in
+/// the conversation (see [`ConversationHistory::repeat_of`]): a pointer to
+/// it, so a file the agent reads again without changing it is not paid for
+/// twice on every later request. `None` means send `result` itself.
+fn repeat_note(conversation: &ConversationHistory, tool: &str, result: &str) -> Option<String> {
+    if !REPEATABLE_READS.contains(&tool) || result.len() < REPEAT_NOTE_MIN_LEN {
+        return None;
+    }
+    let earlier = conversation.repeat_of(REPEATABLE_READS, result)?;
+    Some(format!(
+        "Unchanged: same result as your earlier call {earlier}, which is still above. \
+         Nothing it covers has changed since; use that result."
+    ))
 }
 
 /// The result recorded for a tool call that Stop kept from starting.
