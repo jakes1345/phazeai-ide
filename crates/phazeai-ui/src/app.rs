@@ -4294,7 +4294,21 @@ pub fn launch_phaze_ide() {
                 .style(move |s| {
                     let t = state.workbench.theme.get();
                     let p = &t.palette;
-                    s.width_full().height_full().background(p.bg_base)
+                    // Floem's default theme turns a text input near-white on
+                    // hover (and on hover while focused), which our inputs,
+                    // styled only at rest, keep: a click leaves the pointer
+                    // there and pale theme text sits on white. Give every
+                    // input the theme's colours in those states instead.
+                    let (hover_bg, text) = (p.bg_elevated, p.text_primary);
+                    s.width_full().height_full().background(p.bg_base).class(
+                        floem::views::TextInputClass,
+                        move |s| {
+                            s.hover(move |s| s.background(hover_bg).color(text))
+                                .focus(move |s| {
+                                    s.hover(move |s| s.background(hover_bg).color(text))
+                                })
+                        },
+                    )
                 })
                 .on_event_cont(EventListener::KeyUp, {
                     let state = state.clone();
