@@ -1666,6 +1666,7 @@ mod tests {
                 approval_manager: Arc::new(Mutex::new(ToolApprovalManager::default())),
                 policy: Arc::new(Mutex::new(ApprovalPolicy::default())),
                 cancel: Arc::new(AtomicBool::new(false)),
+                read_only: Arc::new(AtomicBool::new(false)),
                 context_budget: 60_000,
                 max_iterations: phazeai_core::DEFAULT_MAX_ITERATIONS,
                 code_search: None,
