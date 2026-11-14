@@ -5,6 +5,8 @@
 //! Also includes branch switching, pull/push, stash, and commit history.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use floem::{
     ext_event::create_signal_from_channel,
@@ -1102,6 +1104,19 @@ fn run_git_blame(path: &std::path::Path) -> Vec<BlameEntry> {
 
 // ── Panel root ────────────────────────────────────────────────────────────────
 
+/// `git status` of the working tree as git prints it for scripts, or `None`
+/// when it can't be run (not a repository, no git). Two equal results mean
+/// nothing the panel lists has changed.
+fn working_tree_status(root: &Path) -> Option<Vec<u8>> {
+    phazeai_core::process::std_command("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+}
+
 pub fn git_panel(state: IdeState) -> impl IntoView {
     let theme = state.workbench.theme;
     let git_data = create_rw_signal(GitStatusData::default());
@@ -1206,21 +1221,50 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
     // Initial load
     full_refresh();
 
-    // Background watcher: auto-refresh when .git/index changes (e.g. after external git commands)
+    // Background watcher. The index changes when git commands run (here or
+    // outside); a file edited by the editor, the agent or another program
+    // changes only the working tree, which the index does not show. So while
+    // the panel is on screen the watcher also compares `git status` output
+    // and refreshes when it differs: otherwise "Changes (0)" stays on screen
+    // next to a modified file until ↻ is clicked.
     {
         let (refresh_tx, refresh_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let refresh_sig = create_signal_from_channel(refresh_rx);
+
+        let visible = Arc::new(AtomicBool::new(false));
+        {
+            let visible = visible.clone();
+            let show = state.workbench.show_left_panel;
+            let tab = state.workbench.left_panel_tab;
+            create_effect(move |_| {
+                let on_screen = show.get() && tab.get() == crate::app::Tab::Git;
+                visible.store(on_screen, Ordering::Relaxed);
+            });
+        }
 
         let root_for_watch = state.project.workspace_root.get_untracked();
         std::thread::spawn(move || {
             let git_index = root_for_watch.join(".git").join("index");
             let mut last_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
+            let mut last_status: Option<Vec<u8>> = None;
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let current_mtime = git_index.metadata().ok().and_then(|m| m.modified().ok());
-                if current_mtime != last_mtime {
-                    tracing::debug!(target: "phazeai_ui", "Git index changed, triggering refresh");
-                    last_mtime = current_mtime;
+                let mut changed = current_mtime != last_mtime;
+                last_mtime = current_mtime;
+                if visible.load(Ordering::Relaxed) {
+                    let status = working_tree_status(&root_for_watch);
+                    // Just shown (no earlier look): the files may have
+                    // changed while it was hidden, so refresh once; after
+                    // that, whenever the status differs.
+                    changed |= last_status.is_none() || status != last_status;
+                    last_status = status;
+                } else {
+                    // Look afresh when the panel is shown again.
+                    last_status = None;
+                }
+                if changed {
+                    tracing::debug!(target: "phazeai_ui", "Git state changed, triggering refresh");
                     if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
                         refresh_tx.try_send(())
                     {
@@ -4893,5 +4937,50 @@ mod ai_commit_privacy_tests {
             diffstat_summary(3, 10, 0),
             " 3 files changed, 10 insertions(+)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::working_tree_status;
+    use std::process::Command;
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// The panel's watcher compares this between looks: an edit to a
+    /// tracked file (which leaves the index alone) and a new file must each
+    /// change it, and nothing else may.
+    #[test]
+    fn working_tree_edits_change_the_status_the_watcher_compares() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(working_tree_status(root), None, "not a repository yet");
+
+        git(root, &["init", "-q"]);
+        std::fs::write(root.join("lib.rs"), "a + b\n").unwrap();
+        git(root, &["add", "lib.rs"]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        let clean = working_tree_status(root);
+        assert!(clean.is_some());
+        assert_eq!(working_tree_status(root), clean, "no change, same status");
+
+        // Editing a tracked file leaves the index alone (git may rewrite it
+        // while looking, so its time can't be relied on either way).
+        std::fs::write(root.join("lib.rs"), "a * b\n").unwrap();
+        let edited = working_tree_status(root);
+        assert_ne!(edited, clean, "an edit to a tracked file went unseen");
+
+        std::fs::write(root.join("new.rs"), "x\n").unwrap();
+        assert_ne!(working_tree_status(root), edited, "a new file went unseen");
     }
 }
