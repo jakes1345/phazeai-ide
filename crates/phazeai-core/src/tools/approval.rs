@@ -164,6 +164,11 @@ impl ToolApprovalManager {
             // helper whose only tools read files (through the same sandbox
             // and privacy checks).
             "todo" | "subagent" => ToolPermission::ReadOnly,
+            // `memory` only writes its own store, and only when asked to.
+            "memory" => match params.get("action").and_then(|v| v.as_str()) {
+                Some("search" | "list") => ToolPermission::ReadOnly,
+                _ => ToolPermission::Write,
+            },
 
             // File-level write operations. These are the tools `-p --allow edit`
             // may run unasked; all of them resolve their paths inside the
