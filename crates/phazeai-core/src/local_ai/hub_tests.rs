@@ -457,3 +457,44 @@ fn gated_and_missing_repositories_say_why() {
         .to_string();
     assert!(err.contains("owner/name"), "{err}");
 }
+
+#[test]
+fn the_best_pick_is_what_this_machine_can_run_and_pulls() {
+    let fake = fake_hub(false);
+    let hub = Hub::new(&fake.base, None).unwrap();
+    let models = tempfile::tempdir().unwrap();
+    let rt = runtime();
+
+    // The pick is choose()'s, with its fit: here the two-shard Q8_0.
+    let pick = rt.block_on(best_pick(&hub, "o/m", &hw(64, 48))).unwrap();
+    assert_eq!(pick.file.path, "Q8_0/m-Q8_0-00001-of-00002.gguf");
+    assert_eq!(pick.file.shards.len(), 2);
+    assert_ne!(pick.fit.fit, Fit::TooBig);
+    assert!(!pick.fit.reason.is_empty());
+
+    // What it picked downloads, verified, as an installed model.
+    let model = rt
+        .block_on(pull(
+            &hub,
+            &pick.listing,
+            &pick.file,
+            models.path(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        ))
+        .unwrap();
+    assert_eq!(model.id, "hf:o/m:Q8_0/m-Q8_0-00001-of-00002.gguf");
+    assert_eq!(installed(models.path()), vec![model]);
+
+    // Nothing fits: says so, downloads nothing.
+    let err = rt
+        .block_on(best_pick(&hub, "o/m", &hw(0, 0)))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("too big for this machine"), "{err}");
+    let err = rt
+        .block_on(best_pick(&hub, "no/such", &hw(64, 48)))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not found"), "{err}");
+}

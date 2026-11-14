@@ -13,7 +13,7 @@ use std::time::Duration;
 use floem::{
     ext_event::create_signal_from_channel,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate, SignalWith},
-    views::{container, dyn_stack, empty, label, stack, Decorators},
+    views::{container, dyn_stack, empty, label, stack, text_input, Decorators},
     IntoView, View,
 };
 use phazeai_core::{
@@ -487,10 +487,12 @@ fn hub_models(cs: CardState) -> impl IntoView {
             .margin_top(space::MD)
     });
     let how = caption(theme, || {
-        "Run any GGUF model on Hugging Face: `phazeai models search qwen coder`, then \
-         `phazeai models pull <repo>` downloads the best quantization this machine can run."
+        "Run any GGUF model on Hugging Face. Search, then Download picks the best \
+         quantization this machine can run and verifies it (SHA-256). Gated models need \
+         HF_TOKEN set; `phazeai models` does the same from a terminal."
             .to_string()
     });
+    let browser = hub_browser(cs.clone());
     let rows = dyn_stack(
         move || {
             disk_gen.get();
@@ -500,7 +502,253 @@ fn hub_models(cs: CardState) -> impl IntoView {
         move |m| hub_row(m, cs.clone()),
     )
     .style(|s| s.flex_col().width_full().gap(space::SM));
-    stack((heading, how, rows)).style(|s| s.flex_col().width_full().gap(space::XS))
+    stack((heading, how, browser, rows)).style(|s| s.flex_col().width_full().gap(space::XS))
+}
+
+/// Messages from the Hugging Face browser's background work.
+#[derive(Clone)]
+enum HubEvent {
+    Results(String, Result<Vec<hub::HubRepo>, String>),
+    /// The file picked for this machine, as a line to show.
+    Picked(String),
+    Progress(DownloadProgress),
+    Done(String, Result<hub::InstalledModel, String>),
+}
+
+/// Most search results shown.
+const HUB_SEARCH_LIMIT: usize = 20;
+
+/// Search Hugging Face for GGUF models and download one: the file picked is
+/// the best quantization this machine can run ([`hub::best_pick`]), pulled
+/// and verified like `phazeai models pull`. One download at a time; it can
+/// be stopped, and a stopped download resumes on the next Download.
+fn hub_browser(cs: CardState) -> impl IntoView {
+    let theme = cs.state.workbench.theme;
+    let disk_gen = cs.disk_gen;
+    let message = cs.message;
+    let message_is_error = cs.message_is_error;
+    let query = create_rw_signal(String::new());
+    let results = create_rw_signal(Vec::<hub::HubRepo>::new());
+    let status = create_rw_signal(String::new());
+    let searching = create_rw_signal(false);
+    // The repository downloading, what was picked and how far it got.
+    let pulling = create_rw_signal(None::<String>);
+    let picked = create_rw_signal(String::new());
+    let progress = create_rw_signal(None::<DownloadProgress>);
+    let cancel = create_rw_signal(Arc::new(AtomicBool::new(false)));
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(256);
+    let events = create_signal_from_channel(rx);
+    create_effect(move |_| {
+        let Some(ev) = events.get() else { return };
+        match ev {
+            HubEvent::Results(q, found) => {
+                searching.set(false);
+                match found {
+                    Ok(found) => {
+                        status.set(if found.is_empty() {
+                            format!("No GGUF models on Hugging Face match \"{q}\".")
+                        } else {
+                            String::new()
+                        });
+                        results.set(found);
+                    }
+                    Err(e) => {
+                        results.set(Vec::new());
+                        status.set(format!("Search failed: {e}"));
+                    }
+                }
+            }
+            HubEvent::Picked(line) => picked.set(line),
+            HubEvent::Progress(p) => progress.set(Some(p)),
+            HubEvent::Done(repo, result) => {
+                pulling.set(None);
+                progress.set(None);
+                picked.set(String::new());
+                disk_gen.update(|g| *g += 1);
+                match result {
+                    Ok(model) => {
+                        message_is_error.set(false);
+                        message.set(format!(
+                            "{} downloaded and verified (SHA-256). Click Use this to run it.",
+                            model.display_name
+                        ));
+                    }
+                    Err(e) if e == "cancelled" => {
+                        message_is_error.set(false);
+                        message.set(format!(
+                            "Download of {repo} stopped. Click Download to resume."
+                        ));
+                    }
+                    Err(e) => {
+                        message_is_error.set(true);
+                        message.set(format!("Download of {repo} failed: {e}"));
+                    }
+                }
+            }
+        }
+    });
+
+    let search = {
+        let tx = tx.clone();
+        move || {
+            let q = query.get_untracked().trim().to_string();
+            if q.is_empty() || searching.get_untracked() {
+                return;
+            }
+            searching.set(true);
+            status.set(format!("Searching Hugging Face for \"{q}\"…"));
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let found = run_blocking(async {
+                    let hub = hub::Hub::from_env().map_err(|e| e.to_string())?;
+                    hub::search(&hub, &q, HUB_SEARCH_LIMIT)
+                        .await
+                        .map_err(|e| e.to_string())
+                });
+                let _ = tx.send(HubEvent::Results(q, found));
+            });
+        }
+    };
+
+    let input = text_input(query)
+        .placeholder("Search models, e.g. qwen coder")
+        .on_enter({
+            let search = search.clone();
+            move || search()
+        })
+        .style(move |s| {
+            let p = theme.get().palette;
+            s.flex_grow(1.0)
+                .min_width(0.0)
+                .background(p.bg_elevated)
+                .border(stroke::HAIRLINE)
+                .border_color(p.border_focus)
+                .border_radius(radius::MD)
+                .color(p.text_primary)
+                .padding_horiz(space::SM)
+                .padding_vert(space::XS)
+                .font_size(font::UI)
+        });
+    let search_btn = phaze_button("Search", ButtonVariant::Secondary, theme, search);
+    let bar = stack((input, search_btn))
+        .style(|s| s.flex_row().items_center().width_full().gap(space::SM));
+
+    let status_line = caption(theme, move || status.get()).style(move |s| {
+        s.apply_if(status.with(|t| t.is_empty()), |s| {
+            s.display(floem::style::Display::None)
+        })
+    });
+
+    let download_line = {
+        let line = label(move || {
+            let Some(repo) = pulling.get() else {
+                return String::new();
+            };
+            let pick = picked.get();
+            let how_far = progress
+                .get()
+                .map(|p| format!(" · {}", progress_text(&p)))
+                .unwrap_or_else(|| " · finding the right file…".to_string());
+            if pick.is_empty() {
+                format!("Downloading {repo}{how_far}")
+            } else {
+                format!("Downloading {repo}: {pick}{how_far}")
+            }
+        })
+        .style(move |s| {
+            s.font_size(font::CAPTION)
+                .color(theme.get().palette.text_primary)
+                .flex_grow(1.0)
+                .min_width(0.0)
+        });
+        let stop = phaze_button("Stop", ButtonVariant::Secondary, theme, move || {
+            cancel.get_untracked().store(true, Ordering::SeqCst);
+        });
+        stack((line, stop)).style(move |s| {
+            s.flex_row()
+                .items_center()
+                .width_full()
+                .gap(space::SM)
+                .apply_if(pulling.with(|p| p.is_none()), |s| {
+                    s.display(floem::style::Display::None)
+                })
+        })
+    };
+
+    let rows = dyn_stack(
+        move || results.get(),
+        |r| r.id.clone(),
+        move |r| {
+            let tx = tx.clone();
+            let repo = r.id.clone();
+            let name = label({
+                let text = format!("{} · {} downloads", r.id, r.downloads);
+                move || text.clone()
+            })
+            .style(move |s| {
+                s.font_size(font::CAPTION)
+                    .color(theme.get().palette.text_primary)
+                    .flex_grow(1.0)
+                    .min_width(0.0)
+            });
+            let download = shown_button(
+                "Download",
+                ButtonVariant::Primary,
+                theme,
+                move || pulling.with(|p| p.is_none()),
+                move || {
+                    if pulling.get_untracked().is_some() {
+                        return;
+                    }
+                    let stop = Arc::new(AtomicBool::new(false));
+                    cancel.set(stop.clone());
+                    pulling.set(Some(repo.clone()));
+                    picked.set(String::new());
+                    progress.set(None);
+                    let tx = tx.clone();
+                    let repo = repo.clone();
+                    std::thread::spawn(move || {
+                        let models_dir = local_ai::models_dir();
+                        let hw = HardwareInfo::probe(&models_dir);
+                        let result = run_blocking(async {
+                            let hub = hub::Hub::from_env().map_err(|e| e.to_string())?;
+                            let pick = hub::best_pick(&hub, &repo, &hw)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let _ = tx.send(HubEvent::Picked(format!(
+                                "{} ({}), {}",
+                                pick.file.path,
+                                human_bytes(pick.file.size()),
+                                pick.fit.reason
+                            )));
+                            let progress_tx = tx.clone();
+                            hub::pull(&hub, &pick.listing, &pick.file, &models_dir, stop, |p| {
+                                // Dropped when the view is behind: the next one carries on.
+                                let _ = progress_tx.try_send(HubEvent::Progress(p));
+                            })
+                            .await
+                            .map_err(|e| match e {
+                                local_ai::LocalAiError::Cancelled => "cancelled".to_string(),
+                                e => e.to_string(),
+                            })
+                        });
+                        let _ = tx.send(HubEvent::Done(repo, result));
+                    });
+                },
+            );
+            stack((name, download))
+                .style(|s| s.flex_row().items_center().width_full().gap(space::SM))
+        },
+    )
+    .style(|s| s.flex_col().width_full().gap(space::XS));
+
+    stack((bar, status_line, download_line, rows)).style(|s| {
+        s.flex_col()
+            .width_full()
+            .gap(space::XS)
+            .margin_bottom(space::SM)
+    })
 }
 
 fn hub_row(model: hub::InstalledModel, cs: CardState) -> impl IntoView {
