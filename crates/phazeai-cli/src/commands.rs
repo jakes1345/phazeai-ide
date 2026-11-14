@@ -56,6 +56,8 @@ pub enum CommandResult {
     ShowContext,
     /// Switch AI mode (plan, debug, chat, ask, edit).
     SetMode(String),
+    /// Carry out the plan made in Plan mode (/go).
+    RunPlan,
     /// Add a file to the conversation context (/add <path>).
     AddFile(String),
     /// Retry the last user message.
@@ -260,9 +262,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         "/plan",
         [],
         "",
-        "Produce a step-by-step plan, no code",
+        "Plan with read-only tools; /go carries it out",
         Mode
     ),
+    cmd!("/go", [], "", "Carry out the plan made in plan mode", Mode),
     cmd!("/debug", [], "", "Diagnose the root cause first", Mode),
     cmd!("/edit", [], "", "Make minimal, targeted code changes", Mode),
     cmd!("/diff", [], "", "Show uncommitted git diff", Project),
@@ -302,6 +305,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         [],
         "[n]",
         "Show the AI privacy policy and the last n requests sent",
+        Project
+    ),
+    cmd!(
+        "/remember",
+        [],
+        "[key:] <text>",
+        "Save a project memory every new session starts with",
         Project
     ),
     cmd!("/pwd", [], "", "Show the working directory", Project),
@@ -536,6 +546,7 @@ pub fn handle_command(input: &str) -> CommandResult {
                 CommandResult::SearchFiles(arg.to_string())
             }
         }
+        "/remember" => remember(arg),
         "/pwd" => match std::env::current_dir() {
             Ok(path) => CommandResult::Message(format!("Current directory: {}", path.display())),
             Err(e) => CommandResult::Message(format!("Error getting current directory: {}", e)),
@@ -588,6 +599,7 @@ pub fn handle_command(input: &str) -> CommandResult {
             }
         }
         "/plan" => CommandResult::SetMode("plan".into()),
+        "/go" => CommandResult::RunPlan,
         "/debug" => CommandResult::SetMode("debug".into()),
         "/ask" => CommandResult::SetMode("ask".into()),
         "/edit" => CommandResult::SetMode("edit".into()),
@@ -760,6 +772,43 @@ pub fn privacy_report(limit: usize) -> String {
     out
 }
 
+/// `/remember [key:] text`: save a project memory (`.phazeai/memory.md` in
+/// the project), which every new session's system prompt carries. Without a
+/// `key:`, the key is the text's first words.
+fn remember(arg: &str) -> CommandResult {
+    let root = phazeai_core::tools::sandbox::workspace_root()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    remember_in(&root, arg)
+}
+
+fn remember_in(root: &std::path::Path, arg: &str) -> CommandResult {
+    use phazeai_core::tools::memory;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CommandResult::Message(
+            "Usage: /remember [key:] <text>\nSaves it to .phazeai/memory.md; every new session \
+             in this project starts with it."
+                .into(),
+        );
+    }
+    let (key, text) = match arg.split_once(':') {
+        Some((key, text))
+            if !key.trim().is_empty() && !text.trim().is_empty() && key.len() <= 40 =>
+        {
+            (key.trim().to_string(), text.trim())
+        }
+        _ => (memory::key_for(arg), arg),
+    };
+    match memory::remember(root, &key, text) {
+        Ok(()) => CommandResult::Message(format!(
+            "Remembered \"{key}\" in {}. New sessions start with it.",
+            memory::PROJECT_MEMORY_FILE
+        )),
+        Err(e) => CommandResult::Message(format!("Not saved: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +826,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn remember_saves_to_the_project_memory_file() {
+        use phazeai_core::tools::memory;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        match remember_in(root, "tests: run with --workspace") {
+            CommandResult::Message(m) => assert!(m.contains("Remembered \"tests\""), "{m}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        // No key given: one is made from the text.
+        let plain = "Never edit generated files under gen/";
+        remember_in(root, plain);
+        let saved = memory::read_project_memory(root);
+        assert!(saved
+            .iter()
+            .any(|(k, v)| k == "tests" && v == "run with --workspace"));
+        assert!(saved
+            .iter()
+            .any(|(k, v)| *k == memory::key_for(plain) && v == plain));
+        // Nothing to save: usage, and the file is unchanged.
+        match remember_in(root, "   ") {
+            CommandResult::Message(m) => assert!(m.starts_with("Usage: /remember")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(memory::read_project_memory(root).len(), 2);
     }
 
     #[test]

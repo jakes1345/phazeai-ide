@@ -7,7 +7,7 @@ use floem::{
     event::{Event, EventListener},
     ext_event::create_signal_from_channel,
     keyboard::{Key, NamedKey},
-    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
+    reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate, SignalWith},
     views::{container, dyn_stack, empty, label, scroll, stack, text_input, Decorators},
     IntoView,
 };
@@ -703,13 +703,102 @@ pub(crate) fn completion_popup(state: IdeState) -> impl IntoView {
 
 #[derive(Clone, Debug)]
 enum InlineEditUpdate {
+    /// No selection: text to insert at the cursor.
     Done(String),
+    /// A selection: the rewrite to put in its place, for review.
+    Replace(crate::domain_state::editor::InlineReplace),
     Err(String),
 }
 
 /// Upper bound on the file text sent as context for a Ctrl+K request that
 /// has no selection.
 const INLINE_EDIT_CONTEXT_CHARS: usize = 4096;
+
+/// With a selection, at most this much of the file on each side of it goes
+/// along, so the rewrite matches the names and style around it.
+const INLINE_EDIT_AROUND_CHARS: usize = 1500;
+
+/// Most changed lines the review shows; the rest are counted.
+const INLINE_REVIEW_LINES: usize = 40;
+
+/// The file text on each side of `selection` in `file_ctx`, cut to whole
+/// lines and [`INLINE_EDIT_AROUND_CHARS`] each. Empty when the selection is
+/// not in the text exactly once (the file on disk may not match the buffer),
+/// since context from the wrong place would mislead the model.
+pub(crate) fn text_around<'a>(selection: &str, file_ctx: &'a str) -> (&'a str, &'a str) {
+    if selection.trim().is_empty() {
+        return ("", "");
+    }
+    let mut found = file_ctx.match_indices(selection);
+    let Some((at, _)) = found.next() else {
+        return ("", "");
+    };
+    if found.next().is_some() {
+        return ("", "");
+    }
+    let before = &file_ctx[..at];
+    let after = &file_ctx[at + selection.len()..];
+    let mut b = before.len().saturating_sub(INLINE_EDIT_AROUND_CHARS);
+    b = before.ceil_char_boundary(b);
+    if b > 0 {
+        b = before[b..].find('\n').map_or(before.len(), |n| b + n + 1);
+    }
+    let mut a = after.floor_char_boundary(INLINE_EDIT_AROUND_CHARS.min(after.len()));
+    if a < after.len() {
+        a = after[..a].rfind('\n').map_or(0, |n| n + 1);
+    }
+    (&before[b..], &after[..a])
+}
+
+/// The rewrite to put in place of `original`, from the model's reply: a
+/// Markdown fence around it is dropped (models add one despite being told
+/// not to) and the trailing line break is made to match the selection's, so
+/// a rewrite of whole lines doesn't glue the next line on or add a blank one.
+pub(crate) fn fit_replacement(original: &str, reply: &str) -> Result<String, String> {
+    let mut text = reply;
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        if let Some((_lang, body)) = rest.split_once('\n') {
+            let body = body.trim_end();
+            text = body.strip_suffix("```").unwrap_or(body);
+        }
+    }
+    if text.trim().is_empty() {
+        return Err("the model returned nothing".into());
+    }
+    if !original.starts_with(['\n', '\r']) {
+        text = text.trim_start_matches(['\n', '\r']);
+    }
+    let mut out = text.trim_end_matches(['\n', '\r']).to_string();
+    if original.ends_with("\r\n") {
+        out.push_str("\r\n");
+    } else if original.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// The changed lines of a rewrite, `'-'` for removed and `'+'` for added,
+/// at most `cap` of them, and how many more there are.
+pub(crate) fn review_lines(original: &str, text: &str, cap: usize) -> (Vec<(char, String)>, usize) {
+    let diff = similar::TextDiff::from_lines(original, text);
+    let mut lines = Vec::new();
+    let mut more = 0;
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            similar::ChangeTag::Delete => '-',
+            similar::ChangeTag::Insert => '+',
+            similar::ChangeTag::Equal => continue,
+        };
+        if lines.len() < cap {
+            let line = change.value().trim_end_matches(['\n', '\r']);
+            lines.push((sign, line.to_string()));
+        } else {
+            more += 1;
+        }
+    }
+    (lines, more)
+}
 
 /// The file a Ctrl+K request works on.
 ///
@@ -730,11 +819,22 @@ pub(crate) fn inline_edit_source(
 /// generate a fragment against the (capped) file text.
 pub(crate) fn inline_edit_prompt(instruction: &str, selection: &str, file_ctx: &str) -> String {
     if !selection.is_empty() {
-        // Selection-scoped: only rewrite the selected region.
+        // Selection-scoped: only rewrite the selected region. The code
+        // around it goes along when it can be found, so the rewrite fits.
+        let (before, after) = text_around(selection, file_ctx);
+        if before.is_empty() && after.is_empty() {
+            return format!(
+                "Rewrite ONLY the following code snippet according to the instruction. \
+                 Respond with ONLY the rewritten snippet, no explanation, no markdown fences.\n\n\
+                 Instruction: {instruction}\n\nCode to rewrite:\n{selection}"
+            );
+        }
         return format!(
-            "Rewrite ONLY the following code snippet according to the instruction. \
-             Respond with ONLY the rewritten snippet, no explanation, no markdown fences.\n\n\
-             Instruction: {instruction}\n\nCode to rewrite:\n{selection}"
+            "Rewrite ONLY the selected code according to the instruction. Respond with ONLY \
+             the code that replaces the selection: no explanation, no markdown fences, and \
+             nothing from the code before or after it, which is shown only so the rewrite \
+             fits.\n\nInstruction: {instruction}\n\nCode before the selection:\n{before}\n\
+             Selected code to rewrite:\n{selection}\n\nCode after the selection:\n{after}"
         );
     }
     let file_ctx = if file_ctx.len() > INLINE_EDIT_CONTEXT_CHARS {
@@ -776,6 +876,24 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
             match upd {
                 InlineEditUpdate::Done(text) => {
                     state2.editor.pending_completion.set(Some((text, 0)));
+                    state2.ai.thinking.set(false);
+                    state2.ai.inline_edit_open.set(false);
+                    state2.ai.inline_edit_query.set(String::new());
+                }
+                InlineEditUpdate::Replace(req) => {
+                    let request = state2.editor.inline_edit.request;
+                    request.set(Some(req));
+                    // The main pane takes the request at once when the file
+                    // is its active tab. Still here means it isn't: drop it
+                    // rather than replace text later, somewhere unseen.
+                    if request.get_untracked().is_some() {
+                        request.set(None);
+                        show_toast(
+                            state2.workbench.status_toast,
+                            "AI edit: that file is no longer the open tab, so nothing was replaced"
+                                .to_string(),
+                        );
+                    }
                     state2.ai.thinking.set(false);
                     state2.ai.inline_edit_open.set(false);
                     state2.ai.inline_edit_query.set(String::new());
@@ -845,18 +963,34 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                     return;
                 }
             }
+            let selection = state.editor.selected_text.get_untracked();
+            // A selection is rewritten in place, so it must be one region of
+            // the file that was checked above.
+            let target = if selection.is_empty() {
+                None
+            } else {
+                match state.editor.inline_edit.selection.get_untracked() {
+                    Some((path, start, end)) if Some(&path) == ctx_file.as_ref() => {
+                        Some((path, start, end))
+                    }
+                    _ => {
+                        show_toast(
+                            state.workbench.status_toast,
+                            "AI edit rewrites one selection at a time; select a single range"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                }
+            };
+            state.editor.inline_edit.review.set(None);
             let attached: Vec<std::path::PathBuf> = ctx_file.iter().cloned().collect();
             in_flight.set(true);
             ai_thinking.set(true);
-            let selection = state.editor.selected_text.get_untracked();
-            let file_ctx = if selection.is_empty() {
-                ctx_file
-                    .as_ref()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            let file_ctx = ctx_file
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
             let prompt = inline_edit_prompt(&instruction, &selection, &file_ctx);
             let settings = Settings::load();
             let tx = update_tx.clone();
@@ -879,12 +1013,27 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
                             return;
                         }
                     };
-                    let update =
-                        match crate::ai_helpers::inline_edit_reply(client, &prompt, attached).await
-                        {
-                            Ok(text) => InlineEditUpdate::Done(text),
-                            Err(e) => InlineEditUpdate::Err(e),
-                        };
+                    let reply =
+                        crate::ai_helpers::inline_edit_reply(client, &prompt, attached).await;
+                    let update = match (reply, target) {
+                        (Ok(text), None) => InlineEditUpdate::Done(text),
+                        (Ok(text), Some((path, start, end))) => {
+                            match fit_replacement(&selection, &text) {
+                                Ok(text) => InlineEditUpdate::Replace(
+                                    crate::domain_state::editor::InlineReplace {
+                                        path,
+                                        start,
+                                        end,
+                                        original: selection,
+                                        text,
+                                        undo: false,
+                                    },
+                                ),
+                                Err(e) => InlineEditUpdate::Err(e),
+                            }
+                        }
+                        (Err(e), _) => InlineEditUpdate::Err(e),
+                    };
                     let _ = tx.send(update);
                 });
             });
@@ -931,6 +1080,124 @@ pub(crate) fn inline_edit_overlay(state: IdeState) -> impl IntoView {
             open.set(false);
             query.set(String::new());
         })
+}
+
+// ── Ctrl+K review: Keep or Undo the rewrite ──────────────────────────────────
+
+/// The bar under a Ctrl+K rewrite: what changed, with Keep and Undo. Undo
+/// puts the original back while the rewrite is still as it was made; Escape
+/// or Keep closes the bar and leaves the rewrite (Ctrl+Z still undoes it).
+pub(crate) fn inline_review_bar(state: IdeState) -> impl IntoView {
+    let review = state.editor.inline_edit.review;
+    let request = state.editor.inline_edit.request;
+    let theme = state.workbench.theme;
+
+    let title = label(move || {
+        review.with(|r| match r {
+            Some(r) => {
+                let (lines, more) = review_lines(&r.original, &r.text, usize::MAX);
+                let added = lines.iter().filter(|(s, _)| *s == '+').count();
+                let removed = lines.len() + more - added;
+                format!("✦ AI edit applied   +{added} −{removed}")
+            }
+            None => String::new(),
+        })
+    })
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.font_size(12.0)
+            .color(p.accent)
+            .font_weight(floem::text::Weight::BOLD)
+            .flex_grow(1.0)
+    });
+
+    let button = move |text: &'static str, primary: bool| {
+        label(move || text).style(move |s| {
+            let p = theme.get().palette;
+            s.font_size(12.0)
+                .padding_horiz(12.0)
+                .padding_vert(4.0)
+                .margin_left(8.0)
+                .border_radius(4.0)
+                .border(1.0)
+                .border_color(p.border)
+                .cursor(floem::style::CursorStyle::Pointer)
+                .apply_if(primary, |s| {
+                    s.background(p.accent)
+                        .color(p.bg_panel)
+                        .border_color(p.accent)
+                })
+                .apply_if(!primary, |s| s.color(p.text_primary))
+        })
+    };
+    let keep = button("Keep", true).on_click_stop(move |_| review.set(None));
+    let undo = button("Undo", false).on_click_stop(move |_| {
+        let Some(r) = review.get_untracked() else {
+            return;
+        };
+        review.set(None);
+        request.set(Some(crate::domain_state::editor::InlineReplace {
+            path: r.path,
+            start: r.start,
+            end: r.end,
+            original: r.text,
+            text: r.original,
+            undo: true,
+        }));
+    });
+    let header = stack((title, keep, undo)).style(|s| s.items_center().margin_bottom(6.0));
+
+    let diff = scroll(
+        dyn_stack(
+            move || {
+                review.with(|r| match r {
+                    Some(r) => {
+                        let (mut lines, more) =
+                            review_lines(&r.original, &r.text, INLINE_REVIEW_LINES);
+                        if more > 0 {
+                            lines.push((' ', format!("… {more} more changed lines")));
+                        }
+                        lines.into_iter().enumerate().collect::<Vec<_>>()
+                    }
+                    None => Vec::new(),
+                })
+            },
+            |(i, line): &(usize, (char, String))| (*i, line.clone()),
+            move |(_, (sign, text))| {
+                label(move || format!("{sign} {text}")).style(move |s| {
+                    let p = theme.get().palette;
+                    let s = s.font_size(12.0).font_family("monospace".to_string());
+                    match sign {
+                        '+' => s.color(p.success),
+                        '-' => s.color(p.error),
+                        _ => s.color(p.text_muted),
+                    }
+                })
+            },
+        )
+        .style(|s| s.flex_col()),
+    )
+    .style(|s| s.max_height(220.0));
+
+    stack((header, diff)).style(move |s| {
+        let shown = review.with(|r| r.is_some());
+        let p = theme.get().palette;
+        s.flex_col()
+            .absolute()
+            .inset_bottom(48.0)
+            .inset_left_pct(20.0)
+            .width_pct(60.0)
+            .padding(12.0)
+            .background(p.bg_panel)
+            .border(1.0)
+            .border_color(p.glass_border)
+            .border_radius(8.0)
+            .box_shadow_v_offset(4.0)
+            .box_shadow_blur(24.0)
+            .box_shadow_color(p.glow)
+            .z_index(ui_const::Z_INLINE_EDIT)
+            .apply_if(!shown, |s| s.display(floem::style::Display::None))
+    })
 }
 
 // ── LSP Hover tooltip overlay ─────────────────────────────────────────────────
@@ -1991,8 +2258,90 @@ mod picker_row_tests {
 
 #[cfg(test)]
 mod inline_edit_tests {
-    use super::{inline_edit_prompt, inline_edit_source, INLINE_EDIT_CONTEXT_CHARS};
+    use super::{
+        fit_replacement, inline_edit_prompt, inline_edit_source, review_lines, text_around,
+        INLINE_EDIT_AROUND_CHARS, INLINE_EDIT_CONTEXT_CHARS,
+    };
     use std::path::Path;
+
+    #[test]
+    fn the_code_around_a_selection_goes_along_when_it_is_found_once() {
+        let file = "use a;\n\nfn one() {\n    old();\n}\n\nfn two() {}\n";
+        let p = inline_edit_prompt("rename old to new", "    old();\n", file);
+        assert!(
+            p.contains("Code before the selection:\nuse a;\n\nfn one() {\n"),
+            "{p}"
+        );
+        assert!(p.contains("Selected code to rewrite:\n    old();\n"), "{p}");
+        assert!(
+            p.contains("Code after the selection:\n}\n\nfn two() {}\n"),
+            "{p}"
+        );
+
+        // Twice in the file (or not at all, when the buffer has unsaved
+        // edits): no context, rather than context from the wrong place.
+        assert_eq!(text_around("x", "x x"), ("", ""));
+        assert_eq!(text_around("missing", file), ("", ""));
+        assert_eq!(text_around("  ", file), ("", ""));
+    }
+
+    #[test]
+    fn the_context_is_capped_and_cut_to_whole_lines() {
+        let line = "let filler = 1234567890;\n";
+        let pad = line.repeat(400);
+        let file = format!("{pad}fn target() {{}}\n{pad}");
+        let (before, after) = text_around("fn target() {}\n", &file);
+        assert!(!before.is_empty() && before.len() <= INLINE_EDIT_AROUND_CHARS);
+        assert!(!after.is_empty() && after.len() <= INLINE_EDIT_AROUND_CHARS);
+        assert!(before.starts_with("let filler") && before.ends_with('\n'));
+        assert!(after.starts_with("let filler") && after.ends_with('\n'));
+
+        // Multi-byte text right at the cut never splits a char.
+        let wide = "é".repeat(INLINE_EDIT_AROUND_CHARS);
+        let file = format!("{wide}SEL{wide}");
+        let (before, after) = text_around("SEL", &file);
+        assert!(before.chars().all(|c| c == 'é'));
+        assert!(after.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn the_reply_is_fitted_to_the_selection() {
+        // A fence the model added anyway is dropped.
+        assert_eq!(
+            fit_replacement("a()\n", "```rust\nb()\n```").unwrap(),
+            "b()\n"
+        );
+        // Whole lines selected: one trailing line break, never none or two.
+        assert_eq!(fit_replacement("a()\n", "b()").unwrap(), "b()\n");
+        assert_eq!(fit_replacement("a()\n", "b()\n\n").unwrap(), "b()\n");
+        assert_eq!(fit_replacement("a()\r\n", "b()\n").unwrap(), "b()\r\n");
+        // Part of a line selected: no line break added, leading ones dropped.
+        assert_eq!(fit_replacement("a", "\nb\n").unwrap(), "b");
+        // Indentation the model kept stays.
+        assert_eq!(
+            fit_replacement("    a();\n", "    b();\n    c();").unwrap(),
+            "    b();\n    c();\n"
+        );
+        assert!(fit_replacement("a", "  \n").is_err());
+        assert!(fit_replacement("a", "```\n```").is_err());
+    }
+
+    #[test]
+    fn the_review_lists_only_changed_lines_and_counts_the_rest() {
+        let (lines, more) = review_lines("a\nb\nc\n", "a\nB\nc\nd\n", 10);
+        assert_eq!(
+            lines,
+            vec![
+                ('-', "b".to_string()),
+                ('+', "B".to_string()),
+                ('+', "d".to_string())
+            ]
+        );
+        assert_eq!(more, 0);
+        let new: String = (0..50).map(|i| format!("{i}\n")).collect();
+        let (lines, more) = review_lines("", &new, 40);
+        assert_eq!((lines.len(), more), (40, 10));
+    }
 
     #[test]
     fn the_active_tab_wins_over_the_explorer_pick() {
@@ -2018,7 +2367,7 @@ mod inline_edit_tests {
     }
 
     #[test]
-    fn a_selection_scopes_the_prompt_and_leaves_the_file_text_out() {
+    fn a_selection_scopes_the_prompt_and_leaves_unrelated_file_text_out() {
         let p = inline_edit_prompt("add docs", "fn a() {}", "SHOULD NOT APPEAR");
         assert!(p.contains("Instruction: add docs"), "{p}");
         assert!(p.ends_with("Code to rewrite:\nfn a() {}"), "{p}");

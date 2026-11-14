@@ -14,7 +14,7 @@ mod glob;
 mod grep;
 mod list;
 pub mod mcp_bridge;
-mod memory;
+pub mod memory;
 mod move_path;
 mod now;
 mod open;

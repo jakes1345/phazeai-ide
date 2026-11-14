@@ -71,18 +71,44 @@ impl ConversationHistory {
     }
 
     pub fn add_tool_result(&mut self, tool_call_id: impl Into<String>, result: impl Into<String>) {
-        let mut result_str = result.into();
-
-        // Cap huge tool results to save context, keeping the start and the
-        // end (errors and totals are usually last) around a marker.
-        const MAX_TOOL_RESULT_LEN: usize = 12000;
-        if result_str.len() > MAX_TOOL_RESULT_LEN {
-            result_str = crate::text::cut_middle(&result_str, MAX_TOOL_RESULT_LEN).into_owned();
-        }
-
+        let result_str = stored_tool_result(result.into());
         self.messages
             .push_back(Message::tool_result(tool_call_id, result_str));
         self.trim_if_needed();
+    }
+
+    /// The id of an earlier call of one of `tools` whose result, as it is
+    /// still stored in this conversation, is exactly what `result` would be
+    /// stored as; the most recent such call if there are several.
+    ///
+    /// Only a result the model can still read counts: one that compaction
+    /// folded into the summary is gone from the messages, and one that
+    /// [`Self::trim_to_token_budget`] shortened no longer matches. So when
+    /// this returns an id, sending `result` again would repeat, word for
+    /// word, text that is already in the request.
+    pub fn repeat_of(&self, tools: &[&str], result: &str) -> Option<String> {
+        let stored = stored_tool_result(result.to_string());
+        let mut found = None;
+        for (i, m) in self.messages.iter().enumerate() {
+            let Some(id) = m.tool_call_id.as_deref() else {
+                continue;
+            };
+            if m.content != stored {
+                continue;
+            }
+            let called = self.messages.iter().take(i).rev().find_map(|earlier| {
+                earlier
+                    .tool_calls
+                    .as_ref()?
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.function.name.as_str())
+            });
+            if called.is_some_and(|name| tools.contains(&name)) {
+                found = Some(id.to_string());
+            }
+        }
+        found
     }
 
     pub fn add_message(&mut self, message: Message) {
@@ -474,6 +500,18 @@ impl Default for ConversationHistory {
     }
 }
 
+/// A tool result as the conversation stores it: huge results are cut to
+/// save context, keeping the start and the end (errors and totals are
+/// usually last) around a marker.
+fn stored_tool_result(result: String) -> String {
+    const MAX_TOOL_RESULT_LEN: usize = 12000;
+    if result.len() > MAX_TOOL_RESULT_LEN {
+        crate::text::cut_middle(&result, MAX_TOOL_RESULT_LEN).into_owned()
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +536,70 @@ mod tests {
         let conversation = history.get_conversation_messages();
         assert_eq!(conversation.len(), 1);
         assert_eq!(conversation[0].content, "next turn");
+    }
+
+    fn call(id: &str, tool: &str) -> Message {
+        Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: tool.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        )
+    }
+
+    #[test]
+    fn repeat_of_finds_the_latest_identical_result_of_a_listed_tool() {
+        let mut h = ConversationHistory::new();
+        h.add_message(call("a", "read_file"));
+        h.add_tool_result("a", "contents");
+        h.add_message(call("b", "bash"));
+        h.add_tool_result("b", "contents");
+        h.add_message(call("c", "read_file"));
+        h.add_tool_result("c", "contents");
+
+        assert_eq!(
+            h.repeat_of(&["read_file"], "contents").as_deref(),
+            Some("c")
+        );
+        assert_eq!(h.repeat_of(&["read_file"], "other"), None);
+        // `bash` is not listed: its identical output alone does not count.
+        assert_eq!(h.repeat_of(&["grep"], "contents"), None);
+    }
+
+    #[test]
+    fn repeat_of_compares_the_stored_form_of_a_huge_result() {
+        let huge = "y".repeat(30_000);
+        let mut h = ConversationHistory::new();
+        h.add_message(call("a", "read_file"));
+        h.add_tool_result("a", huge.clone());
+        assert_eq!(h.repeat_of(&["read_file"], &huge).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_result_that_is_trimmed_or_folded_is_no_longer_a_repeat() {
+        let text = "z".repeat(4_000);
+        let mut h = ConversationHistory::new();
+        h.add_user_message("q");
+        h.add_message(call("a", "read_file"));
+        h.add_tool_result("a", text.clone());
+        h.add_user_message("q2");
+        // Shrinking the request shortens the old result: it no longer matches.
+        h.trim_to_token_budget(300);
+        assert_eq!(h.repeat_of(&["read_file"], &text), None);
+
+        let mut folded = ConversationHistory::new();
+        folded.add_user_message("q");
+        folded.add_message(call("a", "read_file"));
+        folded.add_tool_result("a", text.clone());
+        folded.add_user_message("q2");
+        let upto = folded.len() - 1;
+        folded.compact(upto, "read a file");
+        assert_eq!(folded.repeat_of(&["read_file"], &text), None);
     }
 
     fn msg(role_user: bool, n: usize) -> Message {
