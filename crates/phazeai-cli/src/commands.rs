@@ -56,6 +56,8 @@ pub enum CommandResult {
     ShowContext,
     /// Switch AI mode (plan, debug, chat, ask, edit).
     SetMode(String),
+    /// Carry out the plan made in Plan mode (/go).
+    RunPlan,
     /// Add a file to the conversation context (/add <path>).
     AddFile(String),
     /// Retry the last user message.
@@ -260,9 +262,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         "/plan",
         [],
         "",
-        "Produce a step-by-step plan, no code",
+        "Plan with read-only tools; /go carries it out",
         Mode
     ),
+    cmd!("/go", [], "", "Carry out the plan made in plan mode", Mode),
     cmd!("/debug", [], "", "Diagnose the root cause first", Mode),
     cmd!("/edit", [], "", "Make minimal, targeted code changes", Mode),
     cmd!("/diff", [], "", "Show uncommitted git diff", Project),
@@ -596,6 +599,7 @@ pub fn handle_command(input: &str) -> CommandResult {
             }
         }
         "/plan" => CommandResult::SetMode("plan".into()),
+        "/go" => CommandResult::RunPlan,
         "/debug" => CommandResult::SetMode("debug".into()),
         "/ask" => CommandResult::SetMode("ask".into()),
         "/edit" => CommandResult::SetMode("edit".into()),
