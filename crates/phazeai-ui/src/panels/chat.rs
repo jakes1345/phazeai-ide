@@ -3040,7 +3040,11 @@ pub fn chat_panel(
         tool_approval_overlay,
         input_bar,
     ))
-    .style(move |s| s.flex_col().width_full().height_full())
+    // min_height(0): a flex item's minimum is otherwise its content, so a
+    // long conversation or a tall review would make the panel, and with it
+    // the window's column, taller than the window, pushing the input bar
+    // and the status bar off the bottom.
+    .style(move |s| s.flex_col().width_full().height_full().min_height(0.0))
 }
 
 /// One row of the file-change review.
