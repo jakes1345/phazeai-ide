@@ -8,6 +8,59 @@ use floem::reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, Sign
 use phazeai_core::config::EditorSettings;
 use std::path::PathBuf;
 
+/// A Ctrl+K rewrite for the editor to make: replace bytes `start..end` of
+/// `path` with `text`, but only while those bytes still read `original` (the
+/// user may have typed while the model worked).
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineReplace {
+    pub path: PathBuf,
+    pub start: usize,
+    pub end: usize,
+    pub original: String,
+    pub text: String,
+    /// Putting `original` back (the review's Undo): no review follows.
+    pub undo: bool,
+}
+
+/// A Ctrl+K rewrite the editor has made, shown with Keep and Undo. `start..end`
+/// is where `text` now sits; `original` is what it replaced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineReview {
+    pub path: PathBuf,
+    pub start: usize,
+    pub end: usize,
+    pub original: String,
+    pub text: String,
+}
+
+/// What Ctrl+K and the main editor pane share.
+#[derive(Clone, Copy)]
+pub struct InlineEditSignals {
+    /// The main pane's one selected region as (file, start, end) in bytes;
+    /// `None` with no selection or with more than one region.
+    pub selection: RwSignal<Option<(PathBuf, usize, usize)>>,
+    /// A rewrite waiting for the main pane to make it.
+    pub request: RwSignal<Option<InlineReplace>>,
+    /// The rewrite on screen for Keep or Undo.
+    pub review: RwSignal<Option<InlineReview>>,
+}
+
+impl InlineEditSignals {
+    pub fn new() -> Self {
+        Self {
+            selection: create_rw_signal(None),
+            request: create_rw_signal(None),
+            review: create_rw_signal(None),
+        }
+    }
+}
+
+impl Default for InlineEditSignals {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The `[editor]` settings of `config.toml`, as the signals the IDE reads.
 ///
 /// [`EditorState::new`] puts these same signals in the editor state and
@@ -254,6 +307,8 @@ pub struct EditorState {
 
     // Text currently selected in the active editor ("" when no selection).
     pub selected_text: RwSignal<String>,
+    // Ctrl+K's selection range, the rewrite to make and the one under review.
+    pub inline_edit: InlineEditSignals,
 
     // Last known pointer position (window-relative). Written by PointerMove on the
     // root stack; read by the hover tooltip overlay to position itself near the cursor.
@@ -381,6 +436,7 @@ impl EditorState {
             close_active_tab_nonce: create_rw_signal(0u64),
             panes: create_rw_signal(Vec::new()),
             selected_text: create_rw_signal(String::new()),
+            inline_edit: InlineEditSignals::new(),
             hover_anchor_x: create_rw_signal(0.0_f64),
             hover_anchor_y: create_rw_signal(0.0_f64),
         }

@@ -1402,6 +1402,9 @@ pub fn editor_panel(
     // a key press names and says whether there was one. See `editor_keys`.
     app_shortcut: ShortcutFn,
     status_toast: RwSignal<Option<String>>,
+    // Ctrl+K: the main pane reports its selection range here and makes the
+    // rewrites it is handed. Other panes ignore it.
+    inline_edit: crate::domain_state::editor::InlineEditSignals,
 ) -> impl IntoView {
     let tabs: RwSignal<Vec<TabState>> = create_rw_signal(vec![]);
     let active_idx: RwSignal<Option<usize>> = create_rw_signal(None);
@@ -2228,6 +2231,14 @@ pub fn editor_panel(
                             .collect::<Vec<_>>()
                             .join("\n");
                         selected_text.set(text);
+                        if is_primary_pane {
+                            let mut picked = sel.regions().iter().filter(|r| r.min() != r.max());
+                            let one = match (picked.next(), picked.next()) {
+                                (Some(r), None) => Some((track_path.clone(), r.min(), r.max())),
+                                _ => None,
+                            };
+                            inline_edit.selection.set(one);
+                        }
                         // Byte span across all non-empty regions (for find-in-selection).
                         let span = sel
                             .regions()
@@ -2241,6 +2252,9 @@ pub fn editor_panel(
                     } else {
                         selected_text.set(String::new());
                         active_sel_range.set(None);
+                        if is_primary_pane {
+                            inline_edit.selection.set(None);
+                        }
                     }
                 });
             }
@@ -2872,6 +2886,59 @@ pub fn editor_panel(
                     let start = cursor_offset.saturating_sub(prefix_byte_len);
                     let sel = Selection::region(start, cursor_offset);
                     doc_for_comp.edit_single(sel, &text, EditType::InsertChars);
+                });
+            }
+
+            // ── Ctrl+K rewrite of the selection ───────────────────────────
+            // Made only while the bytes still read what was sent: a rewrite
+            // of text the user has since changed would overwrite their work.
+            if is_primary_pane {
+                let doc_for_ai = doc.clone();
+                let ai_path = tab.path.clone();
+                create_effect(move |_| {
+                    let Some(req) = inline_edit.request.get() else {
+                        return;
+                    };
+                    if active_idx.get() != Some(i) || req.path != ai_path {
+                        return;
+                    }
+                    inline_edit.request.set(None);
+                    let rope = doc_for_ai.rope_text();
+                    let current = (req.start <= req.end && req.end <= rope.len())
+                        .then(|| rope.slice_to_cow(req.start..req.end).to_string());
+                    if current.as_deref() != Some(req.original.as_str()) {
+                        inline_edit.review.set(None);
+                        crate::app::show_toast(
+                            status_toast,
+                            if req.undo {
+                                "That code changed after the AI edit; Ctrl+Z undoes it".to_string()
+                            } else {
+                                "The selection changed while the AI worked, so nothing was replaced"
+                                    .to_string()
+                            },
+                        );
+                        return;
+                    }
+                    doc_for_ai.edit_single(
+                        Selection::region(req.start, req.end),
+                        &req.text,
+                        EditType::InsertChars,
+                    );
+                    let new_end = req.start + req.text.len();
+                    cursor_sig.set(Cursor::new(
+                        CursorMode::Insert(Selection::region(req.start, new_end)),
+                        None,
+                        None,
+                    ));
+                    inline_edit.review.set((!req.undo).then(|| {
+                        crate::domain_state::editor::InlineReview {
+                            path: req.path.clone(),
+                            start: req.start,
+                            end: new_end,
+                            original: req.original.clone(),
+                            text: req.text.clone(),
+                        }
+                    }));
                 });
             }
 
