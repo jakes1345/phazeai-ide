@@ -1326,6 +1326,47 @@ fn open_in_tabs(
 
 /// Full multi-tab code editor with syntect syntax highlighting.
 ///
+/// The editor's background: Floem's `default_dark_color`, which every theme
+/// keeps (the gutter is painted the same).
+const EDITOR_BG: (u8, u8, u8) = (0x28, 0x2C, 0x34);
+
+/// Line numbers off the current line need this contrast against
+/// [`EDITOR_BG`] to be read (WCAG's floor for large or secondary text).
+const GUTTER_MIN_CONTRAST: f64 = 3.0;
+
+/// WCAG contrast ratio of two opaque colours.
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+        let ch = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.039_28 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// The colour of line numbers other than the current one: the dimmest of
+/// the theme's text colours that can still be read on the editor, so they
+/// stay quieter than the code. (`text_disabled` was used before: at about
+/// 1:1 on the editor in every dark theme, only the current line's number
+/// showed.)
+fn gutter_number_color(p: &crate::theme::PhazePalette) -> floem::peniko::Color {
+    let rgb = |c: floem::peniko::Color| {
+        let c = c.to_rgba8();
+        (c.r, c.g, c.b)
+    };
+    [p.text_disabled, p.text_muted, p.text_secondary]
+        .into_iter()
+        .find(|c| contrast(rgb(*c), EDITOR_BG) >= GUTTER_MIN_CONTRAST)
+        .unwrap_or(floem::peniko::Color::from_rgb8(0xAB, 0xB2, 0xBF))
+}
+
 /// `ai_thinking` drives the sentient-gutter glow on the left edge.
 /// `lsp_cmd` notifies the LSP server on every edit (did_change).
 /// `active_cursor` is written with (path, 0-based line, 0-based col) whenever
@@ -4751,7 +4792,7 @@ pub fn editor_panel(
                     let t = theme.get();
                     let p = &t.palette;
                     default_dark_color(style)
-                        .gutter_dim_color(p.text_disabled)
+                        .gutter_dim_color(gutter_number_color(p))
                         .gutter_accent_color(p.text_primary)
                         .gutter_current_color(p.bg_elevated)
                         .gutter_left_padding(6.0)
@@ -7162,5 +7203,30 @@ mod goto_column_tests {
             "no column: the line's start"
         );
         assert_eq!(goto_offset_in_line(line, Some(999)), line.len());
+    }
+}
+
+#[cfg(test)]
+mod gutter_tests {
+    use super::{contrast, gutter_number_color, EDITOR_BG, GUTTER_MIN_CONTRAST};
+    use crate::theme::{PhazeTheme, ThemeVariant};
+
+    /// Every built-in theme's line numbers can be read on the editor.
+    #[test]
+    fn line_numbers_are_readable_in_every_theme() {
+        for &v in ThemeVariant::all() {
+            let c = gutter_number_color(&PhazeTheme::from_variant(v).palette).to_rgba8();
+            let ratio = contrast((c.r, c.g, c.b), EDITOR_BG);
+            assert!(
+                ratio >= GUTTER_MIN_CONTRAST,
+                "{v:?}: line numbers at {ratio:.2}:1 on the editor"
+            );
+        }
+    }
+
+    #[test]
+    fn contrast_matches_wcag() {
+        assert!((contrast((0, 0, 0), (255, 255, 255)) - 21.0).abs() < 0.01);
+        assert!((contrast((40, 44, 52), (40, 44, 52)) - 1.0).abs() < 1e-9);
     }
 }
