@@ -198,6 +198,7 @@ pub(super) fn handle_key(state: &mut AppState, key: KeyEvent) {
         (KeyCode::Char('o'), true, _) => actions::open_session_picker(state),
         (KeyCode::Char('l'), true, _) => {
             state.items.clear();
+            state.btw.open.clear();
             state.scroll = 0;
             state.follow = true;
             state.needs_clear = true;

@@ -12,6 +12,8 @@ pub enum CommandResult {
     Message(String),
     /// Clear the chat and the model's conversation context.
     Clear,
+    /// `/btw <question>`: a side question for PhazeAI Local.
+    Btw(String),
     /// Quit the application.
     Quit,
     /// Change the model.
@@ -149,6 +151,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         [],
         "",
         "Clear the screen and the model's context",
+        Chat
+    ),
+    cmd!(
+        "/btw",
+        [],
+        "<question>",
+        "Side question, answered free by PhazeAI Local; works mid-reply, not added to the chat",
         Chat
     ),
     cmd!(
@@ -465,6 +474,7 @@ pub fn handle_command(input: &str) -> CommandResult {
         "/help" | "/h" => show_help(),
         "/exit" | "/quit" | "/q" => CommandResult::Quit,
         "/clear" => CommandResult::Clear,
+        "/btw" => CommandResult::Btw(arg.to_string()),
         "/new" => CommandResult::NewConversation,
 
         // Model commands
@@ -882,6 +892,15 @@ fn remember_in(root: &std::path::Path, arg: &str) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn btw_takes_the_rest_of_the_line_as_its_question() {
+        assert!(matches!(
+            handle_command("/btw what does stock_value return?"),
+            CommandResult::Btw(q) if q == "what does stock_value return?"
+        ));
+        assert!(matches!(handle_command("/btw"), CommandResult::Btw(q) if q.is_empty()));
+    }
 
     /// Every advertised command (and alias) must be handled — no dead entries.
     #[test]

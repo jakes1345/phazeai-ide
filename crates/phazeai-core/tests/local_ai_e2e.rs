@@ -262,3 +262,62 @@ async fn reports_gpu_offload_from_a_real_server() {
     println!("offload: {}", offload.describe());
     assert!(offload.gpu_layers > 0, "{}", offload.describe());
 }
+
+/// `/btw` end to end: PhazeAI Local runs a real model, and a side question
+/// about a session snapshot is answered through `btw::ask`, as the IDE and
+/// the CLI call it, while the configured main provider stays a paid one.
+///
+/// ```text
+/// PHAZEAI_E2E_LLAMA_SERVER=/path/to/llama-server PHAZEAI_E2E_GGUF=/path/to/model.gguf \
+///   cargo test -p phazeai-core --test local_ai_e2e btw_answers -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a llama-server binary and a GGUF model"]
+async fn btw_answers_a_side_question_on_the_local_model() {
+    use phazeai_core::btw::{self, SessionLine, Who};
+    use phazeai_core::local_ai::server::LaunchSpec;
+    let spec = LaunchSpec {
+        binary: PathBuf::from(
+            std::env::var("PHAZEAI_E2E_LLAMA_SERVER").expect("set PHAZEAI_E2E_LLAMA_SERVER"),
+        ),
+        model_path: PathBuf::from(std::env::var("PHAZEAI_E2E_GGUF").expect("set PHAZEAI_E2E_GGUF")),
+        model_id: "e2e-btw".into(),
+        ctx_size: 8192,
+    };
+    LOCAL_AI.start_spec(spec).await.expect("server starts");
+
+    let mut settings = Settings::default();
+    settings.set_provider(LlmProvider::Claude); // the main chat is a paid provider
+    settings.local_ai.ctx_size = Some(8192);
+    let session = vec![
+        SessionLine::new(Who::User, "Fix the bug in stock_value in src/lib.rs"),
+        SessionLine::new(Who::Tool, "read_file src/lib.rs: 20 lines"),
+        SessionLine::new(
+            Who::Assistant,
+            "stock_value adds price_cents + qty for each item; it should multiply \
+             price_cents * qty. I'll change the + to *.",
+        ),
+    ];
+    let prompt = btw::prompt(
+        &session,
+        &[],
+        "In one sentence: what operator is wrong in stock_value?",
+        btw::budget_chars(&settings),
+    );
+    let started = std::time::Instant::now();
+    let mut pieces = 0;
+    let answer = btw::ask(&settings, &prompt, |_| pieces += 1)
+        .await
+        .expect("answer");
+    println!(
+        "btw answer in {:.1}s, {pieces} streamed pieces: {answer}",
+        started.elapsed().as_secs_f64()
+    );
+    LOCAL_AI.stop();
+    assert!(pieces > 1, "the answer should stream");
+    let lower = answer.to_lowercase();
+    assert!(
+        lower.contains('+') || lower.contains("plus") || lower.contains("add"),
+        "{answer}"
+    );
+}

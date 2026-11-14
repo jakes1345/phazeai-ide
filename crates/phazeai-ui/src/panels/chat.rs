@@ -1370,12 +1370,27 @@ pub fn chat_panel(
 
     let update_tx = Arc::new(update_tx);
 
+    // `/btw` side questions: answered by PhazeAI Local beside the chat.
+    let btw_state = super::btw::BtwState::new();
+
     let do_send: Rc<dyn Fn()> = Rc::new({
         let update_tx = update_tx.clone();
         let code_search = code_search.clone();
         let checkpoints = checkpoints.clone();
+        let btw_state = btw_state.clone();
         move || {
             let text = input_text.get();
+            // A side question runs even while a reply is, and never joins
+            // the conversation.
+            if let Some(question) = super::btw::btw_question(&text) {
+                let question = question.to_string();
+                input_text.set(String::new());
+                btw_state.ask(
+                    &question,
+                    super::btw::session_lines(&messages.get_untracked()),
+                );
+                return;
+            }
             let trimmed = text.trim().to_string();
             if trimmed.is_empty() || is_loading.get() {
                 // #region agent log
@@ -2334,7 +2349,10 @@ pub fn chat_panel(
             })
     })
     .on_click_stop(move |_| {
-        if is_loading.get() {
+        // While a reply runs the button stops it, unless a `/btw` side
+        // question is typed: that is sent beside the reply.
+        let btw = super::btw::btw_question(&input_text.get_untracked()).is_some();
+        if is_loading.get() && !btw {
             if let Some(token) = current_cancel_token.get() {
                 token.store(true, std::sync::atomic::Ordering::SeqCst);
             }
@@ -2476,6 +2494,7 @@ pub fn chat_panel(
 
     let input_bar = container(
         stack((
+            super::btw::btw_panel(btw_state, theme),
             pending_row,
             stack((attach_btn, input_widget, send_btn)).style(|s| s.items_center().width_full()),
         ))

@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_event;
 pub mod analysis;
+pub mod btw;
 pub mod checkpoint;
 pub mod code_review;
 pub mod companion;
