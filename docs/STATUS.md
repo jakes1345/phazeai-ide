@@ -19,6 +19,7 @@
 - the text-only AI helpers;
 - settings save and load;
 - Stop and history trimming in the agent loop;
+- Plan and Ask modes are read-only for real (`Agent::with_read_only`, `tests/read_only_mode.rs`): a call the approval classifier does not class as read-only is refused without asking, in the IDE chat and the TUI. After a plan, the IDE's **Run plan** button or the TUI's `/go` switches to Chat and has it carried out. The button has no GUI test and was not driven with a real model;
 - repeat reads: a `read_file`, `grep`, `glob`, `list_files` or `find_path` result identical to one still in the conversation is sent as a one-line pointer to it (`ConversationHistory::repeat_of`, `tests/repeat_reads.rs`);
 - permission rules and tool hooks (#49), the per-hunk keep/undo of an agent's edit (#44) and run undo (#45);
 - editor key routing and focus (#55, #57): unit tests plus real-IDE runs under Xvfb.
