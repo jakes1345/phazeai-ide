@@ -34,6 +34,17 @@ impl FileEntry {
     }
 }
 
+/// Entries the tree leaves out: version-control folders, OS clutter (as
+/// other editors hide by default) and Cargo's build folder. Other dotfiles
+/// are shown: `.env`, `.gitignore`, `.github/` and `.phazeai/` (the project's
+/// privacy policy) are files people open and edit.
+fn hidden_in_explorer(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".svn" | ".hg" | ".DS_Store" | "Thumbs.db" | "target"
+    )
+}
+
 /// Load the immediate children of `parent` at `depth`, sorted dirs-first.
 fn load_children(parent: &PathBuf, depth: usize) -> Vec<FileEntry> {
     let Ok(rd) = std::fs::read_dir(parent) else {
@@ -45,11 +56,7 @@ fn load_children(parent: &PathBuf, depth: usize) -> Vec<FileEntry> {
         .filter_map(|e| {
             let path = e.path();
             let name = e.file_name().to_string_lossy().to_string();
-            // Skip hidden files/dirs and common noise
-            if name.starts_with('.') {
-                return None;
-            }
-            if name == "target" {
+            if hidden_in_explorer(&name) {
                 return None;
             }
             let is_dir = path.is_dir();
@@ -1046,5 +1053,40 @@ fn file_icon(name: &str) -> &'static str {
         "md" | "mdx" => icons::FILE_MARKDOWN,
         "lock" => icons::FILE_LOCK,
         _ => icons::FILE,
+    }
+}
+
+#[cfg(test)]
+mod dotfile_tests {
+    use super::{hidden_in_explorer, load_children};
+
+    #[test]
+    fn dotfiles_people_edit_are_listed_and_clutter_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in [".env", ".gitignore", ".DS_Store", "main.rs"] {
+            std::fs::write(root.join(f), "x").unwrap();
+        }
+        for d in [".git", ".github", ".phazeai", "target", "src"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let names: Vec<String> = load_children(&root.to_path_buf(), 0)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        // Folders first, then files, each by name.
+        assert_eq!(
+            names,
+            [
+                ".github",
+                ".phazeai",
+                "src",
+                ".env",
+                ".gitignore",
+                "main.rs"
+            ]
+        );
+        assert!(hidden_in_explorer(".git") && hidden_in_explorer("Thumbs.db"));
+        assert!(!hidden_in_explorer(".env"));
     }
 }
