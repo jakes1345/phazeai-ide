@@ -5,7 +5,7 @@ use std::sync::Arc;
 use floem::{
     event::{Event, EventListener},
     ext_event::create_signal_from_channel,
-    keyboard::{Key, Modifiers},
+    keyboard::Key,
     reactive::{create_effect, create_rw_signal, RwSignal, SignalGet, SignalUpdate},
     views::{container, dyn_container, dyn_stack, label, scroll, stack, text_input, Decorators},
     IntoView,
@@ -2040,22 +2040,33 @@ pub fn chat_panel(
                                         p.text_secondary
                                     })
                                     .max_width_pct(100.0)
+                                    // Flex items default to their content's
+                                    // width; without this a long line pushes
+                                    // the bubble past the panel instead of
+                                    // wrapping.
+                                    .min_width(0.0)
+                                    .flex_shrink(1.0)
                                     .line_height(1.5)
                                     .apply_if(is_tool, |s| {
                                         s.font_weight(floem::text::Weight::MEDIUM)
                                     })
                             }),
                         ))
-                        .style(|s| s.items_center().flex_grow(1.0)),
+                        .style(|s| s.items_center().flex_grow(1.0).min_width(0.0)),
                         // Retry icon (non-error AI messages) + dismiss ✕ (error messages)
                         stack((undo_btn, icon_retry_btn, dismiss_btn))
                             .style(|s| s.items_center().gap(2.0)),
                     ))
-                    .style(|s| s.items_center().justify_between().width_full()),
+                    .style(|s| {
+                        s.items_center()
+                            .justify_between()
+                            .width_full()
+                            .min_width(0.0)
+                    }),
                     // Error retry button below the error text (only for error bubbles)
                     error_retry_btn,
                 ))
-                .style(|s| s.flex_col().width_full()),
+                .style(|s| s.flex_col().width_full().min_width(0.0)),
             )
             .style(move |s| {
                 let t = theme.get();
@@ -2179,7 +2190,12 @@ pub fn chat_panel(
         }
     });
 
+    // Floem's text_input handles Enter and Escape itself on KeyDown and
+    // stops the event there, so a KeyDown listener never sees them: Enter
+    // goes through `on_enter`, and Escape (Stop) is read on KeyUp, which the
+    // input passes on.
     let input_widget = text_input(input_text)
+        .on_enter(move || (do_send_key)())
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
@@ -2194,25 +2210,13 @@ pub fn chat_panel(
                 .font_size(13.0)
                 .min_width(0.0)
         })
-        .on_event_stop(EventListener::KeyDown, move |event| {
-            if let Event::KeyDown(e) = event {
-                match &e.key.logical_key {
-                    Key::Named(floem::keyboard::NamedKey::Escape) => {
-                        if is_loading.get() {
-                            if let Some(token) = current_cancel_token.get_untracked() {
-                                token.store(true, std::sync::atomic::Ordering::SeqCst);
-                            }
-                        }
-                    }
-                    key => {
-                        let enter = match key {
-                            Key::Character(ch) => ch.as_str() == "\r" || ch.as_str() == "\n",
-                            Key::Named(floem::keyboard::NamedKey::Enter) => true,
-                            _ => false,
-                        };
-                        if enter && !e.modifiers.contains(Modifiers::SHIFT) {
-                            (do_send_key)();
-                        }
+        .on_event_stop(EventListener::KeyUp, move |event| {
+            if let Event::KeyUp(e) = event {
+                if e.key.logical_key == Key::Named(floem::keyboard::NamedKey::Escape)
+                    && is_loading.get_untracked()
+                {
+                    if let Some(token) = current_cancel_token.get_untracked() {
+                        token.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
