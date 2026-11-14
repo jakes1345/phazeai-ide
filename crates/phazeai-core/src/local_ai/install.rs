@@ -453,6 +453,7 @@ pub async fn install_latest(
 }
 
 /// [`install_latest`] against any GitHub-compatible release endpoint.
+#[allow(clippy::too_many_arguments)] // the test seam: endpoint and platform are parameters
 pub async fn install_from_release_api(
     client: &reqwest::Client,
     api_url: &str,
