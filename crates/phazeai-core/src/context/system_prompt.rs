@@ -196,6 +196,7 @@ fn tools_can_read(path: &Path) -> bool {
 
 /// Every instruction block for the project at `root`, in prompt order:
 /// its rules ([`super::rules`]: the main rules file and what goes with it),
+/// the project's memory (`.phazeai/memory.md`, see [`crate::tools::memory`]),
 /// `CLAUDE.md` and `AGENTS.md` files in the directories above it (up to the
 /// home directory), the user's global `~/.phazeai/instructions.md`, and last
 /// the menu of rules read on demand. A block whose text another block
@@ -212,8 +213,28 @@ pub fn project_instructions(root: &Path) -> Vec<Instructions> {
         }
     };
 
-    // CLAUDE.md and AGENTS.md in the directories above the project.
     let policy = crate::privacy::policy_for(root);
+
+    // What the agent saved about this project in earlier sessions.
+    let memory_file = root.join(crate::tools::memory::PROJECT_MEMORY_FILE);
+    if !policy.is_denied(&memory_file) {
+        let memories = crate::tools::memory::read_project_memory(root);
+        if !memories.is_empty() {
+            let text: String = memories
+                .iter()
+                .map(|(key, value)| format!("- {key}: {value}\n"))
+                .collect();
+            push(
+                &mut blocks,
+                Instructions::new(text).with_heading(
+                    "# Project memory\nSaved in earlier sessions (the memory tool keeps it \
+                     current; drop what turns out wrong).\n",
+                ),
+            );
+        }
+    }
+
+    // CLAUDE.md and AGENTS.md in the directories above the project.
     let home = dirs::home_dir();
     for dir in root.ancestors().skip(1).take(6) {
         for file in ["CLAUDE.md", "AGENTS.md"] {
@@ -887,6 +908,34 @@ pub(crate) mod tests {
             "{marker}"
         );
         assert!(marker.contains(&root.join("CLAUDE.md").display().to_string()));
+    }
+
+    #[test]
+    fn project_memory_is_in_every_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let _ws = workspace(&root);
+        // Nothing saved yet: no memory block.
+        assert!(!project_instructions(&root)
+            .iter()
+            .any(|b| b.heading.starts_with("# Project memory")));
+
+        crate::tools::memory::remember(&root, "tests", "run with --workspace").unwrap();
+        crate::tools::memory::remember(&root, "style", "no unwrap in src").unwrap();
+        let blocks = project_instructions(&root);
+        let memory = blocks
+            .iter()
+            .find(|b| b.heading.starts_with("# Project memory"))
+            .expect("memory block");
+        assert!(memory.text.contains("- tests: run with --workspace\n"));
+        assert!(memory.text.contains("- style: no unwrap in src\n"));
+
+        // Forgetting the last one takes the block away again.
+        crate::tools::memory::forget(&root, "tests").unwrap();
+        crate::tools::memory::forget(&root, "style").unwrap();
+        assert!(!project_instructions(&root)
+            .iter()
+            .any(|b| b.heading.starts_with("# Project memory")));
     }
 
     #[test]
