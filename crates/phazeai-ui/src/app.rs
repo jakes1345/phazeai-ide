@@ -38,7 +38,7 @@ use crate::{
     components::icon::{icons, phaze_icon},
     domain_state::{AiState, EditorPrefs, EditorState, IdeState, ProjectState, WorkbenchState},
     panels::{
-        chat::chat_panel, containers::containers_panel, editor::editor_panel,
+        agents::agents_panel, chat::chat_panel, containers::containers_panel, editor::editor_panel,
         explorer::explorer_panel, extensions::extensions_panel, git::git_panel,
         github_actions::github_actions_panel, makefile::makefile_panel, remote::remote_panel,
         run_debug::run_debug_panel, search, settings::settings_panel, terminal::terminal_panel,
@@ -130,6 +130,7 @@ pub enum Tab {
     Symbols,
     GitDiff,
     Tests,
+    Agents,
 }
 
 impl std::fmt::Debug for IdeState {
@@ -1530,6 +1531,7 @@ fn activity_bar(state: IdeState) -> impl IntoView {
         activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
         activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
         activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
+        activity_bar_btn(icons::AI, Tab::Agents, state.clone()),
         activity_bar_btn(icons::DESIGN, Tab::Design, state.clone()),
         activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
         activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
@@ -1667,6 +1669,17 @@ fn left_panel(state: IdeState) -> impl IntoView {
         }
     });
 
+    let agents_wrap = container(agents_panel(state.clone())).style({
+        let state = state.clone();
+        move |s| {
+            s.width_full()
+                .height_full()
+                .apply_if(state.workbench.left_panel_tab.get() != Tab::Agents, |s| {
+                    s.display(floem::style::Display::None)
+                })
+        }
+    });
+
     let tests_wrap = container(tests_panel(state.clone())).style({
         let state = state.clone();
         move |s| {
@@ -1735,6 +1748,7 @@ fn left_panel(state: IdeState) -> impl IntoView {
             makefile_wrap,
             github_wrap,
             tests_wrap,
+            agents_wrap,
             composer_wrap,
             design_wrap,
             settings_wrap,
