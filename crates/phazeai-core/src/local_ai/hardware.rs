@@ -1,4 +1,5 @@
-//! What the machine can run: RAM, CPU cores, free disk space, OS and arch.
+//! What the machine can run: RAM, CPU cores, free disk space, OS and arch,
+//! and the GPUs llama.cpp can use ([`list_devices`]).
 //!
 //! Backed by `sysinfo`, which reads the native APIs on Windows
 //! (`GlobalMemoryStatusEx`, `GetDiskFreeSpaceExW`), macOS (`host_statistics64`,
@@ -25,6 +26,23 @@ pub struct HardwareInfo {
     pub os: String,
     /// `std::env::consts::ARCH`: "x86_64", "aarch64", ...
     pub arch: String,
+    /// GPUs the installed `llama-server` can use (empty when none, or before
+    /// one is installed). Filled by [`HardwareInfo::with_gpus`].
+    #[serde(default)]
+    pub gpus: Vec<GpuDevice>,
+}
+
+/// A GPU as `llama-server --list-devices` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuDevice {
+    /// llama.cpp's device name: `Vulkan0`, `Metal`, `CUDA0`.
+    pub name: String,
+    /// The driver's description: `AMD Radeon Graphics (RADV GFX1200)`.
+    pub description: String,
+    /// Video memory in bytes.
+    pub vram_total: u64,
+    /// Video memory free when listed, in bytes.
+    pub vram_free: u64,
 }
 
 impl HardwareInfo {
@@ -45,7 +63,22 @@ impl HardwareInfo {
             free_disk: free_disk_space(models_dir),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
+            gpus: Vec::new(),
         }
+    }
+
+    /// The same snapshot with the GPUs `server` lists (see [`list_devices`]);
+    /// unchanged when listing fails, so a broken server never hides RAM data.
+    pub fn with_gpus(mut self, server: &Path) -> Self {
+        if let Ok(gpus) = list_devices(server) {
+            self.gpus = gpus;
+        }
+        self
+    }
+
+    /// The GPU with the most video memory: the one a model is sized for.
+    pub fn best_gpu(&self) -> Option<&GpuDevice> {
+        self.gpus.iter().max_by_key(|g| g.vram_total)
     }
 
     /// One line for the UI, e.g. `16.0 GiB RAM (9.2 GiB free) · 8 cores · 120.4 GB free disk · windows/x86_64`.
@@ -61,14 +94,103 @@ impl HardwareInfo {
             .free_disk
             .map(|d| format!("{} free disk", super::human_bytes(d)))
             .unwrap_or_else(|| "free disk unknown".into());
+        let gpu = match self.best_gpu() {
+            Some(g) => format!(" · GPU: {} ({})", g.description, gib(g.vram_total)),
+            None => String::new(),
+        };
         format!(
-            "{} RAM ({} free) · {cores} · {disk} · {}/{}",
+            "{} RAM ({} free) · {cores} · {disk} · {}/{}{gpu}",
             gib(self.total_ram),
             gib(self.available_ram),
             self.os,
             self.arch
         )
     }
+}
+
+/// How long `llama-server --list-devices` may take before it is killed.
+const LIST_DEVICES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The GPUs `server` (a `llama-server` binary) can use, from
+/// `llama-server --list-devices`. Empty for a CPU-only build or a machine with
+/// no usable GPU. Blocks for up to 20 s (the first Vulkan run may compile
+/// shaders); call it off the UI thread.
+pub fn list_devices(server: &Path) -> Result<Vec<GpuDevice>, String> {
+    use std::io::Read;
+    let mut cmd = crate::process::std_command(server);
+    cmd.arg("--list-devices")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // PhazeAI-installed builds load their backend libraries from beside the binary.
+    if let Some(dir) = server.parent() {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    // Read on a thread so a chatty child can't fill the pipe and stall.
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
+    let deadline = std::time::Instant::now() + LIST_DEVICES_TIMEOUT;
+    let status = loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("llama-server --list-devices timed out".into());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    let out = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!("llama-server --list-devices exited with {status}"));
+    }
+    Ok(parse_devices(&out))
+}
+
+/// Parse `llama-server --list-devices` output (llama.cpp's
+/// `common_print_available_devices`):
+///
+/// ```text
+/// Available devices:
+///   Vulkan0: AMD Radeon Graphics (RADV GFX1200) (16304 MiB, 15800 MiB free)
+/// ```
+///
+/// The description may contain parentheses itself, so the memory figures are
+/// read from the last `(`. `(none)`, unparsable lines and software
+/// rasterizers (`llvmpipe`, `lavapipe`, `SwiftShader`, which report system RAM
+/// as video memory) give nothing.
+pub fn parse_devices(out: &str) -> Vec<GpuDevice> {
+    const SOFTWARE: [&str; 3] = ["llvmpipe", "lavapipe", "swiftshader"];
+    const MIB: u64 = 1024 * 1024;
+    out.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (name, rest) = line.split_once(": ")?;
+            if name.is_empty() || name.contains(' ') {
+                return None;
+            }
+            let open = rest.rfind(" (")?;
+            let (description, mem) = (&rest[..open], &rest[open + 2..]);
+            let mem = mem.strip_suffix(" MiB free)")?;
+            let (total, free) = mem.split_once(" MiB, ")?;
+            let lower = description.to_ascii_lowercase();
+            if SOFTWARE.iter().any(|s| lower.contains(s)) {
+                return None;
+            }
+            Some(GpuDevice {
+                name: name.to_string(),
+                description: description.trim().to_string(),
+                vram_total: total.trim().parse::<u64>().ok()? * MIB,
+                vram_free: free.trim().parse::<u64>().ok()? * MIB,
+            })
+        })
+        .collect()
 }
 
 /// `16.0 GiB` — RAM is shown in binary units because that is what OSes report.
@@ -156,6 +278,65 @@ fn strip_verbatim(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_list_devices_output() {
+        let out = "Available devices:\n  \
+                   Vulkan0: AMD Radeon Graphics (RADV GFX1200) (16304 MiB, 15800 MiB free)\n  \
+                   Vulkan1: llvmpipe (LLVM 20.1.2, 256 bits) (32016 MiB, 32016 MiB free)\n";
+        let gpus = super::parse_devices(out);
+        // llvmpipe is a software rasterizer, not a GPU.
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Vulkan0");
+        assert_eq!(gpus[0].description, "AMD Radeon Graphics (RADV GFX1200)");
+        assert_eq!(gpus[0].vram_total, 16304 * 1024 * 1024);
+        assert_eq!(gpus[0].vram_free, 15800 * 1024 * 1024);
+
+        assert!(super::parse_devices("Available devices:\n  (none)\n").is_empty());
+        assert!(super::parse_devices("").is_empty());
+        assert!(super::parse_devices("  Metal: Apple M2 (no memory figures)\n").is_empty());
+    }
+
+    #[test]
+    fn best_gpu_and_summary() {
+        let mut hw = super::HardwareInfo::probe(std::path::Path::new("."));
+        assert!(hw.best_gpu().is_none());
+        assert!(!hw.summary().contains("GPU"));
+        hw.gpus = super::parse_devices(
+            "  Vulkan0: Small (2048 MiB, 2000 MiB free)\n  Vulkan1: Big (16304 MiB, 15800 MiB free)\n",
+        );
+        assert_eq!(hw.best_gpu().unwrap().description, "Big");
+        assert!(
+            hw.summary().ends_with(" · GPU: Big (15.9 GiB)"),
+            "{}",
+            hw.summary()
+        );
+    }
+
+    /// A stand-in `llama-server` that prints a device list.
+    #[cfg(unix)]
+    #[test]
+    fn list_devices_runs_the_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("llama-server");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = --list-devices ] || exit 3\n\
+             echo 'Available devices:'\necho '  Vulkan0: Test GPU (8192 MiB, 8000 MiB free)'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let gpus = super::list_devices(&bin).unwrap();
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].vram_total, 8192 * 1024 * 1024);
+
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(super::list_devices(&bin).is_err());
+        // with_gpus keeps the snapshot when listing fails.
+        let hw = super::HardwareInfo::probe(tmp.path()).with_gpus(&bin);
+        assert!(hw.gpus.is_empty());
+    }
+
     use super::*;
 
     #[test]

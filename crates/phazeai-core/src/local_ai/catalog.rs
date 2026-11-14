@@ -22,6 +22,9 @@ pub const OS_IDE_RESERVE: u64 = 4 * GIB;
 /// Below `runtime_bytes + MIN_SYSTEM_RESERVE` of *installed* RAM the model can't
 /// run without swapping the whole machine, so it is "too big".
 pub const MIN_SYSTEM_RESERVE: u64 = 2 * GIB;
+/// Video memory left free on the GPU: what `llama-server --fit` keeps free
+/// per device by default (llama.cpp `fit_params_target`).
+pub const GPU_RESERVE: u64 = GIB;
 /// Largest extra free disk demanded beyond the file itself.
 pub const DISK_MARGIN: u64 = 512 * 1024 * 1024;
 
@@ -211,11 +214,24 @@ impl Fit {
     }
 }
 
+/// Where a model runs, given the machine's best GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Placement {
+    /// Weights and KV cache fit in video memory.
+    Gpu,
+    /// Part on the GPU, the rest on the CPU (llama-server's `--fit` splits it).
+    Split,
+    /// No usable GPU.
+    Cpu,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FitReport {
     pub fit: Fit,
-    /// Estimated RAM while serving, in bytes.
+    /// Estimated memory while serving (weights + KV cache + scratch), in bytes:
+    /// video memory when [`Placement::Gpu`], otherwise mostly RAM.
     pub need: u64,
+    pub placement: Placement,
     /// Whether there is room on disk for the file (None: unknown free space).
     pub disk_ok: Option<bool>,
     /// Plain-language explanation for the UI.
@@ -232,12 +248,58 @@ pub fn fit(entry: &CatalogEntry, hw: &HardwareInfo, ctx: u32) -> FitReport {
 }
 
 /// Fit verdict for a model file of `size` bytes that needs `need` bytes of
-/// RAM while serving and is recommended from `min_ram` of installed RAM (the
-/// rule of [`fit`]).
+/// memory while serving and is recommended from `min_ram` of installed RAM.
+///
+/// With a GPU ([`HardwareInfo::best_gpu`]): *Fits* when `need` plus
+/// [`GPU_RESERVE`] fits its video memory and that much is free now, *Tight*
+/// when it fits but other programs hold the memory. A model too big for the
+/// GPU is split, and the part on the GPU no longer counts against RAM in the
+/// rule of [`fit`] that follows.
 pub fn fit_need(size: u64, need: u64, min_ram: u64, hw: &HardwareInfo) -> FitReport {
     use super::hardware::gib;
     let disk_ok = hw.free_disk.map(|d| d >= size + disk_margin(size));
-    let (fit, reason) = if hw.total_ram < need + MIN_SYSTEM_RESERVE {
+    let gpu = hw.best_gpu();
+    if let Some(g) = gpu.filter(|g| need + GPU_RESERVE <= g.vram_total) {
+        let (fit, reason) = if g.vram_free >= need + GPU_RESERVE {
+            (
+                Fit::Fits,
+                format!(
+                    "Runs on the GPU ({}): uses about {} of its {}.",
+                    g.description,
+                    gib(need),
+                    gib(g.vram_total)
+                ),
+            )
+        } else {
+            (
+                Fit::Tight,
+                format!(
+                    "Fits the GPU ({}), but only {} of its memory is free right now; \
+                     close programs using it (games, other models) first.",
+                    g.description,
+                    gib(g.vram_free)
+                ),
+            )
+        };
+        return FitReport {
+            fit,
+            need,
+            placement: Placement::Gpu,
+            disk_ok,
+            reason,
+        };
+    }
+    // Whatever the GPU holds comes off the RAM bill.
+    let on_gpu = gpu.map_or(0, |g| g.vram_total.saturating_sub(GPU_RESERVE));
+    let placement = if on_gpu > 0 {
+        Placement::Split
+    } else {
+        Placement::Cpu
+    };
+    let full_need = need;
+    let need = need.saturating_sub(on_gpu);
+    let min_ram = min_ram.saturating_sub(on_gpu);
+    let (fit, mut reason) = if hw.total_ram < need + MIN_SYSTEM_RESERVE {
         (
             Fit::TooBig,
             format!(
@@ -270,21 +332,42 @@ pub fn fit_need(size: u64, need: u64, min_ram: u64, hw: &HardwareInfo) -> FitRep
             ),
         )
     };
+    if let (Placement::Split, Some(g)) = (placement, gpu) {
+        reason.push_str(&format!(
+            " About {} of it runs on the GPU ({}), the rest on the CPU, so it is slower \
+             than a model that fits the GPU.",
+            gib(full_need - need),
+            g.description
+        ));
+    }
     FitReport {
         fit,
-        need,
+        need: full_need,
+        placement,
         disk_ok,
         reason,
     }
 }
 
-/// The best model for this machine: the strongest entry (latest in
-/// [`CATALOG`]) whose RAM tier the machine meets — installed RAM ≥ `min_ram`,
+/// The best model for this machine. With a GPU, the strongest entry (latest
+/// in [`CATALOG`]) whose weights and KV cache fit its video memory whole, as
+/// that runs several times faster than anything split or on the CPU.
+/// Otherwise the strongest entry whose RAM tier the machine meets — installed RAM ≥ `min_ram`,
 /// which already includes 4 GiB of headroom for the OS + IDE. Current free RAM is deliberately
 /// ignored — it changes minute to minute — and shown via [`fit`] instead. If
 /// the machine is below every tier, the smallest entry that is not too big;
 /// `None` if even that can't run.
 pub fn recommend(hw: &HardwareInfo) -> Option<&'static CatalogEntry> {
+    // With a GPU: the strongest entry that fits its video memory whole.
+    if let Some(g) = hw.best_gpu() {
+        if let Some(e) = CATALOG
+            .iter()
+            .rev()
+            .find(|e| e.runtime_bytes(e.ctx_size) + GPU_RESERVE <= g.vram_total)
+        {
+            return Some(e);
+        }
+    }
     CATALOG
         .iter()
         .rev()
@@ -309,7 +392,88 @@ mod tests {
             free_disk: Some(100 * GIB),
             os: "linux".into(),
             arch: "x86_64".into(),
+            gpus: Vec::new(),
         }
+    }
+
+    fn with_gpu(mut h: HardwareInfo, total_mib: u64, free_mib: u64) -> HardwareInfo {
+        h.gpus = vec![crate::local_ai::hardware::GpuDevice {
+            name: "Vulkan0".into(),
+            description: "Test GPU".into(),
+            vram_total: total_mib * 1024 * 1024,
+            vram_free: free_mib * 1024 * 1024,
+        }];
+        h
+    }
+
+    #[test]
+    fn a_model_that_fits_video_memory_runs_on_the_gpu() {
+        let small = find("qwen2.5-coder-1.5b-instruct-q4_k_m").unwrap();
+        // RX 9060 XT: 16304 MiB.
+        let r = fit(
+            small,
+            &with_gpu(hw(31.0, 20.0), 16304, 15800),
+            small.ctx_size,
+        );
+        assert_eq!((r.fit, r.placement), (Fit::Fits, Placement::Gpu));
+        assert!(
+            r.reason.starts_with("Runs on the GPU (Test GPU)"),
+            "{}",
+            r.reason
+        );
+
+        // Fits the card, but a game holds most of it right now.
+        let r = fit(
+            small,
+            &with_gpu(hw(31.0, 20.0), 16304, 1000),
+            small.ctx_size,
+        );
+        assert_eq!((r.fit, r.placement), (Fit::Tight, Placement::Gpu));
+        assert!(r.reason.contains("close programs using it"), "{}", r.reason);
+
+        // Even on a machine whose RAM is too small for it on the CPU.
+        let r = fit(small, &with_gpu(hw(2.0, 1.0), 16304, 15800), small.ctx_size);
+        assert_eq!(r.fit, Fit::Fits);
+    }
+
+    #[test]
+    fn a_model_too_big_for_the_gpu_is_split_and_needs_less_ram() {
+        let big = CATALOG.last().unwrap();
+        let need = big.runtime_bytes(big.ctx_size);
+        // A 4 GiB card can't hold it: split.
+        let ram = (need as f64 / GIB as f64) - 1.0; // too small alone
+        let cpu_only = fit(big, &hw(ram, ram), big.ctx_size);
+        assert_eq!(
+            (cpu_only.fit, cpu_only.placement),
+            (Fit::TooBig, Placement::Cpu)
+        );
+        let split = fit(big, &with_gpu(hw(ram, ram), 4096, 4000), big.ctx_size);
+        assert_eq!(split.placement, Placement::Split);
+        assert_ne!(split.fit, Fit::TooBig, "{}", split.reason);
+        assert!(
+            split.reason.contains("runs on the GPU (Test GPU)"),
+            "{}",
+            split.reason
+        );
+        assert_eq!(split.need, need);
+    }
+
+    #[test]
+    fn recommends_the_strongest_model_that_fits_the_gpu_whole() {
+        let gpu = with_gpu(hw(31.0, 20.0), 16304, 15800);
+        let vram = gpu.gpus[0].vram_total;
+        let pick = recommend(&gpu).unwrap();
+        assert!(pick.runtime_bytes(pick.ctx_size) + GPU_RESERVE <= vram);
+        // Every stronger entry is too big for the card.
+        let pos = CATALOG.iter().position(|e| e.id == pick.id).unwrap();
+        for e in &CATALOG[pos + 1..] {
+            assert!(e.runtime_bytes(e.ctx_size) + GPU_RESERVE > vram, "{}", e.id);
+        }
+        // A card too small for every entry: back to the RAM tiers.
+        assert_eq!(
+            recommend(&with_gpu(hw(31.0, 20.0), 512, 500)).map(|e| e.id),
+            recommend(&hw(31.0, 20.0)).map(|e| e.id)
+        );
     }
 
     #[test]

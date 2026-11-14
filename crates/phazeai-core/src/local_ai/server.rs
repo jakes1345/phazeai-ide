@@ -31,15 +31,61 @@ use super::LocalAiSettings;
 
 /// How long to wait for the model to load before giving up.
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(180);
+/// llama.cpp's environment form of `-lv` / `--log-verbosity`.
+const LOG_VERBOSITY_ENV: &str = "LLAMA_ARG_LOG_VERBOSITY";
 /// Lines of server stderr kept for error messages.
 const STDERR_TAIL: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerStatus {
     Stopped,
-    Starting { model_id: String },
-    Running { port: u16, model_id: String },
+    Starting {
+        model_id: String,
+    },
+    Running {
+        port: u16,
+        model_id: String,
+        /// Where llama.cpp put the model's layers, from its own load log;
+        /// `None` when the log didn't say (a binary that logs differently).
+        offload: Option<Offload>,
+    },
     Failed(String),
+}
+
+/// How many of a model's layers llama.cpp put on the GPU, as its loader logs
+/// it: `load_tensors: offloaded 29/29 layers to GPU`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Offload {
+    pub gpu_layers: u32,
+    pub total_layers: u32,
+}
+
+impl Offload {
+    /// Read llama.cpp's `offloaded N/M layers to GPU` log line.
+    pub fn parse(line: &str) -> Option<Self> {
+        let rest = &line[line.find("offloaded ")? + "offloaded ".len()..];
+        let (counts, tail) = rest.split_once(' ')?;
+        if !tail.starts_with("layers to GPU") {
+            return None;
+        }
+        let (n, m) = counts.split_once('/')?;
+        Some(Self {
+            gpu_layers: n.parse().ok()?,
+            total_layers: m.parse().ok()?,
+        })
+    }
+
+    /// `all 29 layers on the GPU`, `20 of 29 layers on the GPU, the rest on the CPU`, `on the CPU`.
+    pub fn describe(self) -> String {
+        match self.gpu_layers {
+            0 => "on the CPU".into(),
+            n if n >= self.total_layers => format!("all {n} layers on the GPU"),
+            n => format!(
+                "{n} of {} layers on the GPU, the rest on the CPU",
+                self.total_layers
+            ),
+        }
+    }
 }
 
 impl ServerStatus {
@@ -48,9 +94,18 @@ impl ServerStatus {
         match self {
             Self::Stopped => "Stopped".into(),
             Self::Starting { model_id } => format!("Starting — loading {}…", name(model_id)),
-            Self::Running { port, model_id } => {
-                format!("Running {} on 127.0.0.1:{port}", name(model_id))
-            }
+            Self::Running {
+                port,
+                model_id,
+                offload,
+            } => match offload {
+                Some(o) => format!(
+                    "Running {} on 127.0.0.1:{port}, {}",
+                    name(model_id),
+                    o.describe()
+                ),
+                None => format!("Running {} on 127.0.0.1:{port}", name(model_id)),
+            },
             Self::Failed(e) => format!("Error: {e}"),
         }
     }
@@ -96,6 +151,7 @@ pub struct LlamaServer {
     port: u16,
     model_id: String,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    offload: Arc<Mutex<Option<Offload>>>,
     pid_file: Option<PathBuf>,
 }
 
@@ -111,15 +167,28 @@ impl LlamaServer {
         if let Some(dir) = spec.binary.parent() {
             cmd.current_dir(dir);
         }
+        // Log level 4, so llama.cpp's loader logs `offloaded N/M layers to GPU`
+        // (hidden at the default 3) and the status can say where the model
+        // runs. The environment form, unlike `-lv`, is ignored by builds that
+        // don't know it, and a value the user set is kept.
+        if std::env::var_os(LOG_VERBOSITY_ENV).is_none() {
+            cmd.env(LOG_VERBOSITY_ENV, "4");
+        }
         let mut child = cmd.spawn()?;
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL)));
+        let offload = Arc::new(Mutex::new(None));
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
+            let offload = offload.clone();
             std::thread::Builder::new()
                 .name("llama-server-stderr".into())
                 .spawn(move || {
                     for line in std::io::BufReader::new(stderr).lines() {
                         let Ok(line) = line else { break };
+                        // Kept apart from the tail, which this line soon scrolls out of.
+                        if let Some(o) = Offload::parse(&line) {
+                            *offload.lock().unwrap_or_else(|e| e.into_inner()) = Some(o);
+                        }
                         let mut t = tail.lock().unwrap_or_else(|e| e.into_inner());
                         if t.len() == STDERR_TAIL {
                             t.pop_front();
@@ -139,6 +208,7 @@ impl LlamaServer {
             port,
             model_id: spec.model_id.clone(),
             stderr_tail,
+            offload,
             pid_file,
         })
     }
@@ -153,6 +223,11 @@ impl LlamaServer {
 
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Where the model's layers went, once llama.cpp has logged it.
+    pub fn offload(&self) -> Option<Offload> {
+        *self.offload.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The last lines the server wrote to stderr.
@@ -563,6 +638,7 @@ impl LocalAi {
         g.status = ServerStatus::Running {
             port,
             model_id: spec.model_id.clone(),
+            offload: server.offload(),
         };
         g.server = Some(server);
         Ok(url)
@@ -590,7 +666,7 @@ impl LocalAi {
     /// Return the base URL of a server running the selected model, starting it
     /// if needed.
     pub async fn ensure_running(&self, settings: &LocalAiSettings) -> Result<String, String> {
-        if let ServerStatus::Running { port, model_id } = self.status() {
+        if let ServerStatus::Running { port, model_id, .. } = self.status() {
             let wanted = selected_model(settings, &super::models_dir()).ok();
             if wanted.is_none_or(|c| c.id == model_id) {
                 return Ok(format!("http://127.0.0.1:{port}"));
@@ -715,6 +791,7 @@ mod tests {
         let running = |id: &str| ServerStatus::Running {
             port: 1,
             model_id: id.into(),
+            offload: None,
         };
         assert_eq!(
             readiness_problem_in(&s, dir.path(), &running(small.id)),
@@ -840,6 +917,28 @@ mod tests {
         s.wait_healthy(Duration::from_secs(20)).await.unwrap();
         assert!(s.exited().is_none());
         drop(s); // Drop kills it.
+    }
+
+    #[test]
+    fn reads_llama_cpp_offload_lines() {
+        let full = Offload::parse("load_tensors: offloaded 29/29 layers to GPU").unwrap();
+        assert_eq!((full.gpu_layers, full.total_layers), (29, 29));
+        assert_eq!(full.describe(), "all 29 layers on the GPU");
+        let part = Offload::parse("load_tensors: offloaded 20/49 layers to GPU").unwrap();
+        assert_eq!(
+            part.describe(),
+            "20 of 49 layers on the GPU, the rest on the CPU"
+        );
+        let none = Offload::parse("load_tensors: offloaded 0/29 layers to GPU").unwrap();
+        assert_eq!(none.describe(), "on the CPU");
+        for other in [
+            "load_tensors: offloading 28 repeating layers to GPU",
+            "load_tensors: offloading output layer to GPU",
+            "offloaded x/29 layers to GPU",
+            "",
+        ] {
+            assert_eq!(Offload::parse(other), None, "{other}");
+        }
     }
 
     /// The process behind `health_ok_is_detected`, not a test: it serves

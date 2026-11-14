@@ -182,6 +182,8 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
             Event::InstallDone(result) => {
                 installing.set(None);
                 binary.set(find_binary(&Settings::load().local_ai));
+                // Re-probe: a new build may see GPUs the old one didn't.
+                disk_gen.update(|g| *g += 1);
                 match result {
                     Ok(what) => {
                         message_is_error.set(false);
@@ -202,9 +204,9 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
         move || {
             let tx = tx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(Event::Hardware(
-                    HardwareInfo::probe(&local_ai::models_dir()),
-                ));
+                let _ = tx.send(Event::Hardware(local_ai::probe_machine(
+                    &Settings::load().local_ai,
+                )));
             });
         }
     };
@@ -348,8 +350,46 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
                 ServerStatus::Running { .. } | ServerStatus::Starting { .. }
             )
     };
-    let install_tx = tx.clone();
-    let cancel_flag = install_cancel.clone();
+    // Install llama.cpp: the GPU build where this platform has one, or the
+    // CPU-only build (the way back when a GPU build won't start).
+    let start_install = {
+        let tx = tx.clone();
+        let cancel_flag = install_cancel.clone();
+        move |allow_gpu: bool| {
+            installing.set(Some(None));
+            message.set(String::new());
+            cancel_flag.store(false, Ordering::Relaxed);
+            let tx = tx.clone();
+            let cancel = cancel_flag.clone();
+            std::thread::spawn(move || {
+                let result = run_blocking(async {
+                    let progress_tx = tx.clone();
+                    install::install_latest(
+                        &local_ai::llama_cpp_dir(),
+                        allow_gpu,
+                        cancel,
+                        move |p| {
+                            let _ = progress_tx.try_send(Event::InstallProgress(p));
+                        },
+                    )
+                    .await
+                    .map(|f| f.describe())
+                    .map_err(|e| e.to_string())
+                });
+                let _ = tx.send(Event::InstallDone(result));
+            });
+        }
+    };
+    let installed_build = move || {
+        binary.with(|b| match b {
+            Ok(Some(f)) => f.build,
+            _ => None,
+        })
+    };
+    let idle = move || installing.with(|i| i.is_none());
+    let install_any = start_install.clone();
+    let install_gpu = start_install.clone();
+    let install_cpu = start_install;
     let server_buttons = stack((
         shown_button("Start", ButtonVariant::Primary, theme, can_start, start),
         shown_button(
@@ -368,26 +408,32 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
             "Install llama.cpp",
             ButtonVariant::Secondary,
             theme,
-            move || binary.with(|b| matches!(b, Ok(None))) && installing.with(|i| i.is_none()),
+            move || binary.with(|b| matches!(b, Ok(None))) && idle(),
+            move || install_any(true),
+        ),
+        // An older install is the CPU build: offer the GPU one.
+        shown_button(
+            "Install GPU build",
+            ButtonVariant::Secondary,
+            theme,
             move || {
-                installing.set(Some(None));
-                message.set(String::new());
-                cancel_flag.store(false, Ordering::Relaxed);
-                let tx = install_tx.clone();
-                let cancel = cancel_flag.clone();
-                std::thread::spawn(move || {
-                    let result = run_blocking(async {
-                        let progress_tx = tx.clone();
-                        install::install_latest(&local_ai::llama_cpp_dir(), cancel, move |p| {
-                            let _ = progress_tx.try_send(Event::InstallProgress(p));
-                        })
-                        .await
-                        .map(|f| f.describe())
-                        .map_err(|e| e.to_string())
-                    });
-                    let _ = tx.send(Event::InstallDone(result));
-                });
+                installed_build() == Some(install::Build::Cpu)
+                    && install::gpu_build_available(std::env::consts::OS, std::env::consts::ARCH)
+                    && idle()
             },
+            move || install_gpu(true),
+        ),
+        // The GPU build failed to start: offer the CPU-only build instead.
+        shown_button(
+            "Install CPU-only build",
+            ButtonVariant::Ghost,
+            theme,
+            move || {
+                installed_build() == Some(install::Build::Vulkan)
+                    && matches!(status(), ServerStatus::Failed(_))
+                    && idle()
+            },
+            move || install_cpu(false),
         ),
         shown_button(
             "Cancel install",
@@ -710,7 +756,7 @@ fn hub_browser(cs: CardState) -> impl IntoView {
                     let repo = repo.clone();
                     std::thread::spawn(move || {
                         let models_dir = local_ai::models_dir();
-                        let hw = HardwareInfo::probe(&models_dir);
+                        let hw = local_ai::probe_machine(&Settings::load().local_ai);
                         let result = run_blocking(async {
                             let hub = hub::Hub::from_env().map_err(|e| e.to_string())?;
                             let pick = hub::best_pick(&hub, &repo, &hw)

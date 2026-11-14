@@ -5,8 +5,10 @@
 //!    user asked for that exact binary);
 //! 2. `llama-server` on `PATH` (winget, Homebrew, distro packages, own builds);
 //! 3. a copy PhazeAI installed under `<data>/phazeai/llama.cpp/<tag>/`;
-//! 4. otherwise [`install_latest`] downloads the CPU build for this platform
-//!    from the newest numbered build (`b<N>`) on GitHub, verified against the
+//! 4. otherwise [`install_latest`] downloads this platform's GPU build (Vulkan
+//!    on Linux and Windows, Metal on Apple Silicon; the CPU build where there
+//!    is none, or when asked for) from the newest numbered build (`b<N>`) on
+//!    GitHub, verified against the
 //!    SHA-256 `digest` GitHub publishes for each release asset. No digest → no
 //!    install.
 //!
@@ -47,6 +49,9 @@ pub enum ServerSource {
 pub struct FoundServer {
     pub path: PathBuf,
     pub source: ServerSource,
+    /// Which build PhazeAI installed; `None` for a binary the user supplied
+    /// (config or `PATH`), whose build PhazeAI doesn't know.
+    pub build: Option<Build>,
 }
 
 impl FoundServer {
@@ -54,11 +59,64 @@ impl FoundServer {
         match &self.source {
             ServerSource::Config => format!("{} (from config)", self.path.display()),
             ServerSource::Path => format!("{} (on PATH)", self.path.display()),
-            ServerSource::Installed(tag) => {
-                format!("llama.cpp {tag} installed by PhazeAI")
-            }
+            ServerSource::Installed(tag) => match self.build {
+                Some(b) => format!("llama.cpp {tag}, {} build, installed by PhazeAI", b.label()),
+                None => format!("llama.cpp {tag} installed by PhazeAI"),
+            },
         }
     }
+}
+
+/// Which llama.cpp build an asset is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Build {
+    /// Vulkan backend (AMD, Intel and NVIDIA GPUs on stock drivers) plus the
+    /// CPU backends, loaded as separate libraries: with no usable Vulkan
+    /// device it runs on the CPU like the CPU build.
+    Vulkan,
+    /// Apple Silicon builds, which always include Metal.
+    Metal,
+    Cpu,
+}
+
+impl Build {
+    pub fn label(self) -> &'static str {
+        match self {
+            Build::Vulkan => "Vulkan GPU",
+            Build::Metal => "Metal GPU",
+            Build::Cpu => "CPU-only",
+        }
+    }
+
+    pub fn uses_gpu(self) -> bool {
+        !matches!(self, Build::Cpu)
+    }
+
+    /// Suffix of the install folder after the tag, so a GPU and a CPU build of
+    /// the same release can sit side by side (`b12383-vulkan`, `b12383`).
+    fn dir_suffix(self) -> &'static str {
+        match self {
+            Build::Vulkan => "-vulkan",
+            Build::Metal | Build::Cpu => "",
+        }
+    }
+}
+
+/// Install folder name → (build number, build). Plain `b<N>` folders are the
+/// platform's default build: Metal on Apple Silicon, the CPU build elsewhere
+/// (all PhazeAI installed before GPU builds).
+fn parse_install_dir(name: &str, os: &str, arch: &str) -> (u64, Build) {
+    let (tag, build) = match name.strip_suffix(Build::Vulkan.dir_suffix()) {
+        Some(tag) => (tag, Build::Vulkan),
+        None if os == "macos" && arch == "aarch64" => (name, Build::Metal),
+        None => (name, Build::Cpu),
+    };
+    (build_number(tag).unwrap_or(0), build)
+}
+
+/// Whether this platform has a GPU build PhazeAI can install.
+pub fn gpu_build_available(os: &str, arch: &str) -> bool {
+    asset_suffixes(os, arch).iter().any(|(_, b)| b.uses_gpu())
 }
 
 /// Locate `llama-server` without installing anything.
@@ -75,6 +133,7 @@ pub fn find_server_binary(
             return Ok(Some(FoundServer {
                 path: p.to_path_buf(),
                 source: ServerSource::Config,
+                build: None,
             }));
         }
         return Err(LocalAiError::Other(format!(
@@ -89,6 +148,7 @@ pub fn find_server_binary(
                 return Ok(Some(FoundServer {
                     path: candidate,
                     source: ServerSource::Path,
+                    build: None,
                 }));
             }
         }
@@ -96,8 +156,13 @@ pub fn find_server_binary(
     Ok(find_installed(install_root))
 }
 
-/// The newest PhazeAI-installed copy under `install_root/<tag>/`.
+/// The newest PhazeAI-installed copy under `install_root/<tag>[-vulkan]/`;
+/// of two builds of the same release, the GPU one.
 pub fn find_installed(install_root: &Path) -> Option<FoundServer> {
+    find_installed_for(install_root, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn find_installed_for(install_root: &Path, os: &str, arch: &str) -> Option<FoundServer> {
     let mut tags: Vec<(String, PathBuf)> = std::fs::read_dir(install_root)
         .ok()?
         .filter_map(|e| e.ok())
@@ -108,17 +173,22 @@ pub fn find_installed(install_root: &Path) -> Option<FoundServer> {
             (!name.starts_with('.') && !name.ends_with(".tmp")).then(|| (name, e.path()))
         })
         .collect();
-    // llama.cpp tags are `b<build number>`; newest = highest number.
+    // llama.cpp tags are `b<build number>`; newest = highest number, and the
+    // GPU build first within one release.
     tags.sort_by_key(|(name, _)| {
-        (
-            name.trim_start_matches('b').parse::<u64>().unwrap_or(0),
-            name.clone(),
-        )
+        let (n, build) = parse_install_dir(name, os, arch);
+        (n, build.uses_gpu(), name.clone())
     });
-    tags.into_iter().rev().find_map(|(tag, dir)| {
+    tags.into_iter().rev().find_map(|(name, dir)| {
+        let (_, build) = parse_install_dir(&name, os, arch);
+        let tag = name
+            .strip_suffix(build.dir_suffix())
+            .unwrap_or(&name)
+            .to_string();
         find_file(&dir, SERVER_EXE, 4).map(|path| FoundServer {
             path,
             source: ServerSource::Installed(tag),
+            build: Some(build),
         })
     })
 }
@@ -194,29 +264,57 @@ pub struct ReleaseAsset {
     pub digest: Option<String>,
 }
 
-/// Name suffixes of the CPU-only build for a platform, in preference order.
+/// Name suffixes of a platform's builds, GPU first, in preference order.
 /// llama.cpp has shipped both `.zip` and `.tar.gz` archives for Linux and macOS,
-/// so both are accepted.
-pub fn asset_suffixes(os: &str, arch: &str) -> &'static [&'static str] {
+/// so both are accepted. CUDA builds are not offered: Vulkan runs on NVIDIA
+/// cards too, without the CUDA runtime.
+pub fn asset_suffixes(os: &str, arch: &str) -> &'static [(&'static str, Build)] {
+    use Build::{Cpu, Metal, Vulkan};
     match (os, arch) {
-        ("windows", "x86_64") => &["-bin-win-cpu-x64.zip"],
-        ("windows", "aarch64") => &["-bin-win-cpu-arm64.zip"],
-        ("linux", "x86_64") => &["-bin-ubuntu-x64.tar.gz", "-bin-ubuntu-x64.zip"],
-        ("linux", "aarch64") => &["-bin-ubuntu-arm64.tar.gz", "-bin-ubuntu-arm64.zip"],
-        ("macos", "aarch64") => &["-bin-macos-arm64.tar.gz", "-bin-macos-arm64.zip"],
-        ("macos", "x86_64") => &["-bin-macos-x64.tar.gz", "-bin-macos-x64.zip"],
+        ("windows", "x86_64") => &[
+            ("-bin-win-vulkan-x64.zip", Vulkan),
+            ("-bin-win-cpu-x64.zip", Cpu),
+        ],
+        ("windows", "aarch64") => &[("-bin-win-cpu-arm64.zip", Cpu)],
+        ("linux", "x86_64") => &[
+            ("-bin-ubuntu-vulkan-x64.tar.gz", Vulkan),
+            ("-bin-ubuntu-vulkan-x64.zip", Vulkan),
+            ("-bin-ubuntu-x64.tar.gz", Cpu),
+            ("-bin-ubuntu-x64.zip", Cpu),
+        ],
+        ("linux", "aarch64") => &[
+            ("-bin-ubuntu-vulkan-arm64.tar.gz", Vulkan),
+            ("-bin-ubuntu-vulkan-arm64.zip", Vulkan),
+            ("-bin-ubuntu-arm64.tar.gz", Cpu),
+            ("-bin-ubuntu-arm64.zip", Cpu),
+        ],
+        ("macos", "aarch64") => &[
+            ("-bin-macos-arm64.tar.gz", Metal),
+            ("-bin-macos-arm64.zip", Metal),
+        ],
+        ("macos", "x86_64") => &[("-bin-macos-x64.tar.gz", Cpu), ("-bin-macos-x64.zip", Cpu)],
         _ => &[],
     }
 }
 
-/// The release asset to install on `os`/`arch`, if the release has one.
-pub fn select_asset<'a>(release: &'a Release, os: &str, arch: &str) -> Option<&'a ReleaseAsset> {
-    asset_suffixes(os, arch).iter().find_map(|suffix| {
-        release
-            .assets
-            .iter()
-            .find(|a| a.name.starts_with("llama-") && a.name.ends_with(suffix))
-    })
+/// The release asset to install on `os`/`arch`, if the release has one: the
+/// GPU build when `allow_gpu` and the release has it, else the CPU build.
+pub fn select_asset<'a>(
+    release: &'a Release,
+    os: &str,
+    arch: &str,
+    allow_gpu: bool,
+) -> Option<(&'a ReleaseAsset, Build)> {
+    asset_suffixes(os, arch)
+        .iter()
+        .filter(|(_, build)| allow_gpu || !build.uses_gpu() || *build == Build::Metal)
+        .find_map(|(suffix, build)| {
+            release
+                .assets
+                .iter()
+                .find(|a| a.name.starts_with("llama-") && a.name.ends_with(suffix))
+                .map(|a| (a, *build))
+        })
 }
 
 /// The build number of a llama.cpp release tag: `"b12383"` → `12383`. Any
@@ -254,6 +352,7 @@ pub enum ReleaseChoice<'a> {
     Ready {
         release: &'a Release,
         asset: &'a ReleaseAsset,
+        build: Build,
         sha256: String,
     },
     /// Numbered builds have this platform's asset, but none has a digest; carries
@@ -265,30 +364,54 @@ pub enum ReleaseChoice<'a> {
 }
 
 /// Pick the release to install from `releases`: among `b<N>` tags with a build
-/// for `os`/`arch`, the highest `N` whose asset carries a valid SHA-256 digest.
-/// Other tags (`v1.0.0`, which holds only `nightly-tag.txt`) are skipped.
-pub fn choose_release<'a>(releases: &'a [Release], os: &str, arch: &str) -> ReleaseChoice<'a> {
+/// for `os`/`arch` (the GPU build when `allow_gpu`, see [`select_asset`]), the
+/// highest `N` whose asset carries a valid SHA-256 digest. Other tags
+/// (`v1.0.0`, which holds only `nightly-tag.txt`) are skipped.
+pub fn choose_release<'a>(
+    releases: &'a [Release],
+    os: &str,
+    arch: &str,
+    allow_gpu: bool,
+) -> ReleaseChoice<'a> {
+    let first = choose_with(releases, os, arch, allow_gpu);
+    if !allow_gpu || matches!(first, ReleaseChoice::Ready { .. }) {
+        return first;
+    }
+    // No verified GPU build anywhere: a verified CPU build beats nothing.
+    match choose_with(releases, os, arch, false) {
+        ready @ ReleaseChoice::Ready { .. } => ready,
+        _ => first,
+    }
+}
+
+fn choose_with<'a>(
+    releases: &'a [Release],
+    os: &str,
+    arch: &str,
+    allow_gpu: bool,
+) -> ReleaseChoice<'a> {
     let mut numbered: Vec<(u64, &Release)> = releases
         .iter()
         .filter_map(|r| build_number(&r.tag_name).map(|n| (n, r)))
         .collect();
     numbered.sort_by(|a, b| b.0.cmp(&a.0));
-    let with_asset: Vec<(&Release, &ReleaseAsset)> = numbered
+    let with_asset: Vec<(&Release, &ReleaseAsset, Build)> = numbered
         .iter()
-        .filter_map(|(_, r)| select_asset(r, os, arch).map(|a| (*r, a)))
+        .filter_map(|(_, r)| select_asset(r, os, arch, allow_gpu).map(|(a, b)| (*r, a, b)))
         .collect();
-    let Some((_, newest_asset)) = with_asset.first() else {
+    let Some((_, newest_asset, _)) = with_asset.first() else {
         let newest = numbered
             .first()
             .map(|(_, r)| r.tag_name.clone())
             .or_else(|| releases.first().map(|r| r.tag_name.clone()));
         return ReleaseChoice::NoAsset(newest);
     };
-    for (release, asset) in &with_asset {
+    for (release, asset, build) in &with_asset {
         if let Some(sha256) = parse_sha256_digest(asset.digest.as_deref()) {
             return ReleaseChoice::Ready {
                 release,
                 asset,
+                build: *build,
                 sha256,
             };
         }
@@ -304,10 +427,14 @@ pub fn parse_sha256_digest(digest: Option<&str>) -> Option<String> {
         .then(|| hex.to_ascii_lowercase())
 }
 
-/// Download, verify and unpack the newest llama.cpp CPU build into
-/// `install_root/<tag>/`; returns the installed server.
+/// Download, verify and unpack the newest llama.cpp build into
+/// `install_root/<tag>[-vulkan]/`; returns the installed server. With
+/// `allow_gpu` it is this platform's GPU build where there is one. Without,
+/// the CPU build, and PhazeAI's own GPU installs are removed so the CPU build
+/// is the one that runs (the way back when a GPU build won't start).
 pub async fn install_latest(
     install_root: &Path,
+    allow_gpu: bool,
     cancel: Arc<AtomicBool>,
     on_progress: impl FnMut(DownloadProgress),
 ) -> Result<FoundServer, LocalAiError> {
@@ -318,6 +445,7 @@ pub async fn install_latest(
         install_root,
         std::env::consts::OS,
         std::env::consts::ARCH,
+        allow_gpu,
         cancel,
         on_progress,
     )
@@ -325,12 +453,14 @@ pub async fn install_latest(
 }
 
 /// [`install_latest`] against any GitHub-compatible release endpoint.
+#[allow(clippy::too_many_arguments)] // the test seam: endpoint and platform are parameters
 pub async fn install_from_release_api(
     client: &reqwest::Client,
     api_url: &str,
     install_root: &Path,
     os: &str,
     arch: &str,
+    allow_gpu: bool,
     cancel: Arc<AtomicBool>,
     on_progress: impl FnMut(DownloadProgress),
 ) -> Result<FoundServer, LocalAiError> {
@@ -353,12 +483,13 @@ pub async fn install_from_release_api(
         )));
     }
     let releases = resp.json::<ReleaseAnswer>().await?.into_vec();
-    let (release, asset, sha) = match choose_release(&releases, os, arch) {
+    let (release, asset, build, sha) = match choose_release(&releases, os, arch, allow_gpu) {
         ReleaseChoice::Ready {
             release,
             asset,
+            build,
             sha256,
-        } => (release, asset, sha256),
+        } => (release, asset, build, sha256),
         ReleaseChoice::NoDigest(name) => {
             return Err(LocalAiError::Other(format!(
                 "GitHub did not publish a SHA-256 digest for {name}, so PhazeAI won't install \
@@ -372,7 +503,7 @@ pub async fn install_from_release_api(
                 |tag| format!("no llama.cpp build up to {tag} has one"),
             );
             return Err(LocalAiError::Other(format!(
-                "no CPU build for {os}/{arch}: {seen}. {}",
+                "no llama.cpp build for {os}/{arch}: {seen}. {}",
                 manual_install_hint(os)
             )));
         }
@@ -401,8 +532,9 @@ pub async fn install_from_release_api(
     )
     .await?;
 
-    let final_dir = install_root.join(&release.tag_name);
-    let tmp_dir = install_root.join(format!("{}.tmp", release.tag_name));
+    let dir_name = format!("{}{}", release.tag_name, build.dir_suffix());
+    let final_dir = install_root.join(&dir_name);
+    let tmp_dir = install_root.join(format!("{dir_name}.tmp"));
     let archive2 = archive.clone();
     let tmp2 = tmp_dir.clone();
     tokio::task::spawn_blocking(move || -> Result<(), LocalAiError> {
@@ -429,12 +561,32 @@ pub async fn install_from_release_api(
     }
     std::fs::rename(&tmp_dir, &final_dir)?;
     let _ = std::fs::remove_file(&archive);
+    if !allow_gpu {
+        remove_gpu_installs(install_root);
+    }
     let path = find_file(&final_dir, SERVER_EXE, 4)
         .ok_or_else(|| LocalAiError::Other(format!("{SERVER_EXE} vanished after install")))?;
     Ok(FoundServer {
         path,
         source: ServerSource::Installed(release.tag_name.clone()),
+        build: Some(build),
     })
+}
+
+/// Delete PhazeAI's own `*-vulkan` installs, so [`find_installed`] picks the
+/// CPU build. Only folders PhazeAI created under its install root.
+fn remove_gpu_installs(install_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(install_root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(Build::Vulkan.dir_suffix())
+            && build_number(name.trim_end_matches(Build::Vulkan.dir_suffix())).is_some()
+        {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Unpack a `.zip` or `.tar.gz` into `dest`. Entries that would escape `dest`
@@ -558,9 +710,40 @@ mod tests {
     }
 
     #[test]
+    fn selects_the_gpu_build_first_and_the_cpu_build_when_asked() {
+        let r = release();
+        let pick = |os, arch| select_asset(&r, os, arch, true).map(|(a, b)| (a.name.as_str(), b));
+        assert_eq!(
+            pick("linux", "x86_64"),
+            Some(("llama-b6500-bin-ubuntu-vulkan-x64.zip", Build::Vulkan))
+        );
+        assert_eq!(
+            pick("windows", "x86_64"),
+            Some(("llama-b6500-bin-win-vulkan-x64.zip", Build::Vulkan))
+        );
+        // No GPU build for these: the CPU build.
+        assert_eq!(
+            pick("windows", "aarch64"),
+            Some(("llama-b6500-bin-win-cpu-arm64.zip", Build::Cpu))
+        );
+        assert_eq!(
+            pick("macos", "x86_64"),
+            Some(("llama-b6500-bin-macos-x64.zip", Build::Cpu))
+        );
+        // Apple Silicon builds always carry Metal.
+        assert_eq!(
+            pick("macos", "aarch64"),
+            Some(("llama-b6500-bin-macos-arm64.zip", Build::Metal))
+        );
+        assert!(gpu_build_available("linux", "x86_64"));
+        assert!(gpu_build_available("macos", "aarch64"));
+        assert!(!gpu_build_available("windows", "aarch64"));
+    }
+
+    #[test]
     fn selects_the_cpu_build_per_platform() {
         let r = release();
-        let pick = |os, arch| select_asset(&r, os, arch).map(|a| a.name.as_str());
+        let pick = |os, arch| select_asset(&r, os, arch, false).map(|(a, _)| a.name.as_str());
         assert_eq!(
             pick("windows", "x86_64"),
             Some("llama-b6500-bin-win-cpu-x64.zip")
@@ -591,7 +774,7 @@ mod tests {
         let mut r = release();
         r.assets.retain(|a| !a.name.ends_with(".tar.gz"));
         assert_eq!(
-            select_asset(&r, "linux", "x86_64").map(|a| a.name.as_str()),
+            select_asset(&r, "linux", "x86_64", false).map(|(a, _)| a.name.as_str()),
             Some("llama-b6500-bin-ubuntu-x64.zip")
         );
     }
@@ -640,7 +823,7 @@ mod tests {
             linux_build("b12383", Some(&d('b'))),
             linux_build("b9999", Some(&d('c'))),
         ];
-        match choose_release(&releases, "linux", "x86_64") {
+        match choose_release(&releases, "linux", "x86_64", true) {
             ReleaseChoice::Ready {
                 release, sha256, ..
             } => {
@@ -656,7 +839,7 @@ mod tests {
         let ok = format!("sha256:{}", "e".repeat(64));
         let releases = vec![linux_build("b200", None), linux_build("b199", Some(&ok))];
         assert!(matches!(
-            choose_release(&releases, "linux", "x86_64"),
+            choose_release(&releases, "linux", "x86_64", true),
             ReleaseChoice::Ready { release, .. } if release.tag_name == "b199"
         ));
 
@@ -665,7 +848,7 @@ mod tests {
             linux_build("b199", Some("md5:00")),
         ];
         assert_eq!(
-            choose_release(&none, "linux", "x86_64"),
+            choose_release(&none, "linux", "x86_64", true),
             ReleaseChoice::NoDigest("llama-b200-bin-ubuntu-x64.tar.gz".into())
         );
     }
@@ -674,7 +857,7 @@ mod tests {
     fn no_build_for_the_platform_names_what_was_seen() {
         let releases = vec![linux_build("b300", None)];
         assert_eq!(
-            choose_release(&releases, "windows", "riscv64"),
+            choose_release(&releases, "windows", "riscv64", true),
             ReleaseChoice::NoAsset(Some("b300".into()))
         );
         let only_v1 = vec![Release {
@@ -682,11 +865,11 @@ mod tests {
             assets: vec![],
         }];
         assert_eq!(
-            choose_release(&only_v1, "linux", "x86_64"),
+            choose_release(&only_v1, "linux", "x86_64", true),
             ReleaseChoice::NoAsset(Some("v1.0.0".into()))
         );
         assert_eq!(
-            choose_release(&[], "linux", "x86_64"),
+            choose_release(&[], "linux", "x86_64", true),
             ReleaseChoice::NoAsset(None)
         );
     }
@@ -778,6 +961,76 @@ mod tests {
             find_server_binary(None, None, &tmp.path().join("none")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn installed_gpu_build_wins_within_a_release_and_newer_builds_win_overall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cpu = root.join("b1200").join(SERVER_EXE);
+        let gpu = root.join("b1200-vulkan").join(SERVER_EXE);
+        let old_gpu = root.join("b900-vulkan").join(SERVER_EXE);
+        for p in [&cpu, &gpu, &old_gpu] {
+            make_exe(p);
+        }
+        let found = find_installed_for(root, "linux", "x86_64").unwrap();
+        assert_eq!(found.path, gpu);
+        assert_eq!(found.source, ServerSource::Installed("b1200".into()));
+        assert_eq!(found.build, Some(Build::Vulkan));
+        assert!(
+            found.describe().contains("b1200, Vulkan GPU build"),
+            "{}",
+            found.describe()
+        );
+
+        // The CPU fallback removes PhazeAI's GPU installs; the CPU build is left.
+        remove_gpu_installs(root);
+        assert!(!root.join("b1200-vulkan").exists() && !root.join("b900-vulkan").exists());
+        let found = find_installed_for(root, "linux", "x86_64").unwrap();
+        assert_eq!((found.path, found.build), (cpu, Some(Build::Cpu)));
+
+        // A plain folder on Apple Silicon is the Metal build.
+        assert_eq!(
+            find_installed_for(root, "macos", "aarch64").unwrap().build,
+            Some(Build::Metal)
+        );
+    }
+
+    #[test]
+    fn an_unverified_gpu_build_falls_back_to_a_verified_cpu_build() {
+        let ok = format!("sha256:{}", "a".repeat(64));
+        let mut r = linux_build("b500", Some(&ok)); // the CPU build, verified
+        r.assets.push(ReleaseAsset {
+            name: "llama-b500-bin-ubuntu-vulkan-x64.tar.gz".into(),
+            browser_download_url: "https://example.invalid/vk.tar.gz".into(),
+            size: 1,
+            digest: None,
+        });
+        let releases = vec![r];
+        match choose_release(&releases, "linux", "x86_64", true) {
+            ReleaseChoice::Ready { asset, build, .. } => {
+                assert_eq!(build, Build::Cpu);
+                assert_eq!(asset.name, "llama-b500-bin-ubuntu-x64.tar.gz");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Once verified, the GPU build is chosen.
+        let mut releases = releases;
+        releases[0].assets[1].digest = Some(format!("sha256:{}", "b".repeat(64)));
+        assert!(matches!(
+            choose_release(&releases, "linux", "x86_64", true),
+            ReleaseChoice::Ready {
+                build: Build::Vulkan,
+                ..
+            }
+        ));
+        assert!(matches!(
+            choose_release(&releases, "linux", "x86_64", false),
+            ReleaseChoice::Ready {
+                build: Build::Cpu,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -943,6 +1196,7 @@ mod tests {
             &root,
             "linux",
             "x86_64",
+            true,
             cancel(),
             |_| {},
         )
@@ -960,6 +1214,7 @@ mod tests {
             &root,
             "linux",
             "x86_64",
+            true,
             cancel(),
             |_| {},
         )
@@ -974,13 +1229,17 @@ mod tests {
             &root,
             "windows",
             "riscv64",
+            true,
             cancel(),
             |_| {},
         )
         .await
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no CPU build"), "{err}");
+        assert!(
+            err.contains("no llama.cpp build for windows/riscv64"),
+            "{err}"
+        );
 
         let found = install_from_release_api(
             &client,
@@ -988,6 +1247,7 @@ mod tests {
             &root,
             "linux",
             "x86_64",
+            true,
             cancel(),
             |_| {},
         )
