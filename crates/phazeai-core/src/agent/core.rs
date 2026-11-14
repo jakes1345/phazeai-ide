@@ -1160,7 +1160,12 @@ impl Agent {
         });
 
         let mut conversation = self.conversation.lock().await;
-        conversation.add_tool_result(&tool_call.id, &result_str);
+        let told = if success {
+            repeat_note(&conversation, tool_name, &result_str)
+        } else {
+            None
+        };
+        conversation.add_tool_result(&tool_call.id, told.as_deref().unwrap_or(&result_str));
     }
 
     async fn execute_tool(&self, tool_call: &ToolCall) -> (bool, String) {
@@ -1278,6 +1283,30 @@ pub const READ_ONLY_REFUSAL: &str = "Read-only mode (the user chose Plan or Ask)
 /// What the user's "run the plan" sends after a reply in Plan mode.
 pub const RUN_PLAN_PROMPT: &str = "Carry out the plan above, step by step. Check each step \
      works before going on to the next.";
+
+/// Tools whose result depends only on the files they look at, so the same
+/// text twice means nothing changed in between.
+const REPEATABLE_READS: &[&str] = &["read_file", "grep", "glob", "list_files", "find_path"];
+
+/// A result shorter than this is sent again as it is: the note costs about
+/// as much.
+const REPEAT_NOTE_MIN_LEN: usize = 300;
+
+/// What the model is told instead of `result` when an earlier call of a
+/// read-only tool returned exactly the same text and that text is still in
+/// the conversation (see [`ConversationHistory::repeat_of`]): a pointer to
+/// it, so a file the agent reads again without changing it is not paid for
+/// twice on every later request. `None` means send `result` itself.
+fn repeat_note(conversation: &ConversationHistory, tool: &str, result: &str) -> Option<String> {
+    if !REPEATABLE_READS.contains(&tool) || result.len() < REPEAT_NOTE_MIN_LEN {
+        return None;
+    }
+    let earlier = conversation.repeat_of(REPEATABLE_READS, result)?;
+    Some(format!(
+        "Unchanged: same result as your earlier call {earlier}, which is still above. \
+         Nothing it covers has changed since; use that result."
+    ))
+}
 
 /// The result recorded for a tool call that Stop kept from starting.
 const NOT_RUN: &str = "Cancelled by the user before this tool started; it did not run.";
