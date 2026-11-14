@@ -2255,11 +2255,17 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
     // ── Commit area ───────────────────────────────────────────────────────────
     let commit_input = text_input(commit_msg)
-        .placeholder("Message (Ctrl+Enter to commit)")
+        // Short: Floem draws a placeholder without clipping it to the box, and
+        // the longer "Message (Ctrl+Enter to commit)" ran under the ✨AI button
+        // in a normal-width sidebar. (Ctrl+Enter still commits.)
+        .placeholder("Commit message")
         .style(move |s| {
             let t = theme.get();
             let p = &t.palette;
             s.flex_grow(1.0)
+                // Shrink to the row, so a long (AI-written) message scrolls
+                // inside the box instead of running under the ✨AI button.
+                .min_width(0.0)
                 .background(p.bg_elevated)
                 .border(1.0)
                 .border_color(p.border)
@@ -2758,32 +2764,41 @@ pub fn git_panel(state: IdeState) -> impl IntoView {
 
             stack((
                 container(
+                    // Two lines: hash and message (cut with … when long),
+                    // then author and date. On one line the author and date
+                    // took most of a narrow sidebar and the message wrapped
+                    // one word per line.
                     stack((
-                        label(move || hash.clone()).style(move |s| {
+                        stack((
+                            label(move || hash.clone()).style(move |s| {
+                                let t = theme.get();
+                                s.font_size(10.0)
+                                    .color(t.palette.accent)
+                                    .min_width(50.0)
+                                    .flex_shrink(0.0)
+                                    .font_family("monospace".to_string())
+                            }),
+                            label(move || msg.clone()).style(move |s| {
+                                let t = theme.get();
+                                s.font_size(11.0)
+                                    .color(t.palette.text_primary)
+                                    .flex_grow(1.0)
+                                    .min_width(0.0)
+                                    .text_ellipsis()
+                            }),
+                            cherry_pick_btn,
+                        ))
+                        .style(|s| s.items_center().width_full().min_width(0.0)),
+                        label(move || format!("{author} · {date}")).style(move |s| {
                             let t = theme.get();
                             s.font_size(10.0)
-                                .color(t.palette.accent)
-                                .min_width(50.0)
-                                .font_family("monospace".to_string())
-                        }),
-                        label(move || msg.clone()).style(move |s| {
-                            let t = theme.get();
-                            s.font_size(11.0)
-                                .color(t.palette.text_primary)
-                                .flex_grow(1.0)
+                                .color(t.palette.text_muted)
+                                .padding_left(50.0)
                                 .min_width(0.0)
+                                .text_ellipsis()
                         }),
-                        label(move || format!(" {author}")).style(move |s| {
-                            let t = theme.get();
-                            s.font_size(10.0).color(t.palette.text_muted)
-                        }),
-                        label(move || format!(" ({date})")).style(move |s| {
-                            let t = theme.get();
-                            s.font_size(10.0).color(t.palette.text_muted)
-                        }),
-                        cherry_pick_btn,
                     ))
-                    .style(|s| s.items_center().width_full().min_width(0.0)),
+                    .style(|s| s.flex_col().width_full().min_width(0.0)),
                 )
                 .style(move |s| {
                     let t = theme.get();
