@@ -176,6 +176,19 @@ pub fn can_ask(stdin_piped: bool) -> bool {
     !stdin_piped && std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// What `-p` reports when the model answered with nothing and did nothing:
+/// one model call, no tools, no text (a model that declines can stop like
+/// this). Printing nothing and calling it a success would hide that. A run
+/// that used tools and ended without a closing word did its work, so that is
+/// not an error.
+pub fn empty_reply_error(reply: &str, model_calls: usize) -> Option<String> {
+    (reply.trim().is_empty() && model_calls <= 1).then(|| {
+        "The model returned an empty reply and did nothing. It may have declined \
+         the request; try rephrasing it."
+            .to_string()
+    })
+}
+
 /// The note printed after a run in which calls were refused.
 pub fn refusal_summary(refusals: &[(String, Allow)]) -> Option<String> {
     let highest = refusals.iter().map(|(_, a)| *a).max()?;
@@ -195,6 +208,16 @@ pub fn refusal_summary(refusals: &[(String, Allow)]) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_empty_reply_with_nothing_done_is_an_error() {
+        use super::empty_reply_error;
+        assert!(empty_reply_error("", 1).is_some());
+        assert!(empty_reply_error(" \n", 0).is_some());
+        assert_eq!(empty_reply_error("Done.", 1), None);
+        // Tools ran (more than one model call): the work is the answer.
+        assert_eq!(empty_reply_error("", 3), None);
+    }
 
     #[test]
     fn levels_permit_up_to_their_risk() {
