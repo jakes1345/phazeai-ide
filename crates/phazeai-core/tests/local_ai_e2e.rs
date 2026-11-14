@@ -149,3 +149,40 @@ async fn download_run_and_chat_with_the_smallest_model() {
     assert_eq!(LOCAL_AI.status(), ServerStatus::Stopped);
     assert!(settings.build_llm_client().is_err());
 }
+
+/// Reads GitHub's live llama.cpp release list (no download) and checks that a
+/// verified build is found for every platform PhazeAI installs on. Catches
+/// llama.cpp changing how it publishes builds, as it did on 2026-11-13.
+///
+/// ```text
+/// cargo test -p phazeai-core --test local_ai_e2e github_lists_an_installable_build -- --ignored
+/// ```
+#[tokio::test]
+#[ignore = "network: reads api.github.com"]
+async fn github_lists_an_installable_build() {
+    use phazeai_core::local_ai::install::{choose_release, Release, ReleaseChoice, RELEASES_API};
+    let releases: Vec<Release> = reqwest::Client::new()
+        .get(RELEASES_API)
+        .header(reqwest::header::USER_AGENT, "phazeai-e2e-test")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .expect("reach api.github.com")
+        .error_for_status()
+        .expect("release list")
+        .json()
+        .await
+        .expect("release JSON");
+    for (os, arch) in [
+        ("linux", "x86_64"),
+        ("windows", "x86_64"),
+        ("macos", "aarch64"),
+    ] {
+        match choose_release(&releases, os, arch) {
+            ReleaseChoice::Ready { release, asset, .. } => {
+                println!("{os}/{arch}: {} → {}", release.tag_name, asset.name)
+            }
+            other => panic!("{os}/{arch}: {other:?}"),
+        }
+    }
+}

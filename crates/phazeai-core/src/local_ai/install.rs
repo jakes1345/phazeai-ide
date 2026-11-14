@@ -6,8 +6,13 @@
 //! 2. `llama-server` on `PATH` (winget, Homebrew, distro packages, own builds);
 //! 3. a copy PhazeAI installed under `<data>/phazeai/llama.cpp/<tag>/`;
 //! 4. otherwise [`install_latest`] downloads the CPU build for this platform
-//!    from the latest GitHub release, verified against the SHA-256 `digest`
-//!    GitHub publishes for each release asset. No digest → no install.
+//!    from the newest numbered build (`b<N>`) on GitHub, verified against the
+//!    SHA-256 `digest` GitHub publishes for each release asset. No digest → no
+//!    install.
+//!
+//! The builds are found by listing releases, not through `releases/latest`:
+//! since 2026-11-13 llama.cpp marks its `b<N>` builds as pre-releases, and
+//! "latest" is a `v1.0.0` that holds no binaries.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -26,8 +31,9 @@ pub const SERVER_EXE: &str = if cfg!(windows) {
     "llama-server"
 };
 
-pub const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+/// The newest releases, pre-releases included (GitHub lists newest first).
+pub const RELEASES_API: &str =
+    "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerSource {
@@ -170,14 +176,14 @@ pub fn manual_install_hint(os: &str) -> String {
 
 // ── GitHub release metadata ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Release {
     pub tag_name: String,
     #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
     pub browser_download_url: String,
@@ -213,6 +219,83 @@ pub fn select_asset<'a>(release: &'a Release, os: &str, arch: &str) -> Option<&'
     })
 }
 
+/// The build number of a llama.cpp release tag: `"b12383"` → `12383`. Any
+/// other tag (`"v1.0.0"`, `"nightly"`) → `None`.
+pub fn build_number(tag: &str) -> Option<u64> {
+    let digits = tag.strip_prefix('b')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// A release endpoint's answer: the list (`/releases`) or one release
+/// (`/releases/latest`, `/releases/tags/<tag>`, mirrors).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ReleaseAnswer {
+    Many(Vec<Release>),
+    One(Release),
+}
+
+impl ReleaseAnswer {
+    fn into_vec(self) -> Vec<Release> {
+        match self {
+            ReleaseAnswer::Many(v) => v,
+            ReleaseAnswer::One(r) => vec![r],
+        }
+    }
+}
+
+/// What [`choose_release`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReleaseChoice<'a> {
+    /// The newest numbered build with this platform's asset and a SHA-256 digest.
+    Ready {
+        release: &'a Release,
+        asset: &'a ReleaseAsset,
+        sha256: String,
+    },
+    /// Numbered builds have this platform's asset, but none has a digest; carries
+    /// the newest such asset's name.
+    NoDigest(String),
+    /// No numbered build has an asset for this platform; carries the newest tag
+    /// seen, if any.
+    NoAsset(Option<String>),
+}
+
+/// Pick the release to install from `releases`: among `b<N>` tags with a build
+/// for `os`/`arch`, the highest `N` whose asset carries a valid SHA-256 digest.
+/// Other tags (`v1.0.0`, which holds only `nightly-tag.txt`) are skipped.
+pub fn choose_release<'a>(releases: &'a [Release], os: &str, arch: &str) -> ReleaseChoice<'a> {
+    let mut numbered: Vec<(u64, &Release)> = releases
+        .iter()
+        .filter_map(|r| build_number(&r.tag_name).map(|n| (n, r)))
+        .collect();
+    numbered.sort_by(|a, b| b.0.cmp(&a.0));
+    let with_asset: Vec<(&Release, &ReleaseAsset)> = numbered
+        .iter()
+        .filter_map(|(_, r)| select_asset(r, os, arch).map(|a| (*r, a)))
+        .collect();
+    let Some((_, newest_asset)) = with_asset.first() else {
+        let newest = numbered
+            .first()
+            .map(|(_, r)| r.tag_name.clone())
+            .or_else(|| releases.first().map(|r| r.tag_name.clone()));
+        return ReleaseChoice::NoAsset(newest);
+    };
+    for (release, asset) in &with_asset {
+        if let Some(sha256) = parse_sha256_digest(asset.digest.as_deref()) {
+            return ReleaseChoice::Ready {
+                release,
+                asset,
+                sha256,
+            };
+        }
+    }
+    ReleaseChoice::NoDigest(newest_asset.name.clone())
+}
+
 /// `"sha256:<64 hex>"` → lower-case hex. Anything else (missing, other
 /// algorithm, malformed) → `None`.
 pub fn parse_sha256_digest(digest: Option<&str>) -> Option<String> {
@@ -221,7 +304,7 @@ pub fn parse_sha256_digest(digest: Option<&str>) -> Option<String> {
         .then(|| hex.to_ascii_lowercase())
 }
 
-/// Download, verify and unpack the latest llama.cpp CPU build into
+/// Download, verify and unpack the newest llama.cpp CPU build into
 /// `install_root/<tag>/`; returns the installed server.
 pub async fn install_latest(
     install_root: &Path,
@@ -231,7 +314,7 @@ pub async fn install_latest(
     let client = super::download::http_client()?;
     install_from_release_api(
         &client,
-        LATEST_RELEASE_API,
+        RELEASES_API,
         install_root,
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -269,22 +352,31 @@ pub async fn install_from_release_api(
             manual_install_hint(os)
         )));
     }
-    let release: Release = resp.json().await?;
-    let asset = select_asset(&release, os, arch).ok_or_else(|| {
-        LocalAiError::Other(format!(
-            "llama.cpp {} has no CPU build for {os}/{arch}. {}",
-            release.tag_name,
-            manual_install_hint(os)
-        ))
-    })?;
-    let sha = parse_sha256_digest(asset.digest.as_deref()).ok_or_else(|| {
-        LocalAiError::Other(format!(
-            "GitHub did not publish a SHA-256 digest for {}, so PhazeAI won't install it \
-             unverified. {}",
-            asset.name,
-            manual_install_hint(os)
-        ))
-    })?;
+    let releases = resp.json::<ReleaseAnswer>().await?.into_vec();
+    let (release, asset, sha) = match choose_release(&releases, os, arch) {
+        ReleaseChoice::Ready {
+            release,
+            asset,
+            sha256,
+        } => (release, asset, sha256),
+        ReleaseChoice::NoDigest(name) => {
+            return Err(LocalAiError::Other(format!(
+                "GitHub did not publish a SHA-256 digest for {name}, so PhazeAI won't install \
+                 it unverified. {}",
+                manual_install_hint(os)
+            )))
+        }
+        ReleaseChoice::NoAsset(newest) => {
+            let seen = newest.map_or_else(
+                || "GitHub listed no llama.cpp releases".to_string(),
+                |tag| format!("no llama.cpp build up to {tag} has one"),
+            );
+            return Err(LocalAiError::Other(format!(
+                "no CPU build for {os}/{arch}: {seen}. {}",
+                manual_install_hint(os)
+            )));
+        }
+    };
     if release.tag_name.is_empty()
         || release
             .tag_name
@@ -341,7 +433,7 @@ pub async fn install_from_release_api(
         .ok_or_else(|| LocalAiError::Other(format!("{SERVER_EXE} vanished after install")))?;
     Ok(FoundServer {
         path,
-        source: ServerSource::Installed(release.tag_name),
+        source: ServerSource::Installed(release.tag_name.clone()),
     })
 }
 
@@ -501,6 +593,101 @@ mod tests {
         assert_eq!(
             select_asset(&r, "linux", "x86_64").map(|a| a.name.as_str()),
             Some("llama-b6500-bin-ubuntu-x64.zip")
+        );
+    }
+
+    #[test]
+    fn build_numbers() {
+        assert_eq!(build_number("b12383"), Some(12383));
+        assert_eq!(build_number("b1"), Some(1));
+        for tag in ["v1.0.0", "b", "b12a", "B100", "nightly", "", "b-1"] {
+            assert_eq!(build_number(tag), None, "{tag}");
+        }
+    }
+
+    fn linux_build(tag: &str, digest: Option<&str>) -> Release {
+        let name = format!("llama-{tag}-bin-ubuntu-x64.tar.gz");
+        Release {
+            tag_name: tag.into(),
+            assets: vec![ReleaseAsset {
+                browser_download_url: format!(
+                    "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{name}"
+                ),
+                name,
+                size: 1,
+                digest: digest.map(str::to_string),
+            }],
+        }
+    }
+
+    /// The `/releases` list as GitHub returned it on 2026-11-14: a `v1.0.0`
+    /// holding only `nightly-tag.txt` (what `releases/latest` points at) next
+    /// to the `b<N>` pre-releases that carry the builds.
+    #[test]
+    fn skips_the_binaryless_v1_release_and_takes_the_newest_build() {
+        let d = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        let releases = vec![
+            linux_build("b12381", Some(&d('a'))),
+            Release {
+                tag_name: "v1.0.0".into(),
+                assets: vec![ReleaseAsset {
+                    name: "nightly-tag.txt".into(),
+                    browser_download_url: "https://example.invalid/nightly-tag.txt".into(),
+                    size: 7,
+                    digest: Some(d('f')),
+                }],
+            },
+            linux_build("b12383", Some(&d('b'))),
+            linux_build("b9999", Some(&d('c'))),
+        ];
+        match choose_release(&releases, "linux", "x86_64") {
+            ReleaseChoice::Ready {
+                release, sha256, ..
+            } => {
+                assert_eq!(release.tag_name, "b12383");
+                assert_eq!(sha256, "b".repeat(64));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_undigested_newest_build_falls_back_to_the_next_verified_one() {
+        let ok = format!("sha256:{}", "e".repeat(64));
+        let releases = vec![linux_build("b200", None), linux_build("b199", Some(&ok))];
+        assert!(matches!(
+            choose_release(&releases, "linux", "x86_64"),
+            ReleaseChoice::Ready { release, .. } if release.tag_name == "b199"
+        ));
+
+        let none = vec![
+            linux_build("b200", None),
+            linux_build("b199", Some("md5:00")),
+        ];
+        assert_eq!(
+            choose_release(&none, "linux", "x86_64"),
+            ReleaseChoice::NoDigest("llama-b200-bin-ubuntu-x64.tar.gz".into())
+        );
+    }
+
+    #[test]
+    fn no_build_for_the_platform_names_what_was_seen() {
+        let releases = vec![linux_build("b300", None)];
+        assert_eq!(
+            choose_release(&releases, "windows", "riscv64"),
+            ReleaseChoice::NoAsset(Some("b300".into()))
+        );
+        let only_v1 = vec![Release {
+            tag_name: "v1.0.0".into(),
+            assets: vec![],
+        }];
+        assert_eq!(
+            choose_release(&only_v1, "linux", "x86_64"),
+            ReleaseChoice::NoAsset(Some("v1.0.0".into()))
+        );
+        assert_eq!(
+            choose_release(&[], "linux", "x86_64"),
+            ReleaseChoice::NoAsset(None)
         );
     }
 
@@ -712,6 +899,15 @@ mod tests {
                 make_json(Some(&format!("sha256:{}", "0".repeat(64)))).into_bytes(),
             ),
             ("/nodigest".to_string(), make_json(None).into_bytes()),
+            (
+                // `/releases` shape: a binaryless `v1.0.0` first, then the build.
+                "/list".to_string(),
+                format!(
+                    r#"[{{"tag_name":"v1.0.0","assets":[]}},{}]"#,
+                    make_json(Some(&format!("sha256:{good}")))
+                )
+                .into_bytes(),
+            ),
             (format!("/dl/{asset_name}"), zip_bytes.clone()),
         ]);
         tokio::spawn(async move {
@@ -788,7 +984,7 @@ mod tests {
 
         let found = install_from_release_api(
             &client,
-            &format!("{base}/good"),
+            &format!("{base}/list"),
             &root,
             "linux",
             "x86_64",
