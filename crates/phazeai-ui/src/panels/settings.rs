@@ -1263,16 +1263,18 @@ fn about_section(state: IdeState) -> impl IntoView {
     ))
     .style(|s| s.flex_row().items_center().padding_vert(4.0));
 
-    let link = container(label(|| "github.com/phazeai/ide").style(move |s| {
-        let t = theme.get();
-        let p = &t.palette;
-        let color = if is_link_hovered.get() {
-            p.accent_hover
-        } else {
-            p.accent
-        };
-        s.font_size(12.0).color(color)
-    }))
+    let link = container(
+        label(|| format!("github.com/{}", phazeai_core::updater::GITHUB_REPO)).style(move |s| {
+            let t = theme.get();
+            let p = &t.palette;
+            let color = if is_link_hovered.get() {
+                p.accent_hover
+            } else {
+                p.accent
+            };
+            s.font_size(12.0).color(color)
+        }),
+    )
     .style(move |s| {
         s.padding_vert(4.0)
             .cursor(floem::style::CursorStyle::Pointer)
@@ -1284,17 +1286,16 @@ fn about_section(state: IdeState) -> impl IntoView {
         is_link_hovered.set(false);
     })
     .on_click_stop(move |_| {
+        let url = format!("https://github.com/{}", phazeai_core::updater::GITHUB_REPO);
         #[cfg(target_os = "linux")]
         let _ = phazeai_core::process::std_command("xdg-open")
-            .arg("https://github.com/phazeai/ide")
+            .arg(&url)
             .spawn();
         #[cfg(target_os = "macos")]
-        let _ = phazeai_core::process::std_command("open")
-            .arg("https://github.com/phazeai/ide")
-            .spawn();
+        let _ = phazeai_core::process::std_command("open").arg(&url).spawn();
         #[cfg(target_os = "windows")]
         let _ = phazeai_core::process::std_command("cmd")
-            .args(["/c", "start", "https://github.com/phazeai/ide"])
+            .args(["/c", "start", url.as_str()])
             .spawn();
     });
 
