@@ -9,7 +9,7 @@ use overlays::{
     rename_overlay, sig_help_overlay, toast_overlay, vim_ex_overlay, workspace_symbols_overlay,
 };
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -146,7 +146,7 @@ impl std::fmt::Debug for IdeState {
 
 impl IdeState {}
 
-/// Persisted layout state from ~/.config/phazeai/session.toml.
+/// Persisted layout state: `session.toml` beside `config.toml`.
 /// `version` lets migrate() handle old files without panic.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -178,7 +178,7 @@ impl Default for SessionState {
             split_editor: false,
             split_editor_down: false,
             vim_mode: false,
-            theme: "Midnight Blue".to_string(),
+            theme: "Phaze".to_string(),
             zen_mode: false,
         }
     }
@@ -308,15 +308,10 @@ impl SessionState {
     }
 }
 
+/// The folder `config.toml` lives in, so the session sits beside it and
+/// follows `XDG_CONFIG_HOME` (and the platform's config folder) the same way.
 fn dirs_next_config() -> Option<PathBuf> {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
-        .inspect_err(
-            |e| tracing::warn!(target: "phazeai_ui", error = %e, "Failed to get HOME env var"),
-        )
-        .ok()?;
-    Some(home.join(".config").join("phazeai"))
+    Settings::config_path().parent().map(Path::to_path_buf)
 }
 
 /// Convert a provider display name back to LlmProvider enum.
@@ -448,7 +443,6 @@ fn check_lsp_ready() -> bool {
 
 impl IdeState {
     pub fn new(settings: &Settings) -> Self {
-        let _theme = PhazeTheme::from_name(&settings.editor.theme);
         // Use the git repository root as the workspace, so all git operations
         // are correctly scoped to the project root even when launched from a
         // subdirectory. Fall back to current_dir if not inside a git repo.
@@ -636,7 +630,10 @@ impl IdeState {
         }
 
         // Create persistent settings signals before Self so we can wire save effects.
-        let theme_signal = create_rw_signal(PhazeTheme::from_name(&session.theme));
+        // The theme is a setting (`[editor] theme` in config.toml, which the
+        // Settings panel and View › Theme write); the session's copy is only
+        // kept for older builds that read it.
+        let theme_signal = create_rw_signal(PhazeTheme::from_name(&settings.editor.theme));
         // The [editor] settings of config.toml. The editor state holds these
         // same signals (`EditorState::new` below), so the file's values apply
         // at start and a change made anywhere is saved back: load-modify-save
@@ -1119,7 +1116,15 @@ pub(crate) fn all_commands() -> Vec<PaletteCommand> {
                 s.workbench.show_right_panel.update(|v| *v = !*v);
             },
         },
-        // ── All 12 themes ────────────────────────────────────────────────────
+        // ── All 13 themes ────────────────────────────────────────────────────
+        PaletteCommand {
+            label: "Theme: Phaze",
+            action: |s| {
+                s.workbench
+                    .theme
+                    .set(PhazeTheme::from_variant(ThemeVariant::Phaze));
+            },
+        },
         PaletteCommand {
             label: "Theme: Midnight Blue",
             action: |s| {
@@ -1459,51 +1464,62 @@ fn cosmic_bg_canvas(theme: RwSignal<PhazeTheme>) -> impl IntoView {
     .style(|s| s.absolute().inset(0))
 }
 
-fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl IntoView {
+/// One activity bar button: an icon, a slim accent bar on the left edge when
+/// its panel is open, and its name in a tooltip (drawn in a window overlay,
+/// so the panels beside the bar never cover it).
+fn activity_bar_btn(
+    icon_svg: &'static str,
+    name: &'static str,
+    tab: Tab,
+    state: IdeState,
+) -> impl IntoView {
     let is_hovered = create_rw_signal(false);
     let active = move || {
         state.workbench.left_panel_tab.get() == tab && state.workbench.show_left_panel.get()
     };
 
     let icon_color = move |p: &crate::theme::PhazePalette| {
-        if active() {
-            p.accent
+        if active() || is_hovered.get() {
+            p.text_primary
         } else {
-            p.text_secondary
+            p.text_muted
         }
     };
 
-    container(phaze_icon(
-        icon_svg,
-        22.0,
-        icon_color,
-        state.workbench.theme,
-    ))
+    let indicator = empty().style(move |s| {
+        let p = state.workbench.theme.get().palette;
+        s.absolute()
+            .inset_left(-6.0)
+            .inset_top(8.0)
+            .width(2.0)
+            .height(20.0)
+            .border_radius(2.0)
+            .background(p.accent)
+            .apply_if(!active(), |s| s.display(floem::style::Display::None))
+    });
+
+    let theme = state.workbench.theme;
+    let button = container(stack((
+        indicator,
+        phaze_icon(icon_svg, 20.0, icon_color, theme),
+    )))
     .style(move |s| {
         let t = state.workbench.theme.get();
         let p = &t.palette;
         let is_active = active();
-        let is_hov = is_hovered.get();
-
-        s.width(40.0)
-            .height(40.0)
-            .border_radius(10.0)
+        s.width(36.0)
+            .height(36.0)
+            .border_radius(crate::tokens::radius::MD)
             .items_center()
             .justify_center()
             .cursor(floem::style::CursorStyle::Pointer)
-            .margin_bottom(4.0)
             .transition(
                 floem::style::Background,
-                floem::style::Transition::linear(Duration::from_millis(150)),
+                floem::style::Transition::linear(Duration::from_millis(120)),
             )
-            .apply_if(is_active, |s| {
-                s.background(p.accent_dim)
-                    .box_shadow_blur(16.0)
-                    .box_shadow_color(p.glow)
-                    .box_shadow_spread(1.0)
-            })
-            .apply_if(is_hov && !is_active, |s| {
-                s.background(p.bg_surface.with_alpha(0.3))
+            .apply_if(is_active, |s| s.background(p.accent_dim))
+            .apply_if(is_hovered.get() && !is_active, |s| {
+                s.background(p.button_hover_bg)
             })
     })
     .on_click_stop(move |_| {
@@ -1521,46 +1537,83 @@ fn activity_bar_btn(icon_svg: &'static str, tab: Tab, state: IdeState) -> impl I
     })
     .on_event_stop(floem::event::EventListener::PointerLeave, move |_| {
         is_hovered.set(false);
+    });
+    // The tip's box is styled through `TooltipClass` (Floem's default is
+    // a white box); the label inside only sets the text.
+    floem::views::tooltip(button, move || {
+        label(move || name).style(move |s| {
+            s.font_size(crate::tokens::font::BODY)
+                .color(theme.get().palette.text_primary)
+        })
+    })
+    .style(move |s| {
+        let p = theme.get().palette;
+        s.class(floem::views::TooltipClass, move |s| {
+            s.padding_horiz(8.0)
+                .padding_vert(3.0)
+                .border_radius(crate::tokens::radius::MD)
+                .background(p.bg_elevated)
+                .color(p.text_primary)
+                .border(1.0)
+                .border_color(p.border)
+                .box_shadow_blur(0.0)
+        })
     })
 }
 
+/// A hairline between groups of activity bar buttons.
+fn activity_divider(theme: RwSignal<PhazeTheme>) -> impl IntoView {
+    empty().style(move |s| {
+        s.width(20.0)
+            .height(1.0)
+            .margin_vert(6.0)
+            .background(theme.get().palette.border)
+    })
+}
+
+/// The activity bar: panels grouped by what they are for — code, AI,
+/// running, elsewhere — with extensions and settings at the bottom.
 fn activity_bar(state: IdeState) -> impl IntoView {
+    let theme = state.workbench.theme;
+    let b = |icon, name, tab| activity_bar_btn(icon, name, tab, state.clone());
     stack((
-        activity_bar_btn(icons::EXPLORER, Tab::Explorer, state.clone()),
-        activity_bar_btn(icons::SEARCH, Tab::Search, state.clone()),
-        activity_bar_btn(icons::SOURCE_CONTROL, Tab::Git, state.clone()),
-        activity_bar_btn(icons::LIST_CHECKS, Tab::Symbols, state.clone()),
-        activity_bar_btn(icons::COMPOSE, Tab::Composer, state.clone()),
-        activity_bar_btn(icons::AI, Tab::Agents, state.clone()),
-        activity_bar_btn(icons::DESIGN, Tab::Design, state.clone()),
-        activity_bar_btn(icons::DEBUG, Tab::Debug, state.clone()),
-        activity_bar_btn(icons::REMOTE, Tab::Remote, state.clone()),
-        activity_bar_btn(icons::CONTAINER, Tab::Containers, state.clone()),
-        activity_bar_btn(icons::LIST_CHECKS, Tab::Makefile, state.clone()),
-        activity_bar_btn(icons::GITHUB, Tab::GitHub, state.clone()),
-        activity_bar_btn(icons::LIST_CHECKS, Tab::Tests, state.clone()),
         stack((
-            activity_bar_btn(icons::EXTENSIONS, Tab::Extensions, state.clone()),
-            activity_bar_btn(icons::SETTINGS, Tab::Settings, state.clone()),
+            b(icons::EXPLORER, "Explorer", Tab::Explorer),
+            b(icons::SEARCH, "Search", Tab::Search),
+            b(icons::SOURCE_CONTROL, "Source control", Tab::Git),
+            b(icons::SYMBOLS, "Symbols", Tab::Symbols),
+            activity_divider(theme),
+            b(icons::COMPOSE, "Composer", Tab::Composer),
+            b(icons::AI, "Agents", Tab::Agents),
+            b(icons::DESIGN, "Design", Tab::Design),
+            activity_divider(theme),
+            b(icons::DEBUG, "Run and debug", Tab::Debug),
+            b(icons::TESTS, "Tests", Tab::Tests),
+            b(icons::TASKS, "Make tasks", Tab::Makefile),
+            activity_divider(theme),
+            b(icons::REMOTE, "Remote", Tab::Remote),
+            b(icons::CONTAINER, "Containers", Tab::Containers),
+            b(icons::GITHUB, "GitHub", Tab::GitHub),
         ))
-        .style(|s| s.flex_col().margin_top(floem::unit::PxPctAuto::Auto)),
+        .style(|s| s.flex_col().items_center().gap(2.0)),
+        stack((
+            b(icons::EXTENSIONS, "Extensions", Tab::Extensions),
+            b(icons::SETTINGS, "Settings", Tab::Settings),
+        ))
+        .style(|s| s.flex_col().items_center().gap(2.0)),
     ))
-    .style(|s| s.flex_col().padding(8.0).gap(2.0))
     .style(move |s| {
-        let t = state.workbench.theme.get();
-        let p = &t.palette;
+        let p = theme.get().palette;
         s.flex_col()
+            .items_center()
+            .justify_between()
             .width(48.0)
             .height_full()
-            .background(p.glass_bg)
+            .padding_vert(8.0)
+            .background(p.bg_deep)
             .border_right(1.0)
-            .border_color(p.glass_border)
-            .justify_between()
-            .box_shadow_h_offset(3.0)
-            .box_shadow_v_offset(0.0)
-            .box_shadow_blur(16.0)
-            .box_shadow_color(p.glow)
-            .box_shadow_spread(0.0)
+            .border_color(p.border)
+            .z_index(20)
     })
 }
 
@@ -1961,10 +2014,11 @@ fn status_bar(state: IdeState) -> impl IntoView {
     let left = stack((
         branch_btn,
         label(|| "   ").style(|s| s.font_size(11.0)),
+        // The AI model in use (not a branch: that is the item before).
         phaze_icon(
-            icons::BRANCH,
+            icons::CHIP,
             12.0,
-            move |p| p.accent,
+            move |p| p.text_muted,
             state.workbench.theme,
         ),
         label(move || format!(" {}", state.ai.model.get())).style(move |s| {

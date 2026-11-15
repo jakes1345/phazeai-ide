@@ -95,7 +95,7 @@ pub mod endpoints {
 // ─── Default Settings ─────────────────────────────────────────────────────────
 
 pub mod defaults {
-    pub const THEME: &str = "Midnight Blue";
+    pub const THEME: &str = "Phaze";
     pub const FONT_SIZE: f32 = 14.0;
     pub const TAB_SIZE: u32 = 4;
     pub const MAX_TOKENS: u32 = 8192;

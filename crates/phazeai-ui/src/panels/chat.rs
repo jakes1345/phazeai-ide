@@ -153,6 +153,62 @@ fn settle_tool_rows(list: &mut [ChatMessage]) {
 
 /// A model's reply as Markdown blocks (see `chat_markdown`): code in a
 /// monospace box, headings bold, paragraphs and lists as wrapped text.
+/// A paragraph or heading with its inline marks drawn: `code` in a
+/// monospace face and its own colour, **bold** heavier and brighter. Wraps
+/// to the width it is given.
+fn inline_text(
+    text: String,
+    size: f32,
+    heading: bool,
+    theme: RwSignal<PhazeTheme>,
+) -> impl IntoView {
+    use super::chat_markdown::{spans, SpanKind};
+    use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout, Weight};
+    floem::views::rich_text(move || {
+        let p = theme.get().palette;
+        let base = Attrs::new()
+            .font_size(size)
+            .line_height(LineHeightValue::Normal(1.55))
+            .weight(if heading {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            })
+            .color(if heading {
+                p.text_primary
+            } else {
+                p.text_secondary
+            });
+        let mono = [FamilyOwned::Monospace];
+        let mut list = AttrsList::new(base.clone());
+        let mut joined = String::new();
+        for (kind, piece) in spans(&text) {
+            let start = joined.len();
+            joined.push_str(&piece);
+            let range = start..joined.len();
+            match kind {
+                SpanKind::Plain => {}
+                SpanKind::Bold => list.add_span(
+                    range,
+                    base.clone().weight(Weight::BOLD).color(p.text_primary),
+                ),
+                SpanKind::Code => list.add_span(
+                    range,
+                    base.clone()
+                        .family(&mono)
+                        .font_size(size - 1.0)
+                        .weight(Weight::NORMAL)
+                        .color(p.syn_string),
+                ),
+            }
+        }
+        let mut layout = TextLayout::new();
+        layout.set_text(&joined, list, None);
+        layout
+    })
+    .style(|s| s.width_full().min_width(0.0).flex_shrink(1.0))
+}
+
 fn reply_view(text: &str, theme: RwSignal<PhazeTheme>) -> impl IntoView {
     use super::chat_markdown::{blocks, Block};
     floem::views::v_stack_from_iter(blocks(text).into_iter().map(move |block| {
@@ -169,32 +225,14 @@ fn reply_view(text: &str, theme: RwSignal<PhazeTheme>) -> impl IntoView {
                 let p = theme.get().palette;
                 s.width_full()
                     .min_width(0.0)
-                    .padding(8.0)
-                    .border_radius(6.0)
-                    .background(p.bg_base.with_alpha(0.6))
-                    .border(1.0)
-                    .border_color(p.glass_border)
+                    .padding_horiz(10.0)
+                    .padding_vert(8.0)
+                    .border_radius(crate::tokens::radius::MD)
+                    .background(p.bg_deep)
             })
             .into_any(),
-            Block::Heading(text) => label(move || text.clone())
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.font_size(14.0)
-                        .font_weight(floem::text::Weight::BOLD)
-                        .color(p.text_primary)
-                        .min_width(0.0)
-                })
-                .into_any(),
-            Block::Text(text) => label(move || text.clone())
-                .style(move |s| {
-                    let p = theme.get().palette;
-                    s.font_size(13.0)
-                        .color(p.text_secondary)
-                        .line_height(1.5)
-                        .min_width(0.0)
-                        .flex_shrink(1.0)
-                })
-                .into_any(),
+            Block::Heading(text) => inline_text(text, 14.0, true, theme).into_any(),
+            Block::Text(text) => inline_text(text, 13.0, false, theme).into_any(),
         }
     }))
     .style(|s| {
@@ -1678,10 +1716,14 @@ pub fn chat_panel(
     // ── Header — neon strip + title ───────────────────────────────────────────
 
     // 2px accent-colored top strip (the "neon line" on top of the panel)
+    // A thin accent line across the top of the chat that shows only while
+    // the AI is working: a quiet "busy" signal visible from anywhere.
     let neon_strip = container(label(|| "")).style(move |s| {
-        s.height(2.0)
-            .width_full()
-            .background(theme.get().palette.accent)
+        s.height(2.0).width_full().background(if is_loading.get() {
+            theme.get().palette.accent
+        } else {
+            floem::peniko::Color::TRANSPARENT
+        })
     });
 
     let new_btn = {
@@ -2311,11 +2353,16 @@ pub fn chat_panel(
                     // Row: tool-chip + message text + action buttons
                     stack((
                         stack((
-                            phaze_icon(icons::CHIP, 11.0, move |p| p.accent, theme).style(
-                                move |s: floem::style::Style| {
-                                    s.apply_if(!is_tool, |s| s.display(floem::style::Display::None))
-                                },
-                            ),
+                            phaze_icon(
+                                icons::CHIP,
+                                11.0,
+                                move |p| if loading { p.accent } else { p.text_muted },
+                                theme,
+                            )
+                            .style(move |s: floem::style::Style| {
+                                s.margin_right(6.0)
+                                    .apply_if(!is_tool, |s| s.display(floem::style::Display::None))
+                            }),
                             {
                                 // A finished or streaming reply is drawn as
                                 // Markdown blocks; questions, tool rows,
@@ -2329,13 +2376,15 @@ pub fn chat_panel(
                                         .style(move |s| {
                                             let t = theme.get();
                                             let p = &t.palette;
-                                            s.font_size(if is_tool { 11.0 } else { 13.0 })
+                                            s.font_size(if is_tool { 11.5 } else { 13.0 })
                                                 .color(if is_user {
                                                     p.text_primary
                                                 } else if is_error {
                                                     p.error
-                                                } else if is_typing || is_tool {
+                                                } else if is_typing || (is_tool && loading) {
                                                     p.accent
+                                                } else if is_tool {
+                                                    p.text_muted
                                                 } else {
                                                     p.text_secondary
                                                 })
@@ -2347,8 +2396,9 @@ pub fn chat_panel(
                                                 .min_width(0.0)
                                                 .flex_shrink(1.0)
                                                 .line_height(1.5)
+                                                // A tool row is one quiet line.
                                                 .apply_if(is_tool, |s| {
-                                                    s.font_weight(floem::text::Weight::MEDIUM)
+                                                    s.text_ellipsis().line_height(1.3)
                                                 })
                                         })
                                         .into_any()
@@ -2375,51 +2425,34 @@ pub fn chat_panel(
                 let t = theme.get();
                 let p = &t.palette;
                 if is_user {
-                    // User bubble: accent tinted glass
+                    // Your turn: a soft filled block, no border or glow.
                     s.width_full()
-                        .padding_horiz(14.0)
-                        .padding_vert(10.0)
-                        .background(p.accent_dim)
-                        .border(1.0)
-                        .border_color(p.glass_border)
-                        .border_radius(12.0)
-                        .margin_bottom(8.0)
-                        // Subtle inner glow
-                        .box_shadow_blur(12.0)
-                        .box_shadow_color(p.glow)
-                        .box_shadow_spread(0.0)
-                        .box_shadow_h_offset(0.0)
-                        .box_shadow_v_offset(0.0)
+                        .padding_horiz(12.0)
+                        .padding_vert(9.0)
+                        .background(p.bg_elevated)
+                        .border_radius(crate::tokens::radius::LG)
+                        .margin_top(6.0)
+                        .margin_bottom(12.0)
                 } else if is_tool {
-                    // Tool card: specialized micro-bubble
+                    // A tool call: one muted line under the turn it belongs to.
                     s.width_full()
-                        .padding_horiz(10.0)
-                        .padding_vert(6.0)
-                        .background(p.bg_deep.with_alpha(0.6))
-                        .border(1.0)
-                        .border_color(p.glass_border)
-                        .border_radius(6.0)
-                        .margin_bottom(6.0)
-                        .margin_horiz(20.0) // Indent tool calls
+                        .min_width(0.0)
+                        .padding_horiz(4.0)
+                        .padding_vert(2.0)
+                        .margin_bottom(2.0)
                 } else if is_error {
                     s.width_full()
-                        .padding_horiz(14.0)
-                        .padding_vert(10.0)
-                        .background(p.error.with_alpha(0.1))
-                        .border(1.0)
-                        .border_color(p.error.with_alpha(0.3))
-                        .border_radius(10.0)
-                        .margin_bottom(8.0)
+                        .padding_horiz(12.0)
+                        .padding_vert(9.0)
+                        .background(p.error.with_alpha(0.08))
+                        .border_radius(crate::tokens::radius::LG)
+                        .margin_bottom(12.0)
                 } else {
-                    // Assistant bubble: darker glass for better readability
+                    // A reply reads like a document: no box around it.
                     s.width_full()
-                        .padding_horiz(14.0)
-                        .padding_vert(10.0)
-                        .background(p.bg_panel)
-                        .border(1.0)
-                        .border_color(p.glass_border)
-                        .border_radius(10.0)
-                        .margin_bottom(8.0)
+                        .padding_horiz(4.0)
+                        .padding_vert(4.0)
+                        .margin_bottom(14.0)
                 }
             })
         },
