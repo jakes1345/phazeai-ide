@@ -451,6 +451,15 @@ fn capture(wid: u64, path: &std::path::Path) -> DynamicImage {
 // ── Image helpers ─────────────────────────────────────────────────────────────
 
 fn diff_percent(a: &DynamicImage, b: &DynamicImage) -> f64 {
+    diff_percent_within(a, b, 10)
+}
+
+/// Like [`diff_percent`], counting a pixel as changed when any channel moves
+/// by more than `tolerance`. Showing or hiding a panel in a quiet theme (the
+/// default, Phaze) swaps surfaces only a few shades apart, so the toggle
+/// scenarios use a fine tolerance: they test that the layout changed, not
+/// how much contrast the theme has.
+fn diff_percent_within(a: &DynamicImage, b: &DynamicImage, tolerance: u32) -> f64 {
     let (aw, ah) = a.dimensions();
     let (bw, bh) = b.dimensions();
     if aw != bw || ah != bh {
@@ -462,9 +471,9 @@ fn diff_percent(a: &DynamicImage, b: &DynamicImage) -> f64 {
         for x in 0..aw {
             let Rgba([r1, g1, b1, _]) = a.get_pixel(x, y);
             let Rgba([r2, g2, b2, _]) = b.get_pixel(x, y);
-            if (r1 as i32 - r2 as i32).unsigned_abs() > 10
-                || (g1 as i32 - g2 as i32).unsigned_abs() > 10
-                || (b1 as i32 - b2 as i32).unsigned_abs() > 10
+            if (r1 as i32 - r2 as i32).unsigned_abs() > tolerance
+                || (g1 as i32 - g2 as i32).unsigned_abs() > tolerance
+                || (b1 as i32 - b2 as i32).unsigned_abs() > tolerance
             {
                 diff += 1;
             }
@@ -472,6 +481,10 @@ fn diff_percent(a: &DynamicImage, b: &DynamicImage) -> f64 {
     }
     (diff as f64 / total) * 100.0
 }
+
+/// Per-channel tolerance for the panel toggle scenarios (see
+/// [`diff_percent_within`]).
+const FINE: u32 = 2;
 
 /// Percentage of pixels that differ inside a band of the frame, comparing `a`
 /// at `(x, y)` with `b` at `(x + dx, y + dy)`. The band is given as columns
@@ -839,8 +852,10 @@ fn scenario_toggle_explorer() {
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+b");
-    let closed = screenshot_until(wid, "s3_explorer_closed", |f| diff_percent(&open, f) > 3.0);
-    let diff = diff_percent(&open, &closed);
+    let closed = screenshot_until(wid, "s3_explorer_closed", |f| {
+        diff_percent_within(&open, f, FINE) > 3.0
+    });
+    let diff = diff_percent_within(&open, &closed, FINE);
     assert!(
         diff > 3.0,
         "Explorer close: expected >3% diff, got {diff:.2}%"
@@ -869,8 +884,10 @@ fn scenario_toggle_chat_panel() {
     assert!(!is_blank(&open), "App rendered blank screen");
 
     send_keys(wid, "ctrl+backslash");
-    let closed = screenshot_until(wid, "s4_chat_closed", |f| diff_percent(&open, f) > 1.0);
-    let diff = diff_percent(&open, &closed);
+    let closed = screenshot_until(wid, "s4_chat_closed", |f| {
+        diff_percent_within(&open, f, FINE) > 1.0
+    });
+    let diff = diff_percent_within(&open, &closed, FINE);
     assert!(diff > 1.0, "Chat close: expected >1% diff, got {diff:.2}%");
 }
 
