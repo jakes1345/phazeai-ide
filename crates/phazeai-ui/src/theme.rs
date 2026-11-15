@@ -2,8 +2,10 @@ use floem::peniko::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeVariant {
-    // Cosmic / PhazeAI originals
+    /// The default: calm graphite with PhazeAI's violet accent.
     #[default]
+    Phaze,
+    // Cosmic / PhazeAI originals
     MidnightBlue,
     Cyberpunk,
     Synthwave84,
@@ -24,6 +26,7 @@ pub enum ThemeVariant {
 impl ThemeVariant {
     pub fn all() -> &'static [ThemeVariant] {
         &[
+            ThemeVariant::Phaze,
             ThemeVariant::MidnightBlue,
             ThemeVariant::Cyberpunk,
             ThemeVariant::Synthwave84,
@@ -49,6 +52,7 @@ impl ThemeVariant {
             return *v;
         }
         match s.to_lowercase().replace([' ', '-', '_'], "").as_str() {
+            "phaze" | "default" => Self::Phaze,
             "midnightblue" | "midnight" => Self::MidnightBlue,
             "cyberpunk" | "cyber" => Self::Cyberpunk,
             "synthwave84" | "synthwave" => Self::Synthwave84,
@@ -66,6 +70,7 @@ impl ThemeVariant {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Phaze => "Phaze",
             Self::MidnightBlue => "Midnight Blue",
             Self::Cyberpunk => "Cyberpunk 2077",
             Self::Synthwave84 => "Synthwave '84",
@@ -217,7 +222,104 @@ impl PhazePalette {
         self
     }
 
-    /// Cosmic glassmorphism palette — the hero theme.
+    /// The default theme: solid graphite surfaces a step apart, hairline
+    /// borders only where structure needs them, no glow, and one violet
+    /// accent for what is active or yours to act on. Built to be read for
+    /// hours: text is high-contrast, everything else stays quiet.
+    pub fn phaze() -> Self {
+        Self {
+            bg_deep: Color::from_rgb8(10, 11, 14),
+            bg_base: Color::from_rgb8(15, 16, 20),
+            bg_surface: Color::from_rgb8(22, 24, 29),
+            bg_panel: Color::from_rgb8(18, 19, 23),
+            bg_elevated: Color::from_rgb8(28, 30, 37),
+
+            text_primary: Color::from_rgb8(230, 232, 238),
+            text_secondary: Color::from_rgb8(163, 168, 181),
+            text_muted: Color::from_rgb8(112, 117, 132),
+            text_disabled: Color::from_rgb8(66, 70, 80),
+
+            accent: Color::from_rgb8(139, 124, 255),
+            accent_hover: Color::from_rgb8(166, 154, 255),
+            accent_dim: Color::from_rgba8(139, 124, 255, 38),
+
+            success: Color::from_rgb8(86, 214, 140),
+            warning: Color::from_rgb8(240, 184, 72),
+            error: Color::from_rgb8(244, 98, 110),
+            info: Color::from_rgb8(110, 168, 254),
+
+            git_added: Color::from_rgb8(86, 214, 140),
+            git_modified: Color::from_rgb8(240, 184, 72),
+            git_deleted: Color::from_rgb8(244, 98, 110),
+            git_untracked: Color::from_rgb8(110, 168, 254),
+
+            border: Color::from_rgba8(255, 255, 255, 18),
+            border_focus: Color::from_rgba8(139, 124, 255, 170),
+
+            selection: Color::from_rgba8(139, 124, 255, 58),
+
+            syn_keyword: Color::from_rgb8(199, 146, 234),
+            syn_string: Color::from_rgb8(152, 211, 145),
+            syn_comment: Color::from_rgb8(106, 112, 128),
+            syn_function: Color::from_rgb8(130, 170, 255),
+            syn_number: Color::from_rgb8(247, 166, 106),
+            syn_type: Color::from_rgb8(102, 217, 200),
+            syn_operator: Color::from_rgb8(163, 168, 181),
+            syn_macro: Color::from_rgb8(240, 140, 180),
+
+            // Derived — overwritten by with_derived_defaults()
+            diag_error: Color::TRANSPARENT,
+            diag_warning: Color::TRANSPARENT,
+            diag_info: Color::TRANSPARENT,
+            diag_hint: Color::TRANSPARENT,
+            diff_added_fg: Color::TRANSPARENT,
+            diff_added_bg: Color::TRANSPARENT,
+            diff_removed_fg: Color::TRANSPARENT,
+            diff_removed_bg: Color::TRANSPARENT,
+            diff_header_fg: Color::TRANSPARENT,
+            diff_header_bg: Color::TRANSPARENT,
+            bracket_1: Color::TRANSPARENT,
+            bracket_2: Color::TRANSPARENT,
+            bracket_3: Color::TRANSPARENT,
+            bracket_4: Color::TRANSPARENT,
+            find_match_bg: Color::TRANSPARENT,
+            find_match_border: Color::TRANSPARENT,
+            indent_guide: Color::TRANSPARENT,
+            inlay_hint: Color::TRANSPARENT,
+            matching_bracket_bg: Color::TRANSPARENT,
+            cursor_line_bg: Color::TRANSPARENT,
+            minimap_bar: Color::TRANSPARENT,
+            overlay_bg: Color::TRANSPARENT,
+            overlay_bg_light: Color::TRANSPARENT,
+            button_primary_bg: Color::TRANSPARENT,
+            button_primary_fg: Color::TRANSPARENT,
+            button_hover_bg: Color::TRANSPARENT,
+
+            // Solid panels and quiet hairlines; no glow.
+            glass_bg: Color::from_rgb8(18, 19, 23),
+            glass_border: Color::from_rgba8(255, 255, 255, 16),
+            glow: Color::TRANSPARENT,
+        }
+        .with_derived_defaults()
+        .with_quiet_editor()
+    }
+
+    /// Calmer editor details than the shared defaults: faint guides and
+    /// current line, a softer find highlight and inlay hints.
+    fn with_quiet_editor(mut self) -> Self {
+        self.indent_guide = Color::from_rgba8(255, 255, 255, 10);
+        self.cursor_line_bg = Color::from_rgba8(255, 255, 255, 7);
+        self.inlay_hint = Color::from_rgb8(112, 117, 132);
+        self.find_match_bg = Color::from_rgba8(240, 184, 72, 45);
+        self.find_match_border = Color::from_rgba8(240, 184, 72, 160);
+        self.matching_bracket_bg = Color::from_rgba8(139, 124, 255, 40);
+        self.minimap_bar = Color::from_rgba8(163, 168, 181, 45);
+        self.overlay_bg = Color::from_rgba8(0, 0, 0, 140);
+        self.button_hover_bg = Color::from_rgba8(255, 255, 255, 14);
+        self
+    }
+
+    /// Cosmic glassmorphism palette.
     /// Electric purple accent on a deep space background.
     pub fn midnight_blue() -> Self {
         Self {
@@ -1156,7 +1258,7 @@ pub struct PhazeTheme {
 
 impl Default for PhazeTheme {
     fn default() -> Self {
-        Self::midnight_blue()
+        Self::from_variant(ThemeVariant::Phaze)
     }
 }
 
@@ -1187,6 +1289,7 @@ impl PhazeTheme {
 
     pub fn from_variant(v: ThemeVariant) -> Self {
         let palette = match v {
+            ThemeVariant::Phaze => PhazePalette::phaze(),
             ThemeVariant::MidnightBlue => PhazePalette::midnight_blue(),
             ThemeVariant::Cyberpunk => PhazePalette::cyberpunk(),
             ThemeVariant::Synthwave84 => PhazePalette::synthwave84(),

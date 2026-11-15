@@ -2,16 +2,17 @@
 //!
 //! Replies are Markdown. The chat draws the parts that matter for reading
 //! code answers (fenced code, headings, lists, paragraphs) as blocks of their
-//! own, and leaves inline marks readable as plain text: `**` is dropped,
-//! inline `code` keeps its backticks. A reply is drawn while it streams in,
-//! so a fence that hasn't closed yet is still code.
+//! own. Inside a block, [`spans`] splits a line into plain, bold (`**`) and
+//! inline-code pieces, which the chat draws in their own fonts. A reply is
+//! drawn while it streams in, so a fence that hasn't closed yet is still code
+//! and an unclosed inline mark stays as typed.
 
 /// One block of a reply, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     /// A fenced code block: its language tag (may be empty) and its lines.
     Code { lang: String, text: String },
-    /// A `#` heading, without the marks.
+    /// A `#` heading, without the `#` marks (inline marks kept; see [`spans`]).
     Heading(String),
     /// A paragraph or a list, lines joined with newlines, list marks as `•`.
     Text(String),
@@ -74,9 +75,65 @@ fn list_item(line: &str) -> String {
     inline(line)
 }
 
-/// Inline marks made plain: bold and italic stars dropped.
+/// Inline text as written; [`spans`] reads its marks when it is drawn.
 fn inline(text: &str) -> String {
-    text.replace("**", "").replace("__", "")
+    text.to_string()
+}
+
+/// How a piece of inline text is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanKind {
+    Plain,
+    Bold,
+    Code,
+}
+
+/// A line split into its plain, `**bold**` and `` `code` `` pieces, marks
+/// removed. A mark without its closing partner (a reply still streaming, a
+/// lone backtick) stays in the text as typed. Nothing inside inline code is
+/// read as a mark.
+pub fn spans(text: &str) -> Vec<(SpanKind, String)> {
+    let mut out: Vec<(SpanKind, String)> = Vec::new();
+    let push = |out: &mut Vec<(SpanKind, String)>, kind: SpanKind, s: &str| {
+        if s.is_empty() {
+            return;
+        }
+        match out.last_mut() {
+            Some((k, t)) if *k == kind => t.push_str(s),
+            _ => out.push((kind, s.to_string())),
+        }
+    };
+    let mut rest = text;
+    while !rest.is_empty() {
+        let code = rest.find('`');
+        let bold = rest.find("**");
+        let next = match (code, bold) {
+            (Some(c), Some(b)) => Some(c.min(b)),
+            (c, b) => c.or(b),
+        };
+        let Some(at) = next else {
+            push(&mut out, SpanKind::Plain, rest);
+            break;
+        };
+        push(&mut out, SpanKind::Plain, &rest[..at]);
+        let (mark, kind) = if code == Some(at) {
+            ("`", SpanKind::Code)
+        } else {
+            ("**", SpanKind::Bold)
+        };
+        let after = &rest[at + mark.len()..];
+        match after.find(mark).filter(|&end| end > 0) {
+            Some(end) => {
+                push(&mut out, kind, &after[..end]);
+                rest = &after[end + mark.len()..];
+            }
+            None => {
+                push(&mut out, SpanKind::Plain, mark);
+                rest = after;
+            }
+        }
+    }
+    out
 }
 
 /// Longest first line a tool row shows.
@@ -110,7 +167,7 @@ pub fn tool_summary(summary: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{blocks, tool_summary, Block};
+    use super::{blocks, spans, tool_summary, Block, SpanKind};
 
     #[test]
     fn a_reply_splits_into_text_headings_lists_and_code() {
@@ -120,7 +177,7 @@ mod tests {
             blocks(md),
             vec![
                 Block::Heading("The bug".into()),
-                Block::Text("Line 12 adds instead of multiplying:".into()),
+                Block::Text("Line 12 **adds** instead of multiplying:".into()),
                 Block::Code {
                     lang: "rust".into(),
                     text: "total += a + b;".into()
@@ -128,6 +185,42 @@ mod tests {
                 Block::Text("• one\n  • two\nDone.".into()),
             ]
         );
+    }
+
+    #[test]
+    fn inline_code_and_bold_become_their_own_spans() {
+        use SpanKind::*;
+        let own = |v: Vec<(SpanKind, &str)>| {
+            v.into_iter()
+                .map(|(k, t)| (k, t.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            spans("Multiply `price_cents` by **qty**, not `+`."),
+            own(vec![
+                (Plain, "Multiply "),
+                (Code, "price_cents"),
+                (Plain, " by "),
+                (Bold, "qty"),
+                (Plain, ", not "),
+                (Code, "+"),
+                (Plain, "."),
+            ])
+        );
+        // Marks inside code are code; names with underscores stay whole.
+        assert_eq!(
+            spans("call `a ** b` on __init__"),
+            own(vec![
+                (Plain, "call "),
+                (Code, "a ** b"),
+                (Plain, " on __init__")
+            ])
+        );
+        // Unclosed marks (a reply still streaming) stay as typed.
+        assert_eq!(spans("half `open"), own(vec![(Plain, "half `open")]));
+        assert_eq!(spans("**bold so far"), own(vec![(Plain, "**bold so far")]));
+        assert_eq!(spans("``"), own(vec![(Plain, "``")]));
+        assert!(spans("").is_empty());
     }
 
     #[test]

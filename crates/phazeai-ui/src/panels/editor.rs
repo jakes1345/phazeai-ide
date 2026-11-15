@@ -29,10 +29,11 @@ use floem::{
                 editor::EditType,
                 selection::{SelRegion, Selection},
             },
+            gutter::GutterClass,
             id::EditorId,
             keypress::{default_key_handler, key::KeyInput, press::KeyPress},
             layout::{LineExtraStyle, TextLayoutLine},
-            text::{default_dark_color, Document, SimpleStylingBuilder, Styling, WrapMethod},
+            text::{Document, SimpleStylingBuilder, Styling, WrapMethod},
             EditorStyle,
         },
         label, scroll, stack, text_editor_keys, text_input, Decorators,
@@ -1326,12 +1327,25 @@ fn open_in_tabs(
 
 /// Full multi-tab code editor with syntect syntax highlighting.
 ///
-/// The editor's background: Floem's `default_dark_color`, which every theme
-/// keeps (the gutter is painted the same).
+/// The editor background of themes whose `bg_base` is see-through (the
+/// cosmic themes draw the window's canvas behind their panels): Floem's
+/// One Dark grey, which those themes have always had.
 const EDITOR_BG: (u8, u8, u8) = (0x28, 0x2C, 0x34);
 
-/// Line numbers off the current line need this contrast against
-/// [`EDITOR_BG`] to be read (WCAG's floor for large or secondary text).
+/// The editor's background in `p`: the theme's own `bg_base` when it is
+/// solid, so the editor matches the panels around it, else [`EDITOR_BG`].
+fn editor_bg(p: &crate::theme::PhazePalette) -> floem::peniko::Color {
+    let c = p.bg_base.to_rgba8();
+    if c.a == 255 {
+        p.bg_base
+    } else {
+        floem::peniko::Color::from_rgb8(EDITOR_BG.0, EDITOR_BG.1, EDITOR_BG.2)
+    }
+}
+
+/// Line numbers off the current line need this contrast against the
+/// editor's background ([`editor_bg`]) to be read (WCAG's floor for large or
+/// secondary text).
 const GUTTER_MIN_CONTRAST: f64 = 3.0;
 
 /// WCAG contrast ratio of two opaque colours.
@@ -1361,9 +1375,10 @@ fn gutter_number_color(p: &crate::theme::PhazePalette) -> floem::peniko::Color {
         let c = c.to_rgba8();
         (c.r, c.g, c.b)
     };
+    let bg = rgb(editor_bg(p));
     [p.text_disabled, p.text_muted, p.text_secondary]
         .into_iter()
-        .find(|c| contrast(rgb(*c), EDITOR_BG) >= GUTTER_MIN_CONTRAST)
+        .find(|c| contrast(rgb(*c), bg) >= GUTTER_MIN_CONTRAST)
         .unwrap_or(floem::peniko::Color::from_rgb8(0xAB, 0xB2, 0xBF))
 }
 
@@ -4788,10 +4803,28 @@ pub fn editor_panel(
 
             raw_editor
                 .styling(syn_style)
+                // Every editor colour comes from the theme (Floem's own
+                // dark defaults are One Dark, whatever the theme): the
+                // background, text and gutter here, the rest just below.
+                .style(move |s| {
+                    let p = theme.get().palette;
+                    let bg = editor_bg(&p);
+                    s.background(bg)
+                        .color(p.text_primary)
+                        .class(GutterClass, move |s| s.background(bg))
+                })
                 .editor_style(move |style| {
                     let t = theme.get();
                     let p = &t.palette;
-                    default_dark_color(style)
+                    style
+                        .cursor_color(p.accent)
+                        .selection_color(p.selection)
+                        .current_line_color(p.cursor_line_bg)
+                        .visible_whitespace(p.text_disabled)
+                        .indent_guide_color(p.indent_guide)
+                        .preedit_underline_color(p.text_primary)
+                        .phantom_color(p.text_muted)
+                        .placeholder_color(p.text_muted)
                         .gutter_dim_color(gutter_number_color(p))
                         .gutter_accent_color(p.text_primary)
                         .gutter_current_color(p.bg_elevated)
@@ -7208,15 +7241,17 @@ mod goto_column_tests {
 
 #[cfg(test)]
 mod gutter_tests {
-    use super::{contrast, gutter_number_color, EDITOR_BG, GUTTER_MIN_CONTRAST};
+    use super::{contrast, editor_bg, gutter_number_color, GUTTER_MIN_CONTRAST};
     use crate::theme::{PhazeTheme, ThemeVariant};
 
     /// Every built-in theme's line numbers can be read on the editor.
     #[test]
     fn line_numbers_are_readable_in_every_theme() {
         for &v in ThemeVariant::all() {
-            let c = gutter_number_color(&PhazeTheme::from_variant(v).palette).to_rgba8();
-            let ratio = contrast((c.r, c.g, c.b), EDITOR_BG);
+            let p = PhazeTheme::from_variant(v).palette;
+            let c = gutter_number_color(&p).to_rgba8();
+            let bg = editor_bg(&p).to_rgba8();
+            let ratio = contrast((c.r, c.g, c.b), (bg.r, bg.g, bg.b));
             assert!(
                 ratio >= GUTTER_MIN_CONTRAST,
                 "{v:?}: line numbers at {ratio:.2}:1 on the editor"

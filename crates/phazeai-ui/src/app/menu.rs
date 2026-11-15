@@ -110,6 +110,14 @@ pub(crate) fn menu_bar(state: IdeState) -> impl IntoView {
             let s_zin = s.clone();
             let s_zout = s.clone();
             let theme_menu = Menu::new("Theme")
+                .entry(MenuItem::new("Phaze").action({
+                    let s = s.clone();
+                    move || {
+                        s.workbench
+                            .theme
+                            .set(PhazeTheme::from_variant(ThemeVariant::Phaze));
+                    }
+                }))
                 .entry(MenuItem::new("Midnight Blue").action({
                     let s = s.clone();
                     move || {
