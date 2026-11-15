@@ -17,6 +17,7 @@ pub mod format;
 pub mod lsp_bridge;
 pub mod notify;
 pub mod panels;
+pub mod syntax_theme;
 pub mod theme;
 pub mod tokens;
 pub mod util;
