@@ -904,6 +904,36 @@ async fn agent_reads_allowed_file_contents_verbatim() {
     assert!(g2.get("privacy_skipped").is_none(), "{g2}");
 }
 
+/// Makes `levels` directories named `name`, each inside the last, under
+/// `base`, with every path the kernel sees one level long, so the chain can
+/// go deeper than PATH_MAX. `mkdir -p` can't be relied on for that: GNU's
+/// walks down with chdir, but the uutils `mkdir` that Ubuntu 26.04 ships
+/// passes the whole path and fails with "File name too long".
+#[cfg(target_os = "linux")]
+fn make_deep_chain(base: &Path, name: &str, levels: usize) {
+    use std::os::fd::AsRawFd;
+    // Each step goes through the open parent's /proc/self/fd entry, which the
+    // kernel resolves to the directory itself, not to its long path.
+    let mut dir = std::fs::File::open(base).expect("open the chain's base");
+    for depth in 1..=levels {
+        let next = format!("/proc/self/fd/{}/{name}", dir.as_raw_fd());
+        std::fs::create_dir(&next).unwrap_or_else(|e| panic!("make level {depth}: {e}"));
+        dir = std::fs::File::open(&next).unwrap_or_else(|e| panic!("open level {depth}: {e}"));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn make_deep_chain(base: &Path, name: &str, levels: usize) {
+    let chain = vec![name; levels].join("/");
+    let made = std::process::Command::new("mkdir")
+        .arg("-p")
+        .arg(&chain)
+        .current_dir(base)
+        .status()
+        .expect("run mkdir");
+    assert!(made.success(), "mkdir -p could not build the deep chain");
+}
+
 #[tokio::test]
 #[ignore = "needs Node and @modelcontextprotocol/server-filesystem@1.0.0; set PHAZEAI_MCP_FS_SERVER to its bin"]
 async fn listing_errors_reach_the_model_as_errors_not_refusals() {
@@ -916,14 +946,7 @@ async fn listing_errors_reach_the_model_as_errors_not_refusals() {
     // `private/` makes the server's realpath fail with ENAMETOOLONG on a path
     // the policy denies, so the error itself names a denied directory.
     let level = format!("deep-denied-{}", "q".repeat(188));
-    let chain = vec![level.as_str(); 22].join("/");
-    let made = std::process::Command::new("mkdir")
-        .arg("-p")
-        .arg(&chain)
-        .current_dir(root.join("private"))
-        .status()
-        .expect("run mkdir");
-    assert!(made.success(), "mkdir -p could not build the deep chain");
+    make_deep_chain(&root.join("private"), &level, 22);
     let _active = activate(&root);
     let calls = vec![
         (
