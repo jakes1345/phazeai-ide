@@ -248,6 +248,79 @@ impl ConversationHistory {
         self.set_summary(summary);
     }
 
+    /// Clear old tool results in one batch, before the conversation gets
+    /// near the point where it would be compacted.
+    ///
+    /// Past [`CLEAR_TRIGGER_RATIO`] of `budget`, every tool result of an
+    /// earlier turn is replaced by a one-line note naming the call, so the
+    /// model can run it again if it still needs the output. The turn being
+    /// worked on keeps its results (the model may be building its answer from
+    /// all of them; if that turn alone is too big, the trim behind compaction
+    /// shrinks it), and so do the newest [`KEEP_TOOL_RESULTS`] results
+    /// overall. The calls themselves and every reply stay. Results of
+    /// [`NEVER_CLEARED`] tools and short results (under
+    /// [`MIN_CLEARED_BYTES`]) stay too.
+    ///
+    /// Each clearing changes the start of the request, so a provider's prefix
+    /// cache has to write it again once. That is worth it only for a batch:
+    /// nothing is cleared unless the batch frees at least
+    /// [`CLEAR_AT_LEAST_RATIO`] of `budget`, and a batch takes every result
+    /// it may, so the next one comes only after the conversation has grown
+    /// back. Returns `None` when nothing was cleared.
+    pub fn clear_old_tool_results(&mut self, budget: usize) -> Option<Cleared> {
+        let tokens_before = self.estimate_tokens();
+        if (tokens_before as f64) < budget as f64 * CLEAR_TRIGGER_RATIO {
+            return None;
+        }
+        let results: Vec<usize> = (0..self.messages.len())
+            .filter(|&i| self.messages[i].tool_call_id.is_some())
+            .collect();
+        let older = results.len().saturating_sub(KEEP_TOOL_RESULTS);
+        let this_turn = self.last_turn_start().unwrap_or(0);
+        let mut notes = Vec::new();
+        let mut freed = 0usize;
+        for &i in results[..older].iter().take_while(|&&i| i < this_turn) {
+            let m = &self.messages[i];
+            if m.content.len() < MIN_CLEARED_BYTES || m.content.starts_with(CLEARED_PREFIX) {
+                continue;
+            }
+            let call = self.call_for(i);
+            if call.is_some_and(|c| NEVER_CLEARED.contains(&c.function.name.as_str())) {
+                continue;
+            }
+            let note = cleared_note(call, &m.content);
+            if note.len() >= m.content.len() {
+                continue;
+            }
+            freed += m.content.len().div_ceil(3) - note.len().div_ceil(3);
+            notes.push((i, note));
+        }
+        if notes.is_empty() || (freed as f64) < budget as f64 * CLEAR_AT_LEAST_RATIO {
+            return None;
+        }
+        let results = notes.len();
+        for (i, note) in notes {
+            self.messages[i].content = note;
+        }
+        Some(Cleared {
+            results,
+            tokens_before,
+            tokens_after: self.estimate_tokens(),
+        })
+    }
+
+    /// The tool call the result at `i` answers: the nearest earlier assistant
+    /// message's call with its id (ids can repeat across replies with some
+    /// providers, so the nearest one is the right one).
+    fn call_for(&self, i: usize) -> Option<&crate::llm::ToolCall> {
+        let id = self.messages[i].tool_call_id.as_deref()?;
+        self.messages
+            .iter()
+            .take(i)
+            .rev()
+            .find_map(|m| m.tool_calls.as_ref()?.iter().find(|c| c.id == id))
+    }
+
     pub fn len(&self) -> usize {
         self.messages.len()
     }
@@ -425,6 +498,84 @@ impl ConversationHistory {
 
         total
     }
+}
+
+/// Old tool results are cleared once the conversation passes this share of
+/// the budget, below compaction's trigger (0.8), so clearing usually spares
+/// the conversation a summary call.
+pub const CLEAR_TRIGGER_RATIO: f64 = 0.6;
+
+/// The newest tool results are never cleared: the model is usually still
+/// working from them.
+pub const KEEP_TOOL_RESULTS: usize = 3;
+
+/// A clearing has to free at least this share of the budget; a smaller one
+/// would cost a cache write for little gain.
+pub const CLEAR_AT_LEAST_RATIO: f64 = 0.1;
+
+/// Results shorter than this are left alone: the note would save next to
+/// nothing.
+pub const MIN_CLEARED_BYTES: usize = 600;
+
+/// Tools whose results are state the model keeps working from, not output it
+/// can fetch again: the checklist and saved memories.
+pub const NEVER_CLEARED: &[&str] = &["todo", "memory"];
+
+/// Tools that only read, so the note can tell the model to run them again.
+/// For any other tool the note says the call already ran, so the model does
+/// not repeat a write or a command to see its output.
+const RERUNNABLE: &[&str] = &[
+    "read_file",
+    "grep",
+    "glob",
+    "list_files",
+    "find_path",
+    "fetch",
+    "web_search",
+    "diagnostics",
+    "browse",
+];
+
+/// How a cleared result starts, so a later batch skips it.
+pub const CLEARED_PREFIX: &str = "[Output cleared to save context: ";
+
+/// What a clearing did, for the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cleared {
+    pub results: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+}
+
+/// The note that stands in for a cleared result: which call made it, how big
+/// it was, and that running the call again brings it back.
+fn cleared_note(call: Option<&crate::llm::ToolCall>, content: &str) -> String {
+    let lines = content.lines().count();
+    let rerun = call.is_some_and(|c| RERUNNABLE.contains(&c.function.name.as_str()));
+    let what = match call {
+        Some(c) => {
+            let args = c
+                .function
+                .arguments
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let shown = crate::text::truncate_bytes(&args, 160);
+            let more = if shown.len() < args.len() { "…" } else { "" };
+            format!("{} {shown}{more}", c.function.name)
+        }
+        None => "a tool call".to_string(),
+    };
+    let then = if rerun {
+        "Run it again if you still need it."
+    } else {
+        "The call already ran; only its output is gone."
+    };
+    format!(
+        "{CLEARED_PREFIX}{what} returned {lines} line{} ({} bytes). {then}]",
+        if lines == 1 { "" } else { "s" },
+        content.len()
+    )
 }
 
 /// Heading that introduces the compaction summary in the system prompt.
@@ -931,5 +1082,205 @@ mod tests {
         );
         assert!(kept.contains("bytes omitted"));
         assert!(kept.len() < 12_100);
+    }
+
+    fn call_with(id: &str, tool: &str, args: &str) -> Message {
+        Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: id.to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: tool.to_string(),
+                    arguments: args.to_string(),
+                },
+            }],
+        )
+    }
+
+    /// `n` turns, each a question and one `read_file` returning `bytes`
+    /// bytes of distinct text.
+    fn reads(n: usize, bytes: usize) -> ConversationHistory {
+        let mut h = ConversationHistory::new().with_system_prompt("sys");
+        for i in 0..n {
+            h.add_user_message(if i == 0 {
+                "look around".to_string()
+            } else {
+                format!("and file {i}")
+            });
+            let id = format!("r{i}");
+            h.add_message(call_with(
+                &id,
+                "read_file",
+                &format!("{{\"path\": \"src/f{i}.rs\"}}"),
+            ));
+            let line = format!("fn f{i}() {{}} // padding padding padding\n");
+            h.add_tool_result(&id, line.repeat(bytes / line.len() + 1));
+        }
+        h
+    }
+
+    #[test]
+    fn nothing_is_cleared_below_the_trigger() {
+        let mut h = reads(6, 3000);
+        let before = h.get_conversation_messages();
+        let budget = (h.estimate_tokens() as f64 / CLEAR_TRIGGER_RATIO) as usize + 10;
+        assert_eq!(h.clear_old_tool_results(budget), None);
+        assert_eq!(h.get_conversation_messages().len(), before.len());
+        for (a, b) in before.iter().zip(h.get_conversation_messages()) {
+            assert_eq!(a.content, b.content);
+        }
+    }
+
+    #[test]
+    fn old_results_become_notes_and_the_newest_stay() {
+        let mut h = reads(8, 3000);
+        let budget = h.estimate_tokens();
+        let done = h.clear_old_tool_results(budget).expect("cleared");
+        assert_eq!(done.results, 8 - KEEP_TOOL_RESULTS);
+        assert!(done.tokens_after < done.tokens_before / 2, "{done:?}");
+        assert_eq!(done.tokens_after, h.estimate_tokens());
+
+        let msgs = h.get_conversation_messages();
+        let results: Vec<&Message> = msgs.iter().filter(|m| m.tool_call_id.is_some()).collect();
+        for (i, r) in results.iter().enumerate() {
+            if i < 8 - KEEP_TOOL_RESULTS {
+                assert!(r.content.starts_with(CLEARED_PREFIX), "{}", r.content);
+                // The note names the call and its file, and says how to get it back.
+                assert!(r
+                    .content
+                    .contains(&format!("read_file {{\"path\": \"src/f{i}.rs\"}}")));
+                assert!(r.content.contains("Run it again"), "{}", r.content);
+            } else {
+                assert!(r.content.starts_with(&format!("fn f{i}()")));
+            }
+        }
+        // Every call and question is untouched, so each turn still pairs up.
+        assert_eq!(msgs.iter().filter(|m| m.tool_calls.is_some()).count(), 8);
+        assert_eq!(msgs[0].content, "look around");
+    }
+
+    #[test]
+    fn a_batch_too_small_to_pay_for_the_cache_write_is_skipped() {
+        // Four reads: only the oldest may go, about 1,000 tokens. A long
+        // system prompt puts the conversation past the trigger of a 20,000
+        // token budget, where a batch must free 2,000.
+        let mut h = reads(4, 3000);
+        h.set_system_prompt("x".repeat(36_000));
+        assert!(h.estimate_tokens() as f64 > 20_000.0 * CLEAR_TRIGGER_RATIO);
+        assert_eq!(h.clear_old_tool_results(20_000), None);
+        // A budget small enough that 1,000 tokens is a tenth of it clears.
+        let mut small = reads(4, 3000);
+        assert_eq!(
+            small
+                .clear_old_tool_results(small.estimate_tokens())
+                .map(|c| c.results),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_cleared_conversation_is_not_cleared_again_until_it_grows() {
+        let mut h = reads(8, 3000);
+        let budget = h.estimate_tokens();
+        assert!(h.clear_old_tool_results(budget).is_some());
+        assert_eq!(h.clear_old_tool_results(budget), None);
+        // It grows back past the trigger: only the results that aged out of
+        // the newest three go, the notes stay as they are.
+        for i in 8..14 {
+            let id = format!("r{i}");
+            h.add_user_message(format!("and file {i}"));
+            h.add_message(call_with(&id, "read_file", "{}"));
+            h.add_tool_result(&id, "y".repeat(3000));
+        }
+        let notes_before: Vec<String> = h
+            .get_conversation_messages()
+            .into_iter()
+            .filter(|m| m.content.starts_with(CLEARED_PREFIX))
+            .map(|m| m.content)
+            .collect();
+        let again = h.clear_old_tool_results(budget).expect("cleared again");
+        assert_eq!(again.results, 6);
+        let notes_after: Vec<String> = h
+            .get_conversation_messages()
+            .into_iter()
+            .filter(|m| m.content.starts_with(CLEARED_PREFIX))
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(&notes_after[..notes_before.len()], &notes_before[..]);
+        assert_eq!(notes_after.len(), 14 - KEEP_TOOL_RESULTS);
+    }
+
+    #[test]
+    fn the_checklist_memories_short_results_and_writes_are_handled_apart() {
+        let mut h = ConversationHistory::new();
+        h.add_user_message("do it");
+        h.add_message(call_with("t", "todo", "{}"));
+        h.add_tool_result("t", "[ ] step\n".repeat(200));
+        h.add_message(call_with("m", "memory", "{}"));
+        h.add_tool_result("m", "remembered ".repeat(200));
+        h.add_message(call_with("s", "read_file", "{}"));
+        h.add_tool_result("s", "short");
+        h.add_message(call_with("b", "bash", "{\"command\": \"cargo test\"}"));
+        h.add_tool_result("b", "test output\n".repeat(800));
+        h.add_user_message("now search");
+        for i in 0..KEEP_TOOL_RESULTS {
+            let id = format!("k{i}");
+            h.add_message(call_with(&id, "grep", "{}"));
+            h.add_tool_result(&id, "hit");
+        }
+        let budget = h.estimate_tokens();
+        let done = h.clear_old_tool_results(budget).expect("cleared");
+        assert_eq!(done.results, 1);
+        let by_id = |id: &str| {
+            h.get_conversation_messages()
+                .into_iter()
+                .find(|m| m.tool_call_id.as_deref() == Some(id))
+                .unwrap()
+                .content
+        };
+        assert!(by_id("t").starts_with("[ ] step"));
+        assert!(by_id("m").starts_with("remembered"));
+        assert_eq!(by_id("s"), "short");
+        let bash = by_id("b");
+        assert!(bash.starts_with(CLEARED_PREFIX), "{bash}");
+        assert!(bash.contains("bash {\"command\": \"cargo test\"}"));
+        assert!(bash.contains("800 lines"), "{bash}");
+        // A command is not to be run again just to see its output.
+        assert!(bash.contains("already ran"), "{bash}");
+        assert!(!bash.contains("Run it again"));
+    }
+
+    #[test]
+    fn the_turn_being_worked_on_keeps_every_result() {
+        // One question with eight reads: the model may be building its
+        // answer from all of them, so none is cleared, however old.
+        let mut h = ConversationHistory::new();
+        h.add_user_message("read all of it");
+        for i in 0..8 {
+            let id = format!("r{i}");
+            h.add_message(call_with(&id, "read_file", "{}"));
+            h.add_tool_result(&id, "z".repeat(3000));
+        }
+        assert_eq!(h.clear_old_tool_results(h.estimate_tokens()), None);
+        // Once a new question starts, they belong to an earlier turn.
+        h.add_user_message("thanks, now this");
+        let done = h.clear_old_tool_results(h.estimate_tokens()).unwrap();
+        assert_eq!(done.results, 8 - KEEP_TOOL_RESULTS);
+    }
+
+    #[test]
+    fn a_cleared_read_is_no_repeat_so_reading_it_again_sends_the_file() {
+        let mut h = reads(8, 3000);
+        let first = h
+            .get_conversation_messages()
+            .into_iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("r0"))
+            .unwrap()
+            .content;
+        assert_eq!(h.repeat_of(&["read_file"], &first).as_deref(), Some("r0"));
+        let budget = h.estimate_tokens();
+        h.clear_old_tool_results(budget).expect("cleared");
+        assert_eq!(h.repeat_of(&["read_file"], &first), None);
     }
 }

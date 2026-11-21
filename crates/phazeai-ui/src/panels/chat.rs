@@ -827,6 +827,17 @@ fn send_to_ai(job: SendToAiJob) {
                                  the context budget (~{tokens_before} → ~{tokens_after} tokens)"
                             )));
                         }
+                        AgentEvent::ToolResultsCleared {
+                            results,
+                            tokens_before,
+                            tokens_after,
+                        } => {
+                            let _ = update_tx.send(ChatUpdate::Notice(format!(
+                                "Cleared {results} old tool output{} to stay within the \
+                                 context budget (~{tokens_before} → ~{tokens_after} tokens)",
+                                if results == 1 { "" } else { "s" }
+                            )));
+                        }
                         AgentEvent::CallUsage(usage) => {
                             let _ = update_tx.send(ChatUpdate::CallUsage {
                                 usage,
