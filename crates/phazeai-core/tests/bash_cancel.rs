@@ -185,6 +185,43 @@ async fn long_output_keeps_its_start_and_end_and_never_splits_a_character() {
     }
 }
 
+/// What only a live terminal needs is gone from what the model reads:
+/// colours, a progress bar's redraws, `\r\n` line ends and a run of
+/// identical lines. Cleaning comes before the cap, so a coloured output
+/// whose escapes alone would pass the cap is returned whole.
+#[tokio::test]
+async fn terminal_noise_is_cleaned_before_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = BashTool::new(dir.path().to_path_buf());
+    let out = tool
+        .execute(json!({ "command": concat!(
+            r"printf '\033[1;32m   Compiling\033[0m app v0.1.0\r\n';",
+            r"for p in 10 50 100; do printf '\r\033[2KDownloading %s%%' $p; done; printf '\n';",
+            r"for i in 1 2 3 4 5; do echo 'warning: deprecated'; done;",
+            r"printf '\033[31merror\033[0m: failed\n' >&2",
+        ) }))
+        .await
+        .unwrap();
+    assert_eq!(
+        out["stdout"],
+        "   Compiling app v0.1.0\nDownloading 100%\nwarning: deprecated\n\
+         [previous line repeated 4 more times]"
+    );
+    assert_eq!(out["stderr"], "error: failed\n");
+
+    // 2,000 coloured lines: 64,000 bytes raw, past the 30,000-byte cap;
+    // 18,000 after cleaning, so none of it is cut.
+    let out = tool
+        .execute(json!({ "command": r"for i in $(seq 1 2000); do printf '\033[38;5;196m%04d\033[0m\033[1m-ok-\033[0m\n' $i; done" }))
+        .await
+        .unwrap();
+    let text = out["stdout"].as_str().unwrap();
+    assert!(!text.contains(OMITTED_PREFIX), "cut: {} bytes", text.len());
+    assert!(text.starts_with("0001-ok-\n0002-ok-\n"), "{}", &text[..40]);
+    assert!(text.trim_end().ends_with("1999-ok-\n2000-ok-"));
+    assert_eq!(text.lines().count(), 2000);
+}
+
 /// A crate whose build script writes its own pid and its parent's (cargo's)
 /// to `pids`, then sleeps: `cargo check` on it stays busy for 30 s unless
 /// something stops it, like a check of a large project.
