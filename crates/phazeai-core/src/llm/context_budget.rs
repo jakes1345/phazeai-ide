@@ -51,11 +51,31 @@ pub fn context_budget(
     max_output_tokens: usize,
     override_tokens: Option<usize>,
 ) -> usize {
-    budget_for_window(
+    let budget = budget_for_window(
         context_window(provider, model),
         max_output_tokens,
         override_tokens,
-    )
+    );
+    if override_tokens.is_none() && charges_more_for_long_prompts(provider, model) {
+        budget.min(HAIKU_5_5_BUDGET)
+    } else {
+        budget
+    }
+}
+
+/// Conversation tokens Claude Haiku 5.5 may be sent: well under the 100K
+/// prompt at which it bills five times as much ($0.50/$2.50 instead of
+/// $0.10/$0.50 per million tokens), with room for the tool schemas and for
+/// the newer tokenizer counting about 30% more than Phaze's estimate.
+pub const HAIKU_5_5_BUDGET: usize = 72_000;
+
+/// Claude Haiku 5.5, directly or through a router.
+fn charges_more_for_long_prompts(provider: &ProviderId, model: &str) -> bool {
+    matches!(provider, ProviderId::Claude | ProviderId::OpenRouter)
+        && model
+            .strip_prefix("anthropic/")
+            .unwrap_or(model)
+            .starts_with("claude-haiku-5-5")
 }
 
 /// [`context_budget`] for a context window already known exactly (the
@@ -85,6 +105,31 @@ pub fn window_for_budget(budget: usize, max_output_tokens: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn haiku_5_5_stays_under_the_prompt_length_that_costs_five_times_as_much() {
+        let budget = context_budget(&ProviderId::Claude, "claude-haiku-5-5", 32_000, None);
+        assert_eq!(budget, HAIKU_5_5_BUDGET);
+        assert!(budget + SCHEMA_RESERVE < 100_000 * 10 / 13);
+        let routed = context_budget(
+            &ProviderId::OpenRouter,
+            "anthropic/claude-haiku-5-5",
+            32_000,
+            None,
+        );
+        assert!(routed <= HAIKU_5_5_BUDGET);
+        // The user's own budget wins, and other models keep their window.
+        assert_eq!(
+            context_budget(
+                &ProviderId::Claude,
+                "claude-haiku-5-5",
+                32_000,
+                Some(300_000)
+            ),
+            300_000
+        );
+        assert!(context_budget(&ProviderId::Claude, "claude-sonnet-5-5", 32_000, None) > 900_000);
+    }
 
     #[test]
     fn the_window_for_a_budget_always_gives_that_budget_back() {

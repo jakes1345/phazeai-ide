@@ -440,9 +440,9 @@ fn test_provider_registry_known_models_returns_models_for_claude() {
     assert!(!models.is_empty());
 
     // Check for expected Claude models
-    let has_opus = models.iter().any(|m| m.id == "claude-opus-4-6");
-    let has_sonnet = models.iter().any(|m| m.id == "claude-sonnet-4-5-20250929");
-    let has_haiku = models.iter().any(|m| m.id == "claude-haiku-4-5-20251001");
+    let has_opus = models.iter().any(|m| m.id == "claude-opus-5-5");
+    let has_sonnet = models.iter().any(|m| m.id == "claude-sonnet-5-5");
+    let has_haiku = models.iter().any(|m| m.id == "claude-haiku-5-5");
 
     assert!(has_opus);
     assert!(has_sonnet);

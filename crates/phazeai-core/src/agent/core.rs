@@ -513,6 +513,9 @@ impl Agent {
             // Kept on the assistant message for providers that must be sent
             // it back (`Message::reasoning`); not shown.
             let mut reasoning = String::new();
+            // The turn as the provider's own blocks, when it must be sent
+            // back unchanged (`Message::raw_content`).
+            let mut raw_content: Vec<Value> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, arguments)
 
@@ -534,6 +537,7 @@ impl Agent {
                         let _ = event_tx.send(AgentEvent::TextDelta(delta));
                     }
                     StreamEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                    StreamEvent::RawContent(blocks) => raw_content = blocks,
                     StreamEvent::ToolCallStart { id, name } => {
                         current_tool_calls.insert(id.clone(), (name, String::new()));
                     }
@@ -578,7 +582,8 @@ impl Agent {
                     let mut conversation = self.conversation.lock().await;
                     conversation.add_message(
                         Message::assistant_with_tools(content.clone(), tool_calls.clone())
-                            .with_reasoning(std::mem::take(&mut reasoning)),
+                            .with_reasoning(std::mem::take(&mut reasoning))
+                            .with_raw_content(std::mem::take(&mut raw_content)),
                     );
                 }
                 // A call that runs a held-back tool through `more_tools` is
@@ -903,7 +908,11 @@ impl Agent {
 
             {
                 let mut conversation = self.conversation.lock().await;
-                conversation.add_message(Message::assistant(&content).with_reasoning(reasoning));
+                conversation.add_message(
+                    Message::assistant(&content)
+                        .with_reasoning(reasoning)
+                        .with_raw_content(raw_content),
+                );
             }
 
             return Ok(AgentResponse {

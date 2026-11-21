@@ -14,7 +14,7 @@ mod stream_cancel;
 mod text_only;
 mod traits;
 
-pub use claude::ClaudeClient;
+pub use claude::{current_model_id, ClaudeClient, EFFORT_LEVELS};
 pub use discovery::LocalDiscovery;
 pub use image::ImageInput;
 pub use model_router::{ModelRoute, ModelRouter, TaskType};

@@ -26,6 +26,12 @@ pub struct Message {
     /// Pictures sent with a user message, for vision models.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<super::ImageInput>,
+    /// An assistant turn's content blocks exactly as the provider sent them,
+    /// kept when they hold blocks that must go back unchanged: Claude's
+    /// thinking blocks, which newer models need on every later request of
+    /// the tool loop. Empty for every other message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_content: Vec<Value>,
 }
 
 impl Message {
@@ -37,6 +43,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             images: Vec::new(),
+            raw_content: Vec::new(),
         }
     }
 
@@ -48,6 +55,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             images: Vec::new(),
+            raw_content: Vec::new(),
         }
     }
 
@@ -59,6 +67,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             images: Vec::new(),
+            raw_content: Vec::new(),
         }
     }
 
@@ -70,6 +79,7 @@ impl Message {
             tool_call_id: None,
             reasoning: None,
             images: Vec::new(),
+            raw_content: Vec::new(),
         }
     }
 
@@ -88,6 +98,13 @@ impl Message {
         self
     }
 
+    /// The same message carrying the provider's own content blocks for it
+    /// ([`Self::raw_content`]).
+    pub fn with_raw_content(mut self, blocks: Vec<Value>) -> Self {
+        self.raw_content = blocks;
+        self
+    }
+
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -96,6 +113,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.into()),
             reasoning: None,
             images: Vec::new(),
+            raw_content: Vec::new(),
         }
     }
 }
@@ -149,6 +167,10 @@ pub enum StreamEvent {
     TextDelta(String),
     /// Part of what a reasoning model thinks before it answers.
     ReasoningDelta(String),
+    /// The whole assistant turn as the provider's content blocks, sent
+    /// before [`StreamEvent::Done`] by a provider whose turn holds blocks
+    /// that must be sent back unchanged ([`Message::raw_content`]).
+    RawContent(Vec<Value>),
     ToolCallStart {
         id: String,
         name: String,
