@@ -46,7 +46,7 @@ use crate::lsp_bridge::DiagSeverity;
 use crate::util::safe_get;
 use lazy_static::lazy_static;
 use syntect::{
-    highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator, ThemeSet},
+    highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator},
     parsing::{ParseState, ScopeStack, SyntaxSet},
 };
 
@@ -62,7 +62,6 @@ use crate::{
 
 lazy_static! {
     static ref SYNTAX_SET: SyntaxSet = SyntaxSet::load_defaults_newlines();
-    static ref THEME_SET: ThemeSet = ThemeSet::load_defaults();
 }
 
 // ── Syntax Highlighting Styling ───────────────────────────────────────────────
@@ -117,6 +116,8 @@ struct SyntaxStyle {
     ts_lang: Option<SyntaxLang>,
     /// Cached tree-sitter highlight spans for the current document content.
     ts_spans: RefCell<Vec<syntax::HighlightSpan>>,
+    /// The theme's syntax colours, used by both tree-sitter and syntect.
+    syn: crate::syntax_theme::SyntaxColors,
     /// Rope length at which ts_spans was last computed (for invalidation).
     ts_computed_len: std::cell::Cell<usize>,
 }
@@ -124,9 +125,12 @@ struct SyntaxStyle {
 impl SyntaxStyle {
     /// Create a `SyntaxStyle` for the given file extension.
     /// Falls back to plain-text if no matching grammar is found.
-    fn for_extension(ext: &str, inner: Rc<dyn Styling>) -> Self {
-        let theme = &THEME_SET.themes["base16-ocean.dark"];
-        let highlighter = Highlighter::new(theme);
+    fn for_extension(
+        ext: &str,
+        inner: Rc<dyn Styling>,
+        syn: crate::syntax_theme::SyntaxColors,
+    ) -> Self {
+        let highlighter = Highlighter::new(crate::syntax_theme::syntect_theme(&syn));
 
         // Map common extensions → syntect scope names
         let syntax = match ext {
@@ -190,6 +194,7 @@ impl SyntaxStyle {
             ts_lang,
             ts_spans: RefCell::new(Vec::new()),
             ts_computed_len: std::cell::Cell::new(0),
+            syn,
         }
     }
 
@@ -197,34 +202,10 @@ impl SyntaxStyle {
         self.doc = Some(doc);
     }
 
-    /// Map a tree-sitter highlight class index to a color.
-    /// Palette matches base16-ocean.dark so it blends with the syntect fallback.
-    fn ts_class_color(class: usize) -> floem::peniko::Color {
-        use floem::peniko::Color;
-        match syntax::HIGHLIGHT_NAMES.get(class).copied().unwrap_or("") {
-            "keyword" => Color::from_rgba8(180, 142, 173, 255), // purple
-            "function" | "function.builtin" | "function.macro" => {
-                Color::from_rgba8(143, 161, 179, 255) // steel blue
-            }
-            "string" | "string.special" => Color::from_rgba8(163, 190, 140, 255), // green
-            "comment" => Color::from_rgba8(101, 115, 126, 255),                   // grey
-            "type" | "type.builtin" | "constructor" => {
-                Color::from_rgba8(235, 203, 139, 255) // yellow
-            }
-            "number" | "constant" | "constant.builtin" => {
-                Color::from_rgba8(208, 135, 112, 255) // orange
-            }
-            "operator" | "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => {
-                Color::from_rgba8(192, 197, 206, 255) // light grey
-            }
-            "attribute" | "label" => Color::from_rgba8(150, 181, 180, 255), // teal
-            "property" => Color::from_rgba8(191, 97, 106, 255),             // red
-            "variable.builtin" | "variable.parameter" => {
-                Color::from_rgba8(191, 97, 106, 255) // red
-            }
-            "tag" => Color::from_rgba8(191, 97, 106, 255), // red
-            _ => Color::from_rgba8(197, 200, 198, 255),    // default text
-        }
+    /// The theme colour of a tree-sitter highlight class index.
+    fn ts_class_color(&self, class: usize) -> floem::peniko::Color {
+        self.syn
+            .for_class(syntax::HIGHLIGHT_NAMES.get(class).copied().unwrap_or(""))
     }
 }
 
@@ -519,7 +500,7 @@ impl Styling for SyntaxStyle {
                     continue;
                 }
                 if let Some(class) = span.class {
-                    let color = Self::ts_class_color(class);
+                    let color = self.ts_class_color(class);
                     attrs.add_span(local_start..local_end, default.clone().color(color));
                 }
             }
@@ -4628,8 +4609,11 @@ pub fn editor_panel(
                 word_wrap.get_untracked(),
                 tab_size.get_untracked() as usize,
             );
-            let mut syn_style =
-                SyntaxStyle::for_extension(if is_large_file { "" } else { &tab_ext }, base_styling);
+            let mut syn_style = SyntaxStyle::for_extension(
+                if is_large_file { "" } else { &tab_ext },
+                base_styling,
+                crate::syntax_theme::SyntaxColors::from_palette(&theme.get_untracked().palette),
+            );
             syn_style.set_doc(doc.clone());
 
             // ── Git gutter decorations ────────────────────────────────────
@@ -4733,6 +4717,7 @@ pub fn editor_panel(
                     let mut new_style = SyntaxStyle::for_extension(
                         if is_large_file { "" } else { &ext_for_style },
                         new_base,
+                        crate::syntax_theme::SyntaxColors::from_palette(&theme.get().palette),
                     );
                     new_style.set_doc(doc_for_style.clone());
                     new_style.diag_lines = my_diags;
