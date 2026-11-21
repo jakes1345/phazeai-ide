@@ -427,10 +427,12 @@ async fn test_bash_output_truncation() {
     let test_dir = temp_dir.path();
     let tool = BashTool::new(test_dir.to_path_buf());
 
-    // Generate output longer than 30000 chars
+    // Generate output longer than 30000 chars. Each line is numbered: a run of
+    // identical lines is collapsed to one before the cap, so it would not
+    // reach it.
     let result = tool
         .execute(json!({
-            "command": "for i in {1..5000}; do echo 'This is a long line of text for testing truncation'; done"
+            "command": "for i in {1..5000}; do echo \"$i This is a long line of text for testing truncation\"; done"
         }))
         .await
         .unwrap();
@@ -438,7 +440,7 @@ async fn test_bash_output_truncation() {
     let stdout = result["stdout"].as_str().unwrap();
     // Should be cut in the middle, keeping the last line
     assert!(stdout.contains(" bytes omitted ...]"));
-    assert!(stdout.ends_with("This is a long line of text for testing truncation"));
+    assert!(stdout.ends_with("5000 This is a long line of text for testing truncation"));
 }
 
 #[tokio::test]

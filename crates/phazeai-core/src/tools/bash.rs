@@ -173,6 +173,11 @@ impl Tool for BashTool {
             }
         }
 
+        // Colours, progress redraws and repeated lines are for a live
+        // terminal; the model reads the finished text. Cleaned before the
+        // cap, so the cap keeps more of what was said.
+        let stdout = crate::text::clean_terminal_output(&stdout);
+        let stderr = crate::text::clean_terminal_output(&stderr);
         Ok(serde_json::json!({
             "stdout": crate::text::cut_middle(&stdout, MAX_OUTPUT_BYTES),
             "stderr": crate::text::cut_middle(&stderr, MAX_OUTPUT_BYTES),
