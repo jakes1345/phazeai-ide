@@ -260,9 +260,8 @@ a request would pass the budget, which after compaction means a single turn
 too large to fit.
 
 Not done here:
-- **Clearing old tool results in batches** (Claude's `clear_tool_uses`). It is
-  a beta server-side feature that the test servers here can't check; it needs a
-  run against the live API first.
+- **Clearing old tool results in batches:** done in T9, client-side, so it
+  works with every provider.
 - **Re-injecting the plan and recently edited files after compaction.** The
   instruction files are already kept (they are in the system prompt). Phaze has
   no plan or to-do state yet; this comes with the to-do work.
@@ -300,6 +299,40 @@ Not done here:
 - **llama-server slots and `--cache-reuse`:** no llama-server binary can be
   run in this environment to check the flags against, so this waits for a
   test on a real machine.
+
+### T9: old tool results cleared in batches
+Built:
+- **One batch, before compaction.** Once the conversation passes 60% of the
+  context budget (compaction starts at 80%), every tool result of an earlier
+  turn becomes a one-line note naming the call and its arguments, its size,
+  and either "run it again" (read-only tools) or "the call already ran"
+  (writes and commands, which must not be repeated just to see their output)
+  (`ConversationHistory::clear_old_tool_results`). The turn being worked on
+  keeps its results, since the model may be building its answer from all of
+  them, and so do the newest three overall. Calls, replies and questions
+  stay, so every call still pairs with a result.
+- **Where it saves.** The CLI keeps tool results across turns, so long CLI
+  sessions gain most. The IDE chat already sends earlier turns as text only.
+  `Agent::with_tool_result_clearing(false)` turns it off.
+- **Measured** on the stress suite's 16-turn local-model session (budget from
+  a 16K window, tool output worth several budgets): with clearing, no summary
+  was needed (6 without) and the turn requests carried 228,318 prompt tokens
+  instead of 258,578 (-11.7%), before counting the 6 summary requests saved.
+  Every turn still got its exact answer.
+- **Only when it pays.** Clearing changes the start of the request, so a
+  prefix cache writes it once more. A batch must free at least 10% of the
+  budget and takes everything it may, so the next one comes only after the
+  conversation has grown back. Results under 600 bytes, and the `todo` and
+  `memory` tools' results, are never cleared.
+- A cleared read no longer counts as a repeat (`repeat_of`), so reading the
+  file again sends it in full.
+- The CLI, the IDE chat and Composer say how many outputs were cleared and the
+  tokens before and after; `-p --output json` emits `tool_results_cleared`.
+- Server-side clearing (Claude's `clear_tool_uses` beta) is not used: it works
+  on Claude only, and the test servers here can't check it.
+- On the Claude 5.5 models (T8), a thinking block that came after a cleared
+  result no longer matches its prefix; the request already asks the API to
+  drop such blocks rather than fail.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor

@@ -50,6 +50,13 @@ pub enum AgentEvent {
         tokens_before: usize,
         tokens_after: usize,
     },
+    /// Old tool results were replaced by one-line notes to stay well within
+    /// the context budget (see `ConversationHistory::clear_old_tool_results`).
+    ToolResultsCleared {
+        results: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+    },
     /// One or more MCP stdio servers were unhealthy and were respawned.
     McpReconnected {
         servers: Vec<String>,

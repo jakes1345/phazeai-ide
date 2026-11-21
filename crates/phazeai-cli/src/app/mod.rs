@@ -758,6 +758,17 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
                  budget (~{tokens_before} → ~{tokens_after} tokens)."
             ));
         }
+        AgentEvent::ToolResultsCleared {
+            results,
+            tokens_before,
+            tokens_after,
+        } => {
+            state.system(format!(
+                "Cleared {results} old tool output{} to stay within the context budget \
+                 (~{tokens_before} → ~{tokens_after} tokens). The agent can run them again.",
+                if results == 1 { "" } else { "s" }
+            ));
+        }
         AgentEvent::CallUsage(usage) => {
             let billed = state.settings.billed_model();
             let billed = billed.as_ref().map(|(p, m)| (p, m.as_str()));

@@ -704,6 +704,11 @@ fn system_prompt() -> String {
 
 /// An agent wired the way the IDE chat and the CLI wire theirs: a tool set, a
 /// system prompt, a context budget, a shared conversation and a cancel flag.
+///
+/// Clearing old tool results is off here: these sessions exist to drive
+/// compaction, and clearing would keep most of them under its trigger.
+/// [`long_session_with_clearing_keeps_every_turn_and_sends_less`] runs the
+/// same session with clearing on.
 fn agent(
     model: Box<dyn LlmClient>,
     tools: ToolRegistry,
@@ -717,6 +722,7 @@ fn agent(
         .with_context_budget(budget)
         .with_shared_conversation(conversation.clone())
         .with_cancel_token(cancel.clone())
+        .with_tool_result_clearing(false)
 }
 
 /// Everything one `run_with_events` call produced.
@@ -975,6 +981,65 @@ async fn long_session_under_context_pressure_compacts_repeatedly_and_loses_no_tu
     );
     assert_eq!(covered, (1..=TURNS).collect::<Vec<_>>());
     assert!(conv.estimate_tokens() <= budget);
+}
+
+/// The long session again, both ways: with old tool results cleared (the
+/// default) and without. With clearing, every turn still gets its exact
+/// answer from its own reads, every request stays within the budget and
+/// keeps the provider contract, fewer summaries are needed, and the session
+/// sends fewer prompt tokens in all.
+#[tokio::test]
+async fn long_session_with_clearing_keeps_every_turn_and_sends_less() {
+    const TURNS: u32 = 16;
+    const HEAVY: u32 = 9;
+    const CHAT_ONLY: u32 = 5;
+    let budget = local_model_budget();
+    let system = system_prompt();
+    let ws = Workspace::new("clear", 50, lines_for(budget, FILE_SHARE));
+    let script = reading_session(&ws, TURNS, Some(HEAVY), Some(CHAT_ONLY));
+
+    let mut runs = Vec::new();
+    for clearing in [true, false] {
+        let (model, log) = ScriptedModel::new(script.plan.clone());
+        let conversation = Arc::new(Mutex::new(ConversationHistory::new()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let agent = agent(
+            Box::new(model),
+            ToolRegistry::default(),
+            budget,
+            &conversation,
+            &cancel,
+        )
+        .with_tool_result_clearing(clearing);
+        for turn in 1..=TURNS {
+            finish(&agent, &script, turn).await;
+        }
+        let log = log.lock().unwrap().clone();
+        let summaries = check_session(&log, &system, budget);
+        let mut sent = 0;
+        let mut summary: Option<String> = None;
+        let mut notes = 0;
+        for seen in &log {
+            match seen {
+                Seen::Turn(messages) => {
+                    sent += request_tokens(messages, &system, summary.as_deref());
+                    notes = messages
+                        .iter()
+                        .filter(|m| m.content.starts_with("[Output cleared to save context: "))
+                        .count()
+                        .max(notes);
+                }
+                Seen::Summary { reply, .. } => summary = Some(reply.clone()),
+            }
+        }
+        runs.push((clearing, summaries, sent, notes));
+    }
+    let (_, with_summaries, with_sent, with_notes) = runs[0];
+    let (_, without_summaries, without_sent, without_notes) = runs[1];
+    assert!(with_notes > 0, "{runs:?}");
+    assert_eq!(without_notes, 0, "{runs:?}");
+    assert!(with_summaries < without_summaries, "{runs:?}");
+    assert!(with_sent < without_sent, "{runs:?}");
 }
 
 // ── (b) Many iterations ──────────────────────────────────────────────────────
