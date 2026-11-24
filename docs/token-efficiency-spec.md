@@ -385,6 +385,26 @@ Built:
 - Claude Code and opencode re-inject the plan and recent files after
   compaction the same way. It costs a few hundred tokens once per compaction
   and saves the re-reads a lost plan causes.
+### T11: terminal noise stripped from command output
+Built:
+- **`bash` returns the finished text** (`text::clean_terminal_output`, applied
+  to stdout and stderr before the 30,000-byte cap): escape sequences
+  (colours, cursor moves, window titles, hyperlinks) and stray control
+  characters are removed; a line redrawn with carriage returns (progress
+  bars, spinners, `\r\n` line ends) keeps what was drawn last; backspaces
+  erase; a run of three or more identical lines becomes the line once and a
+  count. Output with none of these is returned untouched.
+- **Cleaned before the cap,** so a coloured output whose escapes alone would
+  pass 30,000 bytes now comes back whole instead of cut in the middle.
+- **Measured** on real output captured with colour forced, bytes before and
+  after (escape sequences tokenize badly, so tokens fall at least as much):
+  `cargo check` with 40 warnings 15,910 → 7,937 (-50%); `grep --color=always
+  -rn` 38,734 → 22,893 (-41%); `ls --color=always -la /usr/bin` 96,106 →
+  82,302 (-14%); `git log --stat` with colour 11,828 → 11,428 (-3%); a
+  100-step download progress bar 5,556 → 51 (-99%). Many tools turn colour off
+  without a terminal; this matters where it is forced (`CARGO_TERM_COLOR`,
+  `FORCE_COLOR`, `--color=always`) and for progress output, which many tools
+  print regardless.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
