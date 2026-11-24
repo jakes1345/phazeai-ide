@@ -661,7 +661,7 @@ mod tests {
                     price_per_m: None,
                 },
                 LiveModel {
-                    id: "claude-haiku-4-5-20251001".into(),
+                    id: "claude-haiku-5-5".into(),
                     name: None,
                     context_window: None,
                     price_per_m: None,
@@ -673,12 +673,12 @@ mod tests {
         assert_eq!(rows[0].context_window, Some(500_000));
         assert!(rows[0].offered);
         // A listed model the table knows gets its name, window and price.
-        assert_eq!(rows[1].name, "Claude Haiku 4.5");
-        assert_eq!(rows[1].context_window, Some(200_000));
-        assert_eq!(rows[1].price_per_m, Some((1.0, 5.0)));
+        assert_eq!(rows[1].name, "Claude Haiku 5.5");
+        assert_eq!(rows[1].context_window, Some(1_000_000));
+        assert_eq!(rows[1].price_per_m, Some((0.10, 0.50)));
         // The table's other models come last, not offered.
         assert!(rows[2..].iter().all(|r| !r.offered));
-        assert!(rows.iter().any(|r| r.id == "claude-opus-4-6" && !r.offered));
+        assert!(rows.iter().any(|r| r.id == "claude-opus-5-5" && !r.offered));
         // No list: the table alone.
         assert!(merge(&ProviderId::Claude, None).iter().all(|r| r.offered));
     }

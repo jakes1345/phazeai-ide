@@ -293,13 +293,40 @@ Built:
   requests and no longer sends unset options as `null`.
 
 Not done here:
-- **Thinking off for helper calls:** Phaze never turns thinking on, so there
-  is nothing to turn off yet. It belongs with the model-list update (gap 3),
-  since newer models such as Claude Haiku 5.5 think by default.
+- **Thinking off for helper calls:** done in T8 as effort `low` on side jobs.
 - **llama-server slots and `--cache-reuse`:** no llama-server binary can be
   run in this environment to check the flags against, so this waits for a
   test on a real machine.
 
+### T8: current Claude models
+Built:
+- **Defaults move off Claude Sonnet 4.5 before it retires on 2026-11-30.**
+  The agent defaults to Sonnet 5.5 ($2/$10 per million tokens instead of
+  $3/$15) and side jobs to Haiku 5.5 ($0.10/$0.50 instead of Haiku 4.5's
+  $1/$5). A config that still names a retired model is sent as its
+  replacement (`claude::current_model_id`); Sonnet 4.5 only from its
+  retirement day on.
+- **Thinking blocks go back unchanged.** The 5.5 models think by default and
+  check that each thinking block comes back as it was produced. The stream now
+  keeps every content block (`StreamEvent::RawContent`, `Message::raw_content`)
+  and the next request resends that turn as it came, only when its text and
+  tool calls still match what history holds. Requests to those models also ask
+  the API to drop a stale block rather than fail
+  (`block_binding.prefix_mismatch_behavior: "drop_block"`, beta
+  `thinking-binding-controls-2026-08-01`), since compaction and trimming
+  rewrite history. The cache marker never lands on a thinking block.
+- **Effort.** `[llm] effort` (low, medium, high, xhigh, max) goes to models
+  that take `output_config.effort`; side jobs always run at `low`, which keeps
+  thinking short where the answer is a commit message or one completion.
+- **Haiku 5.5's long-prompt price.** Haiku 5.5 bills five times as much once a
+  prompt passes 100K tokens, so its context budget stops at 72K unless
+  `[llm] context_tokens` says otherwise.
+- **A refusal is an error,** not an empty reply that the loop would retry.
+- `max_tokens` is 32,000 for thinking models (thinking counts toward it) and
+  8,192 otherwise.
+
+Not done here: the bench has not been rerun against the real API (no key
+where this was built), so T8 has no results row yet.
 ### T9: old tool results cleared in batches
 Built:
 - **One batch, before compaction.** Once the conversation passes 60% of the

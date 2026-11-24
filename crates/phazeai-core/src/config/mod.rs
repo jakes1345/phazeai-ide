@@ -99,6 +99,11 @@ pub struct LlmSettings {
     /// [`crate::llm::small_model_for`]), otherwise `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub small_model: Option<String>,
+    /// How hard Claude models that take it think and write: `low`,
+    /// `medium`, `high`, `xhigh` or `max`. Lower costs fewer tokens. Unset:
+    /// the model's own default. Side jobs always ask for `low`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 impl LlmSettings {
@@ -445,6 +450,7 @@ impl Default for Settings {
                 max_tokens: defaults::MAX_TOKENS,
                 context_tokens: None,
                 small_model: None,
+                effort: None,
             },
             editor: EditorSettings::default(),
             search: SearchSettings::default(),
@@ -613,6 +619,10 @@ impl Settings {
             registry.add_custom_provider(entry.name.clone(), config);
         }
 
+        if let Some(effort) = &self.llm.effort {
+            registry.set_effort(effort);
+        }
+
         // `[llm] context_tokens` fixes the budget; a local server must then
         // be run with a window that holds it.
         if let Some(budget) = self.llm.context_tokens {
@@ -748,7 +758,10 @@ impl Settings {
         &self,
     ) -> Result<Box<dyn crate::llm::LlmClient>, crate::error::PhazeError> {
         self.check_base_url()?;
-        let registry = self.build_provider_registry();
+        let mut registry = self.build_provider_registry();
+        // Completions, commit messages and helpers are short jobs: little
+        // thinking, so few tokens, on the models that take an effort.
+        registry.set_effort("low");
         let config = registry.active_config().ok_or_else(|| {
             crate::error::PhazeError::Config(format!(
                 "Provider {:?} not configured",
@@ -1050,18 +1063,21 @@ auto_start = false
     #[test]
     fn side_jobs_use_the_providers_cheaper_model() {
         // The family's small model when the main one costs more.
-        let sonnet = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", None);
-        assert_eq!(sonnet.small_model(), "claude-haiku-4-5-20251001");
+        let sonnet = with_model(LlmProvider::Claude, "claude-sonnet-5-5", None);
+        assert_eq!(sonnet.small_model(), "claude-haiku-5-5");
+        // Haiku 4.5 costs ten times what Haiku 5.5 does, so it moves too.
+        let old = with_model(LlmProvider::Claude, "claude-haiku-4-5-20251001", None);
+        assert_eq!(old.small_model(), "claude-haiku-5-5");
         let gpt = with_model(LlmProvider::OpenAI, "gpt-6-sol", None);
         assert_eq!(gpt.small_model(), "gpt-6-luna");
         let luna = with_model(LlmProvider::OpenAI, "gpt-6-luna", None);
         assert_eq!(luna.small_model(), "gpt-6-luna");
         // A main model Phaze has no price for: the small one.
         let newer = with_model(LlmProvider::Claude, "claude-opus-9", None);
-        assert_eq!(newer.small_model(), "claude-haiku-4-5-20251001");
+        assert_eq!(newer.small_model(), "claude-haiku-5-5");
         // Already the small model, or no dearer than it: unchanged.
-        let haiku = with_model(LlmProvider::Claude, "claude-haiku-4-5-20251001", None);
-        assert_eq!(haiku.small_model(), "claude-haiku-4-5-20251001");
+        let haiku = with_model(LlmProvider::Claude, "claude-haiku-5-5", None);
+        assert_eq!(haiku.small_model(), "claude-haiku-5-5");
         let flash = with_model(LlmProvider::Gemini, "gemini-2.0-flash-lite", None);
         assert_eq!(flash.small_model(), "gemini-2.0-flash-lite");
         // Local servers and multi-vendor hosts keep the main model.
@@ -1072,8 +1088,8 @@ auto_start = false
         // `[llm] small_model` wins; blank means unset.
         let chosen = with_model(LlmProvider::Ollama, "big", Some(" tiny "));
         assert_eq!(chosen.small_model(), "tiny");
-        let blank = with_model(LlmProvider::Claude, "claude-sonnet-4-5-20250929", Some(" "));
-        assert_eq!(blank.small_model(), "claude-haiku-4-5-20251001");
+        let blank = with_model(LlmProvider::Claude, "claude-sonnet-5-5", Some(" "));
+        assert_eq!(blank.small_model(), "claude-haiku-5-5");
     }
 
     #[test]
