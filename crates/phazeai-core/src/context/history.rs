@@ -241,8 +241,23 @@ impl ConversationHistory {
 
     /// Replace the first `upto` messages with `summary`. The summary replaces
     /// any earlier one (the caller folds the old summary into the new text).
+    ///
+    /// The agent's checklist as it last stood and the files it changed in
+    /// the folded part are appended to the summary word for word, merged with
+    /// what the earlier summary kept (see [`super::carried`]): the model's
+    /// summary can drop either, and a long task needs both to carry on.
     pub fn compact(&mut self, upto: usize, summary: impl Into<String>) {
         let upto = upto.min(self.messages.len());
+        let summary = summary.into();
+        // The model saw the earlier kept section and may have copied it; the
+        // section is rebuilt from the calls instead.
+        let (text, _) = super::carried::Carried::split(&summary);
+        let (_, previous) =
+            super::carried::Carried::split(self.summary.as_deref().unwrap_or_default());
+        let folded: Vec<Message> = self.messages.range(..upto).cloned().collect();
+        let kept: Vec<Message> = self.messages.range(upto..).cloned().collect();
+        let carried = super::carried::Carried::after_folding(previous, &folded, &kept);
+        let summary = super::carried::join(text, &carried);
         self.messages.drain(..upto);
         self.folded += upto;
         self.set_summary(summary);

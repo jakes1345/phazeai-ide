@@ -1,4 +1,5 @@
 mod builder;
+pub mod carried;
 pub mod compaction;
 mod history;
 pub mod persistence;

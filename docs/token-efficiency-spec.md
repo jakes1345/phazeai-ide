@@ -265,6 +265,11 @@ Not done here:
 - **Re-injecting the plan and recently edited files after compaction.** The
   instruction files are already kept (they are in the system prompt). Phaze has
   no plan or to-do state yet; this comes with the to-do work.
+- **Clearing old tool results in batches** (Claude's `clear_tool_uses`). It is
+  a beta server-side feature that the test servers here can't check; it needs a
+  run against the live API first.
+- **Re-injecting the plan and recently edited files after compaction:** done
+  in T10.
 
 ### T7: side jobs on a cheap model, and local-model settings
 Built:
@@ -360,6 +365,26 @@ Built:
 - On the Claude 5.5 models (T8), a thinking block that came after a cleared
   result no longer matches its prefix; the request already asks the API to
   drop such blocks rather than fail.
+### T10: the checklist and changed files survive compaction
+Built:
+- **Kept word for word under the summary.** When compaction folds part of
+  the conversation, the `todo` tool's newest list from that part and the
+  files it changed (`write_file`, `edit_file`, `delete_path`,
+  `create_directory`, and the destination of `move_path` and `copy_path`;
+  failed calls don't count) are appended to the model's summary under
+  "Kept across compaction" (`context::carried`,
+  `ConversationHistory::compact`). The model's summary can drop either; a
+  long task needs both to carry on without re-reading files to find out what
+  it already did.
+- **Merged across compactions.** The section lives in the summary text, so
+  the IDE, which rebuilds the history from the summary each turn, carries it
+  too. The next compaction reads it back, takes a newer list if the folded
+  part has one (or drops it when the list was emptied or a newer one is still
+  in view), and puts newly changed files first, 20 at most. A copy the model
+  makes of the section is replaced by the rebuilt one, so it appears once.
+- Claude Code and opencode re-inject the plan and recent files after
+  compaction the same way. It costs a few hundred tokens once per compaction
+  and saves the re-reads a lost plan causes.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
