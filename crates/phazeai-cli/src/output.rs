@@ -97,6 +97,16 @@ pub fn stream_event(event: &AgentEvent) -> Option<Value> {
             "tokens_before": tokens_before,
             "tokens_after": tokens_after,
         }),
+        AgentEvent::ToolResultsCleared {
+            results,
+            tokens_before,
+            tokens_after,
+        } => json!({
+            "type": "tool_results_cleared",
+            "results": results,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+        }),
         AgentEvent::McpReconnected { servers } => {
             json!({"type": "mcp_reconnected", "servers": servers})
         }
