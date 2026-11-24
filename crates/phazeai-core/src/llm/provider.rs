@@ -269,6 +269,8 @@ pub struct ProviderRegistry {
     active_model: String,
     /// The context window to ask Ollama for, when the settings fix one.
     local_window: Option<usize>,
+    /// The effort to ask Claude models for (`[llm] effort`), when set.
+    effort: Option<String>,
 }
 
 impl Default for ProviderRegistry {
@@ -298,6 +300,7 @@ impl ProviderRegistry {
             active_provider: ProviderId::Claude,
             active_model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
             local_window: None,
+            effort: None,
         }
     }
 
@@ -326,6 +329,15 @@ impl ProviderRegistry {
     /// window Phaze assumes for the model ([`super::context_budget::context_window`]).
     pub fn set_local_window(&mut self, tokens: usize) {
         self.local_window = Some(tokens);
+    }
+
+    /// Ask Claude models that take it for `effort` (one of
+    /// [`super::EFFORT_LEVELS`]); anything else is ignored.
+    pub fn set_effort(&mut self, effort: &str) {
+        let effort = effort.trim().to_ascii_lowercase();
+        self.effort = super::EFFORT_LEVELS
+            .contains(&effort.as_str())
+            .then_some(effort);
     }
 
     pub fn set_provider(&mut self, provider: ProviderId) {
@@ -429,10 +441,15 @@ impl ProviderRegistry {
                         config.api_key_env
                     ))
                 })?;
+                // The reply length is the model's own default: newer models
+                // think first, and their thinking counts toward it.
                 let client = super::ClaudeClient::new(api_key)
                     .with_model(model)
-                    .with_base_url(base_url)
-                    .with_max_tokens(8192);
+                    .with_base_url(base_url);
+                let client = match &self.effort {
+                    Some(effort) => client.with_effort(effort),
+                    None => client,
+                };
                 let client = if direct {
                     client.without_proxy()
                 } else {
@@ -502,30 +519,41 @@ impl ProviderRegistry {
     pub fn known_models(provider: &ProviderId) -> Vec<ModelInfo> {
         match provider {
             ProviderId::Claude => vec![
-                // Price from platform.claude.com pricing (November 10, 2026).
+                // Model ids and prices from Anthropic's model catalog and
+                // pricing page (November 2026). Each has a 1M-token window.
                 ModelInfo {
-                    id: "claude-opus-4-6".into(),
-                    name: "Claude Opus 4.6".into(),
-                    context_window: 200_000,
+                    id: "claude-opus-5-5".into(),
+                    name: "Claude Opus 5.5".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
-                    input_cost_per_m: 5.0,
-                    output_cost_per_m: 25.0,
+                    input_cost_per_m: 4.0,
+                    output_cost_per_m: 20.0,
                 },
                 ModelInfo {
-                    id: "claude-sonnet-4-5-20250929".into(),
-                    name: "Claude Sonnet 4.5".into(),
-                    context_window: 200_000,
+                    id: "claude-sonnet-5-5".into(),
+                    name: "Claude Sonnet 5.5".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
-                    input_cost_per_m: 3.0,
-                    output_cost_per_m: 15.0,
+                    input_cost_per_m: 2.0,
+                    output_cost_per_m: 10.0,
                 },
                 ModelInfo {
-                    id: "claude-haiku-4-5-20251001".into(),
-                    name: "Claude Haiku 4.5".into(),
-                    context_window: 200_000,
+                    // $0.10/$0.50 up to a 100K-token prompt, five times that
+                    // above it (`cost::price` has both rates).
+                    id: "claude-haiku-5-5".into(),
+                    name: "Claude Haiku 5.5".into(),
+                    context_window: 1_000_000,
                     supports_tools: true,
-                    input_cost_per_m: 1.0,
-                    output_cost_per_m: 5.0,
+                    input_cost_per_m: 0.10,
+                    output_cost_per_m: 0.50,
+                },
+                ModelInfo {
+                    id: "claude-fable-5-2".into(),
+                    name: "Claude Fable 5.2".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    input_cost_per_m: 8.0,
+                    output_cost_per_m: 40.0,
                 },
             ],
             ProviderId::OpenAI => vec![
@@ -875,7 +903,9 @@ impl ProviderRegistry {
 /// many vendors' models.
 pub fn small_model_for(provider: &ProviderId) -> Option<&'static str> {
     match provider {
-        ProviderId::Claude => Some("claude-haiku-4-5-20251001"),
+        // Claude Haiku 5.5: a tenth of Haiku 4.5's price for a prompt up
+        // to 100K tokens.
+        ProviderId::Claude => Some("claude-haiku-5-5"),
         // OpenAI's cheapest model on its pricing page (November 10, 2026).
         // Azure's models go by the deployment names each user picks.
         ProviderId::OpenAI => Some("gpt-6-luna"),

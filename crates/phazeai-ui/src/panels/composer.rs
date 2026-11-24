@@ -656,6 +656,18 @@ pub fn composer_panel(state: IdeState) -> impl IntoView {
                                          ~{tokens_after} tokens)"
                                     )));
                                 }
+                                AgentEvent::ToolResultsCleared {
+                                    results,
+                                    tokens_before,
+                                    tokens_after,
+                                } => {
+                                    let _ = tx2.send(ComposerUpdate::Notice(format!(
+                                        "Cleared {results} old tool output{} to stay within \
+                                         the context budget (~{tokens_before} → \
+                                         ~{tokens_after} tokens)",
+                                        if results == 1 { "" } else { "s" }
+                                    )));
+                                }
                                 AgentEvent::Complete { iterations } => {
                                     let _ = tx2.send(ComposerUpdate::Done { iterations });
                                     break;

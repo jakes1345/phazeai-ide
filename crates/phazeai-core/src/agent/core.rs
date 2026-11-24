@@ -114,6 +114,9 @@ pub struct Agent {
     permissions: PermissionsSlot,
     /// While set, only calls that read run (see [`Self::with_read_only`]).
     read_only: Arc<AtomicBool>,
+    /// Whether old tool results are cleared before compaction (see
+    /// [`Self::with_tool_result_clearing`]).
+    clear_tool_results: bool,
 }
 
 /// Where an agent keeps its permission rules, shared with its helpers.
@@ -145,6 +148,7 @@ impl Agent {
             checkpoints: None,
             permissions: Arc::new(StdMutex::new(None)),
             read_only: Arc::new(AtomicBool::new(false)),
+            clear_tool_results: true,
         }
     }
 
@@ -245,6 +249,14 @@ impl Agent {
 
     pub fn with_context_budget(mut self, budget: usize) -> Self {
         self.max_context_tokens = budget;
+        self
+    }
+
+    /// Whether old tool results give way to one-line notes before the
+    /// conversation is compacted (on by default; see
+    /// [`ConversationHistory::clear_old_tool_results`]).
+    pub fn with_tool_result_clearing(mut self, on: bool) -> Self {
+        self.clear_tool_results = on;
         self
     }
 
@@ -453,6 +465,25 @@ impl Agent {
                 iteration: iterations,
             });
 
+            // Well before compaction, old tool results give way to one-line
+            // notes, in one batch: cheaper than a summary, and the replies
+            // and calls stay as they were.
+            let cleared = if self.clear_tool_results {
+                self.conversation
+                    .lock()
+                    .await
+                    .clear_old_tool_results(self.max_context_tokens)
+            } else {
+                None
+            };
+            if let Some(done) = cleared {
+                let _ = event_tx.send(AgentEvent::ToolResultsCleared {
+                    results: done.results,
+                    tokens_before: done.tokens_before,
+                    tokens_after: done.tokens_after,
+                });
+            }
+
             // Near the budget, fold the oldest messages into a summary rather
             // than forgetting them. If that fails, the trim below still keeps
             // the request within budget. Stop applies while the summary is
@@ -513,6 +544,9 @@ impl Agent {
             // Kept on the assistant message for providers that must be sent
             // it back (`Message::reasoning`); not shown.
             let mut reasoning = String::new();
+            // The turn as the provider's own blocks, when it must be sent
+            // back unchanged (`Message::raw_content`).
+            let mut raw_content: Vec<Value> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, arguments)
 
@@ -534,6 +568,7 @@ impl Agent {
                         let _ = event_tx.send(AgentEvent::TextDelta(delta));
                     }
                     StreamEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                    StreamEvent::RawContent(blocks) => raw_content = blocks,
                     StreamEvent::ToolCallStart { id, name } => {
                         current_tool_calls.insert(id.clone(), (name, String::new()));
                     }
@@ -578,7 +613,8 @@ impl Agent {
                     let mut conversation = self.conversation.lock().await;
                     conversation.add_message(
                         Message::assistant_with_tools(content.clone(), tool_calls.clone())
-                            .with_reasoning(std::mem::take(&mut reasoning)),
+                            .with_reasoning(std::mem::take(&mut reasoning))
+                            .with_raw_content(std::mem::take(&mut raw_content)),
                     );
                 }
                 // A call that runs a held-back tool through `more_tools` is
@@ -903,7 +939,11 @@ impl Agent {
 
             {
                 let mut conversation = self.conversation.lock().await;
-                conversation.add_message(Message::assistant(&content).with_reasoning(reasoning));
+                conversation.add_message(
+                    Message::assistant(&content)
+                        .with_reasoning(reasoning)
+                        .with_raw_content(raw_content),
+                );
             }
 
             return Ok(AgentResponse {
