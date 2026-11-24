@@ -1236,9 +1236,9 @@ mod leftover_tests {
                     price_per_m: None,
                 },
                 LiveModel {
-                    id: "claude-haiku-4-5-20251001".into(),
-                    name: Some("Claude Haiku 4.5".into()),
-                    context_window: Some(200_000),
+                    id: "claude-sonnet-5-5".into(),
+                    name: Some("Claude Sonnet 5.5".into()),
+                    context_window: Some(1_000_000),
                     price_per_m: None,
                 },
             ],
@@ -1249,18 +1249,18 @@ mod leftover_tests {
         assert!(text.contains("claude-opus-5-5"));
         assert!(text.contains("ctx 1.0M"));
         assert!(text.contains("← active"));
-        assert!(text.contains("$1/$5 per M"), "{text}");
+        assert!(text.contains("$2/$10 per M"), "{text}");
         assert!(text.contains("not in"), "{text}");
-        assert!(text.contains("claude-opus-4-6"));
+        assert!(text.contains("claude-fable-5-2"));
 
-        let only = models_text(&claude, "x", "haiku", Ok(&list));
-        assert!(only.contains("1 matching \"haiku\""), "{only}");
+        let only = models_text(&claude, "x", "sonnet", Ok(&list));
+        assert!(only.contains("1 matching \"sonnet\""), "{only}");
         assert!(!only.contains("claude-opus-5-5"));
         assert!(only.contains("isn't in the list"));
 
         let failed = models_text(&claude, "x", "", Err(&"no key".to_string()));
         assert!(failed.starts_with("Couldn't read"), "{failed}");
-        assert!(failed.contains("claude-opus-4-6"));
+        assert!(failed.contains("claude-fable-5-2"));
         assert!(!failed.contains("not in"));
     }
 

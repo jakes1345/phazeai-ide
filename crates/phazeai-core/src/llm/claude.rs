@@ -10,7 +10,133 @@ pub struct ClaudeClient {
     api_key: String,
     model: String,
     base_url: String,
-    max_tokens: u32,
+    /// `None` until set: [`default_max_tokens`] for the model.
+    max_tokens: Option<u32>,
+    /// `output_config.effort`, for the models that take it: how much the
+    /// model thinks and writes. `None`: the model's own default.
+    effort: Option<String>,
+}
+
+/// The beta header that lets a request ask the API to drop a thinking block
+/// whose conversation was edited, instead of refusing the request.
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// The levels `output_config.effort` takes.
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// A model id without a router's or a cloud's vendor prefix.
+fn base_model(model: &str) -> &str {
+    model
+        .strip_prefix("anthropic/")
+        .or_else(|| model.strip_prefix("anthropic."))
+        .unwrap_or(model)
+}
+
+/// Models whose thinking blocks are tied to the model and the conversation
+/// ("preserved thinking"): the API checks that nothing before a block
+/// changed since it was written. Phaze edits history when it compacts or
+/// trims a conversation, so on these it asks for such blocks to be dropped
+/// rather than the request refused (Anthropic's migration guide: Claude
+/// Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5).
+pub fn binds_thinking(model: &str) -> bool {
+    let m = base_model(model);
+    [
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-1",
+        "claude-mythos-5-2",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ]
+    .iter()
+    .any(|p| m.starts_with(p))
+}
+
+/// Models that can think before they answer (adaptive thinking): their
+/// replies may hold thinking blocks, and thinking counts toward
+/// `max_tokens`.
+pub fn thinks(model: &str) -> bool {
+    let m = base_model(model);
+    binds_thinking(m)
+        || [
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ]
+        .iter()
+        .any(|p| m.starts_with(p))
+}
+
+/// Models that take `output_config.effort` (Claude Haiku 4.5 and the older
+/// Sonnets don't).
+pub fn takes_effort(model: &str) -> bool {
+    thinks(model) || base_model(model).starts_with("claude-opus-4-5")
+}
+
+/// The reply length to ask for when none is set: room for thinking as well
+/// as the answer on the models that think (thinking counts toward
+/// `max_tokens`; asking for more costs nothing, only what is written is
+/// billed), 8,192 otherwise.
+pub fn default_max_tokens(model: &str) -> u32 {
+    if thinks(model) {
+        32_000
+    } else {
+        8_192
+    }
+}
+
+/// When Claude Sonnet 4.5 retires: 2026-11-30 00:00 UTC, in seconds since
+/// the Unix epoch.
+const SONNET_4_5_RETIRES: u64 = 1_795_996_800;
+
+/// The id to send for `model`: a Claude model Anthropic has retired (its
+/// requests return 404) is sent as its replacement from Anthropic's
+/// migration guide, so a saved setting keeps working. Claude Sonnet 4.5 is
+/// sent as it is until it retires on November 30, 2026. Every other id is
+/// sent as it is.
+pub fn current_model_id(model: &str) -> &str {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    current_model_id_at(model, now)
+}
+
+fn current_model_id_at(model: &str, now: u64) -> &str {
+    const RETIRED: &[(&str, &str)] = &[
+        ("claude-opus-4-1-20250805", "claude-opus-5-5"),
+        ("claude-opus-4-1", "claude-opus-5-5"),
+        ("claude-opus-4-20250514", "claude-opus-5-5"),
+        ("claude-opus-4-0", "claude-opus-5-5"),
+        ("claude-sonnet-4-20250514", "claude-sonnet-5-5"),
+        ("claude-sonnet-4-0", "claude-sonnet-5-5"),
+        ("claude-3-haiku-20240307", "claude-haiku-5-5"),
+        ("claude-3-7-sonnet-20250219", "claude-sonnet-5-5"),
+        ("claude-3-7-sonnet-latest", "claude-sonnet-5-5"),
+        ("claude-3-5-haiku-20241022", "claude-haiku-5-5"),
+        ("claude-3-5-haiku-latest", "claude-haiku-5-5"),
+        ("claude-3-opus-20240229", "claude-opus-5-5"),
+        ("claude-3-opus-latest", "claude-opus-5-5"),
+        ("claude-3-5-sonnet-20241022", "claude-sonnet-5-5"),
+        ("claude-3-5-sonnet-20240620", "claude-sonnet-5-5"),
+        ("claude-3-5-sonnet-latest", "claude-sonnet-5-5"),
+        ("claude-3-sonnet-20240229", "claude-sonnet-5-5"),
+        ("claude-2.1", "claude-opus-5-5"),
+        ("claude-2.0", "claude-opus-5-5"),
+    ];
+    if let Some(&(_, new)) = RETIRED.iter().find(|(old, _)| model == *old) {
+        return new;
+    }
+    let sonnet_4_5 = model == "claude-sonnet-4-5" || model == "claude-sonnet-4-5-20250929";
+    if sonnet_4_5 && now >= SONNET_4_5_RETIRES {
+        return "claude-sonnet-5-5";
+    }
+    model
 }
 
 impl ClaudeClient {
@@ -20,7 +146,8 @@ impl ClaudeClient {
             api_key: api_key.into(),
             model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
             base_url: crate::constants::endpoints::CLAUDE_BASE_URL.to_string(),
-            max_tokens: 8192,
+            max_tokens: None,
+            effort: None,
         }
     }
 
@@ -43,8 +170,36 @@ impl ClaudeClient {
     }
 
     pub fn with_max_tokens(mut self, max: u32) -> Self {
-        self.max_tokens = max;
+        self.max_tokens = Some(max);
         self
+    }
+
+    /// Ask for `effort` (one of [`EFFORT_LEVELS`]) on the models that take
+    /// it; ignored for the others.
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
+    }
+
+    /// The model id this client sends ([`current_model_id`]).
+    fn model_id(&self) -> &str {
+        current_model_id(&self.model)
+    }
+
+    /// A POST of `body` to the Messages API with this client's headers.
+    fn post(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .post(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+        let request = if binds_thinking(self.model_id()) {
+            request.header("anthropic-beta", THINKING_BINDING_BETA)
+        } else {
+            request
+        };
+        request.json(body)
     }
 
     /// `<base_url>/v1/messages`. A trailing slash on the base URL is
@@ -66,11 +221,26 @@ impl ClaudeClient {
             .collect();
         let conversation = conversation_messages(messages);
 
+        let model = self.model_id();
         let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
+            "model": model,
+            "max_tokens": self.max_tokens.unwrap_or_else(|| default_max_tokens(model)),
             "messages": conversation,
         });
+
+        if binds_thinking(model) {
+            // Adaptive thinking is these models' default; it is spelled out
+            // because `block_binding` is accepted only with it. A thinking
+            // block from before a compaction or a trim is dropped by the API
+            // instead of failing the request.
+            body["thinking"] = serde_json::json!({
+                "type": "adaptive",
+                "block_binding": { "prefix_mismatch_behavior": "drop_block" },
+            });
+        }
+        if let Some(effort) = self.effort.as_deref().filter(|_| takes_effort(model)) {
+            body["output_config"] = serde_json::json!({ "effort": effort });
+        }
 
         if !system.is_empty() {
             body["system"] = Value::Array(system);
@@ -134,6 +304,59 @@ fn system_blocks(text: &str) -> Vec<Value> {
         .collect()
 }
 
+/// A thinking block: what the API sends back unchanged and refuses a
+/// `cache_control` on.
+fn is_thinking(block: &Value) -> bool {
+    matches!(
+        block["type"].as_str(),
+        Some("thinking" | "redacted_thinking")
+    )
+}
+
+/// An assistant turn's blocks as the API sent them ([`Message::raw_content`]),
+/// when they still say what the message says: the same text and the same
+/// tool calls in the same order. A turn Phaze has rewritten since (a trimmed
+/// or summarized history) is rebuilt from the message instead, without its
+/// thinking, which the API would no longer accept as unchanged anyway.
+fn replayed_blocks(m: &Message) -> Option<Vec<Value>> {
+    if m.raw_content.is_empty() {
+        return None;
+    }
+    let text: String = m
+        .raw_content
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    let raw_ids: Vec<&str> = m
+        .raw_content
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    let ids: Vec<&str> = m
+        .tool_calls
+        .iter()
+        .flatten()
+        .map(|tc| tc.id.as_str())
+        .collect();
+    if text != m.content || raw_ids != ids {
+        return None;
+    }
+    Some(
+        m.raw_content
+            .iter()
+            .cloned()
+            .map(|mut b| {
+                if let Some(o) = b.as_object_mut() {
+                    o.remove("cache_control");
+                }
+                b
+            })
+            .collect(),
+    )
+}
+
 /// The conversation in Anthropic's shape. The results of one turn's tool calls
 /// go back in a single user message, as the API documents for parallel calls
 /// (sending each in a message of its own teaches the model to stop calling
@@ -163,6 +386,11 @@ fn conversation_messages(messages: &[Message]) -> Vec<Value> {
             } else {
                 out.push(serde_json::json!({ "role": "user", "content": [result] }));
             }
+        } else if let Some(blocks) = (m.role == Role::Assistant)
+            .then(|| replayed_blocks(m))
+            .flatten()
+        {
+            out.push(serde_json::json!({ "role": "assistant", "content": blocks }));
         } else if let Some(ref tool_calls) = m.tool_calls {
             let mut content: Vec<Value> = Vec::new();
             if !m.content.is_empty() {
@@ -270,14 +498,37 @@ fn mark_conversation_tail(messages: &mut [Value]) {
             return;
         }
         let block = content.as_array_mut().and_then(|blocks| {
-            blocks
-                .iter_mut()
-                .rev()
-                .find(|b| b["type"] != "text" || b["text"].as_str().is_some_and(|t| !t.is_empty()))
+            blocks.iter_mut().rev().find(|b| {
+                !is_thinking(b)
+                    && (b["type"] != "text" || b["text"].as_str().is_some_and(|t| !t.is_empty()))
+            })
         });
         if let Some(block) = block {
             block["cache_control"] = ephemeral();
             return;
+        }
+    }
+}
+
+/// What the user is told when Claude's safety classifiers decline a request
+/// (`stop_reason: "refusal"`, which newer models can return).
+const REFUSAL_MESSAGE: &str =
+    "Claude declined this request (its safety checks stopped the reply). \
+     Rephrase it, or try another model.";
+
+/// Append `text` to the string field `field` of the block at `index`.
+fn append_field(
+    blocks: &mut std::collections::BTreeMap<u64, Value>,
+    index: u64,
+    field: &str,
+    text: &str,
+) {
+    if let Some(block) = blocks.get_mut(&index).and_then(Value::as_object_mut) {
+        match block.get_mut(field) {
+            Some(Value::String(value)) => value.push_str(text),
+            _ => {
+                block.insert(field.to_string(), Value::String(text.to_string()));
+            }
         }
     }
 }
@@ -311,22 +562,10 @@ fn claude_usage(start: Option<&Value>, delta: Option<&Value>) -> Option<Usage> {
 
 #[derive(Debug, Deserialize)]
 struct ClaudeApiResponse {
-    content: Vec<ClaudeContent>,
+    content: Vec<Value>,
     usage: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeContent {
-    #[serde(rename = "type")]
-    content_type: String,
     #[serde(default)]
-    text: String,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    input: Value,
+    stop_reason: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -339,16 +578,9 @@ impl LlmClient for ClaudeClient {
         let url = self.messages_url();
         let request_body = self.build_request_body(messages, tools, false);
 
-        let response = crate::llm::retry::send_with_retry("claude", || {
-            self.client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&request_body)
-                .send()
-        })
-        .await?;
+        let response =
+            crate::llm::retry::send_with_retry("claude", || self.post(&url, &request_body).send())
+                .await?;
 
         let status = response.status();
         let response_text = response.text().await?;
@@ -362,24 +594,29 @@ impl LlmClient for ClaudeClient {
 
         let api_response: ClaudeApiResponse = serde_json::from_str(&response_text)
             .map_err(|e| PhazeError::Llm(format!("Failed to parse response: {e}")))?;
+        if api_response.stop_reason.as_deref() == Some("refusal") {
+            return Err(PhazeError::Llm(REFUSAL_MESSAGE.to_string()));
+        }
 
-        let content = api_response
+        // Every text block, in order: a model that thinks can put text
+        // between its thinking and its tool calls.
+        let content: String = api_response
             .content
             .iter()
-            .find(|c| c.content_type == "text")
-            .map(|c| c.text.clone())
-            .unwrap_or_default();
+            .filter(|c| c["type"] == "text")
+            .filter_map(|c| c["text"].as_str())
+            .collect();
 
         let tool_calls: Vec<ToolCall> = api_response
             .content
             .iter()
-            .filter(|c| c.content_type == "tool_use")
+            .filter(|c| c["type"] == "tool_use")
             .map(|c| ToolCall {
-                id: c.id.clone().unwrap_or_default(),
+                id: c["id"].as_str().unwrap_or_default().to_string(),
                 call_type: "function".to_string(),
                 function: FunctionCall {
-                    name: c.name.clone().unwrap_or_default(),
-                    arguments: serde_json::to_string(&c.input).unwrap_or_default(),
+                    name: c["name"].as_str().unwrap_or_default().to_string(),
+                    arguments: serde_json::to_string(&c["input"]).unwrap_or_default(),
                 },
             })
             .collect();
@@ -388,6 +625,11 @@ impl LlmClient for ClaudeClient {
             Message::assistant(content)
         } else {
             Message::assistant_with_tools(content, tool_calls)
+        };
+        let message = if api_response.content.iter().any(is_thinking) {
+            message.with_raw_content(api_response.content.clone())
+        } else {
+            message
         };
 
         Ok(LlmResponse {
@@ -406,16 +648,9 @@ impl LlmClient for ClaudeClient {
 
         // Retry only the request submission; once the SSE stream starts we
         // can't safely re-issue without duplicating tokens.
-        let response = crate::llm::retry::send_with_retry("claude", || {
-            self.client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&request_body)
-                .send()
-        })
-        .await?;
+        let response =
+            crate::llm::retry::send_with_retry("claude", || self.post(&url, &request_body).send())
+                .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -438,6 +673,12 @@ impl LlmClient for ClaudeClient {
             // `message_delta`; one Usage event is sent from the two.
             let mut start_usage: Option<Value> = None;
             let mut usage_sent = false;
+            // The turn's content blocks by index, as the API builds them, for
+            // a turn that holds thinking blocks (`StreamEvent::RawContent`).
+            let mut blocks: std::collections::BTreeMap<u64, Value> =
+                std::collections::BTreeMap::new();
+            let mut tool_inputs: std::collections::HashMap<u64, String> =
+                std::collections::HashMap::new();
 
             while let Some(chunk) =
                 super::stream_cancel::next_unless_dropped(&mut stream, &tx).await
@@ -469,6 +710,7 @@ impl LlmClient for ClaudeClient {
 
                     if let Ok(event) = serde_json::from_str::<Value>(data) {
                         let event_type = event.get("type").and_then(|t| t.as_str());
+                        let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                         match event_type {
                             Some("content_block_delta") => {
                                 if let Some(delta) = event.get("delta") {
@@ -478,19 +720,34 @@ impl LlmClient for ClaudeClient {
                                             if let Some(text) =
                                                 delta.get("text").and_then(|t| t.as_str())
                                             {
+                                                append_field(&mut blocks, index, "text", text);
                                                 let _ = tx.unbounded_send(StreamEvent::TextDelta(
                                                     text.to_string(),
                                                 ));
+                                            }
+                                        }
+                                        Some("thinking_delta") => {
+                                            if let Some(text) =
+                                                delta.get("thinking").and_then(|t| t.as_str())
+                                            {
+                                                append_field(&mut blocks, index, "thinking", text);
+                                            }
+                                        }
+                                        Some("signature_delta") => {
+                                            if let Some(sig) =
+                                                delta.get("signature").and_then(|t| t.as_str())
+                                            {
+                                                append_field(&mut blocks, index, "signature", sig);
                                             }
                                         }
                                         Some("input_json_delta") => {
                                             if let Some(partial) =
                                                 delta.get("partial_json").and_then(|t| t.as_str())
                                             {
-                                                let index = event
-                                                    .get("index")
-                                                    .and_then(|i| i.as_u64())
-                                                    .unwrap_or(0);
+                                                tool_inputs
+                                                    .entry(index)
+                                                    .or_default()
+                                                    .push_str(partial);
                                                 if let Some(id) = tool_block_ids.get(&index) {
                                                     let _ = tx.unbounded_send(
                                                         StreamEvent::ToolCallDelta {
@@ -507,11 +764,8 @@ impl LlmClient for ClaudeClient {
                             }
                             Some("content_block_start") => {
                                 if let Some(cb) = event.get("content_block") {
+                                    blocks.insert(index, cb.clone());
                                     if cb.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                                        let index = event
-                                            .get("index")
-                                            .and_then(|i| i.as_u64())
-                                            .unwrap_or(0);
                                         let id = cb
                                             .get("id")
                                             .and_then(|v| v.as_str())
@@ -531,8 +785,13 @@ impl LlmClient for ClaudeClient {
                                 }
                             }
                             Some("content_block_stop") => {
-                                let index =
-                                    event.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                                if let Some(block) = blocks.get_mut(&index) {
+                                    if block["type"] == "tool_use" {
+                                        let json = tool_inputs.remove(&index).unwrap_or_default();
+                                        block["input"] = serde_json::from_str(&json)
+                                            .unwrap_or_else(|_| serde_json::json!({}));
+                                    }
+                                }
                                 if let Some(id) = tool_block_ids.remove(&index) {
                                     let _ = tx.unbounded_send(StreamEvent::ToolCallEnd { id });
                                 }
@@ -541,6 +800,14 @@ impl LlmClient for ClaudeClient {
                                 start_usage = event.pointer("/message/usage").cloned();
                             }
                             Some("message_delta") => {
+                                if event.pointer("/delta/stop_reason").and_then(Value::as_str)
+                                    == Some("refusal")
+                                {
+                                    let _ = tx.unbounded_send(StreamEvent::Error(
+                                        REFUSAL_MESSAGE.to_string(),
+                                    ));
+                                    return;
+                                }
                                 if let Some(usage) =
                                     claude_usage(start_usage.as_ref(), event.get("usage"))
                                 {
@@ -549,6 +816,11 @@ impl LlmClient for ClaudeClient {
                                 }
                             }
                             Some("message_stop") => {
+                                if blocks.values().any(is_thinking) {
+                                    let _ = tx.unbounded_send(StreamEvent::RawContent(
+                                        std::mem::take(&mut blocks).into_values().collect(),
+                                    ));
+                                }
                                 if !usage_sent {
                                     if let Some(usage) = claude_usage(start_usage.as_ref(), None) {
                                         let _ = tx.unbounded_send(StreamEvent::Usage(usage));
@@ -848,5 +1120,345 @@ mod tests {
             .await
             .expect("the request was still open 3 s after Stop")
             .unwrap();
+    }
+
+    fn sse(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+            .collect()
+    }
+
+    /// [`serve_once`] that also hands back the request it was sent (head
+    /// and body).
+    async fn serve_once_capturing(
+        body: String,
+        content_type: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len: usize = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&request).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(response.as_bytes()).await.unwrap();
+        });
+        (url, rx)
+    }
+
+    fn request_json(request: &str) -> Value {
+        let body = &request[request.find("\r\n\r\n").unwrap() + 4..];
+        serde_json::from_str(body).unwrap()
+    }
+
+    /// A turn the way Claude Sonnet 5.5 streams one: a thinking block with
+    /// its signature, a sentence, then a tool call.
+    fn thinking_turn() -> Vec<Value> {
+        vec![
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 9, "output_tokens": 1 } } }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "", "signature": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "Read the " } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "file first." } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "c2lnLTE=" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Looking." } }),
+            json!({ "type": "content_block_stop", "index": 1 }),
+            json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "{\"path\":" } }),
+            json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "\"a.rs\"}" } }),
+            json!({ "type": "content_block_stop", "index": 2 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 40 } }),
+            json!({ "type": "message_stop" }),
+        ]
+    }
+
+    fn thinking_blocks() -> Vec<Value> {
+        vec![
+            json!({ "type": "thinking", "thinking": "Read the file first.", "signature": "c2lnLTE=" }),
+            json!({ "type": "text", "text": "Looking." }),
+            json!({ "type": "tool_use", "id": "toolu_1", "name": "read_file", "input": { "path": "a.rs" } }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_thinking_turn_comes_back_whole_and_the_request_asks_to_drop_stale_blocks() {
+        let (url, request) = serve_once_capturing(sse(&thinking_turn()), "text/event-stream").await;
+        let client = ClaudeClient::new("k")
+            .with_model("claude-sonnet-5-5")
+            .with_base_url(url)
+            .without_proxy();
+        let mut rx = client
+            .chat_stream(&[Message::user("fix a.rs")], &[tool("read_file")])
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        let mut raw = None;
+        let mut text = String::new();
+        let mut args = String::new();
+        while let Some(event) = rx.next().await {
+            match event {
+                StreamEvent::RawContent(blocks) => raw = Some(blocks),
+                StreamEvent::TextDelta(t) => text.push_str(&t),
+                StreamEvent::ToolCallDelta {
+                    arguments_delta, ..
+                } => args.push_str(&arguments_delta),
+                StreamEvent::Done => break,
+                _ => {}
+            }
+        }
+        assert_eq!(raw, Some(thinking_blocks()));
+        // The thinking is not shown as the reply.
+        assert_eq!(text, "Looking.");
+        assert_eq!(args, r#"{"path":"a.rs"}"#);
+
+        let request = request.await.unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains(&format!("anthropic-beta: {THINKING_BINDING_BETA}")));
+        let body = request_json(&request);
+        assert_eq!(body["model"], "claude-sonnet-5-5");
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "adaptive", "block_binding": { "prefix_mismatch_behavior": "drop_block" } })
+        );
+        assert_eq!(body["max_tokens"], 32_000);
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_thinking_sends_no_raw_content() {
+        let events = [
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Hi." } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "message_stop" }),
+        ];
+        let (url, request) = serve_once_capturing(sse(&events), "text/event-stream").await;
+        let client = ClaudeClient::new("k")
+            .with_model("claude-haiku-4-5-20251001")
+            .with_effort("low")
+            .with_base_url(url)
+            .without_proxy();
+        let mut rx = client
+            .chat_stream(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        while let Some(event) = rx.next().await {
+            assert!(!matches!(event, StreamEvent::RawContent(_)), "{event:?}");
+            if matches!(event, StreamEvent::Done) {
+                break;
+            }
+        }
+        // An older model gets neither the thinking settings nor an effort it
+        // would refuse, nor the beta header.
+        let request = request.await.unwrap();
+        assert!(!request.to_ascii_lowercase().contains("anthropic-beta"));
+        let body = request_json(&request);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+        assert_eq!(body["max_tokens"], 8_192);
+    }
+
+    #[test]
+    fn effort_goes_to_the_models_that_take_it() {
+        let messages = [Message::user("hi")];
+        let body = ClaudeClient::new("k")
+            .with_model("claude-haiku-5-5")
+            .with_effort("low")
+            .build_request_body(&messages, &[], false);
+        assert_eq!(body["output_config"], json!({ "effort": "low" }));
+        let body = ClaudeClient::new("k")
+            .with_model("claude-opus-5-5")
+            .with_max_tokens(64_000)
+            .build_request_body(&messages, &[], false);
+        assert!(body.get("output_config").is_none());
+        assert_eq!(body["max_tokens"], 64_000);
+        // Claude Opus 5 thinks but does not bind its blocks.
+        let body = ClaudeClient::new("k")
+            .with_model("claude-opus-5")
+            .build_request_body(&messages, &[], false);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 32_000);
+    }
+
+    #[test]
+    fn a_thinking_turn_is_sent_back_unchanged_and_never_carries_the_cache_marker() {
+        let mut turn = Message::assistant_with_tools(
+            "Looking.",
+            vec![ToolCall {
+                id: "toolu_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.rs"}"#.into(),
+                },
+            }],
+        )
+        .with_raw_content(thinking_blocks());
+        let messages = [
+            Message::user("fix a.rs"),
+            turn.clone(),
+            Message::tool_result("toolu_1", "1\tfn a() {}"),
+        ];
+        let body = ClaudeClient::new("k")
+            .with_model("claude-sonnet-5-5")
+            .build_request_body(&messages, &[], true);
+        assert_eq!(body["messages"][1]["content"], json!(thinking_blocks()));
+        assert_eq!(breakpoints(&body), ["messages[2][0]"]);
+
+        // A final answer that ends the conversation: the marker goes on its
+        // text, not on its thinking.
+        let answer = Message::assistant("Done.").with_raw_content(vec![
+            json!({ "type": "thinking", "thinking": "", "signature": "c2lnLTI=" }),
+            json!({ "type": "text", "text": "Done." }),
+        ]);
+        let body =
+            ClaudeClient::new("k").build_request_body(&[Message::user("x"), answer], &[], false);
+        assert_eq!(body["messages"][1]["content"][0]["signature"], "c2lnLTI=");
+        assert!(body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(breakpoints(&body), ["messages[1][1]"]);
+
+        // A turn rewritten since (another text) is rebuilt without thinking.
+        turn.content = "[earlier steps removed]".into();
+        let body = ClaudeClient::new("k").build_request_body(
+            &[
+                Message::user("fix a.rs"),
+                turn,
+                Message::tool_result("toolu_1", "ok"),
+            ],
+            &[],
+            false,
+        );
+        let blocks = body["messages"][1]["content"].as_array().unwrap();
+        assert!(blocks.iter().all(|b| !is_thinking(b)));
+        assert_eq!(blocks[1]["id"], "toolu_1");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_an_error_not_an_empty_reply() {
+        let events = [
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "refusal" }, "usage": { "output_tokens": 0 } }),
+            json!({ "type": "message_stop" }),
+        ];
+        let (url, _request) = serve_once_capturing(sse(&events), "text/event-stream").await;
+        let client = ClaudeClient::new("k")
+            .with_model("claude-opus-5-5")
+            .with_base_url(url)
+            .without_proxy();
+        let mut rx = client
+            .chat_stream(&[Message::user("x")], &[])
+            .await
+            .unwrap();
+        use futures::StreamExt;
+        let mut error = None;
+        while let Some(event) = rx.next().await {
+            if let StreamEvent::Error(e) = event {
+                error = Some(e);
+                break;
+            }
+        }
+        assert_eq!(error.as_deref(), Some(REFUSAL_MESSAGE));
+
+        let reply = json!({ "content": [], "stop_reason": "refusal", "usage": { "input_tokens": 3, "output_tokens": 0 } });
+        let (url, _request) = serve_once_capturing(reply.to_string(), "application/json").await;
+        let client = ClaudeClient::new("k").with_base_url(url).without_proxy();
+        let err = client.chat(&[Message::user("x")], &[]).await.unwrap_err();
+        assert!(err.to_string().contains(REFUSAL_MESSAGE), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_whole_reply_keeps_its_thinking_and_every_text_block() {
+        let reply = json!({
+            "content": [
+                { "type": "thinking", "thinking": "", "signature": "c2ln" },
+                { "type": "text", "text": "One. " },
+                { "type": "text", "text": "Two." },
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 3, "output_tokens": 4 },
+        });
+        let (url, _request) = serve_once_capturing(reply.to_string(), "application/json").await;
+        let client = ClaudeClient::new("k")
+            .with_model("claude-haiku-5-5")
+            .with_base_url(url)
+            .without_proxy();
+        let response = client.chat(&[Message::user("x")], &[]).await.unwrap();
+        assert_eq!(response.message.content, "One. Two.");
+        assert_eq!(response.message.raw_content.len(), 3);
+        assert_eq!(response.message.raw_content[0]["signature"], "c2ln");
+    }
+
+    #[test]
+    fn retired_models_are_sent_as_their_replacements() {
+        let before = SONNET_4_5_RETIRES - 1;
+        assert_eq!(
+            current_model_id_at("claude-sonnet-4-20250514", before),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            current_model_id_at("claude-opus-4-1-20250805", before),
+            "claude-opus-5-5"
+        );
+        assert_eq!(
+            current_model_id_at("claude-3-5-haiku-20241022", before),
+            "claude-haiku-5-5"
+        );
+        // Claude Sonnet 4.5 is the user's choice until the day it retires.
+        assert_eq!(
+            current_model_id_at("claude-sonnet-4-5-20250929", before),
+            "claude-sonnet-4-5-20250929"
+        );
+        assert_eq!(
+            current_model_id_at("claude-sonnet-4-5-20250929", SONNET_4_5_RETIRES),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            current_model_id_at("claude-sonnet-4-5", SONNET_4_5_RETIRES),
+            "claude-sonnet-5-5"
+        );
+        // Current models, and ids Phaze doesn't know, go as they are.
+        for id in [
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-6",
+            "claude-sonnet-5-5",
+            "claude-next",
+        ] {
+            assert_eq!(current_model_id_at(id, SONNET_4_5_RETIRES), id);
+        }
     }
 }

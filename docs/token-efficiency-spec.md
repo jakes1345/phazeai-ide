@@ -260,12 +260,16 @@ a request would pass the budget, which after compaction means a single turn
 too large to fit.
 
 Not done here:
-- **Clearing old tool results in batches** (Claude's `clear_tool_uses`). It is
-  a beta server-side feature that the test servers here can't check; it needs a
-  run against the live API first.
+- **Clearing old tool results in batches:** done in T9, client-side, so it
+  works with every provider.
 - **Re-injecting the plan and recently edited files after compaction.** The
   instruction files are already kept (they are in the system prompt). Phaze has
   no plan or to-do state yet; this comes with the to-do work.
+- **Clearing old tool results in batches** (Claude's `clear_tool_uses`). It is
+  a beta server-side feature that the test servers here can't check; it needs a
+  run against the live API first.
+- **Re-injecting the plan and recently edited files after compaction:** done
+  in T10.
 
 ### T7: side jobs on a cheap model, and local-model settings
 Built:
@@ -294,13 +298,93 @@ Built:
   requests and no longer sends unset options as `null`.
 
 Not done here:
-- **Thinking off for helper calls:** Phaze never turns thinking on, so there
-  is nothing to turn off yet. It belongs with the model-list update (gap 3),
-  since newer models such as Claude Haiku 5.5 think by default.
+- **Thinking off for helper calls:** done in T8 as effort `low` on side jobs.
 - **llama-server slots and `--cache-reuse`:** no llama-server binary can be
   run in this environment to check the flags against, so this waits for a
   test on a real machine.
 
+### T8: current Claude models
+Built:
+- **Defaults move off Claude Sonnet 4.5 before it retires on 2026-11-30.**
+  The agent defaults to Sonnet 5.5 ($2/$10 per million tokens instead of
+  $3/$15) and side jobs to Haiku 5.5 ($0.10/$0.50 instead of Haiku 4.5's
+  $1/$5). A config that still names a retired model is sent as its
+  replacement (`claude::current_model_id`); Sonnet 4.5 only from its
+  retirement day on.
+- **Thinking blocks go back unchanged.** The 5.5 models think by default and
+  check that each thinking block comes back as it was produced. The stream now
+  keeps every content block (`StreamEvent::RawContent`, `Message::raw_content`)
+  and the next request resends that turn as it came, only when its text and
+  tool calls still match what history holds. Requests to those models also ask
+  the API to drop a stale block rather than fail
+  (`block_binding.prefix_mismatch_behavior: "drop_block"`, beta
+  `thinking-binding-controls-2026-08-01`), since compaction and trimming
+  rewrite history. The cache marker never lands on a thinking block.
+- **Effort.** `[llm] effort` (low, medium, high, xhigh, max) goes to models
+  that take `output_config.effort`; side jobs always run at `low`, which keeps
+  thinking short where the answer is a commit message or one completion.
+- **Haiku 5.5's long-prompt price.** Haiku 5.5 bills five times as much once a
+  prompt passes 100K tokens, so its context budget stops at 72K unless
+  `[llm] context_tokens` says otherwise.
+- **A refusal is an error,** not an empty reply that the loop would retry.
+- `max_tokens` is 32,000 for thinking models (thinking counts toward it) and
+  8,192 otherwise.
+
+Not done here: the bench has not been rerun against the real API (no key
+where this was built), so T8 has no results row yet.
+### T9: old tool results cleared in batches
+Built:
+- **One batch, before compaction.** Once the conversation passes 60% of the
+  context budget (compaction starts at 80%), every tool result of an earlier
+  turn becomes a one-line note naming the call and its arguments, its size,
+  and either "run it again" (read-only tools) or "the call already ran"
+  (writes and commands, which must not be repeated just to see their output)
+  (`ConversationHistory::clear_old_tool_results`). The turn being worked on
+  keeps its results, since the model may be building its answer from all of
+  them, and so do the newest three overall. Calls, replies and questions
+  stay, so every call still pairs with a result.
+- **Where it saves.** The CLI keeps tool results across turns, so long CLI
+  sessions gain most. The IDE chat already sends earlier turns as text only.
+  `Agent::with_tool_result_clearing(false)` turns it off.
+- **Measured** on the stress suite's 16-turn local-model session (budget from
+  a 16K window, tool output worth several budgets): with clearing, no summary
+  was needed (6 without) and the turn requests carried 228,318 prompt tokens
+  instead of 258,578 (-11.7%), before counting the 6 summary requests saved.
+  Every turn still got its exact answer.
+- **Only when it pays.** Clearing changes the start of the request, so a
+  prefix cache writes it once more. A batch must free at least 10% of the
+  budget and takes everything it may, so the next one comes only after the
+  conversation has grown back. Results under 600 bytes, and the `todo` and
+  `memory` tools' results, are never cleared.
+- A cleared read no longer counts as a repeat (`repeat_of`), so reading the
+  file again sends it in full.
+- The CLI, the IDE chat and Composer say how many outputs were cleared and the
+  tokens before and after; `-p --output json` emits `tool_results_cleared`.
+- Server-side clearing (Claude's `clear_tool_uses` beta) is not used: it works
+  on Claude only, and the test servers here can't check it.
+- On the Claude 5.5 models (T8), a thinking block that came after a cleared
+  result no longer matches its prefix; the request already asks the API to
+  drop such blocks rather than fail.
+### T10: the checklist and changed files survive compaction
+Built:
+- **Kept word for word under the summary.** When compaction folds part of
+  the conversation, the `todo` tool's newest list from that part and the
+  files it changed (`write_file`, `edit_file`, `delete_path`,
+  `create_directory`, and the destination of `move_path` and `copy_path`;
+  failed calls don't count) are appended to the model's summary under
+  "Kept across compaction" (`context::carried`,
+  `ConversationHistory::compact`). The model's summary can drop either; a
+  long task needs both to carry on without re-reading files to find out what
+  it already did.
+- **Merged across compactions.** The section lives in the summary text, so
+  the IDE, which rebuilds the history from the summary each turn, carries it
+  too. The next compaction reads it back, takes a newer list if the folded
+  part has one (or drops it when the list was emptied or a newer one is still
+  in view), and puts newly changed files first, 20 at most. A copy the model
+  makes of the section is replaced by the rebuilt one, so it appears once.
+- Claude Code and opencode re-inject the plan and recent files after
+  compaction the same way. It costs a few hundred tokens once per compaction
+  and saves the re-reads a lost plan causes.
 ### T11: terminal noise stripped from command output
 Built:
 - **`bash` returns the finished text** (`text::clean_terminal_output`, applied

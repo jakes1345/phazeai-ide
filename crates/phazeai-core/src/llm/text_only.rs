@@ -54,6 +54,7 @@ pub async fn text_only_stream(
             // No tools were offered, so there is nothing to call; usage and
             // the model's reasoning are not the reply.
             StreamEvent::ReasoningDelta(_)
+            | StreamEvent::RawContent(_)
             | StreamEvent::ToolCallStart { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::ToolCallEnd { .. }

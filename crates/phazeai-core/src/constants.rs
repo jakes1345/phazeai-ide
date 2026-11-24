@@ -20,7 +20,9 @@ pub mod models {
     pub const BASE_REVIEWER: &str = "deepseek-coder-v2:16b";
 
     /// Default cloud provider models
-    pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5-20250929";
+    /// Claude Sonnet 5.5: near-Opus coding at $2/$10 per million tokens.
+    /// Sonnet 4.5, the default before it, retires on November 30, 2026.
+    pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
     pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
     pub const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
     pub const DEFAULT_TOGETHER_MODEL: &str = "deepseek-r1-distill-llama-70b";
