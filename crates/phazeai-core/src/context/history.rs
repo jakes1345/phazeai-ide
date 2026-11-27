@@ -362,9 +362,7 @@ impl ConversationHistory {
             freed += m.content.len().div_ceil(3) - note.len().div_ceil(3);
             notes.push((i, note));
         }
-        let Some(&(first, _)) = notes.first() else {
-            return None;
-        };
+        let &(first, _) = notes.first()?;
         if (freed as f64) < budget as f64 * CLEAR_AT_LEAST_RATIO {
             return None;
         }
