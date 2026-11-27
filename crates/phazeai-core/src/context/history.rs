@@ -1,5 +1,5 @@
-use crate::llm::{Message, Role};
-use std::collections::VecDeque;
+use crate::llm::{Message, Role, ToolCall};
+use std::collections::{HashMap, VecDeque};
 
 pub struct ConversationHistory {
     messages: VecDeque<Message>,
@@ -11,6 +11,8 @@ pub struct ConversationHistory {
     /// Messages removed by [`Self::compact`] since this history was created
     /// or last cleared.
     folded: usize,
+    /// File reads recorded whole, by call id (see [`Self::remember_full_read`]).
+    full_reads: HashMap<String, String>,
 }
 
 impl ConversationHistory {
@@ -24,6 +26,7 @@ impl ConversationHistory {
             system_prompt: None,
             summary: None,
             folded: 0,
+            full_reads: HashMap::new(),
         }
     }
 
@@ -122,6 +125,45 @@ impl ConversationHistory {
         found
     }
 
+    /// Note that call `id`'s result, just recorded, is the whole of `result`:
+    /// a file read sent in full, which a later read of the same file can be
+    /// compared with ([`Self::shown_read`]). A result too long to be stored
+    /// whole is not remembered.
+    pub fn remember_full_read(&mut self, id: &str, result: &str) {
+        if stored_tool_result(result.to_string()) == result {
+            self.full_reads.insert(id.to_string(), result.to_string());
+        }
+    }
+
+    /// The newest call accepted by `same` whose result was remembered with
+    /// [`Self::remember_full_read`] and is still in the conversation word for
+    /// word, as (call id, that result). A result that compaction folded,
+    /// clearing replaced with a note or trimming cut no longer counts, since
+    /// the model can no longer read it.
+    pub fn shown_read(&self, same: impl Fn(&ToolCall) -> bool) -> Option<(String, &str)> {
+        for (i, m) in self.messages.iter().enumerate().rev() {
+            let Some(id) = m.tool_call_id.as_deref() else {
+                continue;
+            };
+            let Some(full) = self.full_reads.get(id) else {
+                continue;
+            };
+            if m.content != *full {
+                continue;
+            }
+            let call = self
+                .messages
+                .iter()
+                .take(i)
+                .rev()
+                .find_map(|earlier| earlier.tool_calls.as_ref()?.iter().find(|c| c.id == id));
+            if call.is_some_and(&same) {
+                return Some((id.to_string(), full.as_str()));
+            }
+        }
+        None
+    }
+
     pub fn add_message(&mut self, message: Message) {
         self.messages.push_back(message);
         self.trim_if_needed();
@@ -157,6 +199,7 @@ impl ConversationHistory {
         self.messages.clear();
         self.summary = None;
         self.folded = 0;
+        self.full_reads.clear();
     }
 
     /// The summary of compacted messages, if any compaction has happened.
@@ -260,6 +303,12 @@ impl ConversationHistory {
         let summary = super::carried::join(text, &carried);
         self.messages.drain(..upto);
         self.folded += upto;
+        let shown: std::collections::HashSet<&str> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        self.full_reads.retain(|id, _| shown.contains(id.as_str()));
         self.set_summary(summary);
     }
 
@@ -1297,5 +1346,64 @@ mod tests {
         let budget = h.estimate_tokens();
         h.clear_old_tool_results(budget).expect("cleared");
         assert_eq!(h.repeat_of(&["read_file"], &first), None);
+    }
+
+    /// `n` turns of `reads`, each one also remembered as a full read.
+    fn remembered_reads(n: usize, bytes: usize) -> ConversationHistory {
+        let mut h = reads(n, bytes);
+        let results: Vec<(String, String)> = h
+            .get_conversation_messages()
+            .into_iter()
+            .filter_map(|m| Some((m.tool_call_id?, m.content)))
+            .collect();
+        for (id, content) in results {
+            h.remember_full_read(&id, &content);
+        }
+        h
+    }
+
+    fn path_is(path: &'static str) -> impl Fn(&ToolCall) -> bool {
+        move |c| c.function.arguments.contains(path)
+    }
+
+    #[test]
+    fn a_remembered_read_is_found_while_it_is_shown_whole() {
+        let h = remembered_reads(3, 2000);
+        let (id, text) = h.shown_read(path_is("src/f1.rs")).expect("shown");
+        assert_eq!(id, "r1");
+        assert!(text.starts_with("fn f1()"));
+        assert_eq!(h.shown_read(path_is("src/other.rs")), None);
+        // A result recorded without being remembered (a note) is not one.
+        let plain = reads(3, 2000);
+        assert_eq!(plain.shown_read(path_is("src/f1.rs")), None);
+    }
+
+    #[test]
+    fn a_read_cleared_folded_or_cut_is_no_longer_shown() {
+        let mut h = remembered_reads(8, 3000);
+        let budget = h.estimate_tokens();
+        h.clear_old_tool_results(budget).expect("cleared");
+        assert_eq!(h.shown_read(path_is("src/f0.rs")), None);
+        assert!(h.shown_read(path_is("src/f7.rs")).is_some());
+
+        let mut h = remembered_reads(6, 2000);
+        let upto = h.compaction_point(10).expect("a cut");
+        h.compact(upto, "summary");
+        assert_eq!(h.shown_read(path_is("src/f0.rs")), None);
+        assert!(h.full_reads.len() < 6, "folded reads are forgotten");
+
+        let mut h = remembered_reads(2, 4000);
+        h.trim_to_token_budget(600);
+        assert_eq!(h.shown_read(path_is("src/f1.rs")), None);
+    }
+
+    #[test]
+    fn a_result_too_long_to_store_whole_is_not_remembered() {
+        let mut h = ConversationHistory::new();
+        h.add_message(call_with("big", "read_file", "{}"));
+        let huge = "x".repeat(20_000);
+        h.add_tool_result("big", huge.clone());
+        h.remember_full_read("big", &huge);
+        assert_eq!(h.shown_read(|_| true), None);
     }
 }
