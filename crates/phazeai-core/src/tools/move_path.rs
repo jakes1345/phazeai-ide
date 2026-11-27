@@ -11,6 +11,10 @@ impl Tool for MovePathTool {
         "move_path"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Move or rename a file or directory")
+    }
+
     fn description(&self) -> &str {
         "Move or rename a file or directory. Works across filesystems by falling back to copy+delete."
     }

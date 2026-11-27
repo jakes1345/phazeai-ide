@@ -15,33 +15,26 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Make a surgical edit to a file by replacing old_text with new_text. If old_text appears multiple times, you MUST provide 'context' (an exact string of surrounding code) to disambiguate, or set 'replace_all' to true."
+        "Replace old_text with new_text in a file. If old_text occurs more than once, you MUST give context (exact nearby text that picks one) or set replace_all."
     }
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to edit"
-                },
+                "path": { "type": "string" },
                 "old_text": {
                     "type": "string",
-                    "description": "The exact text to find and replace"
+                    "description": "Exact text to replace"
                 },
-                "new_text": {
-                    "type": "string",
-                    "description": "The text to replace old_text with"
-                },
+                "new_text": { "type": "string" },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all occurrences (default: false)",
-                    "default": false
+                    "description": "Replace every occurrence"
                 },
                 "context": {
                     "type": "string",
-                    "description": "Surrounding context to disambiguate when old_text appears multiple times"
+                    "description": "Exact text around the occurrence to replace"
                 }
             },
             "required": ["path", "old_text", "new_text"]

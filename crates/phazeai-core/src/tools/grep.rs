@@ -41,17 +41,14 @@ impl Tool for GrepTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "The regex pattern to search for"
-                },
+                "pattern": { "type": "string" },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search in (default: current directory)"
+                    "description": "Directory or file to search (default: current)"
                 },
                 "include": {
                     "type": "string",
-                    "description": "File glob pattern to include (e.g., '*.rs', '*.py')"
+                    "description": "Only files matching this glob, e.g. '*.rs'"
                 }
             },
             "required": ["pattern"]

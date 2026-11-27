@@ -12,6 +12,10 @@ impl Tool for FindPathTool {
         "find_path"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Find files and directories by name")
+    }
+
     fn description(&self) -> &str {
         "Find files and directories by name or regex pattern. Walks the directory tree respecting .gitignore. Use this to locate files when you know part of the filename but not the full path."
     }

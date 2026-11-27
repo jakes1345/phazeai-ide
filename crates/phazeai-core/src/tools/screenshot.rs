@@ -16,6 +16,10 @@ impl Tool for ScreenshotTool {
         "screenshot"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("A screenshot of the screen or a window")
+    }
+
     fn description(&self) -> &str {
         "Take a screenshot of the user's screen or a specific window. Saves the image to a file and returns the path. Use this to see what the user sees, debug UI issues, or document the current state of an application."
     }

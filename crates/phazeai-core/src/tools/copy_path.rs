@@ -12,6 +12,10 @@ impl Tool for CopyPathTool {
         "copy_path"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Copy a file or directory")
+    }
+
     fn description(&self) -> &str {
         "Copy a file or directory to a new location. For directories, copies recursively."
     }

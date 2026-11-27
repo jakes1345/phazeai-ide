@@ -13,6 +13,10 @@ impl Tool for FetchTool {
         "fetch"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("An HTTP request; web pages come back as text")
+    }
+
     fn description(&self) -> &str {
         "Make an HTTP request to a URL. Returns the response status, headers, and body. Use this to fetch web pages, API responses, or download content. Body is truncated to 50KB."
     }

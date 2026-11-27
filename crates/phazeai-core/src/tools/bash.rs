@@ -64,21 +64,17 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Returns stdout, stderr, and exit code. The working directory persists between calls."
+        "Run a bash command; returns stdout, stderr and exit code. The working directory persists between calls."
     }
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The bash command to execute"
-                },
+                "command": { "type": "string" },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds (default: 120)",
-                    "default": 120
+                    "description": "Timeout in seconds (default 120)"
                 }
             },
             "required": ["command"]

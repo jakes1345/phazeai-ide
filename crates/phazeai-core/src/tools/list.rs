@@ -14,7 +14,7 @@ impl Tool for ListFilesTool {
     }
 
     fn description(&self) -> &str {
-        "List files and directories. Respects .gitignore. Supports recursive listing."
+        "List files and directories. Respects .gitignore."
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -27,13 +27,9 @@ impl Tool for ListFilesTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory path to list (default: current directory)"
+                    "description": "Directory (default: current)"
                 },
-                "recursive": {
-                    "type": "boolean",
-                    "description": "Whether to list recursively (default: false)",
-                    "default": false
-                }
+                "recursive": { "type": "boolean" }
             }
         })
     }

@@ -188,6 +188,10 @@ impl Tool for MemoryTool {
         "memory"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Facts kept for later sessions")
+    }
+
     fn description(&self) -> &str {
         "Save facts for later sessions. Project memories (the default) are shown to every \
          session in this project, so store only what you would want to know next time: \

@@ -17,6 +17,10 @@ impl Tool for DownloadTool {
         "download"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Save a URL to a file")
+    }
+
     fn description(&self) -> &str {
         "Download a file from a URL and save it to the local filesystem. Supports any file type: images, archives, binaries, documents, etc. Maximum 100MB. Use this to download dependencies, assets, or any file the user needs."
     }

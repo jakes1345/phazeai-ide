@@ -406,6 +406,28 @@ Built:
   `FORCE_COLOR`, `--color=always`) and for progress output, which many tools
   print regardless.
 
+### T14: a leaner tool list
+Built:
+- **Shorter schemas for the eight tools sent with every request.**
+  Parameter descriptions that only repeated the parameter's name
+  (`path`, `command`, `content`, `pattern`, `new_text`) are gone, a default
+  is stated once instead of twice (the text and a `default` key), and the
+  `code_search`, `edit_file`, `bash`, `glob`, `list_files` and `write_file`
+  descriptions say the same in fewer words. What changes how the model
+  calls a tool stays: `edit_file`'s rule for repeated text, `read_file`'s
+  2,000-line limit and 1-based offset, `grep`'s 100-line cap,
+  `code_search`'s "words, not meaning".
+- **A short summary for each held-back tool** (`Tool::summary`), used for
+  its line in `more_tools` instead of the first sentence of its full
+  description. The model asks for a tool's parameters before calling it,
+  so the line only needs to say what the tool is for. A tool without one
+  falls back to the first sentence, and a test makes every tool held back
+  by default carry one.
+- **Measured** on the bench: tool schemas per request 1,266 → 957 tokens
+  (**-24.4%**; `more_tools` 362 → 291, `edit_file` 179 → 126,
+  `code_search` 178 → 117). Input sent 53,857 → 49,531 (**-8.0%**), Claude
+  bill 11,905 → 11,117 (**-6.6%**).
+
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -428,6 +450,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 | T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
 | T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
+| T14: leaner tool list | 49,531 | -59.7% | 89.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (53,857): **-8.0%** sent. Claude bill **11,117 (22.4% of sent)**, down from 11,905 (**-6.6%**). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

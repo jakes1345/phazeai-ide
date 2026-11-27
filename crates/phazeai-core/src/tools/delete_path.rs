@@ -11,6 +11,10 @@ impl Tool for DeletePathTool {
         "delete_path"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Delete a file or directory")
+    }
+
     fn description(&self) -> &str {
         "Delete a file or directory. Refuses to delete critical system paths. For directories, deletes recursively."
     }
