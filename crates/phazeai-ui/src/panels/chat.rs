@@ -324,7 +324,8 @@ fn format_chat_error(raw: &str) -> String {
     let lower = raw.to_lowercase();
     if lower.contains("ollama") && lower.contains("not found") && lower.contains("model") {
         return format!(
-            "Error: {raw}\n\nHint: selected Ollama model is missing.\nTry:\n- ollama pull llama3.2:3b\n- open Settings and switch to an installed model"
+            "Error: {raw}\n\nHint: selected Ollama model is missing.\nTry:\n- ollama pull {} (8 GB graphics card), or qwen3.5:4b on a smaller one\n- open Settings and switch to an installed model",
+            phazeai_core::constants::models::DEFAULT_OLLAMA_MODEL
         );
     }
     if lower.contains("connection refused") && lower.contains("11434") {

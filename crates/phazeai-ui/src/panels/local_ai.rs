@@ -267,6 +267,16 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
             .margin_vert(space::SM)
     });
 
+    let ollama_line = caption(theme, move || {
+        hardware.with(|h| match h {
+            Some(h) => format!(
+                "Using Ollama instead? `ollama pull {}` is the free model that fits this machine.",
+                catalog::recommend_ollama(h).tag
+            ),
+            None => String::new(),
+        })
+    });
+
     // ── catalog cards ───────────────────────────────────────────────────────
     let card_state = CardState {
         state: state.clone(),
@@ -475,6 +485,7 @@ pub fn local_ai_section(state: IdeState) -> impl IntoView {
         header,
         intro,
         hw_line,
+        ollama_line,
         cards,
         hub_list,
         container(empty()).style(|s| s.height(space::MD)),

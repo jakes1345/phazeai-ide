@@ -32,7 +32,7 @@ cargo run -p phazeai-cli    # terminal UI (binary name: phazeai)
 
 The first build downloads Floem from git and takes a while. A debug `target/` directory ends up around 14 GB.
 
-With no config file, PhazeAI talks to Ollama at `http://localhost:11434` using `llama3.2:3b`. So the shortest path to a working setup is `ollama pull llama3.2:3b` and then launching. To use something else, open Settings with Ctrl+, or edit the config file described below.
+With no config file, PhazeAI talks to Ollama at `http://localhost:11434` using `qwen3.5:9b` (Qwen3.5 9B, Apache 2.0, a 6.6 GB download that fits an 8 GB graphics card). So the shortest path to a working setup is `ollama pull qwen3.5:9b` and then launching. On a 4-6 GB card, or a machine with 12 GB of RAM or less and no GPU, pull `qwen3.5:4b` or `qwen3.5:2b` instead and pick it in Settings; `/local` in the terminal UI says which one fits. To use something else, open Settings with Ctrl+, or edit the config file described below.
 
 ## What works today
 
@@ -168,7 +168,7 @@ Settings live in `~/.config/phazeai/config.toml`. If the file doesn't exist Phaz
 ```toml
 [llm]
 provider = "ollama"
-model = "llama3.2:3b"
+model = "qwen3.5:9b"
 api_key_env = ""          # must be present, but keys come from the variables in the table above
 max_tokens = 8192
 # base_url = "http://192.168.1.20:11434"   # optional: provider on another address
