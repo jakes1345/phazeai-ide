@@ -406,6 +406,28 @@ Built:
   `FORCE_COLOR`, `--color=always`) and for progress output, which many tools
   print regardless.
 
+### T12: a file read again after a change sends only the changed lines
+Built:
+- **The lines that differ, against the read still shown.** When `read_file`
+  reads the same part of a file as an earlier call whose full result is still
+  in the conversation word for word, and the file has changed since (most
+  often by the agent's own edit), the model gets a short diff against that
+  read instead of the file: a header naming the earlier call, then one
+  `@@ -old +new @@` hunk per change, removed lines with `-`, added lines with
+  `+` and their line number now (`context::reread::change_note`). A file
+  read again unchanged still gets the "Unchanged" pointer to the first read.
+- **Line numbers are set aside when comparing,** so a line added near the top
+  lists that line alone, not every line below it whose number moved; the
+  hunk headers give the new positions.
+- **Only when it is safe and pays.** The earlier read must be remembered as a
+  full result (`ConversationHistory::remember_full_read`) and still be shown
+  whole: one that compaction folded, clearing (T9) replaced with a note or
+  trimming cut no longer counts, and the file is sent in full. The same goes
+  for another range of the file, and for a change large enough that the diff
+  would be more than half the file. Later reads keep comparing with that same
+  full read.
+- Claude Code tells its model about a changed file with the changed lines in
+  the same way.
 ### T13: web pages read as text, not HTML
 Built:
 - **`tools::readable`**: a small tolerant HTML scanner that writes the page
@@ -460,7 +482,8 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 | T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
 | T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
-| T13: readable web pages | 53,857 | -56.2% | 89.5% | 1,560 of 1,601 | The bench reads no web pages. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
+| T12: changed lines on re-read | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | Measured against main just before it, which had grown to 53,857 since T7 (new tools such as `code_search`): **-4.0%**. The re-read of `src/config.rs` after two edits fell from 929 new tokens to 216. Claude bill: **10,872 (21.0% of sent)**, down from 11,905 on that commit, **-8.7%**: the re-read was a cache write at 1.25x. |
+| T13: readable web pages | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | The bench reads no web pages, so it is unchanged from T12. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
