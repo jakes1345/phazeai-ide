@@ -1222,10 +1222,14 @@ impl Agent {
         let mut conversation = self.conversation.lock().await;
         let told = if success {
             repeat_note(&conversation, tool_name, &result_str)
+                .or_else(|| reread_note(&conversation, tool_call, &result_str))
         } else {
             None
         };
         conversation.add_tool_result(&tool_call.id, told.as_deref().unwrap_or(&result_str));
+        if success && told.is_none() && tool_name == "read_file" {
+            conversation.remember_full_read(&tool_call.id, &result_str);
+        }
     }
 
     async fn execute_tool(&self, tool_call: &ToolCall) -> (bool, String) {
@@ -1366,6 +1370,48 @@ fn repeat_note(conversation: &ConversationHistory, tool: &str, result: &str) -> 
         "Unchanged: same result as your earlier call {earlier}, which is still above. \
          Nothing it covers has changed since; use that result."
     ))
+}
+
+/// What the model is told instead of `result`, a `read_file` result, when it
+/// read the same part of the same file earlier, that read is still shown in
+/// full, and the file has changed since (typically by its own edits): only
+/// the lines that differ ([`crate::context::reread::change_note`]). `None`
+/// means send `result` itself.
+fn reread_note(
+    conversation: &ConversationHistory,
+    call: &ToolCall,
+    result: &str,
+) -> Option<String> {
+    if call.function.name != "read_file" || result.len() < REPEAT_NOTE_MIN_LEN {
+        return None;
+    }
+    let key = read_key(&call.parse_arguments().ok()?)?;
+    let (earlier, old) = conversation.shown_read(|c| {
+        c.function.name == "read_file"
+            && c.parse_arguments()
+                .ok()
+                .as_ref()
+                .and_then(read_key)
+                .as_ref()
+                == Some(&key)
+    })?;
+    crate::context::reread::change_note(&earlier, old, result)
+}
+
+/// Which part of which file a `read_file` call reads: the path as the tool
+/// resolves it (so `src/a.rs` and `./src/a.rs` match), the first line and
+/// the line limit.
+fn read_key(args: &Value) -> Option<(String, u64, Option<u64>)> {
+    let path = args.get("path")?.as_str()?;
+    let resolved = crate::tools::sandbox::resolve_within_workspace("read_file", path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    let first = args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1);
+    Some((resolved, first, args.get("limit").and_then(Value::as_u64)))
 }
 
 /// The result recorded for a tool call that Stop kept from starting.

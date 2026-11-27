@@ -18,6 +18,7 @@ pub mod memory;
 mod move_path;
 mod now;
 mod open;
+pub mod readable;
 pub mod render;
 pub mod sandbox;
 mod screenshot;

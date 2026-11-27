@@ -1,7 +1,9 @@
 //! A file the agent reads again without anything changing is not sent to the
 //! model a second time: the second result points at the first, which is
-//! still in the conversation. Anything that changed, or a first result that
-//! is no longer there in full, is sent again.
+//! still in the conversation. A file that changed in between sends only the
+//! lines that differ from that first read. A first result that is no longer
+//! there in full, or a change too large for a diff to save much, sends the
+//! file again.
 //!
 //! Drives the production loop (`Agent::run_with_events`) with a scripted
 //! model and the real file tools, then reads the conversation the next
@@ -133,7 +135,7 @@ async fn an_unchanged_file_read_again_points_at_the_first_read() {
 }
 
 #[tokio::test]
-async fn a_file_changed_in_between_is_sent_again_in_full() {
+async fn a_file_changed_in_between_sends_only_the_changed_lines() {
     let dir = tempfile::tempdir_in(workspace()).unwrap();
     let lib = dir.path().join("lib.rs");
     std::fs::write(&lib, long_source()).unwrap();
@@ -150,12 +152,46 @@ async fn a_file_changed_in_between_is_sent_again_in_full() {
     .await;
 
     assert_eq!(results.len(), 4);
-    assert!(results[2].1.contains("{ 700 }"), "{}", results[2].1);
-    // The read after the edit is new; the one after that repeats it.
+    // The read after the edit lists the one changed line against the first
+    // read, which is still above in full.
+    let note = &results[2].1;
     assert!(
-        results[3]
-            .1
-            .starts_with("Unchanged: same result as your earlier call c2"),
+        note.starts_with("Changed since your earlier read c0"),
+        "{note}"
+    );
+    assert!(
+        note.contains("@@ -8,1 +8,1 @@\n-pub fn function_7() -> u32 { 7 }\n+8\tpub fn function_7() -> u32 { 700 }"),
+        "{note}"
+    );
+    assert!(!note.contains("function_8"), "{note}");
+    assert!(note.len() * 4 < results[0].1.len());
+    // Reading once more still compares with that first read.
+    assert_eq!(&results[3].1, note);
+}
+
+#[tokio::test]
+async fn other_ranges_and_files_changed_throughout_are_sent_in_full() {
+    let dir = tempfile::tempdir_in(workspace()).unwrap();
+    let lib = dir.path().join("lib.rs");
+    std::fs::write(&lib, long_source()).unwrap();
+    let rewritten: String = (0..40)
+        .map(|n| format!("pub fn renamed_{n}() -> u64 {{ {n} * 2 }}\n"))
+        .collect();
+
+    let results = tool_results(calls(&[
+        ("read_file", json!({"path": lib, "limit": 10})),
+        ("write_file", json!({"path": lib, "content": rewritten})),
+        // Another range was never shown: sent as it is.
+        ("read_file", json!({"path": lib, "offset": 11, "limit": 10})),
+        // Every line changed: a diff would be no shorter, so the file is sent.
+        ("read_file", json!({"path": lib, "limit": 10})),
+    ]))
+    .await;
+
+    assert_eq!(results.len(), 4);
+    assert!(results[2].1.contains("renamed_10"), "{}", results[2].1);
+    assert!(
+        results[3].1.starts_with("1\tpub fn renamed_0"),
         "{}",
         results[3].1
     );

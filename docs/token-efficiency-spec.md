@@ -406,6 +406,59 @@ Built:
   `FORCE_COLOR`, `--color=always`) and for progress output, which many tools
   print regardless.
 
+### T12: a file read again after a change sends only the changed lines
+Built:
+- **The lines that differ, against the read still shown.** When `read_file`
+  reads the same part of a file as an earlier call whose full result is still
+  in the conversation word for word, and the file has changed since (most
+  often by the agent's own edit), the model gets a short diff against that
+  read instead of the file: a header naming the earlier call, then one
+  `@@ -old +new @@` hunk per change, removed lines with `-`, added lines with
+  `+` and their line number now (`context::reread::change_note`). A file
+  read again unchanged still gets the "Unchanged" pointer to the first read.
+- **Line numbers are set aside when comparing,** so a line added near the top
+  lists that line alone, not every line below it whose number moved; the
+  hunk headers give the new positions.
+- **Only when it is safe and pays.** The earlier read must be remembered as a
+  full result (`ConversationHistory::remember_full_read`) and still be shown
+  whole: one that compaction folded, clearing (T9) replaced with a note or
+  trimming cut no longer counts, and the file is sent in full. The same goes
+  for another range of the file, and for a change large enough that the diff
+  would be more than half the file. Later reads keep comparing with that same
+  full read.
+- Claude Code tells its model about a changed file with the changed lines in
+  the same way.
+### T13: web pages read as text, not HTML
+Built:
+- **`tools::readable`**: a small tolerant HTML scanner that writes the page
+  as Markdown-style text. Scripts, styles, inline SVG, `head`, navigation,
+  footers, form controls and anything `hidden` or `aria-hidden` are left
+  out; headings, lists, tables, code blocks, inline code and links are kept.
+  A link to the same site is written from its path, one elsewhere in full,
+  and an address already linked once is not repeated. No new dependency.
+- **`fetch` returns the readable text of a web page** (with its title and,
+  after a redirect, the final address). The 50 KB cap now applies to that
+  text, not to the raw HTML; up to 10 MB is read to get there. `raw: true`
+  gives the body as received with the response headers, which `fetch` used
+  to send on every call. Other bodies (JSON, plain text) are unchanged.
+- **`browse` uses the same converter,** so its `selector` parameter, which
+  was documented but did nothing, now keeps only the matching element
+  (`tag`, `.class`, `#id`, `tag.class`, `tag#id`); when nothing matches, the
+  whole page comes back with a note saying so. Its links resolve against the
+  final address.
+- **Both render as plain text** for the model: a status line, the title and
+  the text, instead of a JSON object.
+- **Measured** on seven saved real pages (four GitHub pages, a PyPI project
+  page, a rustdoc page and a GTK reference page), in `o200k` tokens, the
+  result as the model sees it before and after. `fetch` (old figures leave
+  out the response headers, so the real saving is larger): 108,062 → 36,172
+  (**-66.5%**). The old `fetch` cut raw HTML at 50 KB, which on the four
+  GitHub pages stops in `<head>` and scripts: 13,000 to 17,000 tokens each
+  with 20 to 34 visible words. Now each page costs 342 to 6,346 tokens and
+  holds the page's text. The PyPI page costs the same (15,005 → 15,023), now
+  as its text instead of its first 50 KB of markup. `browse` with its
+  default of no links: 28,342 → 22,887 (**-19.2%**), with more of each
+  page's content kept than the old converter kept.
 ### T14: a leaner tool list
 Built:
 - **Shorter schemas for the eight tools sent with every request.**
@@ -425,8 +478,8 @@ Built:
   by default carry one.
 - **Measured** on the bench: tool schemas per request 1,266 → 957 tokens
   (**-24.4%**; `more_tools` 362 → 291, `edit_file` 179 → 126,
-  `code_search` 178 → 117). Input sent 53,857 → 49,531 (**-8.0%**), Claude
-  bill 11,905 → 11,117 (**-6.6%**).
+  `code_search` 178 → 117). Input sent 51,718 → 47,392 (**-8.4%**), Claude
+  bill 10,872 → 10,084 (**-7.2%**), against `main` with T12 and T13.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
@@ -450,7 +503,9 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 | T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
 | T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
-| T14: leaner tool list | 49,531 | -59.7% | 89.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (53,857): **-8.0%** sent. Claude bill **11,117 (22.4% of sent)**, down from 11,905 (**-6.6%**). |
+| T12: changed lines on re-read | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | Measured against main just before it, which had grown to 53,857 since T7 (new tools such as `code_search`): **-4.0%**. The re-read of `src/config.rs` after two edits fell from 929 new tokens to 216. Claude bill: **10,872 (21.0% of sent)**, down from 11,905 on that commit, **-8.7%**: the re-read was a cache write at 1.25x. |
+| T13: readable web pages | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | The bench reads no web pages, so it is unchanged from T12. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
+| T14: leaner tool list | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (51,718): **-8.4%** sent. Claude bill **10,084 (21.2% of sent)**, down from 10,872 (**-7.2%**). Round 5 together (T12 to T14) against 53,857 before T12: **-12.0%** sent, Claude bill 11,905 → 10,084 (**-15.3%**). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
