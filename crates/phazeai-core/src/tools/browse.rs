@@ -15,6 +15,10 @@ impl Tool for BrowseTool {
         "browse"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("A web page, or one part of it, as text")
+    }
+
     fn description(&self) -> &str {
         "Browse a web page and extract its readable content as clean text. Strips HTML, ads, navigation, and scripts. Returns the main text content of the page. Use this to read documentation, articles, README files, or any web page."
     }

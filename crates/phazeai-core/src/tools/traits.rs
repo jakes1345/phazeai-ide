@@ -19,6 +19,14 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> Value;
 
+    /// A few words for this tool's line in [`MORE_TOOLS`] when it is held
+    /// back: what it is for, not how to call it, since the model asks for the
+    /// parameters before it calls. `None`, the default, uses the first
+    /// sentence of the description, cut at 100 characters.
+    fn summary(&self) -> Option<&str> {
+        None
+    }
+
     async fn execute(&self, params: Value) -> ToolResult;
 
     /// For a tool whose whole effect is writing one file (`write_file`,
@@ -195,15 +203,15 @@ impl ToolRegistry {
             return None;
         }
         let mut description = String::from(
-            "Use a tool not listed above. Call with `name` alone to get its parameters, \
-             then with `name` and `arguments` to run it. Tools:",
+            "Run a tool not listed above: call with `name` to get its parameters, then with \
+             `name` and `arguments`. Tools:",
         );
         for tool in self.deferred.values() {
-            description.push_str(&format!(
-                "\n- {}: {}",
-                tool.name(),
-                first_sentence(tool.description())
-            ));
+            let summary = match tool.summary() {
+                Some(summary) => summary.to_string(),
+                None => first_sentence(tool.description()),
+            };
+            description.push_str(&format!("\n- {}: {summary}", tool.name()));
         }
         Some(ToolDefinition {
             name: MORE_TOOLS.to_string(),
@@ -211,8 +219,8 @@ impl ToolRegistry {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Tool name" },
-                    "arguments": { "type": "object", "description": "The tool's arguments; leave out to get its parameters" }
+                    "name": { "type": "string" },
+                    "arguments": { "type": "object", "description": "Leave out to get the parameters" }
                 },
                 "required": ["name"]
             }),
@@ -371,6 +379,52 @@ mod tests {
         assert_eq!(registry.tool_count(), 3);
         let all: Vec<&str> = registry.list().iter().map(|t| t.name()).collect();
         assert_eq!(all, ["fetch", "now", "read_file"]);
+    }
+
+    #[test]
+    fn a_held_back_tool_is_listed_by_its_summary_or_first_sentence() {
+        struct Plain;
+        #[async_trait::async_trait]
+        impl Tool for Plain {
+            fn name(&self) -> &str {
+                "plain"
+            }
+            fn description(&self) -> &str {
+                "Does a plain thing. More detail the listing leaves out."
+            }
+            fn parameters_schema(&self) -> Value {
+                serde_json::json!({ "type": "object" })
+            }
+            async fn execute(&self, _params: Value) -> ToolResult {
+                Ok(Value::Null)
+            }
+        }
+        let mut registry = ToolRegistry::new();
+        registry.register_deferred(Box::new(super::super::NowTool));
+        registry.register_deferred(Box::new(Plain));
+        let listing = &registry.definitions()[0].description;
+        assert!(
+            listing.contains("\n- now: The current date and time"),
+            "{listing}"
+        );
+        assert!(
+            listing.ends_with("\n- plain: Does a plain thing."),
+            "{listing}"
+        );
+        assert!(!listing.contains("More detail"), "{listing}");
+    }
+
+    #[test]
+    fn every_tool_held_back_by_default_has_a_short_summary() {
+        let registry = ToolRegistry::default();
+        for name in registry.deferred.keys() {
+            let tool = registry.get(name).unwrap();
+            let summary = tool
+                .summary()
+                .unwrap_or_else(|| panic!("{name} has no summary"));
+            assert!(summary.len() <= 100, "{name}: {summary}");
+            assert!(!summary.ends_with('.'), "{name}: {summary}");
+        }
     }
 
     #[test]

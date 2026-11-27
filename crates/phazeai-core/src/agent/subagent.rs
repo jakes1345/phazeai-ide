@@ -188,6 +188,10 @@ impl Tool for SubagentTool {
         "subagent"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Ask a cheaper helper model a self-contained question about the code; only its answer comes back")
+    }
+
     fn description(&self) -> &str {
         "Hand a self-contained question about the code to a helper on a cheaper model; only its \
          answer comes back. Use it for searches that take many reads (where is X handled, how \

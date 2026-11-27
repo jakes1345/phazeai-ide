@@ -33,17 +33,14 @@ impl Tool for ReadFileTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The absolute or relative path to the file to read"
-                },
+                "path": { "type": "string" },
                 "offset": {
                     "type": "integer",
-                    "description": "Line number to start reading from (1-based)"
+                    "description": "First line, from 1"
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read"
+                    "description": "Number of lines"
                 }
             },
             "required": ["path"]
@@ -127,21 +124,15 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does."
+        "Write a file, creating it or replacing its content."
     }
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The absolute or relative path to the file to write"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The content to write to the file"
-                }
+                "path": { "type": "string" },
+                "content": { "type": "string" }
             },
             "required": ["path", "content"]
         })

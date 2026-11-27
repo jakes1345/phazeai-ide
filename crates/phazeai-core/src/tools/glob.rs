@@ -16,7 +16,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.ts'). Respects .gitignore."
+        "Find files matching a glob pattern such as '**/*.rs'. Respects .gitignore."
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -27,13 +27,10 @@ impl Tool for GlobTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob pattern to match files against"
-                },
+                "pattern": { "type": "string" },
                 "path": {
                     "type": "string",
-                    "description": "Base directory to search in (default: current directory)"
+                    "description": "Directory to search (default: current)"
                 }
             },
             "required": ["pattern"]

@@ -86,6 +86,10 @@ impl Tool for TodoTool {
         "todo"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("A checklist the user sees, for a task of three or more steps")
+    }
+
     fn description(&self) -> &str {
         "Keep a checklist for a task of three or more steps, which the user sees. Send the \
          whole list each time: mark the item you are on doing and items you finish done."

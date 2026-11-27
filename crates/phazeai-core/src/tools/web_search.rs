@@ -10,6 +10,10 @@ impl Tool for WebSearchTool {
         "web_search"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Search the web")
+    }
+
     fn description(&self) -> &str {
         "Search the internet using DuckDuckGo. Returns a list of results with titles, URLs, and snippets. Use this to find documentation, solutions, or information online."
     }

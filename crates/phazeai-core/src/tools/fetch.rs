@@ -20,6 +20,10 @@ impl Tool for FetchTool {
         "fetch"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("An HTTP request; web pages come back as text")
+    }
+
     fn description(&self) -> &str {
         "Make an HTTP request to a URL. A web page comes back as readable text (Markdown; \
          same-site links start with /); other bodies as they are. At most 50 KB."

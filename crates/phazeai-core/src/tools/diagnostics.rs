@@ -20,6 +20,10 @@ impl Tool for DiagnosticsTool {
         "diagnostics"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("The project's compiler and linter errors")
+    }
+
     fn description(&self) -> &str {
         "Get compiler/linter diagnostics (errors, warnings) for the project. Runs language-specific checkers: `cargo check` for Rust, `npx tsc --noEmit` for TypeScript, `python -m py_compile` for Python. Returns structured error information with file, line, and message."
     }

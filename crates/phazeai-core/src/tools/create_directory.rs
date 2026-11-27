@@ -11,6 +11,10 @@ impl Tool for CreateDirectoryTool {
         "create_directory"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Make a directory and its parents")
+    }
+
     fn description(&self) -> &str {
         "Create a directory (and any missing parent directories). Succeeds silently if the directory already exists."
     }

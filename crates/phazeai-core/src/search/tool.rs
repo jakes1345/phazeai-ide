@@ -64,12 +64,10 @@ impl Tool for CodeSearchTool {
              uses those words. Respects .gitignore. Returns up to top_k files, each with its best \
              matching line range (start_line..end_line), a score and a snippet."
         } else {
-            "Search the codebase by keywords. Source files are cut into ~40-line chunks and ranked with \
-             BM25 keyword scoring; identifiers are split into words, so 'json config' finds \
-             parseJsonConfig and parse_json_config, and file and folder names count as keywords too. \
-             It matches the words you give it, not their meaning: use words that appear in the code. \
-             Respects .gitignore. Returns up to top_k files, each with its best matching line range \
-             (start_line..end_line), a score and a snippet."
+            "Search the code by keywords (BM25 over ~40-line chunks; identifiers and file names are \
+             split into words, so 'json config' finds parse_json_config). It matches words, not \
+             meaning: use words that appear in the code. Returns the best files, each with a line \
+             range, score and snippet."
         }
     }
 
@@ -81,13 +79,10 @@ impl Tool for CodeSearchTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Keywords or a short phrase describing what to search for"
-                },
+                "query": { "type": "string" },
                 "top_k": {
                     "type": "integer",
-                    "description": "Number of results to return (default: 5, max: 20)"
+                    "description": "Files to return (default 5, max 20)"
                 }
             },
             "required": ["query"]
@@ -136,6 +131,10 @@ impl BuildIndexTool {
 impl Tool for BuildIndexTool {
     fn name(&self) -> &str {
         "build_search_index"
+    }
+
+    fn summary(&self) -> Option<&str> {
+        Some("Rebuild code_search's index after many files changed")
     }
 
     fn description(&self) -> &str {

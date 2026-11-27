@@ -459,6 +459,27 @@ Built:
   as its text instead of its first 50 KB of markup. `browse` with its
   default of no links: 28,342 → 22,887 (**-19.2%**), with more of each
   page's content kept than the old converter kept.
+### T14: a leaner tool list
+Built:
+- **Shorter schemas for the eight tools sent with every request.**
+  Parameter descriptions that only repeated the parameter's name
+  (`path`, `command`, `content`, `pattern`, `new_text`) are gone, a default
+  is stated once instead of twice (the text and a `default` key), and the
+  `code_search`, `edit_file`, `bash`, `glob`, `list_files` and `write_file`
+  descriptions say the same in fewer words. What changes how the model
+  calls a tool stays: `edit_file`'s rule for repeated text, `read_file`'s
+  2,000-line limit and 1-based offset, `grep`'s 100-line cap,
+  `code_search`'s "words, not meaning".
+- **A short summary for each held-back tool** (`Tool::summary`), used for
+  its line in `more_tools` instead of the first sentence of its full
+  description. The model asks for a tool's parameters before calling it,
+  so the line only needs to say what the tool is for. A tool without one
+  falls back to the first sentence, and a test makes every tool held back
+  by default carry one.
+- **Measured** on the bench: tool schemas per request 1,266 → 957 tokens
+  (**-24.4%**; `more_tools` 362 → 291, `edit_file` 179 → 126,
+  `code_search` 178 → 117). Input sent 51,718 → 47,392 (**-8.4%**), Claude
+  bill 10,872 → 10,084 (**-7.2%**), against `main` with T12 and T13.
 
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
@@ -484,6 +505,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
 | T12: changed lines on re-read | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | Measured against main just before it, which had grown to 53,857 since T7 (new tools such as `code_search`): **-4.0%**. The re-read of `src/config.rs` after two edits fell from 929 new tokens to 216. Claude bill: **10,872 (21.0% of sent)**, down from 11,905 on that commit, **-8.7%**: the re-read was a cache write at 1.25x. |
 | T13: readable web pages | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | The bench reads no web pages, so it is unchanged from T12. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
+| T14: leaner tool list | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (51,718): **-8.4%** sent. Claude bill **10,084 (21.2% of sent)**, down from 10,872 (**-7.2%**). Round 5 together (T12 to T14) against 53,857 before T12: **-12.0%** sent, Claude bill 11,905 → 10,084 (**-15.3%**). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

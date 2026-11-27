@@ -9,6 +9,10 @@ impl Tool for NowTool {
         "now"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("The current date and time")
+    }
+
     fn description(&self) -> &str {
         "Get the current date, time, timezone, and unix timestamp. Useful for time-aware operations, logging, and timestamp generation."
     }

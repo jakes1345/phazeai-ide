@@ -11,6 +11,10 @@ impl Tool for OpenTool {
         "open"
     }
 
+    fn summary(&self) -> Option<&str> {
+        Some("Open a file or URL in the system's default app")
+    }
+
     fn description(&self) -> &str {
         "Open a file or URL with the system's default application. For files, this opens them in the default editor or viewer. For URLs, opens in the default browser."
     }
