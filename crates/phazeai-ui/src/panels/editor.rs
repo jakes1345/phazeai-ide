@@ -4535,6 +4535,11 @@ pub fn editor_panel(
                 let fim_file = tab.path.clone();
                 // The text the last request was for (`None`: not seen yet).
                 let fim_seen: Rc<RefCell<Option<u64>>> = Rc::new(RefCell::new(None));
+                // Answers kept for reuse: typing what a suggestion shows, or
+                // backspacing to text already asked about, sends nothing.
+                let fim_memory = Arc::new(std::sync::Mutex::new(
+                    phazeai_core::fim_memory::SuggestionMemory::new(),
+                ));
 
                 create_effect(move |_| {
                     if active_idx.get() != Some(i) {
@@ -4576,6 +4581,19 @@ pub fn editor_panel(
                     if !typed || prefix.trim().is_empty() {
                         return;
                     }
+                    let reuse = fim_memory
+                        .lock()
+                        .map(|mut m| m.at_pause(&prefix, &suffix))
+                        .unwrap_or(phazeai_core::fim_memory::AtPause::Ask);
+                    match reuse {
+                        phazeai_core::fim_memory::AtPause::Show(text) => {
+                            ghost_text.set(Some(text));
+                            return;
+                        }
+                        phazeai_core::fim_memory::AtPause::Nothing => return,
+                        phazeai_core::fim_memory::AtPause::Ask => {}
+                    }
+                    let memory = Arc::clone(&fim_memory);
                     let fim_file = fim_file.clone();
                     let lang = fim_file
                         .extension()
@@ -4601,14 +4619,22 @@ pub fn editor_panel(
                         };
                         // `fim_complete` reads config.toml again, so AI
                         // completions turned off during the wait send nothing.
-                        let suggestion = rt
-                            .block_on(phazeai_core::fim::fim_complete(
-                                &fim_file, &prefix, &suffix, &lang,
-                            ))
-                            .unwrap_or_default();
+                        let answer = rt.block_on(phazeai_core::fim::fim_complete(
+                            &fim_file, &prefix, &suffix, &lang,
+                        ));
+                        // A failed request is not an answer: it may work
+                        // next time, so it isn't kept.
+                        let Ok(suggestion) = answer else {
+                            return;
+                        };
 
                         // One last generation check before writing to channel.
-                        if gen_check.load(Ordering::SeqCst) == my_gen && !suggestion.is_empty() {
+                        let current = gen_check.load(Ordering::SeqCst) == my_gen;
+                        let shown = current && !suggestion.is_empty();
+                        if let Ok(mut m) = memory.lock() {
+                            m.remember(&prefix, &suffix, &suggestion, shown);
+                        }
+                        if shown {
                             let _ = tx.try_send(suggestion);
                         }
                     });
