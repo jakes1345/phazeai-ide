@@ -1,9 +1,16 @@
 use crate::error::PhazeError;
+use crate::tools::readable;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
+/// The most of a body the model is given, in bytes: of the readable text for
+/// a web page, of the body itself otherwise.
 const MAX_RESPONSE_BYTES: usize = 50_000;
+/// The most read from the network. A page is cut to its readable text before
+/// [`MAX_RESPONSE_BYTES`] applies, and pages run to several hundred KB of
+/// HTML, so far more than that is read; this only bounds memory.
+const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 pub struct FetchTool;
 
@@ -14,7 +21,8 @@ impl Tool for FetchTool {
     }
 
     fn description(&self) -> &str {
-        "Make an HTTP request to a URL. Returns the response status, headers, and body. Use this to fetch web pages, API responses, or download content. Body is truncated to 50KB."
+        "Make an HTTP request to a URL. A web page comes back as readable text (Markdown; \
+         same-site links start with /); other bodies as they are. At most 50 KB."
     }
 
     fn is_concurrency_safe(&self) -> bool {
@@ -46,6 +54,10 @@ impl Tool for FetchTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Request timeout in seconds (default: 30)"
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "Return the body exactly as received, with the response headers (default: false)"
                 }
             },
             "required": ["url"]
@@ -67,6 +79,8 @@ impl Tool for FetchTool {
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(30);
+
+        let raw = params.get("raw").and_then(Value::as_bool).unwrap_or(false);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -103,15 +117,16 @@ impl Tool for FetchTool {
             request = request.body(body.to_string());
         }
 
-        let response = request
+        let mut response = request
             .send()
             .await
             .map_err(|e| PhazeError::tool("fetch", format!("Request failed: {e}")))?;
 
         let status = response.status().as_u16();
         let status_text = response.status().canonical_reason().unwrap_or("Unknown");
+        let final_url = response.url().clone();
 
-        let response_headers: HashMap<String, String> = response
+        let response_headers: BTreeMap<String, String> = response
             .headers()
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
@@ -122,28 +137,61 @@ impl Tool for FetchTool {
             .cloned()
             .unwrap_or_default();
 
-        let bytes = response
-            .bytes()
+        let mut bytes = Vec::new();
+        let mut download_cut = false;
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| PhazeError::tool("fetch", format!("Failed to read response: {e}")))?;
+            .map_err(|e| PhazeError::tool("fetch", format!("Failed to read response: {e}")))?
+        {
+            let room = MAX_DOWNLOAD_BYTES - bytes.len();
+            if chunk.len() > room {
+                bytes.extend_from_slice(&chunk[..room]);
+                download_cut = true;
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
 
-        let truncated = bytes.len() > MAX_RESPONSE_BYTES;
-        let body_bytes = if truncated {
-            &bytes[..MAX_RESPONSE_BYTES]
-        } else {
-            &bytes[..]
-        };
-
-        let body = String::from_utf8_lossy(body_bytes).to_string();
-
-        Ok(serde_json::json!({
+        let mut out = serde_json::json!({
             "status": status,
             "status_text": status_text,
-            "headers": response_headers,
             "content_type": content_type,
-            "body": body,
             "body_bytes": bytes.len(),
-            "truncated": truncated,
-        }))
+        });
+        if final_url.as_str() != url {
+            out["url"] = Value::String(final_url.to_string());
+        }
+
+        let received = String::from_utf8_lossy(&bytes);
+        let body = if !raw && readable::is_html(&content_type) {
+            let page = readable::to_text(
+                &received,
+                &readable::Options {
+                    links: true,
+                    base: Some(&final_url),
+                    selector: None,
+                },
+            );
+            if !page.title.is_empty() {
+                out["title"] = Value::String(page.title);
+            }
+            out["format"] = Value::String("readable".into());
+            page.text
+        } else {
+            received.into_owned()
+        };
+        if raw {
+            out["headers"] = serde_json::to_value(&response_headers).unwrap_or_default();
+        }
+
+        let truncated = download_cut || body.len() > MAX_RESPONSE_BYTES;
+        out["body"] =
+            Value::String(crate::text::truncate_bytes(&body, MAX_RESPONSE_BYTES).to_string());
+        out["truncated"] = Value::Bool(truncated);
+        if truncated {
+            out["body_text_bytes"] = Value::from(body.len());
+        }
+        Ok(out)
     }
 }
