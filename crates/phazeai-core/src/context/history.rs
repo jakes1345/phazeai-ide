@@ -325,12 +325,15 @@ impl ConversationHistory {
     /// [`NEVER_CLEARED`] tools and short results (under
     /// [`MIN_CLEARED_BYTES`]) stay too.
     ///
-    /// Each clearing changes the start of the request, so a provider's prefix
-    /// cache has to write it again once. That is worth it only for a batch:
-    /// nothing is cleared unless the batch frees at least
-    /// [`CLEAR_AT_LEAST_RATIO`] of `budget`, and a batch takes every result
-    /// it may, so the next one comes only after the conversation has grown
-    /// back. Returns `None` when nothing was cleared.
+    /// Each clearing changes the conversation from the first cleared result
+    /// on, so a provider's prefix cache has to write that part again once.
+    /// That is worth it only for a batch: nothing is cleared unless the batch
+    /// frees at least [`CLEAR_AT_LEAST_RATIO`] of `budget`, and at least as
+    /// many tokens as the cache would write again (below
+    /// [`CLEAR_ANYWAY_RATIO`] of `budget`; past it, a summary would cost
+    /// more). A batch takes every result it may, so the next one comes only
+    /// after the conversation has grown back. Returns `None` when nothing was
+    /// cleared.
     pub fn clear_old_tool_results(&mut self, budget: usize) -> Option<Cleared> {
         let tokens_before = self.estimate_tokens();
         if (tokens_before as f64) < budget as f64 * CLEAR_TRIGGER_RATIO {
@@ -359,7 +362,25 @@ impl ConversationHistory {
             freed += m.content.len().div_ceil(3) - note.len().div_ceil(3);
             notes.push((i, note));
         }
-        if notes.is_empty() || (freed as f64) < budget as f64 * CLEAR_AT_LEAST_RATIO {
+        let Some(&(first, _)) = notes.first() else {
+            return None;
+        };
+        if (freed as f64) < budget as f64 * CLEAR_AT_LEAST_RATIO {
+            return None;
+        }
+        // A prefix cache keeps the conversation up to the first cleared
+        // result and writes everything after it again. Unless the
+        // conversation is close to being compacted (which costs more), the
+        // batch has to free at least as much as that rewrite, so it pays for
+        // itself within a few requests rather than dozens.
+        let rewrite = self
+            .messages
+            .range(first..)
+            .map(message_tokens)
+            .sum::<usize>()
+            .saturating_sub(freed);
+        let near_compaction = tokens_before as f64 >= budget as f64 * CLEAR_ANYWAY_RATIO;
+        if freed < rewrite && !near_compaction {
             return None;
         }
         let results = notes.len();
@@ -576,6 +597,12 @@ pub const KEEP_TOOL_RESULTS: usize = 3;
 /// A clearing has to free at least this share of the budget; a smaller one
 /// would cost a cache write for little gain.
 pub const CLEAR_AT_LEAST_RATIO: f64 = 0.1;
+
+/// From this share of the budget, just under compaction's trigger (0.8), a
+/// batch is cleared even when it frees less than it makes a prefix cache
+/// write again: a summary would rewrite the whole conversation and cost a
+/// request of its own.
+pub const CLEAR_ANYWAY_RATIO: f64 = 0.75;
 
 /// Results shorter than this are left alone: the note would save next to
 /// nothing.
@@ -1240,6 +1267,33 @@ mod tests {
                 .clear_old_tool_results(small.estimate_tokens())
                 .map(|c| c.results),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn a_batch_that_frees_less_than_the_cache_rewrites_waits_for_compaction_to_near() {
+        // Four reads: only the oldest may go, about 1,000 tokens, and a
+        // prefix cache would write the three turns after it again, about
+        // 3,000.
+        let mut h = reads(4, 3000);
+        let tokens = h.estimate_tokens();
+        let past_trigger = (tokens as f64 / (CLEAR_TRIGGER_RATIO + 0.01)) as usize;
+        assert!((tokens as f64) < past_trigger as f64 * CLEAR_ANYWAY_RATIO);
+        assert_eq!(h.clear_old_tool_results(past_trigger), None);
+        // Close to compaction, a summary would cost more: it clears.
+        let near = (tokens as f64 / CLEAR_ANYWAY_RATIO) as usize;
+        assert_eq!(h.clear_old_tool_results(near).map(|c| c.results), Some(1));
+    }
+
+    #[test]
+    fn a_batch_that_frees_more_than_the_cache_rewrites_clears_early() {
+        // Eight reads: five may go, and they free more than the turns
+        // after the first of them hold.
+        let mut h = reads(8, 3000);
+        let budget = (h.estimate_tokens() as f64 / (CLEAR_TRIGGER_RATIO + 0.01)) as usize;
+        assert_eq!(
+            h.clear_old_tool_results(budget).map(|c| c.results),
+            Some(8 - KEEP_TOOL_RESULTS)
         );
     }
 
