@@ -481,6 +481,29 @@ Built:
   `code_search` 178 → 117). Input sent 51,718 → 47,392 (**-8.4%**), Claude
   bill 10,872 → 10,084 (**-7.2%**), against `main` with T12 and T13.
 
+### T15: clearing that pays for its cache rewrite
+Built:
+- **The problem.** T9's clearing changes the conversation from the first
+  cleared result on, and Claude caches only up to a breakpoint, so every
+  clearing writes the rest of the conversation again at 1.25x. On the
+  long-session bench, 8 of 32 requests read only the system prompt from
+  cache and wrote everything after it; three of them came one after another,
+  each clearing one more result as it aged out of the newest three.
+- **The rule** (`ConversationHistory::clear_old_tool_results`). A batch must
+  still free a tenth of the budget, and now also at least as many tokens as
+  the cache will write again (the conversation from the first cleared result
+  to the end, after clearing). A smaller batch waits until more has piled up
+  behind it. From 75% of the budget (`CLEAR_ANYWAY_RATIO`), just under
+  compaction's 80%, it clears anyway: a summary rewrites everything and costs
+  a request of its own.
+- **Measured** on the long-session bench: cache writes 33,330 → 26,816
+  (-19.5%), Claude bill 51,868 → 45,028 input-token units (**-13.2%**), still
+  no summary. Raw tokens sent rise 135,384 → 141,897 (+4.8%), since results
+  stay a little longer; every provider that caches (Claude, OpenAI,
+  DeepSeek, llama.cpp's prompt cache) pays for the rewrite the rule avoids.
+  The stress suite's local session still needs no summary (6 without
+  clearing); its raw tokens go from 228,318 to 236,282 for the same reason.
+  The short bench never clears and is unchanged.
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -506,6 +529,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T12: changed lines on re-read | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | Measured against main just before it, which had grown to 53,857 since T7 (new tools such as `code_search`): **-4.0%**. The re-read of `src/config.rs` after two edits fell from 929 new tokens to 216. Claude bill: **10,872 (21.0% of sent)**, down from 11,905 on that commit, **-8.7%**: the re-read was a cache write at 1.25x. |
 | T13: readable web pages | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | The bench reads no web pages, so it is unchanged from T12. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
 | T14: leaner tool list | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (51,718): **-8.4%** sent. Claude bill **10,084 (21.2% of sent)**, down from 10,872 (**-7.2%**). Round 5 together (T12 to T14) against 53,857 before T12: **-12.0%** sent, Claude bill 11,905 → 10,084 (**-15.3%**). |
+| T15: clearing that pays | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **45,028**, down from 51,868 (**-13.2%**); cache writes 33,330 → 26,816; raw sent 135,384 → 141,897 (+4.8%). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
