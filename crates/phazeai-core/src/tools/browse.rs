@@ -1,9 +1,7 @@
-/// Web browsing tool — fetches a URL and converts HTML to clean readable text.
-///
-/// Unlike the raw `fetch` tool which returns the full HTTP response,
-/// this tool extracts the main content from web pages, strips navigation/ads,
-/// and returns clean text suitable for the AI to read and understand.
+/// Web browsing tool — fetches a URL and converts HTML to clean readable text
+/// ([`crate::tools::readable`]), optionally only the part a selector picks.
 use crate::error::PhazeError;
+use crate::tools::readable;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
 
@@ -31,7 +29,7 @@ impl Tool for BrowseTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Optional CSS selector to extract specific content (e.g., 'article', 'main', '.content')"
+                    "description": "Optional element to keep, as tag, .class, #id, tag.class or tag#id (e.g. 'main', 'article', '.content'); the whole page if nothing matches"
                 },
                 "include_links": {
                     "type": "boolean",
@@ -85,11 +83,32 @@ impl Tool for BrowseTool {
             .await
             .map_err(|e| PhazeError::tool("browse", format!("Failed to read page: {e}")))?;
 
-        // Extract title
-        let title = extract_html_title(&html);
-
-        // Convert HTML to readable text
-        let text = html_to_text(&html, include_links);
+        let selector = params
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        let base = reqwest::Url::parse(&final_url).ok();
+        let page = if readable::is_html(&content_type) || content_type.is_empty() {
+            readable::to_text(
+                &html,
+                &readable::Options {
+                    links: include_links,
+                    base: base.as_ref(),
+                    selector,
+                },
+            )
+        } else {
+            readable::Page {
+                title: String::new(),
+                text: html,
+                selected: false,
+            }
+        };
+        let note = selector
+            .filter(|_| !page.selected)
+            .map(|s| format!("nothing matched {s:?}; showing the whole page"));
+        let title = page.title;
+        let text = page.text;
 
         // Truncate if too long
         let truncated = text.len() > MAX_CONTENT_CHARS;
@@ -111,209 +130,9 @@ impl Tool for BrowseTool {
             "content": content,
             "content_length": content.len(),
             "truncated": truncated,
+            "note": note,
         }))
     }
-}
-
-fn extract_html_title(html: &str) -> String {
-    if let Some(start) = html.find("<title") {
-        let after_tag = &html[start..];
-        if let Some(close_bracket) = after_tag.find('>') {
-            let after_open = &after_tag[close_bracket + 1..];
-            if let Some(end) = after_open.find("</title>") {
-                return after_open[..end].trim().to_string();
-            }
-        }
-    }
-    String::new()
-}
-
-/// Convert HTML to readable text, stripping tags and extracting content.
-fn html_to_text(html: &str, include_links: bool) -> String {
-    let mut result = String::with_capacity(html.len() / 3);
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut in_style = false;
-    let mut current_tag = String::new();
-    let mut consecutive_newlines = 0;
-
-    let chars: Vec<char> = html.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        let ch = chars[i];
-
-        if ch == '<' {
-            in_tag = true;
-            current_tag.clear();
-            i += 1;
-            continue;
-        }
-
-        if ch == '>' && in_tag {
-            in_tag = false;
-            let tag_lower = current_tag.to_lowercase();
-            let tag_name = tag_lower
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('/');
-
-            // Track script/style blocks
-            if tag_lower.starts_with("script") {
-                in_script = true;
-            } else if tag_lower.starts_with("/script") {
-                in_script = false;
-            } else if tag_lower.starts_with("style") {
-                in_style = true;
-            } else if tag_lower.starts_with("/style") {
-                in_style = false;
-            }
-
-            // Block elements get line breaks
-            if matches!(
-                tag_name,
-                "p" | "div"
-                    | "br"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-                    | "li"
-                    | "tr"
-                    | "blockquote"
-                    | "pre"
-                    | "hr"
-                    | "section"
-                    | "article"
-                    | "header"
-                    | "footer"
-            ) && consecutive_newlines < 2
-            {
-                result.push('\n');
-                consecutive_newlines += 1;
-            }
-
-            // Headers get markdown-style formatting
-            if tag_name == "h1" && !tag_lower.starts_with('/') {
-                result.push_str("# ");
-            } else if tag_name == "h2" && !tag_lower.starts_with('/') {
-                result.push_str("## ");
-            } else if tag_name == "h3" && !tag_lower.starts_with('/') {
-                result.push_str("### ");
-            }
-
-            // List items get bullet points
-            if tag_name == "li" && !tag_lower.starts_with('/') {
-                result.push_str("• ");
-            }
-
-            // Handle links
-            if include_links && tag_lower.starts_with("a ") {
-                if let Some(href_start) = tag_lower.find("href=\"") {
-                    let href_content = &tag_lower[href_start + 6..];
-                    if let Some(href_end) = href_content.find('"') {
-                        let href = &href_content[..href_end];
-                        if href.starts_with("http") {
-                            result.push('[');
-                            // The link text will be added normally, closing ] and (url) added at </a>
-                        }
-                    }
-                }
-            }
-
-            i += 1;
-            continue;
-        }
-
-        if in_tag {
-            current_tag.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // Skip script and style content
-        if in_script || in_style {
-            i += 1;
-            continue;
-        }
-
-        // Handle HTML entities
-        if ch == '&' {
-            let remaining: String = chars[i..std::cmp::min(i + 10, len)].iter().collect();
-            if remaining.starts_with("&amp;") {
-                result.push('&');
-                i += 5;
-                consecutive_newlines = 0;
-                continue;
-            } else if remaining.starts_with("&lt;") {
-                result.push('<');
-                i += 4;
-                consecutive_newlines = 0;
-                continue;
-            } else if remaining.starts_with("&gt;") {
-                result.push('>');
-                i += 4;
-                consecutive_newlines = 0;
-                continue;
-            } else if remaining.starts_with("&quot;") {
-                result.push('"');
-                i += 6;
-                consecutive_newlines = 0;
-                continue;
-            } else if remaining.starts_with("&nbsp;") {
-                result.push(' ');
-                i += 6;
-                consecutive_newlines = 0;
-                continue;
-            } else if remaining.starts_with("&#") {
-                // Numeric entity
-                if let Some(semi) = remaining.find(';') {
-                    let num_str = &remaining[2..semi];
-                    let code = if num_str.starts_with('x') || num_str.starts_with('X') {
-                        u32::from_str_radix(&num_str[1..], 16).ok()
-                    } else {
-                        num_str.parse().ok()
-                    };
-                    if let Some(c) = code.and_then(char::from_u32) {
-                        result.push(c);
-                    }
-                    i += semi + 1;
-                    consecutive_newlines = 0;
-                    continue;
-                }
-            }
-        }
-
-        // Normal character
-        if ch == '\n' || ch == '\r' {
-            if consecutive_newlines < 2 {
-                result.push('\n');
-                consecutive_newlines += 1;
-            }
-        } else if ch == ' ' || ch == '\t' {
-            if !result.ends_with(' ') && !result.ends_with('\n') {
-                result.push(' ');
-            }
-        } else {
-            result.push(ch);
-            consecutive_newlines = 0;
-        }
-
-        i += 1;
-    }
-
-    // Clean up excessive whitespace
-    let lines: Vec<&str> = result
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -321,23 +140,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_html_to_text() {
-        let html = r#"<html><head><title>Test</title><style>body{}</style></head>
-        <body><h1>Hello World</h1><p>This is a <b>test</b> page.</p>
-        <script>alert('hi')</script>
-        <ul><li>Item 1</li><li>Item 2</li></ul></body></html>"#;
-
-        let text = html_to_text(html, false);
-        assert!(text.contains("# Hello World"));
-        assert!(text.contains("This is a test page."));
-        assert!(text.contains("• Item 1"));
-        assert!(!text.contains("alert"));
-        assert!(!text.contains("body{}"));
-    }
-
-    #[test]
-    fn test_extract_title() {
-        let html = "<html><head><title>My Page Title</title></head></html>";
-        assert_eq!(extract_html_title(html), "My Page Title");
+    fn describes_its_selector_as_what_it_supports() {
+        let schema = BrowseTool.parameters_schema();
+        let desc = schema["properties"]["selector"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(desc.contains(".class"), "{desc}");
     }
 }

@@ -406,6 +406,38 @@ Built:
   `FORCE_COLOR`, `--color=always`) and for progress output, which many tools
   print regardless.
 
+### T13: web pages read as text, not HTML
+Built:
+- **`tools::readable`**: a small tolerant HTML scanner that writes the page
+  as Markdown-style text. Scripts, styles, inline SVG, `head`, navigation,
+  footers, form controls and anything `hidden` or `aria-hidden` are left
+  out; headings, lists, tables, code blocks, inline code and links are kept.
+  A link to the same site is written from its path, one elsewhere in full,
+  and an address already linked once is not repeated. No new dependency.
+- **`fetch` returns the readable text of a web page** (with its title and,
+  after a redirect, the final address). The 50 KB cap now applies to that
+  text, not to the raw HTML; up to 10 MB is read to get there. `raw: true`
+  gives the body as received with the response headers, which `fetch` used
+  to send on every call. Other bodies (JSON, plain text) are unchanged.
+- **`browse` uses the same converter,** so its `selector` parameter, which
+  was documented but did nothing, now keeps only the matching element
+  (`tag`, `.class`, `#id`, `tag.class`, `tag#id`); when nothing matches, the
+  whole page comes back with a note saying so. Its links resolve against the
+  final address.
+- **Both render as plain text** for the model: a status line, the title and
+  the text, instead of a JSON object.
+- **Measured** on seven saved real pages (four GitHub pages, a PyPI project
+  page, a rustdoc page and a GTK reference page), in `o200k` tokens, the
+  result as the model sees it before and after. `fetch` (old figures leave
+  out the response headers, so the real saving is larger): 108,062 → 36,172
+  (**-66.5%**). The old `fetch` cut raw HTML at 50 KB, which on the four
+  GitHub pages stops in `<head>` and scripts: 13,000 to 17,000 tokens each
+  with 20 to 34 visible words. Now each page costs 342 to 6,346 tokens and
+  holds the page's text. The PyPI page costs the same (15,005 → 15,023), now
+  as its text instead of its first 50 KB of markup. `browse` with its
+  default of no links: 28,342 → 22,887 (**-19.2%**), with more of each
+  page's content kept than the old converter kept.
+
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -428,6 +460,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T5: compact tool results | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | Tool results as plain text instead of pretty JSON, plus default caps. Raw input fell 42.5% from T4's 91,678, past the 61,000 target. Claude bill: **11,693 (22.2% of sent)** from 47,192 read and 5,579 written, a **90.5% cut** from the T2 commit's 123,206. |
 | T6: cached compaction | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The short bench doesn't compact, so it is unchanged. Long-session bench (36 requests, 4 compactions), billed as Claude bills: **50,708**, down from 58,909 before this change (**-13.9%**). The summaries alone: **8,523**, down from 16,724 (**-49.0%**). Three of the four summaries now read 6,479 to 6,605 tokens from cache instead of 0 to 180; the fourth was too close to the budget to ask in place and used the transcript. |
 | T7: side models, Ollama settings | 52,695 | -57.1% | 89.4% | 1,477 of 1,518 | The agent's own requests are unchanged by design. Inline completions, commit messages and terminal commands move to the provider's cheap model: with Claude Sonnet 4.5, a third of the price per token ($1/$5 instead of $3/$15). Ollama now gets the window the budget assumes, so long prompts are no longer cut at its default window. |
+| T13: readable web pages | 53,857 | -56.2% | 89.5% | 1,560 of 1,601 | The bench reads no web pages. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

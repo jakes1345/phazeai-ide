@@ -31,6 +31,8 @@ pub fn for_model(tool: &str, value: &Value) -> String {
         "write_file" => write_file(value, cwd.as_deref()),
         "edit_file" => edit_file(value, cwd.as_deref()),
         "code_search" => code_search(value, cwd.as_deref()),
+        "fetch" => fetch(value),
+        "browse" => browse(value),
         _ => None,
     };
     let mut text = rendered.unwrap_or_else(|| match value {
@@ -219,6 +221,77 @@ fn code_search(v: &Value, cwd: Option<&Path>) -> Option<String> {
 
 /// The notes a listing can carry: hits cut at a cap, files the privacy
 /// policy kept out.
+/// A response as a status line, any headers asked for, then the body as
+/// plain text (a web page's readable text, not escaped JSON).
+fn fetch(v: &Value) -> Option<String> {
+    let status = v.get("status")?.as_u64()?;
+    let body = v.get("body")?.as_str()?;
+    let mut out = format!("HTTP {status}");
+    if let Some(text) = v.get("status_text").and_then(Value::as_str) {
+        let _ = write!(out, " {text}");
+    }
+    if let Some(ct) = v.get("content_type").and_then(Value::as_str) {
+        if !ct.is_empty() {
+            let _ = write!(out, ", {ct}");
+        }
+    }
+    if let Some(n) = v.get("body_bytes").and_then(Value::as_u64) {
+        let _ = write!(out, ", {n} bytes");
+    }
+    if v.get("format").and_then(Value::as_str) == Some("readable") {
+        out.push_str(", shown as readable text");
+    }
+    if let Some(url) = v.get("url").and_then(Value::as_str) {
+        let _ = write!(out, "\nFrom: {url}");
+    }
+    if let Some(title) = v.get("title").and_then(Value::as_str) {
+        let _ = write!(out, "\nTitle: {title}");
+    }
+    if let Some(headers) = v.get("headers").and_then(Value::as_object) {
+        for (name, value) in headers {
+            let _ = write!(out, "\n{name}: {}", value.as_str().unwrap_or_default());
+        }
+    }
+    out.push_str("\n\n");
+    out.push_str(body);
+    if v.get("truncated").and_then(Value::as_bool) == Some(true) {
+        match v.get("body_text_bytes").and_then(Value::as_u64) {
+            Some(total) => {
+                let _ = write!(out, "\n[cut at {} of {total} bytes]", body.len());
+            }
+            None => out.push_str("\n[cut]"),
+        }
+    }
+    Some(out)
+}
+
+/// A page read with `browse`: its title and address, then its text.
+fn browse(v: &Value) -> Option<String> {
+    let content = v.get("content")?.as_str()?;
+    let mut out = String::new();
+    if let Some(title) = v.get("title").and_then(Value::as_str) {
+        if !title.is_empty() {
+            let _ = writeln!(out, "Title: {title}");
+        }
+    }
+    if let Some(url) = v.get("url").and_then(Value::as_str) {
+        let _ = writeln!(out, "From: {url}");
+    }
+    if let Some(status) = v.get("status").and_then(Value::as_u64) {
+        if status != 200 {
+            let _ = writeln!(out, "HTTP {status}");
+        }
+    }
+    if let Some(note) = v.get("note").and_then(Value::as_str) {
+        let _ = writeln!(out, "[{note}]");
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(content);
+    Some(out)
+}
+
 fn with_notes(mut out: String, v: &Value) -> String {
     if let Some(limit) = v.get("limit").and_then(Value::as_u64) {
         if v.get("truncated").and_then(Value::as_bool) == Some(true) {
@@ -358,6 +431,40 @@ mod tests {
         assert_eq!(
             code_search(&v, cwd()).unwrap(),
             "a.rs:4-5\nx\ny\n\nb.rs:1-1\nz"
+        );
+    }
+
+    #[test]
+    fn a_fetched_page_is_plain_text_with_a_status_line() {
+        let v = json!({
+            "status": 200, "status_text": "OK", "content_type": "text/html",
+            "body_bytes": 368345, "format": "readable", "title": "Repo",
+            "body": "# Repo\n\nSee \"this\".", "truncated": false,
+        });
+        assert_eq!(
+            for_model("fetch", &v),
+            "HTTP 200 OK, text/html, 368345 bytes, shown as readable text\nTitle: Repo\n\n\
+             # Repo\n\nSee \"this\"."
+        );
+        let raw = json!({
+            "status": 404, "status_text": "Not Found", "content_type": "application/json",
+            "body_bytes": 2, "headers": {"content-type": "application/json", "x-id": "7"},
+            "url": "https://a.test/b", "body": "{}", "truncated": true, "body_text_bytes": 90000,
+        });
+        assert_eq!(
+            for_model("fetch", &raw),
+            "HTTP 404 Not Found, application/json, 2 bytes\nFrom: https://a.test/b\n\
+             content-type: application/json\nx-id: 7\n\n{}\n[cut at 2 of 90000 bytes]"
+        );
+    }
+
+    #[test]
+    fn a_browsed_page_is_its_title_address_and_text() {
+        let v = json!({"url": "https://a.test/", "title": "A", "status": 200,
+            "content": "Hello", "content_length": 5, "truncated": false});
+        assert_eq!(
+            for_model("browse", &v),
+            "Title: A\nFrom: https://a.test/\n\nHello"
         );
     }
 
