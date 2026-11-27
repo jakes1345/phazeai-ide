@@ -111,7 +111,7 @@ fn replay(text: &str, model: Model, typos: bool) -> (Count, Count) {
     for c in text.chars() {
         if typos && is_word(c) && !is_word(previous) {
             words += 1;
-            if words % 8 == 0 {
+            if words.is_multiple_of(8) {
                 let at = typed.len();
                 typed.push_str("zq");
                 pause(&typed, &mut before, &mut after);
