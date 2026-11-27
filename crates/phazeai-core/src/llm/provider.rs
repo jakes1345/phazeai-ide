@@ -996,7 +996,7 @@ fn default_model_for(id: &ProviderId) -> &str {
         ProviderId::Fireworks => models::DEFAULT_FIREWORKS_MODEL,
         ProviderId::SambaNova => models::DEFAULT_SAMBANOVA_MODEL,
         ProviderId::GithubModels => models::DEFAULT_GITHUB_MODELS_MODEL,
-        ProviderId::BuiltIn => crate::local_ai::CATALOG[0].id,
+        ProviderId::BuiltIn => crate::local_ai::catalog::DEFAULT_MODEL_ID,
         ProviderId::Custom(_) => "default",
     }
 }

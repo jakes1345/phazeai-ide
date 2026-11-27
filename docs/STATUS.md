@@ -13,7 +13,7 @@
 
 ## Where we are
 
-**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (16 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests; optional matching by meaning through an embedding endpoint the user runs, tested against a real local HTTP server that speaks the Ollama and OpenAI formats, not against a real model); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
+**Implemented, and the engine has tests that call the production code:** agent loop and cancel; tool approval classifier (16 unit tests); privacy policy and audit log; in-process code search (BM25, 110 spec tests plus unit tests; optional matching by meaning through an embedding endpoint the user runs, tested against a real local HTTP server that speaks the Ollama and OpenAI formats, not against a real model); context compaction; the built-in local AI's download, verify and install logic (unit-tested against mock servers; the real end-to-end test is `#[ignore]`; catalog sizes and hashes were re-checked against Hugging Face on 2026-10-30; Qwen3.5 4B's on 2026-11-27); the AI design engine; the CLI (TUI and `-p` mode). Also tested:
 - the MCP client, against the official filesystem server in CI;
 - the Vim ex bar's save and quit commands;
 - the text-only AI helpers;
@@ -56,7 +56,7 @@
   - The privacy deny rules, `local_only` and the audit log still apply.
 - *First run:* a readiness card exists (provider ready, rust-analyzer found).
 - *Memory:* a global `memory` tool stores `~/.phazeai/memory.json`; there is no per-project memory.
-- *Smallest built-in model (1.5B):* its catalog notes say it writes tool calls as plain text, so agent actions are unreliable on it. That matters for the "works without a strong machine" goal.
+- *Smallest built-in model (1.5B):* its catalog notes say it writes tool calls as plain text, so agent actions are unreliable on it. Qwen3.5 4B (added 2026-11-27) now takes 6 GB cards and 12 GB machines that used to get the 1.5B; 8 GB laptops without a usable GPU still do. The 4B and 9B have not been run through PhazeAI's agent path yet.
 - *Roots after "Open Folder":* **fixed (this PR).** The agent's file sandbox now follows the workspace like the privacy policy and code search do. Relative tool paths (`src/main.rs`, a `list_files`/`grep`/`glob` with no path) are read from the open folder, not the folder the IDE started in, and the shell starts over at the new root. Left open: a run still in progress when another folder is opened carries on in the new folder.
 
 **Claimed as shipped but absent:** the README is accurate since #29. `CONTRIBUTING.md` (~35) still names the removed `phazeai-cloud` crate and "WASM" plugins, and `ROADMAP.md` (~134) its skeleton.

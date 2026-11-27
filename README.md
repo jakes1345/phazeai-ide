@@ -76,7 +76,7 @@ Also in the IDE:
 - MCP servers, listed in `<project>/.phazeai/mcp.json` as `{"servers": [...]}`. A local server is `{"name", "command", "args", "env"}` and runs over stdio; CI tests this against the official filesystem server. A remote one is `{"name", "url", "headers"}` and is reached over MCP's Streamable HTTP transport, with `${VAR}` in a header value filled in from the environment, so a key needn't sit in the file. Headers only go to another machine over https, and a local-only project refuses remote servers.
 - A Design panel that turns a prompt into a self-contained HTML prototype in `.phazeai/designs/`, following `.phazeai/design-system.md` if you have one.
 
-The built-in local model lives in Settings › Local AI. It checks your RAM and disk, downloads one of five Apache-2.0 GGUF models (from 1.5B up to a 35B mixture-of-experts), verifies the size and SHA-256, and runs it with llama.cpp's `llama-server`. The smallest one writes tool calls as plain text, so the agent can't reliably act through it.
+The built-in local model lives in Settings › Local AI. It checks your RAM and disk, downloads one of six Apache-2.0 GGUF models (from 1.5B up to a 35B mixture-of-experts), verifies the size and SHA-256, and runs it with llama.cpp's `llama-server`. It recommends the strongest one your graphics card holds whole: Qwen3.5 9B on an 8 GB card (the default), its 4B sibling on 4-6 GB cards. The smallest one writes tool calls as plain text, so the agent can't reliably act through it.
 
 ### Privacy controls
 

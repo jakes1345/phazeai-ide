@@ -38,6 +38,13 @@ pub fn disk_margin(size: u64) -> u64 {
 /// currently uses it too.
 pub const DEFAULT_CTX_SIZE: u32 = 16_384;
 
+/// The model PhazeAI names by default when nothing more specific is known: the
+/// strongest free (Apache-2.0) entry that runs whole on an 8 GB graphics card
+/// (about 6.2 GiB with its 16k context, plus [`GPU_RESERVE`]). [`recommend`]
+/// still picks per machine; this is the fallback name and what the docs point
+/// most people to.
+pub const DEFAULT_MODEL_ID: &str = "qwen3.5-9b-q4_k_m";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogEntry {
     /// Stable id stored in config (`[local_ai] model`) and sent as the model name.
@@ -103,6 +110,25 @@ pub static CATALOG: &[CatalogEntry] = &[
         // 28 layers × 2 KV heads × 128 head_dim
         kv_bytes_per_token: 2 * 28 * 2 * 128 * 2,
         runtime_note: None,
+    },
+    CatalogEntry {
+        id: "qwen3.5-4b-q4_k_m",
+        display_name: "Qwen3.5 4B",
+        good_at: "General model with coding, 4B parameters (dense, hybrid attention), \
+                  2026. The smaller sibling of Qwen3.5 9B for 4-6 GB graphics cards and \
+                  12 GB machines; thinks before answering (Qwen's default).",
+        repo: "lmstudio-community/Qwen3.5-4B-GGUF",
+        revision: "f9f88ac3e234be915e23811a6d28ea287bdb927e",
+        file: "Qwen3.5-4B-Q4_K_M.gguf",
+        size: 2_707_513_696,
+        sha256: "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+        license: "Apache-2.0",
+        min_ram: 8 * GIB,
+        ctx_size: 16_384,
+        // Hybrid like the 9B: 8 of 32 layers use full attention (4 KV heads ×
+        // 256 head_dim, from Qwen/Qwen3.5-4B config.json).
+        kv_bytes_per_token: 2 * 8 * 4 * 256 * 2,
+        runtime_note: Some(QWEN35_NOTE),
     },
     CatalogEntry {
         id: "qwen2.5-coder-7b-instruct-q4_k_m",
@@ -533,6 +559,7 @@ mod tests {
                 1_117_320_768u64,
                 "cc324af0",
             ),
+            ("qwen3.5-4b-q4_k_m", 2_707_513_696, "25082a7d"),
             (
                 "qwen2.5-coder-7b-instruct-q4_k_m",
                 4_683_073_536,
@@ -550,6 +577,7 @@ mod tests {
         }
         // Newer architectures say what runtime they need.
         for id in [
+            "qwen3.5-4b-q4_k_m",
             "qwen3.5-9b-q4_k_m",
             "gpt-oss-20b-mxfp4",
             "qwen3.5-35b-a3b-q4_k_m",
@@ -561,15 +589,14 @@ mod tests {
     #[test]
     fn recommend_picks_the_strongest_with_headroom() {
         let id = |h: &HardwareInfo| recommend(h).map(|e| e.id);
-        // 8 GB laptops report ~7.6 GiB; 12 GB is below the 16 GB tier.
+        // 8 GB laptops report ~7.6 GiB: below the 4B's tier (it needs ~3.5 GiB
+        // plus 4 GiB for the OS and IDE), so the 1.5B.
         assert_eq!(
             id(&hw(7.6, 3.0)),
             Some("qwen2.5-coder-1.5b-instruct-q4_k_m")
         );
-        assert_eq!(
-            id(&hw(11.7, 8.0)),
-            Some("qwen2.5-coder-1.5b-instruct-q4_k_m")
-        );
+        // 12 GB (~11.7 GiB) is below the 16 GB tier: the 4B.
+        assert_eq!(id(&hw(11.7, 8.0)), Some("qwen3.5-4b-q4_k_m"));
         // 16 GB machines report ~15.6 GiB: the 9B is the strongest that fits.
         assert_eq!(id(&hw(15.6, 9.0)), Some("qwen3.5-9b-q4_k_m"));
         // Free RAM does not change the tier choice.
@@ -619,9 +646,48 @@ mod tests {
     fn hybrid_and_moe_ram_estimates() {
         let need = |id| find(id).unwrap();
         let gib_need = |e: &CatalogEntry| e.runtime_bytes(e.ctx_size) as f64 / GIB as f64;
+        assert!((3.4..3.7).contains(&gib_need(need("qwen3.5-4b-q4_k_m"))));
         assert!((6.0..6.5).contains(&gib_need(need("qwen3.5-9b-q4_k_m"))));
         assert!((12.0..13.0).contains(&gib_need(need("gpt-oss-20b-mxfp4"))));
         assert!((20.0..21.0).contains(&gib_need(need("qwen3.5-35b-a3b-q4_k_m"))));
+    }
+
+    #[test]
+    fn eight_gb_cards_get_the_default_and_smaller_cards_its_sibling() {
+        let id = |mib| recommend(&with_gpu(hw(15.6, 9.0), mib, mib - 300)).map(|e| e.id);
+        // 8 GB cards report 8192 MiB, some a few MiB less (RTX 2060 SUPER: 8188).
+        assert_eq!(id(8192), Some(DEFAULT_MODEL_ID));
+        assert_eq!(id(8188), Some(DEFAULT_MODEL_ID));
+        // 6 GB cards: the 9B doesn't fit whole, its 4B sibling does.
+        assert_eq!(id(6144), Some("qwen3.5-4b-q4_k_m"));
+        // 4 GB cards: only the 1.5B fits whole.
+        assert_eq!(id(4096), Some("qwen2.5-coder-1.5b-instruct-q4_k_m"));
+        // On a CPU-only 8 GB laptop the 12 GB-tier 4B is offered but shown Tight.
+        let small_box = hw(7.6, 5.0);
+        let q4 = find("qwen3.5-4b-q4_k_m").unwrap();
+        assert_eq!(fit(q4, &small_box, q4.ctx_size).fit, Fit::Tight);
+    }
+
+    #[test]
+    fn default_model_is_free_and_fits_an_8_gb_card() {
+        let e = find(DEFAULT_MODEL_ID).expect("default model is in the catalog");
+        assert_eq!(e.license, "Apache-2.0");
+        let r = fit(e, &with_gpu(hw(15.6, 9.0), 8192, 7900), e.ctx_size);
+        assert_eq!(
+            (r.fit, r.placement),
+            (Fit::Fits, Placement::Gpu),
+            "{}",
+            r.reason
+        );
+        // Nothing stronger in the catalog fits an 8 GB card whole.
+        let pos = CATALOG.iter().position(|c| c.id == e.id).unwrap();
+        for c in &CATALOG[pos + 1..] {
+            assert!(
+                c.runtime_bytes(c.ctx_size) + GPU_RESERVE > 8192 * 1024 * 1024,
+                "{}",
+                c.id
+            );
+        }
     }
 
     #[test]
@@ -645,7 +711,7 @@ mod tests {
 
     #[test]
     fn bigger_context_needs_more_ram() {
-        let mid = &CATALOG[1];
+        let mid = find("qwen2.5-coder-7b-instruct-q4_k_m").unwrap();
         assert!(mid.runtime_bytes(32_768) > mid.runtime_bytes(16_384));
         assert_eq!(
             mid.runtime_bytes(16_384) - mid.runtime_bytes(0),
