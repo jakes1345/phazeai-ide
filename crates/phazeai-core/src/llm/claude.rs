@@ -15,10 +15,6 @@ pub struct ClaudeClient {
     /// `output_config.effort`, for the models that take it: how much the
     /// model thinks and writes. `None`: the model's own default.
     effort: Option<String>,
-    /// The clearing horizon of the last agent request
-    /// ([`mark_clearing_horizon`]), so the request after a clearing can
-    /// read the conversation up to where it was.
-    horizon: std::sync::Mutex<Option<Horizon>>,
 }
 
 /// The beta header that lets a request ask the API to drop a thinking block
@@ -152,7 +148,6 @@ impl ClaudeClient {
             base_url: crate::constants::endpoints::CLAUDE_BASE_URL.to_string(),
             max_tokens: None,
             effort: None,
-            horizon: std::sync::Mutex::new(None),
         }
     }
 
@@ -269,13 +264,9 @@ impl ClaudeClient {
             body["stream"] = Value::Bool(true);
         }
 
-        // Only agent requests (with tools) move the horizon: a side request
-        // through this client, such as a summary, is another conversation.
-        let mut horizon = self.horizon.lock().unwrap_or_else(|e| e.into_inner());
-        let now = place_cache_breakpoints(&mut body, *horizon);
-        if !tools.is_empty() {
-            *horizon = now;
-        }
+        // Only agent requests (with tools) move a horizon: a side request,
+        // such as a summary, is another conversation.
+        place_cache_breakpoints(&mut body, !tools.is_empty());
         body
     }
 }
@@ -468,17 +459,18 @@ fn conversation_messages(messages: &[Message]) -> Vec<Value> {
 /// would make five, the tool schemas give up theirs: the first system block
 /// caches them too, and only a change to the shared prompt (another project,
 /// or an edited instructions file) leaves the schemas to be read alone.
-fn place_cache_breakpoints(body: &mut Value, last: Option<Horizon>) -> Option<Horizon> {
+fn place_cache_breakpoints(body: &mut Value, agent: bool) {
     let system_marks = body
         .get("system")
         .and_then(Value::as_array)
         .map_or(0, |s| s.len().min(2));
-    let mut horizon = (false, None);
+    let prefixes = prefix_hashes(body);
+    let mut horizon = false;
     if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-        horizon = mark_clearing_horizon(messages, last);
+        horizon = mark_clearing_horizon(messages, &prefixes, agent);
         mark_conversation_tail(messages);
     }
-    let tools_fit = system_marks + 1 + usize::from(horizon.0) < MAX_BREAKPOINTS;
+    let tools_fit = system_marks + 1 + usize::from(horizon) < MAX_BREAKPOINTS;
     if tools_fit {
         if let Some(last_tool) = body
             .get_mut("tools")
@@ -496,12 +488,11 @@ fn place_cache_breakpoints(body: &mut Value, last: Option<Horizon>) -> Option<Ho
             }
         }
     }
-    horizon.1
 }
 
-/// Where a clearing horizon was: the block (`message`, `block` in the
-/// request's `messages`) and a hash of the conversation up to and including
-/// it, so a later request can tell whether that prefix is still the same.
+/// A block of the request's `messages` (`message`, `block`) and a hash of
+/// the prompt up to and including it (tools, system and conversation), so a
+/// later request can tell whether it starts with the same prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Horizon {
     message: usize,
@@ -509,34 +500,54 @@ struct Horizon {
     hash: u64,
 }
 
-impl Horizon {
-    fn at(messages: &[Value], message: usize, block: usize) -> Option<Self> {
-        let blocks = messages.get(message)?["content"].as_array()?;
-        blocks.get(block)?;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for m in &messages[..message] {
-            std::hash::Hash::hash(&m.to_string(), &mut h);
+/// Every content block of `messages` with the hash of the prompt up to and
+/// including it, in order. Taken before any breakpoint is placed, so the
+/// markers never change a hash.
+fn prefix_hashes(body: &Value) -> Vec<Horizon> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body["tools"].to_string().hash(&mut h);
+    body["system"].to_string().hash(&mut h);
+    let mut out = Vec::new();
+    for (i, message) in body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        message["role"].to_string().hash(&mut h);
+        match message["content"].as_array() {
+            Some(blocks) => {
+                for (j, b) in blocks.iter().enumerate() {
+                    b.to_string().hash(&mut h);
+                    out.push(Horizon {
+                        message: i,
+                        block: j,
+                        hash: h.finish(),
+                    });
+                }
+            }
+            None => message["content"].to_string().hash(&mut h),
         }
-        std::hash::Hash::hash(&messages[message]["role"].to_string(), &mut h);
-        for b in &blocks[..=block] {
-            std::hash::Hash::hash(&b.to_string(), &mut h);
-        }
-        Some(Self {
-            message,
-            block,
-            hash: std::hash::Hasher::finish(&h),
-        })
     }
-
-    /// Whether `messages` still hold the same conversation up to this block.
-    fn holds(&self, messages: &[Value]) -> bool {
-        Self::at(messages, self.message, self.block) == Some(*self)
-    }
+    out
 }
+
+/// The horizons of recent agent requests, across clients: the IDE builds a
+/// new agent (and client) for every chat message, and the request after a
+/// clearing may be the first of the next message. A horizon is used only
+/// where the new request's prompt matches it up to that block, so
+/// conversations running side by side never use each other's.
+static HORIZONS: std::sync::Mutex<std::collections::VecDeque<Horizon>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// How many recent horizons are kept: enough for a few agents at once.
+const KEPT_HORIZONS: usize = 16;
 
 /// Put a breakpoint on the block just before the oldest tool result that a
 /// clearing could still replace (`ConversationHistory::clear_old_tool_results`),
-/// and say whether one was placed.
+/// and say whether one was placed. `prefixes` are [`prefix_hashes`] of the
+/// request; `agent` says whether to remember this request's horizon.
 ///
 /// A clearing changes the conversation from that result on, and Anthropic
 /// reads a cached prefix only where an earlier request put a breakpoint (or
@@ -544,10 +555,12 @@ impl Horizon {
 /// earlier requests all end past that result, so without this one a
 /// clearing read only the system prompt from cache and wrote the whole
 /// conversation again at 1.25x. With it, every request since the result
-/// arrived has cached the conversation up to it, and a clearing reads that
-/// part. Until the next clearing the horizon stays put, so marking it costs
-/// nothing: its prefix is already read from cache.
-fn mark_clearing_horizon(messages: &mut [Value], last: Option<Horizon>) -> (bool, Option<Horizon>) {
+/// arrived has cached the conversation up to it. Until the next clearing
+/// the horizon stays put, so marking it costs nothing: its prefix is
+/// already read from cache. Right after a clearing the horizon has moved
+/// on, and the cache ends at the old one: that request marks the old one,
+/// and the next marks the new one.
+fn mark_clearing_horizon(messages: &mut [Value], prefixes: &[Horizon], agent: bool) -> bool {
     let mut names: std::collections::HashMap<String, String> = Default::default();
     let mut oldest = None;
     'find: for (i, message) in messages.iter().enumerate() {
@@ -578,28 +591,33 @@ fn mark_clearing_horizon(messages: &mut [Value], last: Option<Horizon>) -> (bool
     }
     // The block before it: an earlier result in the same message, or the
     // last block of the message before (the call that asked for it).
-    let now = oldest.and_then(|(i, j)| match j {
-        0 if i > 0 => {
-            let before = messages[i - 1]["content"]
-                .as_array()?
-                .len()
-                .checked_sub(1)?;
-            Horizon::at(messages, i - 1, before)
-        }
-        0 => None,
-        _ => Horizon::at(messages, i, j - 1),
+    let now = oldest.and_then(|(i, j)| {
+        let at = prefixes
+            .iter()
+            .position(|p| (p.message, p.block) == (i, j))?;
+        let before = prefixes.get(at.checked_sub(1)?)?;
+        (before.message + 1 >= i).then_some(*before)
     });
-    // Right after a clearing the horizon has moved on, and the cache holds
-    // the conversation only up to where it was: that is the breakpoint this
-    // request reads from. The next request marks the new one.
-    let mark = match (last, now) {
-        (Some(old), Some(new)) if (old.message, old.block) < (new.message, new.block) => {
-            Some(old).filter(|o| o.holds(messages)).or(Some(new))
+    let mut kept = HORIZONS.lock().unwrap_or_else(|e| e.into_inner());
+    let holds = |h: &Horizon| prefixes.contains(h);
+    let old = kept
+        .iter()
+        .copied()
+        .filter(|h| holds(h))
+        .filter(|h| now.is_none_or(|n| (h.message, h.block) < (n.message, n.block)))
+        .max_by_key(|h| (h.message, h.block));
+    let mark = old.or(now);
+    if agent {
+        kept.retain(|h| Some(*h) != old && Some(*h) != now);
+        if let Some(now) = now {
+            kept.push_back(now);
         }
-        (Some(old), None) => Some(old).filter(|o| o.holds(messages)),
-        (_, new) => new,
-    };
-    let placed = mark.is_some_and(|h| {
+        while kept.len() > KEPT_HORIZONS {
+            kept.pop_front();
+        }
+    }
+    drop(kept);
+    mark.is_some_and(|h| {
         let block = &mut messages[h.message]["content"][h.block];
         let markable = !is_thinking(block)
             && (block["type"] != "text" || block["text"].as_str().is_some_and(|t| !t.is_empty()));
@@ -607,8 +625,7 @@ fn mark_clearing_horizon(messages: &mut [Value], last: Option<Horizon>) -> (bool
             block["cache_control"] = ephemeral();
         }
         markable
-    });
-    (placed, now)
+    })
 }
 
 /// Put a breakpoint on the last block of the conversation that can carry one.
@@ -1060,11 +1077,15 @@ mod tests {
     }
 
     /// A conversation with three tool rounds: `read_file` results big enough
-    /// to clear, the first `cleared` of them already cleared.
-    fn rounds(cleared: usize) -> Vec<Message> {
+    /// to clear, the first `cleared` of them already cleared. `session` goes
+    /// in the system prompt: horizons are kept for the whole process, and
+    /// tests running side by side must not share a prompt.
+    fn rounds(session: &str, cleared: usize) -> Vec<Message> {
         let big = "x".repeat(crate::context::MIN_CLEARED_BYTES);
         let mut messages = vec![
-            Message::system(format!("You are Phaze.{GIT_HEADING}- Git branch: main")),
+            Message::system(format!(
+                "You are Phaze.{GIT_HEADING}- Git branch: {session}"
+            )),
             Message::user("Read the files"),
         ];
         for n in 1..=3 {
@@ -1086,7 +1107,7 @@ mod tests {
     #[test]
     fn the_block_before_the_oldest_clearable_result_is_cached() {
         let client = ClaudeClient::new("k");
-        let body = client.build_request_body(&rounds(0), &[tool("read_file")], true);
+        let body = client.build_request_body(&rounds("oldest", 0), &[tool("read_file")], true);
         // The call that asked for the first result, so a clearing that
         // starts there reads everything before it. Four breakpoints at most:
         // the tool schemas give theirs up, the first system block holds them.
@@ -1100,18 +1121,18 @@ mod tests {
     fn the_request_after_a_clearing_reads_up_to_the_old_horizon() {
         let client = ClaudeClient::new("k");
         let tools = [tool("read_file")];
-        let before = client.build_request_body(&rounds(0), &tools, true);
+        let before = client.build_request_body(&rounds("after", 0), &tools, true);
         assert!(breakpoints(&before).contains(&"messages[1][0]".to_string()));
         // The first two results were cleared: the cache holds the
         // conversation up to the first one's call, and that is read.
-        let after = client.build_request_body(&rounds(2), &tools, true);
+        let after = client.build_request_body(&rounds("after", 2), &tools, true);
         assert_eq!(
             breakpoints(&after),
             ["system[0]", "system[1]", "messages[1][0]", "messages[6][0]"]
         );
         // From the next request on, the horizon is the new oldest result's
         // call.
-        let next = client.build_request_body(&rounds(2), &tools, true);
+        let next = client.build_request_body(&rounds("after", 2), &tools, true);
         assert_eq!(
             breakpoints(&next),
             ["system[0]", "system[1]", "messages[5][0]", "messages[6][0]"]
@@ -1119,18 +1140,46 @@ mod tests {
     }
 
     #[test]
+    fn a_new_client_reads_up_to_the_horizon_of_the_last() {
+        // The IDE builds a new agent, and client, for every chat message.
+        let tools = [tool("read_file")];
+        ClaudeClient::new("k").build_request_body(&rounds("next message", 0), &tools, true);
+        let body =
+            ClaudeClient::new("k").build_request_body(&rounds("next message", 2), &tools, true);
+        assert_eq!(
+            breakpoints(&body),
+            ["system[0]", "system[1]", "messages[1][0]", "messages[6][0]"]
+        );
+    }
+
+    #[test]
     fn an_old_horizon_in_a_changed_conversation_is_not_reused() {
         let client = ClaudeClient::new("k");
         let tools = [tool("read_file")];
-        client.build_request_body(&rounds(0), &tools, true);
-        // Another conversation through the same client: its first message
+        client.build_request_body(&rounds("changed", 0), &tools, true);
+        // Another conversation with the same prompt: its first message
         // differs, so the old horizon's prefix is not cached for it.
-        let mut other = rounds(2);
+        let mut other = rounds("changed", 2);
         other[1] = Message::user("Something else");
         let body = client.build_request_body(&other, &tools, true);
         assert_eq!(
             breakpoints(&body),
             ["system[0]", "system[1]", "messages[5][0]", "messages[6][0]"]
+        );
+    }
+
+    #[test]
+    fn a_side_request_leaves_the_horizon_alone() {
+        let client = ClaudeClient::new("k");
+        let tools = [tool("read_file")];
+        client.build_request_body(&rounds("side", 0), &tools, true);
+        // A request with no tools, such as a summary, is another prompt:
+        // it neither uses up nor replaces the agent's horizon.
+        client.build_request_body(&rounds("side", 2), &[], false);
+        let body = client.build_request_body(&rounds("side", 2), &tools, true);
+        assert_eq!(
+            breakpoints(&body),
+            ["system[0]", "system[1]", "messages[1][0]", "messages[6][0]"]
         );
     }
 

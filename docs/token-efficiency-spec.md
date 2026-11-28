@@ -545,11 +545,14 @@ Built:
   clearing could still replace (`context::clearable`, the same test
   `clear_old_tool_results` uses). It stays put until the next clearing, so
   every request since that result arrived has cached the conversation up
-  to it. The client remembers it, with a hash of the conversation up to it;
-  the request right after a clearing marks that old horizon, which is
-  where the cache now ends, and the next request moves on to the new one.
-  If the conversation before it changed (another conversation through the
-  same client), the old horizon is not reused.
+  to it. The last 16 horizons are kept for the whole process, each with a
+  hash of the prompt up to it (tool schemas, system and conversation), so
+  one survives the new agent and client the IDE builds for every chat
+  message. The request right after a clearing marks the furthest kept
+  horizon whose prompt it still starts with, which is where the cache now
+  ends, and the next request moves on to the new one. Another conversation,
+  or a request without tools such as a summary, never matches or uses up
+  an agent's horizon.
 - **Four breakpoints at most.** With a horizon, the tool schemas give up
   theirs: the first system block caches them too.
 - **Measured** on the long-session bench: the clearings now read 1,328,
