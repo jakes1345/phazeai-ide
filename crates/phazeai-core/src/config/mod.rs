@@ -104,6 +104,13 @@ pub struct LlmSettings {
     /// the model's own default. Side jobs always ask for `low`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Minutes to keep Claude's prompt cache warm after it answers, so a
+    /// reply within them reads the conversation from cache (a tenth of the
+    /// price, or less) instead of writing it again at 1.25x. Each refresh,
+    /// every four minutes, bills a cache read of the conversation. `0` turns
+    /// it off. Unset: [`crate::llm::keep_alive::DEFAULT_KEEP_ALIVE_MINUTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_keep_alive_minutes: Option<u32>,
 }
 
 impl LlmSettings {
@@ -451,6 +458,7 @@ impl Default for Settings {
                 context_tokens: None,
                 small_model: None,
                 effort: None,
+                cache_keep_alive_minutes: None,
             },
             editor: EditorSettings::default(),
             search: SearchSettings::default(),
@@ -622,6 +630,9 @@ impl Settings {
         if let Some(effort) = &self.llm.effort {
             registry.set_effort(effort);
         }
+        if let Some(minutes) = self.llm.cache_keep_alive_minutes {
+            registry.set_keep_alive_minutes(minutes);
+        }
 
         // `[llm] context_tokens` fixes the budget; a local server must then
         // be run with a window that holds it.
@@ -762,6 +773,9 @@ impl Settings {
         // Completions, commit messages and helpers are short jobs: little
         // thinking, so few tokens, on the models that take an effort.
         registry.set_effort("low");
+        // A side job's conversation never continues, so its cache is not
+        // worth keeping.
+        registry.set_keep_alive_minutes(0);
         let config = registry.active_config().ok_or_else(|| {
             crate::error::PhazeError::Config(format!(
                 "Provider {:?} not configured",

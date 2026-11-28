@@ -271,6 +271,9 @@ pub struct ProviderRegistry {
     local_window: Option<usize>,
     /// The effort to ask Claude models for (`[llm] effort`), when set.
     effort: Option<String>,
+    /// Minutes to keep Claude's cache warm after an answer
+    /// (`[llm] cache_keep_alive_minutes`); `0` turns it off.
+    keep_alive_minutes: u32,
 }
 
 impl Default for ProviderRegistry {
@@ -301,6 +304,7 @@ impl ProviderRegistry {
             active_model: crate::constants::models::DEFAULT_CLAUDE_MODEL.to_string(),
             local_window: None,
             effort: None,
+            keep_alive_minutes: super::keep_alive::DEFAULT_KEEP_ALIVE_MINUTES,
         }
     }
 
@@ -338,6 +342,12 @@ impl ProviderRegistry {
         self.effort = super::EFFORT_LEVELS
             .contains(&effort.as_str())
             .then_some(effort);
+    }
+
+    /// Keep Claude's prompt cache warm for `minutes` after each answer
+    /// ([`super::keep_alive`]); `0` turns it off.
+    pub fn set_keep_alive_minutes(&mut self, minutes: u32) {
+        self.keep_alive_minutes = minutes;
     }
 
     pub fn set_provider(&mut self, provider: ProviderId) {
@@ -445,7 +455,10 @@ impl ProviderRegistry {
                 // think first, and their thinking counts toward it.
                 let client = super::ClaudeClient::new(api_key)
                     .with_model(model)
-                    .with_base_url(base_url);
+                    .with_base_url(base_url)
+                    .with_keep_alive(std::time::Duration::from_secs(
+                        u64::from(self.keep_alive_minutes) * 60,
+                    ));
                 let client = match &self.effort {
                     Some(effort) => client.with_effort(effort),
                     None => client,

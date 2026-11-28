@@ -864,7 +864,10 @@ async fn long_session_bench() {
     let (url, bodies) = fake_provider_answering(replies, Some(claude_summary())).await;
     let agent = single_prompt_agent(&settings, claude_client(&url), &root, None);
     let mut runs = Vec::new();
+    // Where each question's requests start, for the pause model below.
+    let mut starts = Vec::new();
     for ask in LONG_ASKS {
+        starts.push(bodies.lock().unwrap().len());
         runs.push(agent.run(*ask).await.unwrap());
     }
     phazeai_core::tools::sandbox::set_workspace_root(None);
@@ -927,6 +930,124 @@ async fn long_session_bench() {
         summaries.total,
         summaries.equivalent()
     );
+
+    println!("\n### When you pause between questions\n");
+    println!(
+        "The same requests, {REQUEST_GAP_SECONDS} s apart within a question, with a pause \
+         before each new question. Cache entries last 5 minutes from their last use. \
+         Keep-alive: after each answer, its request is sent again with `max_tokens: 0` \
+         every 4 minutes for {} minutes, billed as cache reads, unless the last {} replies \
+         all came after that window.\n",
+        phazeai_core::llm::keep_alive::DEFAULT_KEEP_ALIVE_MINUTES,
+        phazeai_core::llm::keep_alive::LATE_REPLIES_TO_PAUSE
+    );
+    println!("| pause | billed, no keep-alive | billed, keep-alive | refreshes | change |");
+    println!("|--:|--:|--:|--:|--:|");
+    for pause in [3.0, 7.0, 12.0, 25.0, 60.0] {
+        let off = billed_with_pauses(&bpe, &sent, &starts, pause, false);
+        let on = billed_with_pauses(&bpe, &sent, &starts, pause, true);
+        println!(
+            "| {pause:.0} min | {:.0} | {:.0} | {} | {:+.1}% |",
+            off.0,
+            on.0,
+            on.1,
+            100.0 * (on.0 - off.0) / off.0
+        );
+    }
+}
+
+/// Seconds between the requests of one question in the pause model.
+const REQUEST_GAP_SECONDS: f64 = 15.0;
+
+/// [`PromptCache`] with time: an entry lasts five minutes from the start of
+/// the last request that wrote or read it.
+struct TimedCache {
+    entries: std::collections::HashMap<Vec<u32>, f64>,
+}
+
+impl TimedCache {
+    const LIFETIME: f64 = 5.0;
+
+    fn bill(&mut self, bpe: &tiktoken_rs::CoreBPE, body: &Value, now: f64) -> Billed {
+        self.entries.retain(|_, used| now - *used < Self::LIFETIME);
+        let mut tokens: Vec<u32> = Vec::new();
+        let mut ends = Vec::new();
+        let mut marks = Vec::new();
+        for (i, (text, marked)) in claude_blocks(body).into_iter().enumerate() {
+            tokens.extend(bpe.encode_ordinary(&text));
+            ends.push(tokens.len());
+            if marked {
+                marks.push(i);
+            }
+        }
+        let mut read = 0;
+        for &mark in &marks {
+            for k in (mark.saturating_sub(19)..=mark).rev() {
+                if let Some(used) = self.entries.get_mut(&tokens[..ends[k]]) {
+                    *used = now;
+                    read = read.max(ends[k]);
+                    break;
+                }
+            }
+        }
+        let last_mark = marks.last().map(|&m| ends[m]).unwrap_or(0);
+        for &mark in &marks {
+            self.entries.insert(tokens[..ends[mark]].to_vec(), now);
+        }
+        Billed {
+            total: tokens.len(),
+            read,
+            written: last_mark.saturating_sub(read),
+            uncached: tokens.len() - last_mark.max(read),
+        }
+    }
+}
+
+/// The bill for `sent` with a `pause` (minutes) before each question after
+/// the first, and the number of keep-alive refreshes sent. `starts` are the
+/// indexes where each question's requests begin.
+fn billed_with_pauses(
+    bpe: &tiktoken_rs::CoreBPE,
+    sent: &[Value],
+    starts: &[usize],
+    pause: f64,
+    keep_alive: bool,
+) -> (f64, usize) {
+    let window = phazeai_core::llm::keep_alive::DEFAULT_KEEP_ALIVE_MINUTES as f64;
+    let (every, lifetime) = (4.0, TimedCache::LIFETIME);
+    let mut cache = TimedCache {
+        entries: Default::default(),
+    };
+    let (mut now, mut billed, mut refreshes) = (0.0, 0.0, 0);
+    // Whether each recent reply came after the window: the keep-alive backs
+    // off while the last few all did.
+    let mut late: Vec<bool> = Vec::new();
+    let backoff = phazeai_core::llm::keep_alive::LATE_REPLIES_TO_PAUSE;
+    for (i, body) in sent.iter().enumerate() {
+        if i > 0 && starts.contains(&i) {
+            let answered = now;
+            let next = answered + pause;
+            let worth_it = late.len() < backoff || late[late.len() - backoff..].contains(&false);
+            late.push(pause > window);
+            if keep_alive && worth_it {
+                // Refreshes while the entry would lapse inside the window,
+                // and only until the next question arrives.
+                let mut at = answered;
+                while at + lifetime < answered + window && at + every < next {
+                    at += every;
+                    let mut refresh = sent[i - 1].clone();
+                    refresh["max_tokens"] = json!(0);
+                    billed += cache.bill(bpe, &refresh, at).equivalent();
+                    refreshes += 1;
+                }
+            }
+            now = next;
+        } else if i > 0 {
+            now += REQUEST_GAP_SECONDS / 60.0;
+        }
+        billed += cache.bill(bpe, body, now).equivalent();
+    }
+    (billed, refreshes)
 }
 
 /// Every scripted call of the long session succeeded.

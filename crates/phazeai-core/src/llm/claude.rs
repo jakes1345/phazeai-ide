@@ -15,6 +15,13 @@ pub struct ClaudeClient {
     /// `output_config.effort`, for the models that take it: how much the
     /// model thinks and writes. `None`: the model's own default.
     effort: Option<String>,
+    /// How long to keep the cache warm after an agent turn ends
+    /// ([`super::keep_alive`]). `None`: not at all.
+    keep_alive: Option<std::time::Duration>,
+    /// How often a keep-alive refresh is sent, and how long the API keeps a
+    /// cache entry: Anthropic's values, shortened in tests.
+    keep_alive_every: std::time::Duration,
+    cache_lifetime: std::time::Duration,
 }
 
 /// The beta header that lets a request ask the API to drop a thinking block
@@ -148,6 +155,9 @@ impl ClaudeClient {
             base_url: crate::constants::endpoints::CLAUDE_BASE_URL.to_string(),
             max_tokens: None,
             effort: None,
+            keep_alive: None,
+            keep_alive_every: super::keep_alive::REFRESH_EVERY,
+            cache_lifetime: super::keep_alive::CACHE_LIFETIME,
         }
     }
 
@@ -179,6 +189,64 @@ impl ClaudeClient {
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
         self
+    }
+
+    /// Keep the prompt cache warm for `window` after each agent turn ends,
+    /// so a reply within it reads the conversation from cache instead of
+    /// writing it again ([`super::keep_alive`]). A zero window turns it off.
+    pub fn with_keep_alive(mut self, window: std::time::Duration) -> Self {
+        self.keep_alive = (!window.is_zero()).then_some(window);
+        self
+    }
+
+    /// The keep-alive for an agent request about to be sent: refreshes
+    /// already running for its conversation stop, since this request
+    /// refreshes the cache itself, and new ones are ready to start once it
+    /// is answered. `None` for a side request (no tools) or when turned off.
+    fn keep_alive_for(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        body: &Value,
+    ) -> Option<super::keep_alive::KeepAlive> {
+        if tools.is_empty() {
+            return None;
+        }
+        let key = super::keep_alive::conversation_key(messages);
+        super::keep_alive::cancel(key);
+        let window = self.keep_alive?;
+        let refresh = super::keep_alive::refresh_body(body);
+        let request = self.post(&self.messages_url(), &refresh);
+        let send = move || -> futures::future::BoxFuture<'static, bool> {
+            let request = request.try_clone();
+            Box::pin(async move {
+                let Some(request) = request else {
+                    return false;
+                };
+                match request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        let usage = response.text().await.unwrap_or_default();
+                        tracing::debug!("cache keep-alive: {usage}");
+                        true
+                    }
+                    Ok(response) => {
+                        tracing::debug!("cache keep-alive refused: {}", response.status());
+                        false
+                    }
+                    Err(e) => {
+                        tracing::debug!("cache keep-alive failed: {e}");
+                        false
+                    }
+                }
+            })
+        };
+        Some(super::keep_alive::KeepAlive {
+            key,
+            started: tokio::time::Instant::now(),
+            window,
+            every: self.keep_alive_every,
+            send: Box::new(send),
+        })
     }
 
     /// The model id this client sends ([`current_model_id`]).
@@ -717,6 +785,12 @@ struct ClaudeApiResponse {
     stop_reason: Option<String>,
 }
 
+/// Whether a reply with `stop_reason` ended the agent's turn: the answer is
+/// with the user, who may take a while to reply.
+fn ended_turn(stop_reason: &Option<String>) -> bool {
+    stop_reason.as_deref() == Some("end_turn")
+}
+
 #[async_trait::async_trait]
 impl LlmClient for ClaudeClient {
     async fn chat(
@@ -726,6 +800,7 @@ impl LlmClient for ClaudeClient {
     ) -> Result<LlmResponse, PhazeError> {
         let url = self.messages_url();
         let request_body = self.build_request_body(messages, tools, false);
+        let keep_alive = self.keep_alive_for(messages, tools, &request_body);
 
         let response =
             crate::llm::retry::send_with_retry("claude", || self.post(&url, &request_body).send())
@@ -745,6 +820,9 @@ impl LlmClient for ClaudeClient {
             .map_err(|e| PhazeError::Llm(format!("Failed to parse response: {e}")))?;
         if api_response.stop_reason.as_deref() == Some("refusal") {
             return Err(PhazeError::Llm(REFUSAL_MESSAGE.to_string()));
+        }
+        if let Some(keep_alive) = keep_alive.filter(|_| ended_turn(&api_response.stop_reason)) {
+            keep_alive.start(self.cache_lifetime);
         }
 
         // Every text block, in order: a model that thinks can put text
@@ -794,6 +872,8 @@ impl LlmClient for ClaudeClient {
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>, PhazeError> {
         let url = self.messages_url();
         let request_body = self.build_request_body(messages, tools, true);
+        let mut keep_alive = self.keep_alive_for(messages, tools, &request_body);
+        let cache_lifetime = self.cache_lifetime;
 
         // Retry only the request submission; once the SSE stream starts we
         // can't safely re-issue without duplicating tokens.
@@ -949,9 +1029,16 @@ impl LlmClient for ClaudeClient {
                                 start_usage = event.pointer("/message/usage").cloned();
                             }
                             Some("message_delta") => {
-                                if event.pointer("/delta/stop_reason").and_then(Value::as_str)
-                                    == Some("refusal")
-                                {
+                                let stop_reason = event
+                                    .pointer("/delta/stop_reason")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+                                if ended_turn(&stop_reason) {
+                                    if let Some(keep_alive) = keep_alive.take() {
+                                        keep_alive.start(cache_lifetime);
+                                    }
+                                }
+                                if stop_reason.as_deref() == Some("refusal") {
                                     let _ = tx.unbounded_send(StreamEvent::Error(
                                         REFUSAL_MESSAGE.to_string(),
                                     ));
@@ -1445,6 +1532,204 @@ mod tests {
             sock.write_all(response.as_bytes()).await.unwrap();
         });
         (url, rx)
+    }
+
+    /// A server that answers every request it gets: a refresh
+    /// (`max_tokens: 0`) with `refresh_status`, anything else with `turn`
+    /// as a stream. Hands back its base URL and the bodies it was sent.
+    async fn serve_turns(
+        turn: Vec<Value>,
+        refresh_status: u16,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let turn = sse(&turn);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    request.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len: usize = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().to_string())
+                            })
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let body = request_json(&String::from_utf8_lossy(&request));
+                let refresh = body["max_tokens"] == 0;
+                record.lock().unwrap().push(body);
+                let (status, kind, reply) = if refresh {
+                    let usage = json!({ "content": [], "stop_reason": "max_tokens",
+                        "usage": { "input_tokens": 0, "cache_read_input_tokens": 5000, "output_tokens": 0 } });
+                    (refresh_status, "application/json", usage.to_string())
+                } else {
+                    (200, "text/event-stream", turn.clone())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
+    /// A streamed answer that ends the agent's turn (`stop` `end_turn`) or
+    /// asks for a tool (`tool_use`).
+    fn answer(stop: &str) -> Vec<Value> {
+        vec![
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 9, "output_tokens": 1 } } }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Done." } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": stop }, "usage": { "output_tokens": 3 } }),
+            json!({ "type": "message_stop" }),
+        ]
+    }
+
+    /// A client whose keep-alive runs in milliseconds: an entry lasts 150 ms
+    /// and a refresh goes every 100 ms.
+    fn fast_keep_alive(url: String, window_ms: u64) -> ClaudeClient {
+        let mut client = ClaudeClient::new("k")
+            .with_base_url(url)
+            .without_proxy()
+            .with_keep_alive(std::time::Duration::from_millis(window_ms));
+        client.keep_alive_every = std::time::Duration::from_millis(100);
+        client.cache_lifetime = std::time::Duration::from_millis(150);
+        client
+    }
+
+    async fn run_turn(client: &ClaudeClient, messages: &[Message], tools: &[ToolDefinition]) {
+        use futures::StreamExt;
+        let mut rx = client.chat_stream(messages, tools).await.unwrap();
+        while let Some(event) = rx.next().await {
+            if matches!(event, StreamEvent::Done) {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_keeps_the_cache_warm_until_the_window_ends() {
+        let (url, seen) = serve_turns(answer("end_turn"), 200).await;
+        let client = fast_keep_alive(url, 300);
+        let messages = [
+            Message::system("You are Phaze."),
+            Message::user("Keep warm: window"),
+        ];
+        run_turn(&client, &messages, &[tool("grep")]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let seen = seen.lock().unwrap().clone();
+        // The answer lasts 150 ms; refreshes at 100 and 200 ms keep it
+        // until 350, past the 300 ms window. A third would be wasted.
+        assert_eq!(seen.len(), 3, "the turn and two refreshes: {seen:#?}");
+        assert_eq!(seen[0]["stream"], true);
+        for refresh in &seen[1..] {
+            assert_eq!(refresh["max_tokens"], 0);
+            assert!(refresh.get("stream").is_none());
+            // The same prompt, breakpoints included, so it reads the entry.
+            assert_eq!(refresh["messages"], seen[0]["messages"]);
+            assert_eq!(refresh["system"], seen[0]["system"]);
+            assert_eq!(refresh["tools"], seen[0]["tools"]);
+        }
+        let key = super::super::keep_alive::conversation_key(&messages);
+        assert!(!super::super::keep_alive::is_running(key));
+    }
+
+    #[tokio::test]
+    async fn the_next_request_stops_the_refreshes() {
+        let (url, seen) = serve_turns(answer("end_turn"), 200).await;
+        let client = fast_keep_alive(url.clone(), 60_000);
+        let mut messages = vec![
+            Message::system("You are Phaze."),
+            Message::user("Keep warm: next"),
+        ];
+        let key = super::super::keep_alive::conversation_key(&messages);
+        run_turn(&client, &messages, &[tool("grep")]).await;
+        assert!(super::super::keep_alive::is_running(key));
+        // The user replies; this time Claude calls a tool, so the turn goes
+        // on and nothing is kept warm in between.
+        let (url, _) = serve_turns(answer("tool_use"), 200).await;
+        let client = fast_keep_alive(url, 60_000);
+        messages.push(Message::assistant("Done."));
+        messages.push(Message::user("Also log it"));
+        run_turn(&client, &messages, &[tool("grep")]).await;
+        assert!(!super::super::keep_alive::is_running(key));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "no refresh after the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_side_request_is_not_kept_warm() {
+        let (url, seen) = serve_turns(answer("end_turn"), 200).await;
+        let client = fast_keep_alive(url, 60_000);
+        let messages = [
+            Message::system("You are Phaze."),
+            Message::user("Keep warm: side"),
+        ];
+        run_turn(&client, &messages, &[]).await;
+        let key = super::super::keep_alive::conversation_key(&messages);
+        assert!(!super::super::keep_alive::is_running(key));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_refresh_ends_the_keep_alive() {
+        let (url, seen) = serve_turns(answer("end_turn"), 400).await;
+        let client = fast_keep_alive(url, 60_000);
+        let messages = [
+            Message::system("You are Phaze."),
+            Message::user("Keep warm: refused"),
+        ];
+        run_turn(&client, &messages, &[tool("grep")]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the turn and one refused refresh"
+        );
+        let key = super::super::keep_alive::conversation_key(&messages);
+        assert!(!super::super::keep_alive::is_running(key));
+    }
+
+    #[tokio::test]
+    async fn a_zero_window_turns_the_keep_alive_off() {
+        let (url, seen) = serve_turns(answer("end_turn"), 200).await;
+        let client = fast_keep_alive(url, 0);
+        let messages = [
+            Message::system("You are Phaze."),
+            Message::user("Keep warm: off"),
+        ];
+        run_turn(&client, &messages, &[tool("grep")]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     fn request_json(request: &str) -> Value {
