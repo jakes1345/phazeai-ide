@@ -269,6 +269,10 @@ fn render(body: &Value) -> String {
     out
 }
 
+/// The benches share a fixture directory, `HOME` and the working directory,
+/// so they take turns: `cargo test token_bench -- --ignored` runs both.
+static ONE_BENCH_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Restores an environment variable when dropped.
 struct EnvGuard(&'static str, Option<std::ffi::OsString>);
 
@@ -565,6 +569,7 @@ fn check_script_ran(runs: &[phazeai_core::AgentResponse]) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "report, not a check; sets process-wide state (run with --ignored)"]
 async fn token_bench() {
+    let _turn = ONE_BENCH_AT_A_TIME.lock().await;
     // No personal instructions file is read: `HOME` is an empty directory
     // beside the fixture (which `fresh_fixture` recreates).
     let _home = EnvGuard::set(
@@ -831,6 +836,7 @@ fn claude_summary() -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "report, not a check; sets process-wide state (run with --ignored)"]
 async fn long_session_bench() {
+    let _turn = ONE_BENCH_AT_A_TIME.lock().await;
     let _home = EnvGuard::set(
         "HOME",
         &std::env::temp_dir().join("phaze-token-bench").join("home"),
