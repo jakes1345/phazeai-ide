@@ -124,10 +124,7 @@ async fn fim_request(
     suffix: &str,
     language: &str,
 ) -> Result<String, String> {
-    // Only the code near the cursor is sent, so a large file costs no more
-    // than a small one.
-    let prefix_trimmed = last_n_lines(prefix, PREFIX_LINES);
-    let suffix_trimmed = first_n_lines(suffix, SUFFIX_LINES);
+    let (prefix_trimmed, suffix_trimmed) = window(prefix, suffix);
 
     if let Some(endpoint) = endpoint()?.filter(|e| !e.turned_down()) {
         match endpoint.complete(prefix_trimmed, suffix_trimmed).await {
@@ -141,6 +138,32 @@ async fn fim_request(
     chat_request(client, prefix_trimmed, suffix_trimmed, language).await
 }
 
+/// The code a request carries: only the code near the cursor, so a large
+/// file costs no more than a small one.
+pub fn window<'a>(prefix: &'a str, suffix: &'a str) -> (&'a str, &'a str) {
+    (
+        last_n_lines(prefix, PREFIX_LINES),
+        first_n_lines(suffix, SUFFIX_LINES),
+    )
+}
+
+/// The system and user messages of the chat prompt that stands in for a
+/// fill-in-the-middle API, for the code [`window`] keeps.
+pub fn chat_prompt(prefix_trimmed: &str, suffix_trimmed: &str, language: &str) -> (String, String) {
+    let system = format!(
+        "You are an expert {language} code completion engine. \
+         The user will show you code with a <CURSOR> marker. \
+         Output ONLY the text that should be inserted at <CURSOR> — \
+         no explanation, no markdown, no code fences, no repetition of \
+         surrounding lines. If no completion is appropriate, output nothing."
+    );
+    let user = format!(
+        "Complete the {language} code at <CURSOR>:\n\n\
+         ```{language}\n{prefix_trimmed}<CURSOR>{suffix_trimmed}\n```"
+    );
+    (system, user)
+}
+
 /// The chat prompt that stands in for a fill-in-the-middle API.
 async fn chat_request(
     client: impl FnOnce() -> Result<Box<dyn LlmClient>, String>,
@@ -149,20 +172,7 @@ async fn chat_request(
     language: &str,
 ) -> Result<String, String> {
     let client = client()?;
-
-    let system = format!(
-        "You are an expert {language} code completion engine. \
-         The user will show you code with a <CURSOR> marker. \
-         Output ONLY the text that should be inserted at <CURSOR> — \
-         no explanation, no markdown, no code fences, no repetition of \
-         surrounding lines. If no completion is appropriate, output nothing."
-    );
-
-    let user = format!(
-        "Complete the {language} code at <CURSOR>:\n\n\
-         ```{language}\n{prefix_trimmed}<CURSOR>{suffix_trimmed}\n```"
-    );
-
+    let (system, user) = chat_prompt(prefix_trimmed, suffix_trimmed, language);
     let messages = vec![Message::system(system), Message::user(user)];
 
     let resp = client

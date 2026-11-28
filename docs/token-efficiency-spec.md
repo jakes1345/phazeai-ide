@@ -504,6 +504,34 @@ Built:
   The stress suite's local session still needs no summary (6 without
   clearing); its raw tokens go from 228,318 to 236,282 for the same reason.
   The short bench never clears and is unchanged.
+### T16: inline suggestions reused as you type
+Built:
+- **The problem.** The editor asks for an inline completion after every
+  300 ms pause in typing. When the suggestion on screen is right, typing it
+  pauses several times, and each pause sent a new request for the rest of
+  a suggestion already shown. Backspacing over a typo sent a request for
+  text the model had answered a moment before. On Claude every request is a
+  chat request with up to 60 lines of code around the cursor.
+- **The memory** (`phazeai_core::fim_memory::SuggestionMemory`, one per
+  editor tab). At a pause it returns one of three things:
+  - *Show*: the text before the cursor is the text the suggestion was shown
+    for plus the start of the suggestion, and nothing after the cursor
+    changed, so the rest stays on screen with no request. Copilot keeps a
+    suggestion while it is typed the same way.
+  - *Nothing*: the model already answered nothing for exactly this text.
+  - *Ask*: anything else, as before.
+  Answers are kept for the last 32 places asked about, keyed by hashes of
+  the text before and after the cursor, so backspacing or undoing to text
+  already asked about reuses its answer. An answer that came back after the
+  cursor moved is kept for that text but never typed through.
+- **Measured** with `tests/fim_bench.rs`: the token bench's seven source
+  files (411 lines) typed one character at a time, a pause after each
+  newline and after each word, and a scripted model, so every run makes the
+  same requests. When every suggestion is right, requests fall
+  1,695 → 483 and input tokens 582,376 → 163,107 (**-72.0%**); with a typo
+  in every eighth word, **-60.6%**. When no suggestion is ever right,
+  nothing is reused on clean typing, and the typos alone save 3.8%. Real
+  typing falls between the two, by how often suggestions are taken.
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -530,6 +558,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T13: readable web pages | 51,718 | -57.9% | 90.4% | 1,560 of 1,601 | The bench reads no web pages, so it is unchanged from T12. On seven saved real pages, what the model gets from `fetch` fell from 108,062 to 36,172 tokens (**-66.5%**) and from `browse` from 28,342 to 22,887 (**-19.2%**). Four of the old `fetch` results were GitHub pages cut inside `<head>`, at 13,000 to 17,000 tokens for 20 to 34 visible words. |
 | T14: leaner tool list | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (51,718): **-8.4%** sent. Claude bill **10,084 (21.2% of sent)**, down from 10,872 (**-7.2%**). Round 5 together (T12 to T14) against 53,857 before T12: **-12.0%** sent, Claude bill 11,905 → 10,084 (**-15.3%**). |
 | T15: clearing that pays | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **45,028**, down from 51,868 (**-13.2%**); cache writes 33,330 → 26,816; raw sent 135,384 → 141,897 (+4.8%). |
+| T16: inline suggestions reused | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Chat is unchanged. Inline completion bench (411 lines typed): input tokens 582,376 → 163,107 (**-72.0%**) when suggestions are right, -60.6% with typos, 0% to -3.8% when they never are. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 

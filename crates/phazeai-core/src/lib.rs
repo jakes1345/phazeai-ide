@@ -14,6 +14,7 @@ pub mod design;
 pub mod error;
 pub mod ext_host;
 pub mod fim;
+pub mod fim_memory;
 pub mod git;
 pub mod hooks;
 pub mod llm;
