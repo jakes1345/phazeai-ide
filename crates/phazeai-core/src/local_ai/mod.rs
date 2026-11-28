@@ -23,7 +23,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use catalog::{recommend, CatalogEntry, Fit, FitReport, CATALOG};
+pub use catalog::{
+    recommend, recommend_ollama, CatalogEntry, Fit, FitReport, OllamaModel, CATALOG, OLLAMA_MODELS,
+};
 pub use download::{download_model, DownloadProgress};
 pub use hardware::HardwareInfo;
 pub use server::{readiness_problem, ServerStatus, LOCAL_AI};

@@ -102,6 +102,10 @@ pub fn local_ai_status_text(settings: &Settings) -> String {
     if let Some(rec) = catalog::recommend(&hw) {
         out.push_str(&format!("  Recommended:  {}\n", rec.display_name));
     }
+    out.push_str(&format!(
+        "  With Ollama:  ollama pull {}\n",
+        catalog::recommend_ollama(&hw).tag
+    ));
     out.push_str(&format!("  Models dir:   {}\n", models_dir.display()));
     out.push_str(
         "Download models from the IDE (Settings → Local AI). Run `phazeai --provider builtin` \

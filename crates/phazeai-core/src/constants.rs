@@ -14,6 +14,12 @@ pub mod models {
     /// All custom phaze models (for auto-pull / discovery)
     pub const PHAZE_MODELS: &[&str] = &[PHAZE_BEAST, PHAZE_CODER, PHAZE_PLANNER, PHAZE_REVIEWER];
 
+    /// The Ollama model PhazeAI uses out of the box: Qwen3.5 9B (Apache 2.0).
+    /// Its default build (Q4_K_M weights plus the vision projector, 6.6 GB)
+    /// fits an 8 GB graphics card; [`crate::local_ai::catalog::recommend_ollama`]
+    /// picks the 4B or 2B tag for smaller machines.
+    pub const DEFAULT_OLLAMA_MODEL: &str = "qwen3.5:9b";
+
     /// Base models used to build phaze Modelfiles
     pub const BASE_CODER: &str = "qwen2.5-coder:14b";
     pub const BASE_PLANNER: &str = "llama3.2:3b";
@@ -102,9 +108,9 @@ pub mod defaults {
     pub const TAB_SIZE: u32 = 4;
     pub const MAX_TOKENS: u32 = 8192;
     pub const CONTEXT_WINDOW: u32 = 8192;
-    /// Safer out-of-the-box default than custom phaze-* models.
-    /// `llama3.2:3b` is a public Ollama model users can pull directly.
-    pub const DEFAULT_MODEL: &str = super::models::BASE_PLANNER;
+    /// Safer out-of-the-box default than custom phaze-* models: a public,
+    /// Apache-2.0 Ollama model users can pull directly.
+    pub const DEFAULT_MODEL: &str = super::models::DEFAULT_OLLAMA_MODEL;
 }
 
 // ─── Modelfile Hyperparameters ────────────────────────────────────────────────

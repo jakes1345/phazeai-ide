@@ -405,6 +405,85 @@ pub fn recommend(hw: &HardwareInfo) -> Option<&'static CatalogEntry> {
         })
 }
 
+/// A Qwen3.5 tag in Ollama's library, for people who run models through
+/// Ollama instead of the built-in server. Sizes are the tag pages' download
+/// sizes (ollama.com/library/qwen3.5, read 2026-11-27): the weights plus the
+/// vision projector Ollama loads with them. All three carry the same
+/// Apache-2.0 license layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OllamaModel {
+    /// What to `ollama pull`. The bare tag, so Ollama picks its llama.cpp or
+    /// MLX build for the platform.
+    pub tag: &'static str,
+    /// Download size in bytes, as the tag's page gives it.
+    pub size: u64,
+    /// KV cache bytes per token of context (f16), from the model's config.
+    pub kv_bytes_per_token: u64,
+    /// Installed RAM a CPU-only machine needs, by the catalog's rule:
+    /// `runtime_bytes + OS_IDE_RESERVE`, rounded up.
+    pub min_ram: u64,
+}
+
+impl OllamaModel {
+    /// Memory the model takes while running with a `ctx`-token window.
+    pub fn runtime_bytes(&self, ctx: u32) -> u64 {
+        self.size + self.kv_bytes_per_token * ctx as u64 + COMPUTE_OVERHEAD
+    }
+}
+
+/// The window PhazeAI asks Ollama for when it knows no better
+/// (`context_budget::context_window` for Ollama).
+pub const OLLAMA_CTX: u32 = 8_192;
+
+/// Qwen3.5 tags in Ollama's library, smallest first.
+pub const OLLAMA_MODELS: &[OllamaModel] = &[
+    OllamaModel {
+        // Q8_0 weights (2.0 GB) + projector (671 MB). 6 of 24 layers are full
+        // attention, 2 KV heads of 256.
+        tag: "qwen3.5:2b",
+        size: 2_700_000_000,
+        kv_bytes_per_token: 2 * 6 * 2 * 256 * 2,
+        min_ram: 8 * GIB,
+    },
+    OllamaModel {
+        // Q4_K_M weights + projector (676 MB). 8 of 32 layers are full
+        // attention, 4 KV heads of 256.
+        tag: "qwen3.5:4b",
+        size: 3_300_000_000,
+        kv_bytes_per_token: 2 * 8 * 4 * 256 * 2,
+        min_ram: 8 * GIB,
+    },
+    OllamaModel {
+        // Q4_K_M weights (5.6 GB, the same file as the built-in Qwen3.5 9B)
+        // + projector (922 MB). Same tier as that entry on a CPU-only machine.
+        tag: crate::constants::models::DEFAULT_OLLAMA_MODEL,
+        size: 6_600_000_000,
+        kv_bytes_per_token: 2 * 8 * 4 * 256 * 2,
+        min_ram: 14 * GIB,
+    },
+];
+
+/// The Qwen3.5 tag to `ollama pull` on `hw`, by the same rule as
+/// [`recommend`]: with a GPU, the strongest tag that fits its video memory
+/// whole (an 8 GB card gets the 9B, a 6 GB card the 4B); when none does, the
+/// smallest, which Ollama keeps mostly on the card. Without a GPU, the
+/// strongest whose RAM tier is met, or the smallest.
+pub fn recommend_ollama(hw: &HardwareInfo) -> &'static OllamaModel {
+    let smallest = &OLLAMA_MODELS[0];
+    if let Some(g) = hw.best_gpu() {
+        return OLLAMA_MODELS
+            .iter()
+            .rev()
+            .find(|m| m.runtime_bytes(OLLAMA_CTX) + GPU_RESERVE <= g.vram_total)
+            .unwrap_or(smallest);
+    }
+    OLLAMA_MODELS
+        .iter()
+        .rev()
+        .find(|m| hw.total_ram >= m.min_ram)
+        .unwrap_or(smallest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +795,63 @@ mod tests {
         assert_eq!(
             mid.runtime_bytes(16_384) - mid.runtime_bytes(0),
             57_344 * 16_384
+        );
+    }
+
+    #[test]
+    fn ollama_default_is_the_9b_and_fits_an_8_gb_card() {
+        assert_eq!(
+            crate::constants::defaults::DEFAULT_MODEL,
+            crate::constants::models::DEFAULT_OLLAMA_MODEL
+        );
+        let nine = OLLAMA_MODELS.last().unwrap();
+        assert_eq!(nine.tag, "qwen3.5:9b");
+        for mib in [8192, 8188] {
+            assert_eq!(
+                recommend_ollama(&with_gpu(hw(15.6, 9.0), mib, mib)).tag,
+                nine.tag
+            );
+        }
+        // Weights, projector, an 8k window and scratch: just under 7 GiB.
+        let need = nine.runtime_bytes(OLLAMA_CTX) as f64 / GIB as f64;
+        assert!((6.8..7.0).contains(&need), "{need}");
+    }
+
+    #[test]
+    fn ollama_smaller_cards_and_machines_get_smaller_tags() {
+        assert_eq!(
+            recommend_ollama(&with_gpu(hw(15.6, 9.0), 6144, 6144)).tag,
+            "qwen3.5:4b"
+        );
+        // Nothing fits a 4 GB card whole: the 2B, mostly on the card.
+        assert_eq!(
+            recommend_ollama(&with_gpu(hw(15.6, 9.0), 4096, 4096)).tag,
+            "qwen3.5:2b"
+        );
+        // No GPU: by installed RAM, as the built-in catalog does.
+        assert_eq!(recommend_ollama(&hw(31.0, 20.0)).tag, "qwen3.5:9b");
+        assert_eq!(recommend_ollama(&hw(15.6, 9.0)).tag, "qwen3.5:9b");
+        assert_eq!(recommend_ollama(&hw(11.7, 8.0)).tag, "qwen3.5:4b");
+        assert_eq!(recommend_ollama(&hw(7.6, 5.0)).tag, "qwen3.5:2b");
+    }
+
+    #[test]
+    fn ollama_tags_are_sorted_and_tiered_like_the_catalog() {
+        for w in OLLAMA_MODELS.windows(2) {
+            assert!(w[0].size < w[1].size);
+            assert!(w[0].min_ram <= w[1].min_ram);
+        }
+        for m in OLLAMA_MODELS {
+            assert!(m.tag.starts_with("qwen3.5:"), "{}", m.tag);
+            assert!(
+                m.min_ram >= m.runtime_bytes(OLLAMA_CTX) + OS_IDE_RESERVE,
+                "{} RAM tier too low",
+                m.tag
+            );
+        }
+        assert_eq!(
+            OLLAMA_CTX as usize,
+            crate::llm::context_budget::context_window(&crate::ProviderId::Ollama, "qwen3.5:9b")
         );
     }
 }
