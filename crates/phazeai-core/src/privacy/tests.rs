@@ -265,6 +265,72 @@ fn parse_errors_are_reported() {
 
 // ── active policy ─────────────────────────────────────────────────────────────
 
+/// Set the policy file's modification time `secs` seconds in the past.
+fn age_policy(root: &Path, secs: u64) {
+    let f = std::fs::File::options()
+        .write(true)
+        .open(root.join(POLICY_FILE))
+        .unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn a_policy_file_caught_empty_mid_save_keeps_the_deny_list() {
+    let (_d, root) = project(Some("deny = [\"finance/**\"]\n"));
+    let _g = activate(&root);
+    let budget = Path::new("finance/budget.md");
+    assert!(active().is_denied(budget));
+
+    // A save truncates the file first; a check lands in that moment.
+    std::fs::write(root.join(POLICY_FILE), "").unwrap();
+    let p = active();
+    assert!(
+        p.is_denied(budget),
+        "a half-written file must not lift the list"
+    );
+    assert!(p.load_error().is_none());
+
+    // The save finishes with a broken file: it fails closed with the list.
+    std::fs::write(root.join(POLICY_FILE), "deny = [\n this is not toml").unwrap();
+    let p = active();
+    assert!(p.load_error().is_some());
+    assert!(p.local_only());
+    assert!(p.is_denied(budget), "last good list kept");
+
+    // Reopening the project in that moment keeps it too.
+    std::fs::write(root.join(POLICY_FILE), "deny = [\"finance/**\"]\n").unwrap();
+    assert!(active().is_denied(budget));
+    std::fs::write(root.join(POLICY_FILE), "").unwrap();
+    set_active_project(&root);
+    assert!(active().is_denied(budget));
+}
+
+#[test]
+fn a_policy_file_emptied_on_purpose_applies_once_settled() {
+    let (_d, root) = project(Some("deny = [\"finance/**\"]\n"));
+    let _g = activate(&root);
+    let budget = Path::new("finance/budget.md");
+    assert!(active().is_denied(budget));
+
+    std::fs::write(root.join(POLICY_FILE), "").unwrap();
+    assert!(active().is_denied(budget), "still settling");
+    age_policy(&root, 5);
+    let p = active();
+    assert!(!p.is_denied(budget), "an empty file left alone is honoured");
+    assert!(p.load_error().is_none());
+}
+
+#[test]
+fn an_empty_policy_file_from_the_start_applies_at_once() {
+    let (_d, root) = project(Some(""));
+    let _g = activate(&root);
+    assert!(!active().is_denied(Path::new("finance/budget.md")));
+    // Emptying a file that was already empty is no save in progress either.
+    std::fs::write(root.join(POLICY_FILE), "").unwrap();
+    assert!(active().load_error().is_none());
+}
+
 #[test]
 fn active_policy_reloads_and_fails_closed() {
     let (_d, root) = project(Some("deny = [\"*.sqlite\"]\nlocal_only = false\n"));

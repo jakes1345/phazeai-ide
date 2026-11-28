@@ -37,6 +37,13 @@
 //! file is fixed. The error is available from [`PrivacyPolicy::load_error`]
 //! and is included in every refusal message.
 //!
+//! A save empties the file before writing the new text. A file that reads
+//! empty less than a second after it was saved, having held text before, is
+//! taken to be half-written: the policy in force stays, and the file is read
+//! again at the next check. A file read while it changed is treated the same
+//! way. Otherwise a check in that moment would replace the last good deny
+//! list with an empty one.
+//!
 //! # What is enforced
 //!
 //! - Agent tools: `read_file`, `write_file`, `edit_file`, `diagnostics` refuse
@@ -83,7 +90,7 @@ use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Location of the policy file, relative to the project root.
 pub const POLICY_FILE: &str = ".phazeai/privacy.toml";
@@ -692,16 +699,60 @@ fn load_state(root: PathBuf, last_good: Option<Arc<PrivacyPolicy>>) -> ActiveSta
     }
 }
 
+/// How long after a save an empty policy file is taken to be half-written.
+/// Editors and `std::fs::write` empty the file before writing the new text,
+/// and an empty file is a valid policy with no deny list.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// Whether the file was modified less than [`SETTLE`] ago (either way, in
+/// case its clock runs ahead).
+fn just_saved(stamp: Stamp) -> bool {
+    let Some((modified, _)) = stamp else {
+        return false;
+    };
+    let gap = match SystemTime::now().duration_since(modified) {
+        Ok(age) => age,
+        Err(ahead) => ahead.duration(),
+    };
+    gap < SETTLE
+}
+
+/// Reload the policy of `prev`'s root after its file changed. `None` keeps
+/// `prev` as it is, with its old stamp, so the next check reads the file
+/// again:
+/// - when the file changed again while it was read, so what was read may be
+///   half of one save and half of another;
+/// - when the file is empty and was saved just now, having held text before.
+///   That is a save in progress, and taking it would replace the last good
+///   deny list with an empty one: a broken file saved next would then fail
+///   closed with nothing denied. A file left empty for [`SETTLE`] is taken
+///   as it is.
+fn reload(prev: &ActiveState) -> Option<ActiveState> {
+    let next = load_state(prev.root.clone(), prev.last_good.clone());
+    if stamp_of(&prev.root) != next.stamp {
+        return None;
+    }
+    let had_text = matches!(prev.stamp, Some((_, len)) if len > 0);
+    let empty = matches!(next.stamp, Some((_, 0)));
+    if had_text && empty && just_saved(next.stamp) {
+        return None;
+    }
+    Some(next)
+}
+
 /// Make `root` the active project. Its policy file is (re)loaded now and
 /// re-checked for changes on every [`active`] call.
 pub fn set_active_project(root: impl AsRef<Path>) {
     let root = canonical_root(root.as_ref());
     let mut guard = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let last_good = guard
-        .as_ref()
-        .filter(|s| s.root == root)
-        .and_then(|s| s.last_good.clone());
-    *guard = Some(load_state(root, last_good));
+    match guard.as_ref().filter(|s| s.root == root) {
+        Some(prev) => {
+            if let Some(next) = reload(prev) {
+                *guard = Some(next);
+            }
+        }
+        None => *guard = Some(load_state(root, None)),
+    }
 }
 
 /// Forget the active project (only the built-in list applies afterwards).
@@ -726,9 +777,9 @@ pub fn active() -> Arc<PrivacyPolicy> {
         return DEFAULTS.clone();
     };
     if stamp_of(&state.root) != state.stamp {
-        let root = state.root.clone();
-        let last_good = state.last_good.clone();
-        *state = load_state(root, last_good);
+        if let Some(next) = reload(state) {
+            *state = next;
+        }
     }
     state.policy.clone()
 }
