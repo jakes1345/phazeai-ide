@@ -2,7 +2,7 @@ use crate::error::PhazeError;
 use crate::tools::sandbox;
 use crate::tools::traits::{Tool, ToolResult};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -174,6 +174,20 @@ impl Tool for BashTool {
         // cap, so the cap keeps more of what was said.
         let stdout = crate::text::clean_terminal_output(&stdout);
         let stderr = crate::text::clean_terminal_output(&stderr);
+        // Paths under the project, written out in full by `find`, test
+        // runners and linters, are given relative to it: the shell is there
+        // and the file tools read relative paths from there, so they mean
+        // the same and the root is not repeated on every line.
+        let base = sandbox::base_dir();
+        let ended = self.shell.lock().await.cwd.clone();
+        let (stdout, stderr) = if same_dir(&cwd, &base) && same_dir(&ended, &base) {
+            (
+                relative_to(&stdout, &base, &cwd),
+                relative_to(&stderr, &base, &cwd),
+            )
+        } else {
+            (stdout.into_owned().into(), stderr.into_owned().into())
+        };
         Ok(serde_json::json!({
             "stdout": crate::text::cut_middle(&stdout, MAX_OUTPUT_BYTES),
             "stderr": crate::text::cut_middle(&stderr, MAX_OUTPUT_BYTES),
@@ -181,6 +195,63 @@ impl Tool for BashTool {
             "success": status.success(),
         }))
     }
+}
+
+/// Whether `a` and `b` are the same directory.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
+/// `text` with the project folder's own prefix taken off the paths under it:
+/// `/home/me/app/src/main.rs:3:` becomes `src/main.rs:3:`. The folder is
+/// matched as written (`spelled`, the shell's working directory) and as its
+/// canonical path, only where a path starts, and never when it is `/`.
+fn relative_to<'a>(text: &'a str, root: &Path, spelled: &Path) -> std::borrow::Cow<'a, str> {
+    let mut prefixes: Vec<String> = [
+        Some(root.to_path_buf()),
+        Some(spelled.to_path_buf()),
+        root.canonicalize().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| p.is_absolute() && p.parent().is_some())
+    .filter_map(|p| p.to_str().map(|s| format!("{}/", s.trim_end_matches('/'))))
+    .collect();
+    // The longest first, so a prefix that holds another is taken whole.
+    prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    prefixes.dedup();
+    if !prefixes.iter().any(|p| text.contains(p.as_str())) {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while !rest.is_empty() {
+        let at_path_start = out
+            .chars()
+            .last()
+            .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~')));
+        if at_path_start {
+            for p in &prefixes {
+                if let Some(after) = rest.strip_prefix(p.as_str()) {
+                    // The folder itself (`<root>/`, then a space or the end)
+                    // stays a path: `.`.
+                    if after.is_empty() || after.starts_with(char::is_whitespace) {
+                        out.push('.');
+                    }
+                    rest = after;
+                    continue 'scan;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out.into()
 }
 
 // Tests live in `tests/bash_cancel.rs` (interrupt, timeout, output capture
@@ -209,6 +280,34 @@ mod tests {
         let prev = workspace_root();
         set_workspace_root(Some(root.to_path_buf()));
         Root { _lock: lock, prev }
+    }
+
+    #[test]
+    fn paths_under_the_project_are_given_relative_to_it() {
+        let root = std::path::Path::new("/work/app");
+        let out = "/work/app/src/main.rs:3: fn main\n\
+                   ./tests/a.rs\n\
+                   see /work/app/README.md and (/work/app/docs/x.md)\n\
+                   /work/app-old/src/lib.rs\n\
+                   /usr/lib/x.so /tmp/work/app/y\n\
+                   cd /work/app/ done\n";
+        assert_eq!(
+            relative_to(out, root, root),
+            "src/main.rs:3: fn main\n\
+             ./tests/a.rs\n\
+             see README.md and (docs/x.md)\n\
+             /work/app-old/src/lib.rs\n\
+             /usr/lib/x.so /tmp/work/app/y\n\
+             cd . done\n"
+        );
+        // Nothing to change: the text is passed through as it is.
+        assert!(matches!(
+            relative_to("no paths here", root, root),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // The filesystem root is never taken off.
+        let slash = std::path::Path::new("/");
+        assert_eq!(relative_to("/etc/hosts", slash, slash), "/etc/hosts");
     }
 
     #[test]
