@@ -348,11 +348,8 @@ impl ConversationHistory {
         let mut freed = 0usize;
         for &i in results[..older].iter().take_while(|&&i| i < this_turn) {
             let m = &self.messages[i];
-            if m.content.len() < MIN_CLEARED_BYTES || m.content.starts_with(CLEARED_PREFIX) {
-                continue;
-            }
             let call = self.call_for(i);
-            if call.is_some_and(|c| NEVER_CLEARED.contains(&c.function.name.as_str())) {
+            if !clearable(call.map(|c| c.function.name.as_str()), &m.content) {
                 continue;
             }
             let note = cleared_note(call, &m.content);
@@ -627,6 +624,16 @@ const RERUNNABLE: &[&str] = &[
 
 /// How a cleared result starts, so a later batch skips it.
 pub const CLEARED_PREFIX: &str = "[Output cleared to save context: ";
+
+/// Whether a clearing could still replace this tool result (the tool that
+/// made it, when known, and its text): it is long enough to be worth a note,
+/// not a note already, and not state the model keeps working from. Providers
+/// use it to keep a cache breakpoint where the next clearing will start.
+pub fn clearable(tool: Option<&str>, content: &str) -> bool {
+    content.len() >= MIN_CLEARED_BYTES
+        && !content.starts_with(CLEARED_PREFIX)
+        && !tool.is_some_and(|t| NEVER_CLEARED.contains(&t))
+}
 
 /// What a clearing did, for the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

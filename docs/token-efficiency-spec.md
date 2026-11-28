@@ -532,6 +532,39 @@ Built:
   in every eighth word, **-60.6%**. When no suggestion is ever right,
   nothing is reused on clean typing, and the typos alone save 3.8%. Real
   typing falls between the two, by how often suggestions are taken.
+### T17: the cache kept through a clearing
+Built:
+- **The problem.** Anthropic reads a cached prefix only where an earlier
+  request put a breakpoint, or within 20 blocks before one of this
+  request's. Every earlier tail breakpoint ends past the first result a
+  clearing replaces, so after T15 a clearing still read only the system
+  prompt from cache and wrote the whole conversation again at 1.25x: on the
+  long-session bench, all five clearings read 1,266 to 1,328 tokens.
+- **The horizon** (`mark_clearing_horizon` in `llm/claude.rs`). Each agent
+  request also marks the block just before the oldest tool result that a
+  clearing could still replace (`context::clearable`, the same test
+  `clear_old_tool_results` uses). It stays put until the next clearing, so
+  every request since that result arrived has cached the conversation up
+  to it. The client remembers it, with a hash of the conversation up to it;
+  the request right after a clearing marks that old horizon, which is
+  where the cache now ends, and the next request moves on to the new one.
+  If the conversation before it changed (another conversation through the
+  same client), the old horizon is not reused.
+- **Four breakpoints at most.** With a horizon, the tool schemas give up
+  theirs: the first system block caches them too.
+- **Measured** on the long-session bench: the clearings now read 1,328,
+  1,659, 2,366, 2,688 and 3,273 tokens; cache writes 26,816 → 21,847
+  (-18.5%), Claude bill 45,028 → 39,314 input-token units (**-12.7%**). Raw
+  tokens sent are unchanged (141,897), and so is the short bench, which
+  never clears. OpenAI, DeepSeek and llama.cpp cache any shared prefix
+  without breakpoints, so this is Claude only.
+- **Not checked against the live API** (no key here): the bench models the
+  20-block lookback, but whether Anthropic keeps the horizon's entry warm
+  while longer prefixes are read is not verified. The cache-read counts
+  the API returns on a real session will show it.
+- The two benches share a fixture directory, `HOME` and the working
+  directory, so they now take turns: `cargo test token_bench -- --ignored`
+  failed when both ran at once.
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -559,6 +592,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T14: leaner tool list | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Tool schemas per request 1,266 → 957 tokens (-24.4%). Against `main` before it (51,718): **-8.4%** sent. Claude bill **10,084 (21.2% of sent)**, down from 10,872 (**-7.2%**). Round 5 together (T12 to T14) against 53,857 before T12: **-12.0%** sent, Claude bill 11,905 → 10,084 (**-15.3%**). |
 | T15: clearing that pays | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **45,028**, down from 51,868 (**-13.2%**); cache writes 33,330 → 26,816; raw sent 135,384 → 141,897 (+4.8%). |
 | T16: inline suggestions reused | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Chat is unchanged. Inline completion bench (411 lines typed): input tokens 582,376 → 163,107 (**-72.0%**) when suggestions are right, -60.6% with typos, 0% to -3.8% when they never are. |
+| T17: cache kept through a clearing | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **39,314**, down from 45,028 (**-12.7%**); cache writes 26,816 → 21,847; raw sent unchanged at 141,897. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
