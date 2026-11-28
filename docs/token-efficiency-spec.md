@@ -568,6 +568,26 @@ Built:
 - The two benches share a fixture directory, `HOME` and the working
   directory, so they now take turns: `cargo test token_bench -- --ignored`
   failed when both ran at once.
+### T19: project paths in command output given relative to it
+Built:
+- **The problem.** `find`, test runners, linters and stack traces write
+  paths out in full, so every line repeats the project folder: on a
+  `find crates -name '*.rs'` of this repository that is about nine tokens
+  of 22 per line.
+- **The change** (`relative_to` in `tools/bash.rs`). When the shell ran in
+  the folder that relative paths are read from (the workspace root, else
+  the process's directory) and is still there afterwards, that folder's
+  prefix is taken off the paths in stdout and stderr: `/home/me/app/src/main.rs:3:`
+  becomes `src/main.rs:3:`, which means the same file to the shell and to
+  the file tools. The folder is matched as the shell spells it and as its
+  canonical path, only where a path starts (`/tmp/home/me/app/x` and
+  `/home/me/app-old/x` are left alone), never when it is `/`, and the
+  folder itself becomes `.`. After a `cd` elsewhere nothing is changed,
+  since a relative path would then mean something else to the shell.
+- **Measured:** that `find` listing (336 paths) falls from 7,281 to 4,257
+  tokens (**-41.5%**). The short bench, which runs few such commands, falls
+  from 47,392 to 47,212 tokens sent (-0.4%) and its Claude bill from 10,084
+  to 10,025 (-0.6%); the long-session bench is unchanged.
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -596,6 +616,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T15: clearing that pays | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **45,028**, down from 51,868 (**-13.2%**); cache writes 33,330 → 26,816; raw sent 135,384 → 141,897 (+4.8%). |
 | T16: inline suggestions reused | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Chat is unchanged. Inline completion bench (411 lines typed): input tokens 582,376 → 163,107 (**-72.0%**) when suggestions are right, -60.6% with typos, 0% to -3.8% when they never are. |
 | T17: cache kept through a clearing | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **39,314**, down from 45,028 (**-12.7%**); cache writes 26,816 → 21,847; raw sent unchanged at 141,897. |
+| T19: relative project paths | 47,212 | -61.6% | 90.3% | 1,251 of 1,292 | Against `main` before it: **-0.4%** sent, Claude bill 10,084 → **10,025 (-0.6%)**. A `find` of this repository's 336 source files: 7,281 → 4,257 tokens (**-41.5%**). |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
