@@ -2,6 +2,7 @@ mod claude;
 pub mod context_budget;
 pub mod discovery;
 pub mod image;
+pub mod keep_alive;
 pub mod key_setup;
 pub mod model_list;
 pub mod model_router;

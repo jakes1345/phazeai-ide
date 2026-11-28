@@ -568,6 +568,40 @@ Built:
 - The two benches share a fixture directory, `HOME` and the working
   directory, so they now take turns: `cargo test token_bench -- --ignored`
   failed when both ran at once.
+### T18: the cache kept warm while you read
+Built:
+- **The problem.** Anthropic keeps a cached prefix for five minutes from the
+  start of the last request that read or wrote it. Reading an answer,
+  trying it and replying takes longer than that often, and the next
+  request then writes the whole conversation again at 1.25x instead of
+  reading it at a tenth (a twentieth on Opus and Sonnet 5.5).
+- **The keep-alive** (`llm/keep_alive.rs`). When an agent turn ends with
+  `end_turn`, the request that produced the answer is sent again every four
+  minutes with `max_tokens: 0` and no `stream`, for as long as
+  `[llm] cache_keep_alive_minutes` says (default 15; 0 turns it off). Such a
+  request reads the cached prefix, which restarts its timer, and writes and
+  generates nothing, so each refresh bills a cache read only. The next
+  request in the same conversation (same system prompt and first message)
+  stops the refreshes, and so does a refused one. Requests without tools
+  (summaries, side jobs) and the small model used by side jobs and
+  subagents are never kept warm.
+- **Backing off.** Refreshes are wasted when the reply comes after the
+  window anyway, so once the last three replies all did, answers are not
+  kept warm until a reply comes inside the window again.
+- **Cheaper than the one-hour cache,** which charges 2x for every write in
+  the conversation to keep the few that matter alive.
+- **Measured** on the long-session bench with a pause model (requests 15 s
+  apart within a question, a pause before each new one, entries expiring
+  after five minutes): with 7-minute pauses the Claude bill falls from
+  74,564 to 42,379 (**-43.2%**), with 12-minute pauses to 45,444
+  (**-39.1%**). Pauses under five minutes need no refresh (0%). When every
+  reply comes after the window, the first three answers are still kept
+  warm and it costs **+4.5%**. Raw tokens per question are unchanged.
+- **Not checked against the live API** (no key here). Refreshes are not
+  yet counted in the app's usage and cost display. `max_tokens: 0` is
+  refused with forced tool choice, structured output and `thinking.type:
+  "enabled"`; the agent loop uses none of them on a turn that ended, and a
+  refusal just stops the refreshes.
 ### Not adopted
 - **LLMLingua-style prompt compression.** Its own follow-up work reports poor
   results on code, it needs a second model, and its rewrites break cache
@@ -596,6 +630,7 @@ Rerun the bench after each PR and add a row. Real numbers only.
 | T15: clearing that pays | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **45,028**, down from 51,868 (**-13.2%**); cache writes 33,330 → 26,816; raw sent 135,384 → 141,897 (+4.8%). |
 | T16: inline suggestions reused | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | Chat is unchanged. Inline completion bench (411 lines typed): input tokens 582,376 → 163,107 (**-72.0%**) when suggestions are right, -60.6% with typos, 0% to -3.8% when they never are. |
 | T17: cache kept through a clearing | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The short bench never clears, so it is unchanged. Long-session bench: Claude bill **39,314**, down from 45,028 (**-12.7%**); cache writes 26,816 → 21,847; raw sent unchanged at 141,897. |
+| T18: cache kept warm while you read | 47,392 | -61.4% | 90.2% | 1,251 of 1,292 | The benches run requests back to back, so they are unchanged. Long-session bench with a pause before each question: Claude bill 74,564 → **42,379 (-43.2%)** at 7-minute pauses, → 45,444 (**-39.1%**) at 12; **+4.5%** when every reply comes after the 15-minute window. |
 
 ## 6. Proposed separately: a built-in local runtime and Hugging Face models
 
